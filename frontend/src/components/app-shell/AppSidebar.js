@@ -10,6 +10,7 @@ import useSidebarLayout from "@/components/preferences/useSidebarLayout";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import IconButton from "@/components/shared/IconButton";
 import DesktopAppDownloadDialog from "./DesktopAppDownloadDialog";
+import SidebarHint from "./SidebarHint";
 import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 /** How closely an entry claims the page: the length of its `href` or `activePath` that holds it, else -1. */
@@ -287,9 +288,9 @@ export default function AppSidebar({ open, onClose }) {
             const itemActive = !childActive && longest >= 0 && claimLength(item, pathname) === longest;
             return <div key={item.label}>
               {item.href
-                ? <Link href={item.href} onClick={closeDrawer} title={item.hint} className={`flex items-center justify-between gap-2 rounded-md px-2.5 py-1 text-sm hover:bg-slate-50 ${itemActive ? "font-medium text-blue-600" : "text-slate-700"}`}>
+                ? <SidebarHint title={item.label} hint={item.hint}><Link href={item.href} onClick={closeDrawer} className={`flex items-center justify-between gap-2 rounded-md px-2.5 py-1 text-sm hover:bg-slate-50 ${itemActive ? "font-medium text-blue-600" : "text-slate-700"}`}>
                   <span className="min-w-0 truncate">{item.label}</span>
-                </Link>
+                </Link></SidebarHint>
                 : <span aria-disabled="true" className="block cursor-not-allowed rounded-md px-2.5 py-1 text-sm text-slate-400">{item.label}</span>}
               {children.length > 0 && <div className="ml-2 border-l border-slate-100 pl-2">
                 {children.map((child) => <Link key={child.label} href={child.href} onClick={closeDrawer} className={`block rounded-md px-2.5 py-1 text-sm hover:bg-slate-50 ${pathname === child.href || pathname.startsWith(`${child.href}/`) ? "font-medium text-blue-600" : "text-slate-600"}`}>{child.label}</Link>)}

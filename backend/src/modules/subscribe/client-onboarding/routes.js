@@ -2,7 +2,7 @@ const express = require("express");
 const { protect } = require("../../../middleware/authMiddleware");
 const { checkPermission } = require("../../../middleware/permissionMiddleware");
 const { mountBulkDelete } = require("../../../services/bulkDelete");
-const { listInvites, createInvite, cancelInvite, updateInviteContact, sendInvite, updateInvite, deleteInvite, deleteRow, saveSubscription, publishSubscription, discardPending, checkSiteNow, resetAdminPassword, createSiteKey } = require("./controller");
+const { importClients, importClientTemplate, listInvites, createInvite, cancelInvite, updateInviteContact, sendInvite, updateInvite, deleteInvite, deleteRow, saveSubscription, publishSubscription, discardPending, checkSiteNow, resetAdminPassword, createSiteKey } = require("./controller");
 
 // SUBSCRIBE -> Media Studio Operations / Account Manager: the team's side of client onboarding.
 const router = express.Router();
@@ -13,6 +13,11 @@ router.use(protect);
 router.get("/invites", reads, listInvites);
 router.post("/invites", writes, createInvite);
 router.patch("/invites/:id/cancel", writes, cancelInvite);
+// Table Options → Import: companies filed as submitted forms. From a product page, that product.
+router.get("/invites/import/template", writes, importClientTemplate);
+router.post("/invites/import", writes, importClients);
+router.get("/invites/product/:product/import/template", writes, importClientTemplate);
+router.post("/invites/product/:product/import", writes, importClients);
 // View All Invites: correct who a link is for (the link is kept), and email it.
 router.patch("/invites/:id/contact", writes, updateInviteContact);
 router.post("/invites/:id/send", writes, sendInvite);

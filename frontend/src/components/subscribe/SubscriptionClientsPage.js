@@ -19,12 +19,29 @@ import Dialog from "@/components/ui/Dialog";
 import ShareableMessage from "@/components/shared/ShareableMessage";
 import { useRouteAccess } from "@/components/auth/PermissionsProvider";
 import { API_URL } from "@/services/api/client";
-import { checkClientSite, createClientSiteKey, deleteClientInvite, discardClientSubscriptionChange, listClientInvites, publishClientSubscription, resetClientPassword } from "@/services/subscribe/client-onboarding.service";
+import { createClientSiteKey, deleteClientInvite, discardClientSubscriptionChange, listClientInvites, publishClientSubscription, resetClientPassword } from "@/services/subscribe/client-onboarding.service";
 import { CLIENT_TABS, LIVE_TABS, liveRow, PRODUCTS, clientInfoSections, clientRow, clientStatusStyles, clientTableFieldsFor, inTab } from "@/constants/subscriptionProducts.mjs";
 import ClientInviteDialog from "./ClientInviteDialog";
 import ClientOnboardingInviteDialog from "./ClientOnboardingInviteDialog";
 import SubscriptionDialog from "./SubscriptionDialog";
 import { useUrlParam } from "@/lib/stayOnRefresh";
+
+// Client Details → Import: the template's columns, as the server reads them (client-onboarding controller).
+const CLIENT_IMPORT_COLUMNS = [
+  { label: "Company Name", required: true, aliases: ["Name Of The Company"] },
+  { label: "Address", required: true },
+  { label: "GST Number", required: true, aliases: ["GST"] },
+  { label: "PAN Number", required: true, aliases: ["PAN"] },
+  { label: "Number Of Users Needed", required: true, aliases: ["Users", "Number Of Users"] },
+  { label: "Main Contact Name", required: true },
+  { label: "Main Contact Number", required: true, aliases: ["Main Contact Phone"] },
+  { label: "Main Contact Designation", required: true },
+  { label: "Secondary Contact Name", required: true },
+  { label: "Secondary Contact Number", required: true, aliases: ["Secondary Contact Phone"] },
+  { label: "Secondary Contact Designation", required: true },
+  { label: "Company Email ID", aliases: ["Email", "Contact Email"] },
+  { label: "Product" },
+];
 
 const errorMessage = (error, fallback) => error?.data?.message || error?.message || fallback;
 
@@ -76,7 +93,6 @@ function SubscriptionClientsScreen({ product = null }) {
   // Update site / Discard changes, each confirmed first: `{ row, action: "publish" | "discard" }`.
   const [pendingAction, setPendingAction] = useState(null);
   const [pendingBusy, setPendingBusy] = useState(false);
-  const [checking, setChecking] = useState(false);
   // Reset password: the row asked about, then the message with the new password, shown once.
   const [resettingRow, setResettingRow] = useState(null);
   const [resetBusy, setResetBusy] = useState(false);
@@ -129,21 +145,6 @@ function SubscriptionClientsScreen({ product = null }) {
     onDeleted: () => load(),
   });
 
-  // Check now: every live site on this page, one after another, then the table re-read.
-  async function checkAll() {
-    setChecking(true);
-    let down = 0;
-    try {
-      for (const row of rows) {
-        const result = await checkClientSite(row.id).catch(() => null);
-        if (result?.data?.status !== "Up") down += 1;
-      }
-      if (rows.length) (down ? showError : showSuccess)(down ? `${down} of ${rows.length} site${rows.length === 1 ? "" : "s"} down.` : `All ${rows.length} site${rows.length === 1 ? " is" : "s are"} up.`);
-      await load();
-    } finally {
-      setChecking(false);
-    }
-  }
 
   async function confirmResetPassword() {
     setResetBusy(true);
@@ -236,7 +237,8 @@ function SubscriptionClientsScreen({ product = null }) {
       onTabChange={setActiveTab}
       tabsAriaLabel={`${productLabel} clients`}
       // Invites are sent from HRM -> Client Details only; a product page just lists that product's clients.
-      actions={product ? (rows.length ? <Button type="button" disabled={checking} onClick={() => void checkAll()}>{checking ? "Checking..." : "Check now"}</Button> : null) : canWrite ? <Button type="button" variant="primary" onClick={() => setInviting(true)}>Create Onboarding Invite</Button> : null}
+      // The product pages are lists only; the monitor checks every site on its own every 5 minutes.
+      actions={!product && canWrite ? <Button type="button" variant="primary" onClick={() => setInviting(true)}>Create Onboarding Invite</Button> : null}
       // Every invite sent, with what became of each - as the Employee Repository's own ⋮, after Nebula.
       menu={!product && canWrite ? <OptionsMenu ariaLabel="Client invite options" items={[{ label: "View All Invites", onSelect: () => setOpenParam("invites") }]} /> : null}
     />
@@ -246,6 +248,20 @@ function SubscriptionClientsScreen({ product = null }) {
         <div className="flex min-h-0 min-w-0 flex-1">
           <DataTable
             key={activeTab}
+            // Table Options → Import: companies filed as submitted forms, ready for Set up account. On a
+            // product page every imported company is that product's.
+            importConfig={canDelete ? {
+              prefix: product ? `/api/subscribe/client-onboarding/invites/product/${product}` : "/api/subscribe/client-onboarding/invites",
+              title: "Import Clients",
+              templateName: `${(product || "all").toLowerCase()}-clients-import-template`,
+              columns: CLIENT_IMPORT_COLUMNS.filter((column) => !(product && column.label === "Product")),
+              hints: [
+                "Each row arrives as Submitted, ready for ⋮ → Set up account. Add the logo and favicon afterwards with ⋮ → Edit.",
+                "GST is 15 characters and PAN 10; phone numbers include the country code, e.g. +91 9876543210.",
+                ...(product ? [] : ["Product is optional: Orbyt or Nilo."]),
+              ],
+              onImported: () => load(),
+            } : undefined}
             columns={columns}
             data={shown}
             density={density}

@@ -85,3 +85,23 @@ test("the invite asks who it is for and until when, all required; company detail
   assert.deepEqual(clientInviteSchema.parse({ ...contact, company: { companyName: "Velava Agencies", address: "", gstNumber: " 33abcde1234f1z5 " } }).company, { companyName: "Velava Agencies", gstNumber: "33ABCDE1234F1Z5" });
   assert.equal(clientInviteSchema.safeParse({ ...contact, company: { panNumber: "ABC" } }).success, false);
 });
+
+test("an imported company is the form's fields without logo or favicon; Product by its name or key", () => {
+  const { importClientSchema } = require("../src/modules/subscribe/client-onboarding/rules");
+  const row = {
+    companyName: "Velava Agencies", address: "Main Road", gstNumber: "33abcde1234f1z5", panNumber: "abcde1234f", usersNeeded: "5",
+    mainContactName: "Kamal", mainContactPhone: "+91 9442648610", mainContactDesignation: "Owner",
+    secondaryContactName: "Siva", secondaryContactPhone: "+91 9443348610", secondaryContactDesignation: "Manager",
+  };
+  const parsed = importClientSchema.parse({ ...row, product: "nilo", contactEmail: " Owner@Velava.in " });
+  assert.equal(parsed.product, "ACCOUNT_MANAGER");
+  assert.equal(parsed.gstNumber, "33ABCDE1234F1Z5");
+  assert.equal(parsed.usersNeeded, 5);
+  assert.equal(parsed.contactEmail, "owner@velava.in");
+  assert.equal(importClientSchema.parse({ ...row, product: "MEDIA_STUDIO_OPERATIONS" }).product, "MEDIA_STUDIO_OPERATIONS");
+  assert.equal(importClientSchema.parse(row).product, undefined);
+  assert.equal(importClientSchema.safeParse({ ...row, product: "Unknown" }).success, false);
+  assert.equal(importClientSchema.safeParse({ ...row, gstNumber: "bad" }).success, false);
+  const { companyName: _drop, ...noName } = row;
+  assert.equal(importClientSchema.safeParse(noName).success, false);
+});

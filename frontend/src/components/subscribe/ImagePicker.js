@@ -3,8 +3,11 @@
 import { useState } from "react";
 
 const MB = 1024 * 1024;
-export const LOGO = { types: ["image/png"], maxBytes: 5 * MB, hint: "PNG, up to 5 MB.", accept: "image/png" };
-export const FAVICON = { types: ["image/png", "image/svg+xml"], maxBytes: 1 * MB, hint: "PNG or SVG, up to 1 MB.", accept: "image/png,image/svg+xml" };
+// Any common image; kept as uploaded. Matched to LOGO_RULE / FAVICON_RULE on the server.
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/jpg", "image/svg+xml", "image/webp", "image/gif", "image/x-icon", "image/vnd.microsoft.icon", "image/avif"];
+const IMAGE_ACCEPT = `${IMAGE_TYPES.join(",")},.png,.jpg,.jpeg,.svg,.webp,.gif,.ico,.avif`;
+export const LOGO = { types: IMAGE_TYPES, maxBytes: 10 * MB, hint: "PNG, JPG, SVG, WebP, GIF or ICO, up to 10 MB.", accept: IMAGE_ACCEPT };
+export const FAVICON = { types: IMAGE_TYPES, maxBytes: 5 * MB, hint: "PNG, JPG, SVG, WebP, GIF or ICO, up to 5 MB.", accept: IMAGE_ACCEPT };
 
 /** A logo or favicon picker: read as a data URI, refused here if it is the wrong type or too big. */
 export default function ImagePicker({ label, rule, value, error, onPick, required = true }) {
@@ -13,7 +16,9 @@ export default function ImagePicker({ label, rule, value, error, onPick, require
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    if (!rule.types.includes(file.type)) return setProblem(`${label} must be ${rule.hint.split(",")[0]}.`);
+    // Some systems give an .ico or .svg no type at all; the extension decides then.
+    const known = rule.types.includes(file.type) || (!file.type && /\.(png|jpe?g|svg|webp|gif|ico|avif)$/i.test(file.name));
+    if (!known) return setProblem(`${label} must be an image: PNG, JPG, SVG, WebP, GIF or ICO.`);
     if (file.size > rule.maxBytes) return setProblem(`${label} must be ${Math.round(rule.maxBytes / MB)} MB or smaller.`);
     setProblem("");
     const reader = new FileReader();

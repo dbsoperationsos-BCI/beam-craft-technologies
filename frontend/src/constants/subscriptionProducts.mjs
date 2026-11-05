@@ -50,7 +50,7 @@ export const clientStatusStyles = { "Form Pending": "bg-amber-500", Submitted: "
 
 /**
  * What each product can be given: modules and their screens, the same keys and labels as the server's
- * `MODULES_BY_PRODUCT` (from DBS-Operations-OS's sidebar). Both products offer the same list. Stored as
+ * `MODULES_BY_PRODUCT`: Orbyt offers DBS-Operations-OS's sidebar, Nilo its own three screens. Stored as
  * "module/screen".
  */
 const ALL_MODULES = {
@@ -63,7 +63,15 @@ const ALL_MODULES = {
   "resource-management": { label: "Resource Management", screens: { assets: "Assets", vendors: "Vendors", "client-storage": "Client Storage", "recycling-bin": "Project Vault" } },
 };
 
-export const MODULES_BY_PRODUCT = { ACCOUNT_MANAGER: ALL_MODULES, MEDIA_STUDIO_OPERATIONS: ALL_MODULES };
+// Nilo (the Account Manager app, e.g. Velava) has three screens. The keys are the ones the app reads
+// (`hrm/employee-repository` is its Users screen), so a saved setup keeps working.
+const NILO_MODULES = {
+  hrm: { label: "User Management", screens: { "employee-repository": "Users" } },
+  accounts: { label: "Accounts", screens: { "accounts-manager": "Accounts Manager" } },
+  "resource-management": { label: "Resource Management", screens: { vendors: "Vendors" } },
+};
+
+export const MODULES_BY_PRODUCT = { ACCOUNT_MANAGER: NILO_MODULES, MEDIA_STUDIO_OPERATIONS: ALL_MODULES };
 
 // Account Manager's own keys from before it offered the full list, as the screens they became.
 const RENAMED_SCREENS = { "user-management/users": "hrm/employee-repository", "user-management": "hrm/employee-repository" };

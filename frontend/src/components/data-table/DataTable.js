@@ -1949,6 +1949,7 @@ export default function DataTable({
       title={importConfig.title || "Import"}
       columns={importConfig.columns || []}
       templateName={importConfig.templateName || "import-template"}
+      hints={importConfig.hints || []}
       onImportChunk={(chunk) => importTableRows(importConfig.prefix, chunk).then((answer) => answer?.data || answer)}
       onImported={importConfig.onImported}
     />}

@@ -12,8 +12,10 @@ const isProduct = (value) => Object.prototype.hasOwnProperty.call(PRODUCTS, valu
 const GST_PATTERN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 const PAN_PATTERN = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 
-const LOGO_RULE = Object.freeze({ types: ["image/png"], maxBytes: 5 * 1024 * 1024, label: "Logo must be a PNG file" });
-const FAVICON_RULE = Object.freeze({ types: ["image/png", "image/svg+xml"], maxBytes: 1024 * 1024, label: "Favicon must be a PNG or SVG file" });
+// A client's logo and favicon: any common image, kept as uploaded (a PNG keeps its transparency).
+const IMAGE_TYPES = Object.freeze({ "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/svg+xml": "svg", "image/webp": "webp", "image/gif": "gif", "image/x-icon": "ico", "image/vnd.microsoft.icon": "ico", "image/avif": "avif" });
+const LOGO_RULE = Object.freeze({ types: Object.keys(IMAGE_TYPES), extensions: IMAGE_TYPES, maxBytes: 10 * 1024 * 1024, label: "Logo must be an image (PNG, JPG, SVG, WebP, GIF, ICO or AVIF)" });
+const FAVICON_RULE = Object.freeze({ types: Object.keys(IMAGE_TYPES), extensions: IMAGE_TYPES, maxBytes: 5 * 1024 * 1024, label: "Favicon must be an image (PNG, JPG, SVG, WebP, GIF, ICO or AVIF)" });
 
 /**
  * Where an invite stands. Only Created/Verified/Submitted/Cancelled are stored; Expired is read off the
@@ -36,8 +38,9 @@ const submissionSchema = z.object({
   address: required("Address", 500),
   gstNumber: code("GST number", GST_PATTERN, "33ABCDE1234F1Z5"),
   panNumber: code("PAN number", PAN_PATTERN, "ABCDE1234F"),
-  logo: required("Logo", 10 * 1024 * 1024),
-  favicon: required("Favicon", 2 * 1024 * 1024),
+  // Data URIs: base64 is 4/3 of the file, so room for a 10 MB logo and a 5 MB favicon.
+  logo: required("Logo", 14 * 1024 * 1024),
+  favicon: required("Favicon", 7 * 1024 * 1024),
   usersNeeded: z.coerce.number({ error: "Number of users is required." }).int("Number of users must be a whole number.").min(1, "Number of users must be at least 1."),
   mainContactName: required("Main contact name", 150),
   mainContactPhone: required("Main contact number", 30),
@@ -79,4 +82,21 @@ function checkUpload(dataUri, { types, maxBytes, label }) {
   return null;
 }
 
-module.exports = { PRODUCTS, isProduct, inviteState, contactSchema, clientInviteSchema, submissionSchema, checkUpload, phonesMatch, LOGO_RULE, FAVICON_RULE };
+/**
+ * Client Details → Import: one company per row, as its onboarding form would file it, without the
+ * logo and favicon (added later in Edit). Product is optional and read by its name (Orbyt, Nilo) or key;
+ * an unknown name is an error rather than a silent blank.
+ */
+const productFromName = (value) => {
+  const text = String(value ?? "").trim();
+  if (!text) return undefined;
+  const key = Object.keys(PRODUCTS).find((product) => product === text.toUpperCase() || PRODUCTS[product].toLowerCase() === text.toLowerCase());
+  return key ?? `?${text}`;
+};
+const importClientSchema = submissionSchema.omit({ logo: true, favicon: true }).extend({
+  contactEmail: z.string().trim().toLowerCase().email("Enter a valid email.").max(191).optional(),
+  product: z.string().optional().transform(productFromName)
+    .refine((value) => value === undefined || isProduct(value), { message: `Choose ${Object.values(PRODUCTS).join(" or ")}.` }),
+});
+
+module.exports = { importClientSchema, PRODUCTS, isProduct, inviteState, contactSchema, clientInviteSchema, submissionSchema, checkUpload, phonesMatch, LOGO_RULE, FAVICON_RULE };

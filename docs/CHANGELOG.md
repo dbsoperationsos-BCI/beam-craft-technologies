@@ -44,6 +44,19 @@ Every code change adds an entry here, in the same commit or PR as the code. This
   [DEPLOYMENT-WORKFLOW.md](project-state/DEPLOYMENT-WORKFLOW.md) describe DBS and no longer apply here.
 
 ### Changed
+- **A client's logo and favicon can be any common image** - PNG, JPG, SVG, WebP, GIF, ICO or AVIF - up
+  to 10 MB (logo) and 5 MB (favicon), kept as uploaded. The studio's own branding upload is unchanged.
+  **Check now** is gone from the Orbyt and Nilo pages; the monitor checks every site every 5 minutes.
+- **Set up account lists modules as simple rows.** Each module has its icon, its screens in grey and one
+  switch; a module with several screens also shows them as chips to pick one by one. The expand-and-tick
+  list is gone.
+- **Client Details, Orbyt and Nilo can import companies.** Table Options → Import takes a CSV of
+  companies (the company form's fields, Product optional); each row is filed as a submitted form, ready
+  for Set up account, with the logo and favicon added afterwards in Edit. On a product page every row is
+  that product's. `POST /invites/import` and `/invites/product/:product/import`; the Import dialog now
+  shows a table's own hints.
+- **Nilo offers only its own three screens** in Set up account: User Management → Users, Accounts →
+  Accounts Manager, Resource Management → Vendors. Orbyt keeps the full DBS list. Saved setups are unchanged.
 - **Media Studio Operations is called "Orbyt"** (hovering it in the sidebar says "Media Studio OS"). The
   sidebar group is **Subscription Management**. Stored product keys are unchanged.
 - **Create Onboarding Invite asks for the company, not a person.** Company Name, Company Email ID,

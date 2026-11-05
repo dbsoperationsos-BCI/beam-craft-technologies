@@ -18,7 +18,15 @@ const ALL_MODULES = {
   "resource-management": { label: "Resource Management", screens: { assets: "Assets", vendors: "Vendors", "client-storage": "Client Storage", "recycling-bin": "Project Vault" } },
 };
 
-const MODULES_BY_PRODUCT = Object.freeze({ ACCOUNT_MANAGER: ALL_MODULES, MEDIA_STUDIO_OPERATIONS: ALL_MODULES });
+// Nilo (the Account Manager app, e.g. Velava) has three screens. The keys are the ones the app reads
+// (`hrm/employee-repository` is its Users screen), so a saved setup keeps working.
+const NILO_MODULES = {
+  hrm: { label: "User Management", screens: { "employee-repository": "Users" } },
+  accounts: { label: "Accounts", screens: { "accounts-manager": "Accounts Manager" } },
+  "resource-management": { label: "Resource Management", screens: { vendors: "Vendors" } },
+};
+
+const MODULES_BY_PRODUCT = Object.freeze({ ACCOUNT_MANAGER: NILO_MODULES, MEDIA_STUDIO_OPERATIONS: ALL_MODULES });
 
 /** Whether "module/screen" is one of `product`'s screens. Own keys only, so "hrm/constructor" is not. */
 function isProductScreen(product, key) {

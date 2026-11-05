@@ -12,7 +12,7 @@ const valid = () => ({
   modules: ["hrm/employee-repository", "accounts/accounts-manager"],
 });
 
-test("both products offer DBS's full module list", () => {
+test("Orbyt offers DBS's full module list; Nilo only its three screens", () => {
   const screens = (product) => Object.entries(MODULES_BY_PRODUCT[product]).map(([key, module]) => `${key}: ${Object.keys(module.screens).join(", ")}`);
   assert.deepEqual(screens("MEDIA_STUDIO_OPERATIONS"), [
     "hrm: employee-repository, employee-attendance, tasks, interview, payroll",
@@ -23,7 +23,7 @@ test("both products offer DBS's full module list", () => {
     "accounts: accounts-manager, payment-requests",
     "resource-management: assets, vendors, client-storage, recycling-bin",
   ]);
-  assert.deepEqual(screens("ACCOUNT_MANAGER"), screens("MEDIA_STUDIO_OPERATIONS"));
+  assert.deepEqual(screens("ACCOUNT_MANAGER"), ["hrm: employee-repository", "accounts: accounts-manager", "resource-management: vendors"]);
 });
 
 test("a client can be given one screen of a module - HRM with only Interview", () => {

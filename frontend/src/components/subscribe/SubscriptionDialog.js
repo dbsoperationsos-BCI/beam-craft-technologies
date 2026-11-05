@@ -1,6 +1,15 @@
 "use client";
 
 import { useState } from "react";
+import AccountBalanceWallet from "@mui/icons-material/AccountBalanceWallet";
+import AccountTree from "@mui/icons-material/AccountTree";
+import Groups from "@mui/icons-material/Groups";
+import Inventory2 from "@mui/icons-material/Inventory2";
+import PhotoLibrary from "@mui/icons-material/PhotoLibrary";
+import SupportAgent from "@mui/icons-material/SupportAgent";
+import TrendingUp from "@mui/icons-material/TrendingUp";
+import Widgets from "@mui/icons-material/Widgets";
+import ToggleSwitch from "@/components/shared/ToggleSwitch";
 import { clearDraft, useDraft } from "@/lib/stayOnRefresh";
 import Button from "@/components/shared/Button";
 import DateField from "@/components/shared/DateField";
@@ -35,8 +44,37 @@ function Section({ id, title, hint, action, children }) {
 
 const SECTIONS = [["account", "Account"], ["validity", "Validity"], ["modules", "Modules"]];
 
-function Chevron({ open }) {
-  return <svg viewBox="0 0 20 20" aria-hidden="true" className={`h-4 w-4 text-slate-400 transition-transform ${open ? "rotate-90" : ""}`}><path fill="currentColor" d="M7.3 4.3a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1 0 1.4l-5 5a1 1 0 1 1-1.4-1.4L11.6 10 7.3 5.7a1 1 0 0 1 0-1.4Z" /></svg>;
+// Each module's icon on its row; a module not listed gets the generic one.
+const MODULE_ICONS = { hrm: Groups, "sales-crm": TrendingUp, "client-management": SupportAgent, "project-management": AccountTree, "visual-curation": PhotoLibrary, accounts: AccountBalanceWallet, "resource-management": Inventory2 };
+
+/**
+ * One module as a settings row: its icon and name, the screens it brings in grey, and a switch for all of
+ * it. Only a module with several screens shows them as chips beneath, to pick one by one.
+ */
+function ModuleRow({ module, label, screens, selected, onToggleModule, onToggleScreen }) {
+  const entries = Object.entries(screens);
+  const keys = entries.map(([screen]) => `${module}/${screen}`);
+  const picked = keys.filter((key) => selected.includes(key)).length;
+  const all = picked === keys.length;
+  const Icon = MODULE_ICONS[module] || Widgets;
+  const summary = entries.length === 1 ? entries[0][1] : picked && !all ? `${picked} of ${entries.length} screens` : `${entries.length} screens`;
+  return <li className="px-4 py-3.5">
+    <div className="flex items-center gap-3">
+      <span aria-hidden="true" className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors ${picked ? "bg-blue-50 text-blue-600" : "bg-slate-100 text-slate-400"}`}><Icon sx={{ fontSize: 20 }} /></span>
+      <span className="min-w-0 flex-1">
+        <span className={`block truncate text-sm font-medium ${picked ? "text-slate-900" : "text-slate-600"}`}>{label}</span>
+        <span className="block truncate text-xs text-slate-500">{summary}</span>
+      </span>
+      <ToggleSwitch ariaLabel={`${label}: all screens`} checked={all} mixed={picked > 0 && !all} onCheckedChange={() => onToggleModule(module)} />
+    </div>
+    {entries.length > 1 && <div className="mt-3 flex flex-wrap gap-1.5 pl-12" role="group" aria-label={`${label} screens`}>
+      {entries.map(([screen, name]) => {
+        const key = `${module}/${screen}`;
+        const on = selected.includes(key);
+        return <button key={screen} type="button" aria-pressed={on} onClick={() => onToggleScreen(key)} className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${on ? "bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-200" : "bg-white text-slate-500 ring-1 ring-inset ring-slate-200 hover:text-slate-800"}`}>{name}</button>;
+      })}
+    </div>}
+  </li>;
 }
 
 /**
@@ -67,15 +105,6 @@ export default function SubscriptionDialog({ row, onClose: close, onSaved }) {
       resetPassword: false,
     };
   });
-  // Modules the client has only part of start open, so what was chosen inside them is in view.
-  const [open, setOpen] = useState(() => new Set(
-    Object.entries(MODULES_BY_PRODUCT[pending?.product || row.product] || {})
-      .filter(([module, { screens }]) => {
-        const picked = Object.keys(screens).filter((screen) => form.modules.includes(`${module}/${screen}`)).length;
-        return picked > 0 && picked < Object.keys(screens).length;
-      })
-      .map(([module]) => module),
-  ));
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [sent, setSent] = useState(null);
@@ -92,11 +121,6 @@ export default function SubscriptionDialog({ row, onClose: close, onSaved }) {
     const all = keys.every((key) => form.modules.includes(key));
     set("modules", all ? form.modules.filter((key) => !keys.includes(key)) : [...new Set([...form.modules, ...keys])]);
   };
-  const toggleOpen = (module) => setOpen((current) => {
-    const next = new Set(current);
-    if (next.has(module)) next.delete(module); else next.add(module);
-    return next;
-  });
   const everything = allKeys.length > 0 && chosen.length === allKeys.length;
 
   async function save(event) {
@@ -170,41 +194,12 @@ export default function SubscriptionDialog({ row, onClose: close, onSaved }) {
     <Section
       id="modules"
       title="Modules"
-      hint={form.product ? `Tick a module for all of its screens, or open it and pick only the screens they need. ${chosen.length} of ${allKeys.length} screens selected.` : "Choose the product to see its modules."}
+      hint={form.product ? `Choose what the client gets. ${chosen.length} of ${allKeys.length} screen${allKeys.length === 1 ? "" : "s"} on.` : "Choose the product to see its modules."}
       action={form.product ? <button type="button" onClick={() => set("modules", everything ? [] : allKeys)} className="shrink-0 rounded text-sm font-medium text-blue-700 hover:text-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600">{everything ? "Clear all" : "Select all"}</button> : null}
     >
-      {form.product && <ul className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200">
-          {Object.entries(modules).map(([module, { label, screens }]) => {
-            const keys = screenKeys(module);
-            const picked = keys.filter((key) => form.modules.includes(key)).length;
-            const isOpen = open.has(module);
-            return <li key={module} className={picked ? "bg-blue-50/40" : "bg-white"}>
-              <div className="flex items-center gap-3 px-3 py-2.5">
-                <input
-                  type="checkbox"
-                  aria-label={`All of ${label}`}
-                  className="h-4 w-4 shrink-0 accent-blue-600"
-                  checked={picked === keys.length}
-                  ref={(input) => { if (input) input.indeterminate = picked > 0 && picked < keys.length; }}
-                  onChange={() => toggleModule(module)}
-                />
-                <button type="button" onClick={() => toggleOpen(module)} aria-expanded={isOpen} className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600">
-                  <span className="truncate text-sm font-medium text-slate-800">{label}</span>
-                  <span className="flex shrink-0 items-center gap-2">
-                    <span className={`text-xs tabular-nums ${picked ? "text-blue-700" : "text-slate-400"}`}>{picked === keys.length ? "All screens" : picked ? `${picked} of ${keys.length} screens` : `${keys.length} screens`}</span>
-                    <Chevron open={isOpen} />
-                  </span>
-                </button>
-              </div>
-              {isOpen && <div className="grid gap-x-4 gap-y-2 border-t border-slate-100 bg-white px-3 py-3 pl-10 sm:grid-cols-2">
-                {Object.entries(screens).map(([screen, name]) => <label key={screen} className="flex items-center gap-2 text-sm text-slate-700">
-                  <input type="checkbox" className="h-4 w-4 accent-blue-600" checked={form.modules.includes(`${module}/${screen}`)} onChange={() => toggleScreen(`${module}/${screen}`)} />
-                  {name}
-                </label>)}
-              </div>}
-            </li>;
-          })}
-        </ul>}
+      {form.product && <ul className="max-w-2xl divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white">
+        {Object.entries(modules).map(([module, { label, screens }]) => <ModuleRow key={module} module={module} label={label} screens={screens} selected={form.modules} onToggleModule={toggleModule} onToggleScreen={toggleScreen} />)}
+      </ul>}
     </Section>
   </SchemaFormPanel>;
 }

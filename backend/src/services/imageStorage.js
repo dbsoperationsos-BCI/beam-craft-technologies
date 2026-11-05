@@ -148,12 +148,14 @@ async function storeFavicon(source, options = {}) {
   const match = /^data:([^;,]+);base64,(.+)$/i.exec(String(source).trim());
   if (!match) throw fail(400, "A favicon must be uploaded as a PNG or SVG file.");
   const mimeType = match[1].toLowerCase();
-  const extension = FAVICON_TYPES[mimeType];
-  if (!extension) throw fail(400, "A favicon must be a PNG or an SVG.");
+  // A caller may widen what it takes (client logos and favicons take any common image); by default a PNG or an SVG.
+  const extension = (options.types || FAVICON_TYPES)[mimeType];
+  if (!extension) throw fail(400, options.typeMessage || "A favicon must be a PNG or an SVG.");
 
   const buffer = Buffer.from(match[2], "base64");
   if (!buffer.length) throw fail(400, "That favicon file is empty.");
-  if (buffer.length > MAX_FAVICON_BYTES) throw fail(400, "A favicon must be smaller than 5 MB.");
+  const maxBytes = options.maxBytes || MAX_FAVICON_BYTES;
+  if (buffer.length > maxBytes) throw fail(400, `That file must be ${Math.round(maxBytes / (1024 * 1024))} MB or smaller.`);
 
   if (!isConfigured) {
     if (process.env.NODE_ENV === "production") throw fail(500, "Image storage is not configured on this server.");

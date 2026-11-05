@@ -9,7 +9,8 @@ const { healthFor, checkAndRecord } = require("./siteHealth");
 const { makeSiteKey } = require("./siteApi");
 const { subscriptionSchema, generatePassword, subscriptionStatus, accountMessage } = require("./subscription");
 const { sendClientOnboardingInviteEmail } = require("../../../services/emailService");
-const { PRODUCTS, isProduct, inviteState, contactSchema, clientInviteSchema, submissionSchema, checkUpload, LOGO_RULE, FAVICON_RULE } = require("./rules");
+const { importTableRows, templateHeaders } = require("../../../services/tableImport");
+const { importClientSchema, PRODUCTS, isProduct, inviteState, contactSchema, clientInviteSchema, submissionSchema, checkUpload, LOGO_RULE, FAVICON_RULE } = require("./rules");
 
 const LOGO_FOLDER = "beamcraft/client-onboarding/logo";
 const FAVICON_FOLDER = "beamcraft/client-onboarding/favicon";
@@ -112,7 +113,7 @@ async function storeCompany(company, uploads) {
     if (problem) throw fail(400, problem);
     assertUploadsCanBeStored();
     // Stored as uploaded (not re-encoded), so the PNG logo keeps its transparency.
-    const result = await storeFavicon(company[key], { folder });
+    const result = await storeFavicon(company[key], { folder, types: rule.extensions, maxBytes: rule.maxBytes, typeMessage: `${rule.label}.` });
     uploads.push(result);
     stored[urlKey] = result.url;
   }
@@ -257,6 +258,66 @@ async function sendInvite(req, res) {
   }
 }
 
+// Client Details → Import: the columns of the template, in the words of the company form.
+const CLIENT_IMPORT_COLUMNS = [
+  { field: "companyName", label: "Company Name", required: true, aliases: ["Name Of The Company"] },
+  { field: "address", label: "Address", required: true },
+  { field: "gstNumber", label: "GST Number", required: true, aliases: ["GST"] },
+  { field: "panNumber", label: "PAN Number", required: true, aliases: ["PAN"] },
+  { field: "usersNeeded", label: "Number Of Users Needed", required: true, aliases: ["Users", "Number Of Users"] },
+  { field: "mainContactName", label: "Main Contact Name", required: true },
+  { field: "mainContactPhone", label: "Main Contact Number", required: true, aliases: ["Main Contact Phone"] },
+  { field: "mainContactDesignation", label: "Main Contact Designation", required: true },
+  { field: "secondaryContactName", label: "Secondary Contact Name", required: true },
+  { field: "secondaryContactPhone", label: "Secondary Contact Number", required: true, aliases: ["Secondary Contact Phone"] },
+  { field: "secondaryContactDesignation", label: "Secondary Contact Designation", required: true },
+  { field: "contactEmail", label: "Company Email ID", aliases: ["Email", "Contact Email"] },
+  { field: "product", label: "Product" },
+];
+
+/**
+ * One imported company, filed as a submitted onboarding form: an invite already submitted (it has no
+ * link to open) and its company, ready for Set up account. The logo and favicon are added in Edit.
+ */
+async function createImportedClient({ product, contactEmail, ...fields }, createdBy) {
+  await prisma.$transaction(async (tx) => {
+    const now = new Date();
+    const invite = await tx.clientOnboardingInvite.create({
+      data: {
+        product: product ?? null, contactName: fields.companyName, contactEmail: contactEmail ?? null, contactPhone: fields.mainContactPhone,
+        tokenHash: hashToken(crypto.randomBytes(32).toString("hex")), token: null, shortCode: null,
+        status: "Submitted", expiresAt: now, submittedAt: now, createdBy,
+      },
+    });
+    const client = await tx.subscriptionClient.create({ data: { ...fields, product: product ?? null, contactEmail: contactEmail ?? null, logoUrl: "", faviconUrl: "", inviteId: invite.id } });
+    await tx.clientOnboardingInvite.update({ where: { id: invite.id }, data: { clientId: client.id } });
+  });
+}
+
+function importClientTemplate(_req, res) {
+  return res.json({ data: { columns: templateHeaders(CLIENT_IMPORT_COLUMNS) } });
+}
+
+/** POST .../invites/import, or .../invites/product/:product/import from a product page (that product, always). */
+async function importClients(req, res) {
+  const pageProduct = req.params.product ? String(req.params.product) : null;
+  if (pageProduct && !isProduct(pageProduct)) return res.status(400).json({ message: "Unknown product." });
+  try {
+    const createdBy = req.user?.id ? String(req.user.id) : null;
+    const data = await importTableRows({
+      headers: req.body?.headers,
+      rows: req.body?.rows,
+      startRow: Number(req.body?.startRow) || 2,
+      columns: CLIENT_IMPORT_COLUMNS,
+      schema: importClientSchema,
+      create: (input) => createImportedClient(pageProduct ? { ...input, product: pageProduct } : input, createdBy),
+    });
+    return res.json({ data });
+  } catch (error) {
+    return respondError(res, error, "Unable to import the clients");
+  }
+}
+
 async function cancelInvite(req, res) {
   try {
     const invite = await prisma.clientOnboardingInvite.findUnique({ where: { id: String(req.params.id) } });
@@ -328,7 +389,7 @@ async function updateInvite(req, res) {
       const resolved = resolveSubmittedImage(parsed.data[key], current[urlKey], rule);
       if (resolved.keep) { images[urlKey] = resolved.keep; continue; }
       assertUploadsCanBeStored();
-      const stored = await storeFavicon(parsed.data[key], { folder });
+      const stored = await storeFavicon(parsed.data[key], { folder, types: rule.extensions, maxBytes: rule.maxBytes, typeMessage: `${rule.label}.` });
       uploads.push(stored);
       images[urlKey] = stored.url;
     }
@@ -558,7 +619,7 @@ async function submitPublicInvite(req, res) {
       if (resolved.keep) { images[urlKey] = resolved.keep; continue; }
       assertUploadsCanBeStored();
       // Stored as uploaded (not re-encoded), so the PNG logo keeps its transparency.
-      const stored = await storeFavicon(parsed.data[key], { folder });
+      const stored = await storeFavicon(parsed.data[key], { folder, types: rule.extensions, maxBytes: rule.maxBytes, typeMessage: `${rule.label}.` });
       uploads.push(stored);
       images[urlKey] = stored.url;
     }
@@ -572,4 +633,4 @@ async function submitPublicInvite(req, res) {
   }
 }
 
-module.exports = { updateInviteContact, sendInvite, serializeInvite, passwordColumns, assertCanMakeSiteKey, createSiteKey, conflictMessage, assertSubdomainFree, assertCanResetPassword, resetAdminPassword, checkSiteNow, liveFields, publishPending, publishSubscription, discardPending, assertProductEditable, assertCanSetUp, passwordChange, saveSubscription, productFromEdit, deleteInviteAndClient, deleteRow, deleteInvite, updateInvite, buildInviteMessage, assertSubmittable, claimAndCreateClient, assertUploadsCanBeStored, resolveSubmittedImage, listInvites, createInvite, cancelInvite, getPublicInvite, submitPublicInvite };
+module.exports = { importClients, importClientTemplate, createImportedClient, CLIENT_IMPORT_COLUMNS, updateInviteContact, sendInvite, serializeInvite, passwordColumns, assertCanMakeSiteKey, createSiteKey, conflictMessage, assertSubdomainFree, assertCanResetPassword, resetAdminPassword, checkSiteNow, liveFields, publishPending, publishSubscription, discardPending, assertProductEditable, assertCanSetUp, passwordChange, saveSubscription, productFromEdit, deleteInviteAndClient, deleteRow, deleteInvite, updateInvite, buildInviteMessage, assertSubmittable, claimAndCreateClient, assertUploadsCanBeStored, resolveSubmittedImage, listInvites, createInvite, cancelInvite, getPublicInvite, submitPublicInvite };
