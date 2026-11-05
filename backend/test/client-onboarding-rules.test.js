@@ -24,7 +24,7 @@ function validSubmission() {
 }
 
 test("the two products and nothing else", () => {
-  assert.deepEqual(PRODUCTS, { MEDIA_STUDIO_OPERATIONS: "Orbyt", ACCOUNT_MANAGER: "Accora" });
+  assert.deepEqual(PRODUCTS, { MEDIA_STUDIO_OPERATIONS: "Orbyt", ACCOUNT_MANAGER: "Nilo" });
   assert.equal(isProduct("ACCOUNT_MANAGER"), true);
   assert.equal(isProduct("HRM"), false);
 });

@@ -65,7 +65,7 @@ export const SIDEBAR_MODULES = [
     icon: "Subscriptions",
     items: [
       { id: "media-studio-operations", label: "Orbyt", hint: "Media Studio OS", href: "/subscribe/media-studio-operations", activePath: "/subscribe/media-studio-operations" },
-      { id: "subscribe-account-manager", label: "Accora", hint: "Account Manager", href: "/subscribe/account-manager", activePath: "/subscribe/account-manager" },
+      { id: "subscribe-account-manager", label: "Nilo", hint: "Account Manager", href: "/subscribe/account-manager", activePath: "/subscribe/account-manager" },
     ],
   },
   /*

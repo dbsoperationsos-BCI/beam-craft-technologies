@@ -52,7 +52,7 @@ Every code change adds an entry here, in the same commit or PR as the code. This
 - **SUBSCRIBE product pages can select and delete clients.** Media Studio Operations and SAAS
   Application Managing get the tick boxes with Select all and Delete, and a ⋮ → Delete on each row,
   for anyone who may change client onboarding. Setting up and editing stay in Client Details.
-- **The Account Manager product is called "Accora"** (hovering it in the sidebar says "Account Manager", and searching "account manager" finds it). Sidebar (SUBSCRIBE), its page
+- **The Account Manager product is called "Nilo"** (hovering it in the sidebar says "Account Manager", and searching "account manager" finds it). Sidebar (SUBSCRIBE), its page
   title, and the Product choice in Edit / Set up account. The stored key stays `ACCOUNT_MANAGER`, so
   existing clients are unchanged.
 - **A client's site on our own server connects to Beam Craft by itself - no site key to copy.** Its key

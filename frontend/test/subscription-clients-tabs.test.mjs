@@ -4,7 +4,7 @@ import { CLIENT_TABS, PRODUCTS, inTab, clientRow } from "../src/constants/subscr
 
 test("the tabs, in order", () => {
   assert.deepEqual(CLIENT_TABS, ["All", "Form Pending", "Submitted", "Active", "Update Pending", "Expired", "Link Expired/Cancelled"]);
-  assert.deepEqual(PRODUCTS, { MEDIA_STUDIO_OPERATIONS: "Orbyt", ACCOUNT_MANAGER: "Accora" });
+  assert.deepEqual(PRODUCTS, { MEDIA_STUDIO_OPERATIONS: "Orbyt", ACCOUNT_MANAGER: "Nilo" });
 });
 
 test("each row sits in All and in exactly one other tab", () => {
