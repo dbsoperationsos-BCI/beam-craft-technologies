@@ -1,4 +1,5 @@
 const { google } = require("googleapis");
+const { LEAD_SOURCES } = require("./leadSources");
 const prisma = require("../../../config/db");
 const { advanceSequence, contextFromKey, formatIdentifier, parseIdentifier, sequenceKey } = require("../../../services/identifiers");
 const { getGoogleSheetConnectionForUser } = require("../google-oauth/service");
@@ -442,7 +443,7 @@ function mapRowToCrmCandidate(row = [], mapping = {}, link = {}, rowNumber = 0, 
   const sheetIdentity = getSheetIdentity(link);
   const fallbackSourceId = `${sheetIdentity}:row:${rowNumber}`;
   const effectiveSourceId = sourceEnquiryId || fallbackSourceId;
-  const existing = (sourceEnquiryId && existingById.get(sourceEnquiryId)) || (effectiveSourceId && existingById.get(effectiveSourceId)) || (normalizedPhone && existingByPhone.get(normalizedPhone)) || null;
+  const existing = (sourceEnquiryId && existingById.get(sourceEnquiryId)) || (effectiveSourceId && existingById.get(effectiveSourceId)) || (normalizedPhone && existingByPhone.get(phoneKey(vertical, normalizedPhone))) || null;
   const recordId = existing?.lead?.id || (sourceEnquiryId && CRM_ID_PATTERN.test(sourceEnquiryId) ? sourceEnquiryId : leadIds.next(leadIdContext(link, lead)));
   const status = getMappedRowValue(row, mapping, "status") || existing?.lead?.status || "";
   /*
@@ -515,7 +516,13 @@ function mapRowToCrmCandidate(row = [], mapping = {}, link = {}, rowNumber = 0, 
        * reach an imported lead again only while it is still unassigned.
        */
       crm: alreadyOwned || assignment?.crm || "",
-      source: lead.source || existing?.lead?.source || "Google sheet integration",
+      /*
+       * Where the lead came from, which for a row read off a linked sheet is the integration -
+       * never the sheet's own "Source" cell (Instagram, a campaign name). That cell is ignored, and
+       * set *after* the spread of the row's mapped columns so it cannot slip back in. A lead that
+       * already had a source keeps it: a re-read of the same row changes nothing.
+       */
+      source: existing?.lead?.source || LEAD_SOURCES.SHEET,
       status,
     },
     details: {
@@ -594,6 +601,35 @@ function normalizeDateForValidation(value) {
   return { valid: true, normalized: parsed.toISOString().slice(0, 10) };
 }
 
+/**
+ * A cell the importer cannot read is **emptied**, and the rest of the row is kept.
+ *
+ * This replaces refusing the row. One unreadable cell used to cost the whole lead - the name, the
+ * number, the campaign that paid for it - and the cells at fault are the ones a client answers in
+ * their own words: "feb 10 th and 11 th 2027" in When is the Event Planned, "Immediate" in a
+ * joining date, a state name where a date was expected. A lead is worth more than a tidy column,
+ * and the studio can see the blank and fill it in.
+ *
+ * Every column this touches is nullable text, so a blank is a value the table already holds. `null`
+ * rather than `""`, because on this schema `""` never means "none".
+ *
+ * The row is never refused: a sheet row with nothing readable in it at all still imports, because a
+ * row that is *wholly* blank never reaches here - `normalizeSheetRows` drops it before mapping.
+ */
+function clearUnreadableFields(record, issues = []) {
+  const cleared = [];
+  for (const issue of issues) {
+    const field = issue?.field;
+    if (!field) continue;
+    // Both halves: a field can be read from either, and leaving the other holding the bad value
+    // would put it back on the way to the database.
+    if (record?.lead && field in record.lead) record.lead[field] = null;
+    if (record?.details && field in record.details) record.details[field] = null;
+    cleared.push({ field, reason: issue.reason });
+  }
+  return cleared;
+}
+
 function validateCandidateRecord(record, mapping = {}) {
   const issues = [];
   const lead = record?.lead || {};
@@ -621,7 +657,21 @@ function validateCandidateRecord(record, mapping = {}) {
    * Time** column failed on its one good column and the whole import reported "0 created, 0
    * updated, 32 skipped". The same mistake was already corrected once on the board's filters.
    */
-  const dateFields = ["createdDate", "eventPlannedDate", "lastFollowUpDate", "nextFollowUpDate", "lastConvertedDate", "date", "dateOfBirthOrEdod"];
+  /*
+   * `eventPlannedDate` is **not** among them, for the reason `addedTime` is not.
+   *
+   * "When is the Event Planned" is a question the client answers in their own words on a Meta lead
+   * form, and a wedding is two days as often as one: "feb 10 th and 11 th 2027", "March 10,11 2027",
+   * "after Deepavali". The column is `TEXT` and has always held exactly that. Validating it as a
+   * single day refused the **whole row** - name, number and all - over a cell that was answered
+   * correctly, so a sheet of new leads imported the ones who left it blank and dropped the rest.
+   *
+   * It is still folded to `YYYY-MM-DD` where the cell *is* a day: that happens through
+   * `LEAD_DATE_COLUMNS` on the way to the database, which leaves anything else exactly as written.
+   * So nothing is lost either way - a real date still sorts and filters as one, and a client's own
+   * answer is kept rather than costing the studio the lead.
+   */
+  const dateFields = ["createdDate", "lastFollowUpDate", "nextFollowUpDate", "lastConvertedDate", "date", "dateOfBirthOrEdod"];
   for (const field of dateFields) {
     const result = normalizeDateForValidation(lead[field] || details[field]);
     if (!result.valid) {
@@ -743,8 +793,8 @@ function buildExistingIndexes(existingRows = []) {
      * already held. That is the "it was added manually already" case, and it has to be one answer.
      */
     for (const value of [item.lead?.phone, item.lead?.contactNumber]) {
-      const number = normalizePhone(value);
-      if (number && !byPhone.has(number)) byPhone.set(number, item);
+      const key = phoneKey(item.lead?.vertical, value);
+      if (key && !byPhone.has(key)) byPhone.set(key, item);
     }
     const email = normalizeEmail(item.lead?.officialEmailId);
     if (email) byEmail.set(email, item);
@@ -766,52 +816,48 @@ function classifyAgainstExisting(candidate, indexes, seenInBatch = new Map()) {
   const lead = candidate?.lead || {};
   const details = candidate?.details || {};
   const sourceId = String(details.sourceEnquiryId || "").trim();
-  const phone = normalizePhone(lead.phone);
+  // Vertical and number together - see `phoneKey`. The same number in another vertical is new here.
+  const phone = phoneKey(lead.vertical, lead.phone);
   // The row's other number as well, matched against the same index: a sheet's Contact Number and
   // the CRM's are the same fact about the same person, and a row that carries only the second must
   // not read as somebody new.
-  const contactNumber = normalizePhone(lead.contactNumber);
+  const contactNumber = phoneKey(lead.vertical, lead.contactNumber);
   const phoneMatch = (phone && indexes.byPhone.get(phone)) || (contactNumber && indexes.byPhone.get(contactNumber)) || null;
   const email = normalizeEmail(lead.officialEmailId);
   const shootId = String(lead.shootId || "").trim();
   const position = sheetPositionKey(details.spreadsheetId, details.gid || details.targetTab, details.sourceRowNumber);
 
-  const duplicateKey = sourceId || phone || contactNumber || email || shootId;
-  if (duplicateKey && seenInBatch.has(duplicateKey)) {
-    return {
-      classification: "DUPLICATE_IN_SHEET",
-      matchedRecord: seenInBatch.get(duplicateKey),
-      matchBy: sourceId ? "sourceEnquiryId" : phone || contactNumber ? "phone" : email ? "email" : "shootId",
-    };
-  }
+  /*
+   * ── The phone number decides, and nothing else ─────────────────────────────────────────────
+   *
+   * A row whose number is already on the board is not imported; a row whose number is new **is**
+   * imported, whatever else about it disagrees - a changed source id, an email shared with a
+   * relative, a reused shoot id, a row that has moved. Those are the spreadsheet being untidy, not
+   * a second client.
+   *
+   * It used to fall through `sourceId || phone || contactNumber || email || shootId` and match live
+   * rows on five keys in turn, which got both halves wrong: two real enquiries sharing an office
+   * email were read as one, and one real enquiry whose row id changed was read as two.
+   *
+   * Either of the row's two numbers counts, against the same index: a sheet's Contact Number and the
+   * CRM's phone are the same fact about the same person, and a row carrying only the second must not
+   * read as somebody new.
+   */
+  const duplicateKey = phone;
+  const anyNumber = phone || contactNumber;
 
-  const existing =
-    (sourceId && indexes.byId.get(sourceId)) ||
-    (position && indexes.bySheetPosition?.get(position)) ||
-    phoneMatch ||
-    (email && indexes.byEmail.get(email)) ||
-    (shootId && indexes.byShootId.get(shootId)) ||
-    null;
+  // Refused outright, and the only row this importer refuses. Every other unreadable value is
+  // blanked and the row still goes in; a row with no number at all cannot be checked for
+  // uniqueness, so it is reported instead of guessed at.
+  if (!anyNumber) return { classification: "NO_PHONE", matchedRecord: null, matchBy: null };
 
-  if (duplicateKey) {
-    seenInBatch.set(duplicateKey, candidate);
+  const batchKey = duplicateKey || contactNumber;
+  if (seenInBatch.has(batchKey)) {
+    return { classification: "DUPLICATE_IN_SHEET", matchedRecord: seenInBatch.get(batchKey), matchBy: "phone" };
   }
+  seenInBatch.set(batchKey, candidate);
 
-  if (existing) {
-    return {
-      classification: "EXISTING",
-      matchedRecord: existing,
-      matchBy: sourceId && indexes.byId.get(sourceId)
-        ? "sourceEnquiryId"
-        : position && indexes.bySheetPosition?.get(position)
-          ? "sheetPosition"
-          : phoneMatch
-            ? "phone"
-            : email && indexes.byEmail.get(email)
-              ? "email"
-              : "shootId",
-    };
-  }
+  if (phoneMatch) return { classification: "EXISTING", matchedRecord: phoneMatch, matchBy: "phone" };
 
   return {
     classification: "NEW",
@@ -820,8 +866,10 @@ function classifyAgainstExisting(candidate, indexes, seenInBatch = new Map()) {
   };
 }
 
-async function prepareGoogleSheetCrmImport(link) {
-  const sheet = await readLinkedGoogleSheet(link);
+// `sheet`, when given, is this link's sheet already read by the caller - the poller reads it first
+// to see whether anything changed - so it is not fetched from Google a second time.
+async function prepareGoogleSheetCrmImport(link, { sheet: alreadyRead = null } = {}) {
+  const sheet = alreadyRead || await readLinkedGoogleSheet(link);
   // Both read paths must produce the same sheet identity, otherwise every row gets a
   // fresh sourceEnquiryId on the next sync and re-imports as a new lead.
   const resolvedLink = {
@@ -887,8 +935,8 @@ async function prepareGoogleSheetCrmImport(link) {
   );
   const knownByPhone = new Map(
     indexes.rows
-      .filter((item) => normalizePhone(item.lead?.phone))
-      .map((item) => [normalizePhone(item.lead.phone), item]),
+      .filter((item) => phoneKey(item.lead?.vertical, item.lead?.phone))
+      .map((item) => [phoneKey(item.lead.vertical, item.lead.phone), item]),
   );
 
   // Attached to the link the rows are mapped against, so the matcher reaches
@@ -899,8 +947,11 @@ async function prepareGoogleSheetCrmImport(link) {
 
   const rows = [];
   let validCount = 0;
-  let invalidCount = 0;
+  // Not rows any more: no row is refused. This counts the **cells** emptied because the importer
+  // could not read them, which is what the studio has to go and look at in the sheet.
+  let clearedFieldCount = 0;
   let duplicateCount = 0;
+  let missingPhoneCount = 0;
   let existingCount = 0;
   let newCount = 0;
   // Rows this link imported once and the studio has since deleted. Reported, not silently dropped.
@@ -927,6 +978,11 @@ async function prepareGoogleSheetCrmImport(link) {
       knownByPhone,
     );
     const validation = validateCandidateRecord(candidatePayload.record, mapping);
+    /*
+     * Emptied before the row is classified, so what is matched on is what will be stored: a phone
+     * the importer could not read is not a phone to find an existing lead by either.
+     */
+    const cleared = clearUnreadableFields(candidatePayload.record, validation.issues);
     const classification = classifyAgainstExisting(candidatePayload.record, indexes, seenInBatch);
     const rowIssues = [...validation.issues];
     /*
@@ -946,7 +1002,15 @@ async function prepareGoogleSheetCrmImport(link) {
         || (rowKey && importedRowKeys.has(rowKey))
         || matchesDeletedRecord(candidatePayload.record, deletedKeys));
 
-    if (classification.classification === "DUPLICATE_IN_SHEET") {
+    if (classification.classification === "NO_PHONE") {
+      /*
+       * The only row this importer refuses. Every other unreadable value is blanked and the row goes
+       * in regardless, but the number is what decides whether a row is somebody the board already
+       * holds - so a row without one cannot be checked at all, and is reported rather than guessed at.
+       */
+      rowIssues.push({ field: "phone", reason: "A phone number is required: it is what decides whether this row is somebody the board already holds." });
+      missingPhoneCount += 1;
+    } else if (classification.classification === "DUPLICATE_IN_SHEET") {
       rowIssues.push({ field: "duplicate", reason: "Duplicate row within the same spreadsheet import batch." });
       duplicateCount += 1;
     } else if (classification.classification === "EXISTING") {
@@ -956,8 +1020,8 @@ async function prepareGoogleSheetCrmImport(link) {
     } else {
       newCount += 1;
     }
-    if (!validation.valid) invalidCount += 1;
-    else validCount += 1;
+    validCount += 1;
+    clearedFieldCount += cleared.length;
     if (candidatePayload.assignment) assignedByRuleCount += 1;
     else if (!String(candidatePayload.record?.lead?.crm || "").trim()) unassignedRows += 1;
     rows.push({
@@ -966,11 +1030,13 @@ async function prepareGoogleSheetCrmImport(link) {
       record: candidatePayload.record,
       mapping: candidatePayload.mapping,
       assignment: candidatePayload.assignment,
-      classification: !validation.valid ? "INVALID" : alreadyImported ? "ALREADY_IMPORTED" : classification.classification,
+      // Never INVALID any more: an unreadable cell is emptied above and the row goes in regardless.
+      classification: alreadyImported ? "ALREADY_IMPORTED" : classification.classification,
       rowKey,
       matchedRecord: classification.matchedRecord ? classification.matchedRecord.record || classification.matchedRecord : null,
       matchedBy: classification.matchBy,
-      valid: validation.valid,
+      valid: true,
+      cleared,
       issues: rowIssues,
     });
   }
@@ -994,8 +1060,13 @@ async function prepareGoogleSheetCrmImport(link) {
     summary: {
       totalRows: rows.length,
       validRows: validCount,
-      invalidRows: invalidCount,
+      // Kept at 0 rather than removed: the Settings panel and the sync summary both read it, and a
+      // sheet import genuinely has no invalid rows now.
+      invalidRows: 0,
+      clearedFields: clearedFieldCount,
       duplicateRows: duplicateCount,
+      // Rows refused for carrying no phone number at all - see the classification above.
+      missingPhoneRows: missingPhoneCount,
       existingRows: existingCount,
       newRows: newCount,
       alreadyImportedRows: deletedCount,
@@ -1006,8 +1077,12 @@ async function prepareGoogleSheetCrmImport(link) {
   };
 }
 
-async function runGoogleSheetLinkSync(link) {
-  const preview = await prepareGoogleSheetCrmImport(link);
+async function runGoogleSheetLinkSync(link, options = {}) {
+  const preview = await prepareGoogleSheetCrmImport(link, options);
+  // How many New Lead Welcome messages this pass has queued (`automatic-whatsapp/newLeadWelcome.js`)
+  // - past `MAX_PER_SYNC` the rest are logged, not sent. A link's first sync is welcomed too; its
+  // old rows are held back by their enquiry date, not by being first.
+  let welcomesQueued = 0;
   const actions = [];
   let created = 0;
   let skippedExisting = 0;
@@ -1022,7 +1097,10 @@ async function runGoogleSheetLinkSync(link) {
    */
   let skippedSameContact = 0;
   let skippedDuplicate = 0;
-  let skippedInvalid = 0;
+  let skippedMissingPhone = 0;
+  // Cells emptied because the importer could not read them. No row is refused over one any more,
+  // so this counts columns rather than rows.
+  let clearedFields = 0;
   // Rows held back because their lead was deleted here. See the ALREADY_IMPORTED branch below.
   let skippedDeleted = 0;
   let failed = 0;
@@ -1057,18 +1135,27 @@ async function runGoogleSheetLinkSync(link) {
       continue;
     }
 
+    if (classification === "NO_PHONE") {
+      // Refused in the plan above and refused here: a row with no number is never written.
+      skippedMissingPhone += 1;
+      actions.push({ rowNumber: row.rowNumber, action: "SKIPPED_NO_PHONE" });
+      continue;
+    }
     if (classification === "DUPLICATE_IN_SHEET") {
       skippedDuplicate += 1;
       actions.push({ rowNumber: row.rowNumber, action: "SKIPPED_DUPLICATE" });
       continue;
     }
-    if (classification === "INVALID") {
-      skippedInvalid += 1;
-      // The first issue only. A row with a blank name and three bad dates is corrected by opening
-      // it, and four reasons on one line push the other rows off the panel.
-      noteProblem(row.rowNumber, (row.issues || [])[0]?.reason);
-      actions.push({ rowNumber: row.rowNumber, action: "SKIPPED_INVALID", issues: row.issues || [] });
-      continue;
+    /*
+     * A cell the importer could not read was emptied, not a reason to drop the lead.
+     *
+     * Still named, and by column: "row 12 - When is the Event Planned: Invalid date value" is what
+     * sends somebody to the cell that needs correcting. The row itself carries on below and is
+     * imported with that one column blank.
+     */
+    for (const issue of row.cleared || []) {
+      clearedFields += 1;
+      noteProblem(row.rowNumber, `${issue.field}: ${issue.reason}`);
     }
     /*
      * Imported once already, and its lead is gone: the studio deleted it, and the sheet is not
@@ -1108,6 +1195,12 @@ async function runGoogleSheetLinkSync(link) {
       // marked as imported and therefore skipped for good.
       await recordImportedRow(link?.id, row.rowKey || importedRowKey(record), record.lead?.id || "");
       actions.push({ rowNumber: row.rowNumber, action: "CREATED", crmLeadId: record.lead?.id || "" });
+      // The lead is on the board now: queue its welcome from its owner's WhatsApp, if switched on.
+      // After the fact and caught - a message that cannot be queued never fails the import.
+      const welcomed = await require("../../settings/automatic-whatsapp/newLeadWelcome")
+        .afterLeadCreated({ lead: record.lead, queuedThisSync: welcomesQueued })
+        .catch((error) => console.warn("[lead-welcome] could not queue the welcome for", record.lead?.id, error?.code || "ERROR"));
+      if (welcomed === "queued") welcomesQueued += 1;
     } catch (error) {
       failed += 1;
       const reason = error?.message || "Unable to create CRM lead.";
@@ -1151,11 +1244,15 @@ async function runGoogleSheetLinkSync(link) {
     // `skippedExisting` and `skippedDeleted` count here too: they are rows this pass declined to
     // write, which is what every other number in this total means. Left out, a sheet whose rows are
     // all already in the CRM would report a sync that touched nothing and explain none of it.
-    skipped: skippedExisting + skippedDuplicate + skippedInvalid + skippedDeleted,
+    skipped: skippedExisting + skippedDuplicate + skippedDeleted,
     skippedExisting,
     skippedSameContact,
     skippedDuplicate,
-    skippedInvalid,
+    skippedMissingPhone,
+    // Always 0: a sheet row is no longer refused for what one of its cells holds. Kept in the
+    // summary because the Settings panel reads it, and an absent key would read as "unknown".
+    skippedInvalid: 0,
+    clearedFields,
     skippedDeleted,
     failed,
     totalRows: Array.isArray(preview.rows) ? preview.rows.length : 0,
@@ -1169,7 +1266,7 @@ async function runGoogleSheetLinkSync(link) {
     // spreadsheet - the column was renamed, so the rule has to be pointed at its new heading -
     // and it cannot be acted on from a number.
     assignmentMissingColumns: (preview.assignment?.missingColumns || []).map((entry) => entry.columnHeader).filter(Boolean),
-    // Named rows, capped; `skippedInvalid` + `failed` beside them is the true total.
+    // Named rows and columns, capped; `clearedFields` + `failed` beside them is the true total.
     rowProblems,
   };
   await recordLinkSync(link?.id, failed ? "PARTIAL" : "OK", summary);
@@ -1179,9 +1276,9 @@ async function runGoogleSheetLinkSync(link) {
 
 // Wraps the run so a failure is recorded too - otherwise a link whose sync keeps throwing
 // would still show whatever the last successful attempt reported.
-async function syncGoogleSheetLinkToCrm(link) {
+async function syncGoogleSheetLinkToCrm(link, options = {}) {
   try {
-    return await runGoogleSheetLinkSync(link);
+    return await runGoogleSheetLinkSync(link, options);
   } catch (error) {
     await recordLinkSync(link?.id, "FAILED", { error: String(error?.message || error).slice(0, 300) });
     throw error;
@@ -1325,6 +1422,20 @@ function normalizeVerticalValue(value) {
   return key ? VERTICAL_VALUE_ALIASES[key] || "" : "";
 }
 
+/*
+ * ── One number, one enquiry - per vertical ────────────────────────────────────────────────────
+ *
+ * The key a phone number is matched under: the vertical and the number together. A client already
+ * on Dum Dum whose number arrives in a Qua Qua sheet is a second enquiry *on purpose* - different
+ * work, a different pipeline - so it comes in; only the same number in the same vertical is the same
+ * client twice. The rule Add Lead and `findVerticalDuplicate` already apply. A blank or unrecognised
+ * vertical is Dum Dum, as the board reads it.
+ */
+function phoneKey(vertical, phone) {
+  const number = normalizePhone(phone);
+  return number ? `${normalizeVerticalValue(vertical) || "Dum Dum"}|${number}` : "";
+}
+
 // Returns the vertical the link was explicitly created for, or "" when the link
 // carries no vertical/system table. Unlike getLinkVertical this never falls back to
 // Dum Dum, so callers can tell "no choice made" apart from "chose Dum Dum".
@@ -1441,14 +1552,16 @@ function mapCrmRow(row = {}) {
  * So the deleted leads are asked directly as well, on the same identities the classifier matches
  * live leads by, and a row carrying one of them is that lead wherever it has since moved to.
  */
-function deletedRecordKeys({ sourceEnquiryId, phone, email } = {}) {
+function deletedRecordKeys({ sourceEnquiryId, phone, email, vertical } = {}) {
   const keys = [];
   const id = String(sourceEnquiryId || "").trim();
   if (id) keys.push(`id:${id}`);
-  const tel = normalizePhone(phone);
+  // The number and the email within their vertical, like a live lead's: a Dum Dum lead deleted here
+  // does not hold back the same client's Qua Qua enquiry.
+  const tel = phoneKey(vertical, phone);
   if (tel) keys.push(`tel:${tel}`);
   const mail = normalizeEmail(email);
-  if (mail) keys.push(`mail:${mail}`);
+  if (mail) keys.push(`mail:${normalizeVerticalValue(vertical) || "Dum Dum"}|${mail}`);
   return keys;
 }
 
@@ -1460,7 +1573,7 @@ function deletedRecordKeys({ sourceEnquiryId, phone, email } = {}) {
 async function loadDeletedLeadKeys() {
   try {
     const rows = await prisma.$queryRawUnsafe(
-      "SELECT `phone`, `official_email_id` AS `email`, `source_enquiry_id` AS `sourceEnquiryId` FROM `sales_crm_lead` WHERE `deleted_at` IS NOT NULL",
+      "SELECT `phone`, `official_email_id` AS `email`, `source_enquiry_id` AS `sourceEnquiryId`, `vertical` FROM `sales_crm_lead` WHERE `deleted_at` IS NOT NULL",
     );
     const set = new Set();
     for (const row of Array.isArray(rows) ? rows : []) {
@@ -1480,6 +1593,7 @@ function matchesDeletedRecord(record, deletedKeys) {
     sourceEnquiryId: record?.details?.sourceEnquiryId,
     phone: record?.lead?.phone,
     email: record?.lead?.officialEmailId,
+    vertical: record?.lead?.vertical,
   }).some((key) => deletedKeys.has(key));
 }
 
@@ -1703,7 +1817,7 @@ function buildRecordFromRow(row, headerMap, link, rowNumber, leadIds, existingBy
   const fallbackSourceId = `${sheetIdentity}:row:${rowNumber}`;
   const effectiveSourceId = sourceEnquiryId || fallbackSourceId;
 
-  const existing = (sourceEnquiryId && existingById.get(sourceEnquiryId)) || (effectiveSourceId && existingById.get(effectiveSourceId)) || (normalizedPhone && existingByPhone.get(normalizedPhone)) || null;
+  const existing = (sourceEnquiryId && existingById.get(sourceEnquiryId)) || (effectiveSourceId && existingById.get(effectiveSourceId)) || (normalizedPhone && existingByPhone.get(phoneKey(vertical, normalizedPhone))) || null;
   const recordId = existing?.lead?.id || (sourceEnquiryId && CRM_ID_PATTERN.test(sourceEnquiryId) ? sourceEnquiryId : leadIds.next(leadIdContext(link, lead)));
   const status = valueForHeader(row, headerMap, "Status") || existing?.lead?.status || "";
   // The same two sources as `mapRowToCrmCandidate`, in the same order - see the note there.
@@ -1730,7 +1844,13 @@ function buildRecordFromRow(row, headerMap, link, rowNumber, leadIds, existingBy
       createdDate: existing?.lead?.createdDate || lead.createdDate || importDateKey(),
       addedTime: addedTime || lead.addedTime || lead.addedTimestamp || existing?.lead?.addedTime || "",
       crm: lead.crm || existing?.lead?.crm || "",
-      source: lead.source || existing?.lead?.source || "Google sheet integration",
+      /*
+       * Where the lead came from, which for a row read off a linked sheet is the integration -
+       * never the sheet's own "Source" cell (Instagram, a campaign name). That cell is ignored, and
+       * set *after* the spread of the row's mapped columns so it cannot slip back in. A lead that
+       * already had a source keeps it: a re-read of the same row changes nothing.
+       */
+      source: existing?.lead?.source || LEAD_SOURCES.SHEET,
       status,
     },
     details: {
@@ -2020,7 +2140,7 @@ async function refreshCrmLeadsFromSheets() {
   const leadIds = await loadLeadIdAllocator(existingRows.map((row) => row.enquiryId));
   const existingById = new Map(existingRows.map((row) => [row.enquiryId, mapCrmRow(row)]));
   const existingByPhone = new Map(
-    existingRows.map((row) => mapCrmRow(row)).filter((item) => normalizePhone(item.lead?.phone)).map((item) => [normalizePhone(item.lead.phone), item]),
+    existingRows.map((row) => mapCrmRow(row)).filter((item) => phoneKey(item.lead?.vertical, item.lead?.phone)).map((item) => [phoneKey(item.lead.vertical, item.lead.phone), item]),
   );
   // The deleted leads, so this path cannot resurrect one either. `null` is the unreadable case and
   // withholds every row, the same answer the link sync gives: this runs when the table is empty,
@@ -2051,11 +2171,11 @@ async function refreshCrmLeadsFromSheets() {
        * put on the lead - and a row matching a deleted lead is not written at all, or this path
        * would undo the delete the moment somebody opened an empty CRM Leads page.
        */
-      const phoneKey = normalizePhone(record.lead?.phone);
-      const alreadyHere = existingById.has(record.lead?.id) || (phoneKey && existingByPhone.has(phoneKey));
+      const numberKey = phoneKey(record.lead?.vertical, record.lead?.phone);
+      const alreadyHere = existingById.has(record.lead?.id) || (numberKey && existingByPhone.has(numberKey));
       if (alreadyHere || deletedKeys === null || matchesDeletedRecord(record, deletedKeys)) continue;
       await upsertRecord(record);
-      if (record.lead.phone) existingByPhone.set(normalizePhone(record.lead.phone), record);
+      if (record.lead.phone) existingByPhone.set(phoneKey(record.lead.vertical, record.lead.phone), record);
       existingById.set(record.lead.id, record);
       imported.push({ rowNumber: index + 2, record });
     }
@@ -2120,7 +2240,7 @@ async function syncCrmLeadLink(integrationId) {
       .filter(([sourceId]) => sourceId),
   );
   const existingByPhone = new Map(
-    existingRows.map((row) => mapCrmRow(row)).filter((item) => normalizePhone(item.lead?.phone)).map((item) => [normalizePhone(item.lead.phone), item]),
+    existingRows.map((row) => mapCrmRow(row)).filter((item) => phoneKey(item.lead?.vertical, item.lead?.phone)).map((item) => [phoneKey(item.lead.vertical, item.lead.phone), item]),
   );
 
   let created = 0;
@@ -2138,12 +2258,13 @@ async function syncCrmLeadLink(integrationId) {
     const rowNumber = headerRowIndex + index + 2;
     const sourceEnquiryId = valueForHeader(row, headerMap, "Enquiry ID", "Lead ID", "ID");
     const phone = valueForHeader(row, headerMap, "Phone Number", "Phone", "Contact");
-    const existing = (sourceEnquiryId && existingById.get(sourceEnquiryId)) || (phone && existingByPhone.get(normalizePhone(phone))) || null;
     const nextRecord = buildRecordFromRow(row, headerMap, linkIdentity, rowNumber, leadIds, existingById, existingByPhone);
     if (!nextRecord) {
       skipped += 1;
       continue;
     }
+    // Read once the row's vertical is known: the number is matched within it (`phoneKey`).
+    const existing = (sourceEnquiryId && existingById.get(sourceEnquiryId)) || (phone && existingByPhone.get(phoneKey(nextRecord.lead.vertical, phone))) || null;
     const changed = JSON.stringify(nextRecord.lead) !== JSON.stringify(existing?.lead || {}) || JSON.stringify(nextRecord.details) !== JSON.stringify(existing?.details || {});
     await upsertRecord(nextRecord);
     records.push(nextRecord);
@@ -2152,7 +2273,7 @@ async function syncCrmLeadLink(integrationId) {
     } else {
       created += 1;
     }
-    if (nextRecord.lead.phone) existingByPhone.set(normalizePhone(nextRecord.lead.phone), nextRecord);
+    if (nextRecord.lead.phone) existingByPhone.set(phoneKey(nextRecord.lead.vertical, nextRecord.lead.phone), nextRecord);
     if (nextRecord.details?.sourceEnquiryId) existingById.set(nextRecord.details.sourceEnquiryId, nextRecord);
   }
 
@@ -2195,6 +2316,7 @@ module.exports = {
   // module's own importer, so a heading matches there exactly as it matches here.
   normalizeText,
   normalizePhone,
+  phoneKey,
   normalizeHeaderForMatching,
   prepareGoogleSheetCrmImport,
   syncGoogleSheetLinkToCrm,

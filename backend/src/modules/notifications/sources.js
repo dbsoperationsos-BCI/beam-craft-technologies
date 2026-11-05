@@ -32,10 +32,10 @@ const { ensureTable: ensureWhatsAppMessageTable } = require("../sales/whatsapp-c
  * role test written here. A studio-wide notice names whose it is, since for that reader "who" is
  * the first thing the line has to say.
  *
- * The CRM's leads are the one awkward case: a lead records who is working it as a **name** in its
- * `crm` column rather than as a user id, so "mine" is matched on the signed-in user's name. That is
- * the same compromise the Reports module already makes everywhere it groups by a person, and it is
- * noted here rather than hidden because two logins sharing a name would share these notices.
+ * The CRM's leads name their owner as an **employee** (`owner_employee_id`, beside the `crm` text
+ * the board prints), so "mine" there is the employee behind the signed-in login - `viewer.employeeId`
+ * - and only a lead whose owner matched nobody falls back to the name. Callyzer's call log is the one
+ * source still matched on a name, because the handset reports one and nothing else.
  *
  * ── Never throws ──
  *
@@ -99,12 +99,25 @@ function notice({ id, kind, title, detail = "", at = null, href = "", tone = "in
  * lead that has been converted, rejected or marked invalid is not owed a call, whatever date is
  * still written on it.
  */
-async function followUps({ userName, everyone = false }) {
-  if (!everyone && !userName) return [];
+async function followUps({ userName, employeeId = null, everyone = false }) {
+  if (!everyone && !userName && !employeeId) return [];
   const today = studioToday();
-  // The studio's, or this person's. Written as one clause or the other rather than as a clause that
-  // is sometimes `1=1`, so the parameters and the SQL are built together and cannot fall out of step.
-  const mine = everyone ? "1=1" : "TRIM(COALESCE(`crm`, '')) = ?";
+  /*
+   * The studio's, or this person's. Written as one clause or the other rather than as a clause that
+   * is sometimes `1=1`, so the parameters and the SQL are built together and cannot fall out of step.
+   *
+   * "This person's" is the lead's `owner_employee_id` - the reference the data-scope work put beside
+   * the `crm` text, and the same column the board narrows by - so a lead follows its owner through a
+   * rename and two logins sharing a name no longer share each other's follow-ups. The name is kept
+   * only for a lead whose owner matched nobody (`owner_employee_id IS NULL`), which is the one case
+   * where the text is all there is; a login with no employee behind it has only the name to offer.
+   */
+  const mine = everyone
+    ? "1=1"
+    : employeeId
+      ? "(`owner_employee_id` = ? OR (`owner_employee_id` IS NULL AND TRIM(COALESCE(`crm`, '')) = ?))"
+      : "TRIM(COALESCE(`crm`, '')) = ?";
+  const mineParams = everyone ? [] : employeeId ? [employeeId, userName] : [userName];
   const rows = await prisma.$queryRawUnsafe(
     /*
      * `DATE_FORMAT` rather than the bare column, and it is the whole of a bug worth remembering.
@@ -119,13 +132,14 @@ async function followUps({ userName, everyone = false }) {
      * (`day < today`), and a string is the only shape that comparison is right for.
      */
     "SELECT `enquiry_id` AS `enquiryId`, `name`, DATE_FORMAT(`follow_up_day`, '%Y-%m-%d') AS `day`, `vertical`,"
-    + "       TRIM(COALESCE(`crm`, '')) AS `crm`"
+    // The owner's current name through the reference, the text only where nothing is linked.
+    + "       COALESCE((SELECT `e`.`employee_name` FROM `employee` AS `e` WHERE `e`.`id` = `sales_crm_lead`.`owner_employee_id`), TRIM(COALESCE(`crm`, ''))) AS `crm`"
     + " FROM `sales_crm_lead`"
     + ` WHERE \`deleted_at\` IS NULL AND ${mine}`
     + "   AND `follow_up_day` IS NOT NULL AND `follow_up_day` <= ?"
     + "   AND LOWER(TRIM(COALESCE(`status`, ''))) NOT IN ('converted', 'rejected', 'invalid')"
     + " ORDER BY `follow_up_day` ASC LIMIT 50",
-    ...(everyone ? [] : [userName]),
+    ...mineParams,
     today,
   );
   return rows.map((row) => {

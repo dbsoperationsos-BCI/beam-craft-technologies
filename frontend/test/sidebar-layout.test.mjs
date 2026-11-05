@@ -32,7 +32,7 @@ test("with nothing saved, the sidebar is the registry's own order", () => {
 
 test("a saved order is the order, for the modules and inside them", () => {
   const stored = {
-    moduleOrder: ["accounts", "hrm", "subscribe", "client-management", "sales-crm", "resource-management"],
+    moduleOrder: ["accounts", "hrm", "subscribe", "sales-crm", "client-management", "resource-management"],
     submoduleOrder: {
       ...DEFAULT_SIDEBAR_LAYOUT.submoduleOrder,
       "sales-crm": ["quotations", "contacts", "leads-followups", "reports-analytics", "bookings-converted"],
@@ -55,7 +55,7 @@ test("a layout that mentions only some of the modules is completed, and written 
 
   assert.equal(changed, true);
   assert.equal(layout.moduleOrder[0], "accounts");
-  // Every module's own order is kept, a module off the menu included (its list is just empty).
+  // Every module's own order is kept, one off the menu included (its list is just empty).
   assert.deepEqual(Object.keys(layout.submoduleOrder), Object.keys(DEFAULT_SIDEBAR_LAYOUT.submoduleOrder));
   assert.equal(layout.submoduleOrder["sales-crm"][0], "quotations");
   // Completing it is a one-off: merging the completed layout again changes nothing.
@@ -70,10 +70,10 @@ test("two logins arrange independently: one layout says nothing about another", 
 });
 
 test("a screen cannot be moved into another module, however the layout was written", () => {
-  // The exact case the rule exists for: Quotations, filed under Client Management.
+  // The exact case the rule exists for: Quotations, filed under Project Management.
   const stored = {
     moduleOrder: DEFAULT_SIDEBAR_LAYOUT.moduleOrder,
-    submoduleOrder: { "client-management": ["quotations", "employee-repository"] },
+    submoduleOrder: { "client-management": ["quotations", "client-details"] },
   };
   const { groups } = resolveSidebarLayout(stored, seeEverything);
   assert.equal(itemIds(groups, "client-management").includes("quotations"), false);
@@ -86,24 +86,26 @@ test("a screen added to the application appears in a saved layout, at its defaul
   const stored = {
     moduleOrder: DEFAULT_SIDEBAR_LAYOUT.moduleOrder,
     submoduleOrder: {
-      // Includes two screens since taken off the menu (`hidden`), which is the realistic case for
+      // Includes a screen since taken off the menu (`hidden`), which is the realistic case for
       // a layout saved a while ago - a stored id for a screen nobody can see any more is dropped.
-      hrm: ["employee-attendance", "interview"],
+      hrm: ["employee-referral", "employee-repository"],
       "sales-crm": ["quotations", "leads-followups", "contacts"],
     },
   };
   const { groups, layout, changed } = resolveSidebarLayout(stored, seeEverything);
 
   // The arrangement they made is untouched, and the new screens follow it, in registry order.
-  assert.deepEqual(itemIds(groups, "hrm"), ["interview", "tasks"]);
+  assert.deepEqual(itemIds(groups, "hrm"), ["employee-repository", "employee-attendance", "tasks", "interview", "payroll"]);
   assert.deepEqual(itemIds(groups, "sales-crm"), ["quotations", "leads-followups", "contacts", "reports-analytics", "bookings-converted"]);
+  // Beam Craft's Client Management shows Client Details only; DBS's customer screens are hidden there.
+  assert.deepEqual(itemIds(groups, "client-management"), ["client-details"]);
   // Worth writing back, so the stored record keeps up with the application.
   assert.equal(changed, true);
-  assert.equal(layout.submoduleOrder.hrm.at(-1), "tasks");
+  assert.equal(layout.submoduleOrder.hrm.at(-1), "payroll");
 });
 
 test("a screen the role cannot open is neither added nor shown, and arrives when the permission does", () => {
-  const stored = { moduleOrder: ["hrm"], submoduleOrder: { hrm: ["interview"] } };
+  const stored = { moduleOrder: ["hrm"], submoduleOrder: { hrm: ["employee-repository"] } };
   const withoutTasks = (item) => item.id !== "tasks";
 
   const before = resolveSidebarLayout(stored, withoutTasks);
@@ -112,7 +114,7 @@ test("a screen the role cannot open is neither added nor shown, and arrives when
 
   // The permission is granted; nothing was reset and nothing had to be pressed.
   const after = resolveSidebarLayout(before.layout, seeEverything);
-  assert.deepEqual(itemIds(after.groups, "hrm"), ["interview", "tasks"]);
+  assert.deepEqual(itemIds(after.groups, "hrm"), ["employee-repository", "employee-attendance", "interview", "payroll", "tasks"]);
 });
 
 test("a permission taken away hides the screen but keeps where it was put", () => {
@@ -133,6 +135,7 @@ test("a permission taken away hides the screen but keeps where it was put", () =
 test("a module with nothing the role may open is not drawn at all", () => {
   const salesOnly = (item) => item.href.startsWith("/sales");
   const { groups } = resolveSidebarLayout(null, salesOnly);
+  // On Beam Craft the /sales screens under Client Management are hidden, so only Sales & CRM is drawn.
   assert.deepEqual(ids(groups), ["sales-crm"]);
 });
 
@@ -204,39 +207,34 @@ test("every id in the registry is unique, and every screen belongs to exactly on
 
 test("a screen marked hidden is off the menu for everybody, permission or not", () => {
   /*
-   * `hidden` is not a permission. Employee Attendance, the Attendance Register and Employee
-   * Referral are still in the registry - the Roles screen reads its friendly labels from there,
-   * Field Settings its screen picker, and the topbar each page's title - but the studio does not
-   * want them in the menu, and that applies to a Super Admin as much as to anybody.
+   * `hidden` is not a permission. Employee Referral is still in the registry - the Roles screen
+   * reads its friendly label from there, Field Settings its screen picker, and the topbar the
+   * page's title - but the studio reaches it from the Employee Repository's heading instead, and
+   * that applies to a Super Admin as much as to anybody.
    */
   const { groups } = resolveSidebarLayout(null, seeEverything);
   const hrm = itemIds(groups, "hrm");
-  assert.equal(hrm.includes("employee-attendance"), false);
-  assert.equal(hrm.includes("attendance-register"), false);
-  // Employee Referral joined them: it is reached from the Employee Repository's heading instead.
   assert.equal(hrm.includes("employee-referral"), false);
-  assert.deepEqual(hrm, ["tasks", "interview"]);
-  // Client Details has its own group; Project Management and Visual Curation are off the menu.
-  assert.deepEqual(itemIds(groups, "client-management"), ["employee-repository"]);
-  assert.equal(ids(groups).includes("project-management"), false);
-  assert.equal(ids(groups).includes("visual-curation"), false);
+  assert.deepEqual(hrm, ["employee-repository", "employee-attendance", "tasks", "interview", "payroll"]);
 });
 
 test("a hidden screen cannot be reordered either, since there is nothing to arrange", () => {
   // Sidebar Layout is drawn from the same resolver, so it offers exactly what the menu draws.
   const { layout } = resolveSidebarLayout(null, seeEverything);
-  assert.equal(layout.submoduleOrder.hrm.includes("employee-attendance"), false);
-  assert.equal(layout.submoduleOrder.hrm.includes("attendance-register"), false);
+  assert.equal(layout.submoduleOrder.hrm.includes("employee-referral"), false);
 });
 
 test("hiding a screen does not take its name off the Roles screen", () => {
   /*
-   * The reason the flag exists rather than the two rows simply being deleted. `FEATURE_LABELS` in
+   * The reason the flag exists rather than the row simply being deleted. `FEATURE_LABELS` in
    * modulePermissions is built by walking this registry, so a deleted entry would leave the
    * permission showing its raw feature name to whoever is granting it. `HRM / Employee Referral`
    * is the live case: off the menu, still granted by name on the Roles screen.
    */
   const hrm = SIDEBAR_MODULES.find((group) => group.id === "hrm");
   const labels = hrm.items.filter((item) => item.hidden).map((item) => item.label);
-  assert.deepEqual(labels, ["Employee Attendance", "Attendance Register", "Employee Referral"]);
+  // Request, the Attendance Register and Events too: they are Employee Attendance's sections now,
+  // and still granted by name. Payroll is on the menu again; Payslip is a tab of My Profile, off the
+  // menu and still granted by name as My Payslip.
+  assert.deepEqual(labels, ["Attendance Register", "Leave or Comp-Off Request", "Events", "Employee Referral", "Payslip"]);
 });

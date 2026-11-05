@@ -124,7 +124,7 @@ export default function DuplicateEnquiryDialog({
       {!blocked && onContinue && (
         <Button type="button" onClick={onContinue}>
           {intent === "edit" ? "Save anyway" : "Add anyway"}
-        </Button>
+        </Button> 
       )}
       <Button type="button" variant="primary" onClick={() => onOpenEnquiry?.(first.enquiryId)}>
         Open {first.enquiryId}
@@ -137,7 +137,8 @@ export default function DuplicateEnquiryDialog({
           {/*
             * One row per enquiry, and every field on it is one the reader needs to tell "this is
             * the same client" from "this is somebody else on a shared line": who it is filed
-            * under, which vertical works it, where it has got to, and when it came in.
+            * under, which vertical works it, where it has got to, who it is assigned to, and when it
+            * came in.
             */}
           <button
             type="button"
@@ -151,6 +152,10 @@ export default function DuplicateEnquiryDialog({
             <span className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500">
               {entry.vertical && <span>{entry.vertical}</span>}
               {entry.status && <span>{entry.status}</span>}
+              {/* Who to talk to before touching it - and "Not assigned" says it is free to pick up. */}
+              <span className="font-medium text-slate-700">
+                {entry.assignedTo ? `Assigned to ${entry.assignedTo}` : "Not assigned"}
+              </span>
               {entry.enquiryDate && <span>Enquired {entry.enquiryDate}</span>}
               {entry.nextFollowUpDate && <span>Follow-up {entry.nextFollowUpDate}</span>}
             </span>

@@ -5,6 +5,7 @@ const prisma = require("../../../config/db");
 const { forgetEmployeeOptionLists } = require("../../../services/employeeOptionLists");
 const { forgetPaymentOptionLists } = require("../../../services/paymentOptionLists");
 const { forgetOptionLists } = require("../../../services/optionLists");
+const employeeReferences = require("../../../services/employeeReferences");
 
 /**
  * A list has been written to, so nothing cached from it is current.
@@ -18,6 +19,8 @@ function forgetCachedLists(key) {
   forgetEmployeeOptionLists(key);
   forgetPaymentOptionLists(key);
   forgetOptionLists(key);
+  // And the matchers that turn an employee's text answers into references to these very rows.
+  employeeReferences.invalidate();
 }
 
 /**
@@ -44,8 +47,10 @@ async function blockedForBeingTheLast(prismaClient, definition, id) {
 // These lists are held on the records as plain text, so an entry cannot simply be deleted out
 // from under them, and renaming one has to take them with it. See `usage.js`.
 const { countUsage, refusalMessage, renameUsage } = require("./usage");
+const { rememberAlias } = require("../../../services/nameCopies");
 const { definitions, codeFromName } = require("./definitions");
 const iamService = require("../../../services/iam.service");
+const { everyChunk } = require("../../../services/wordChunks");
 
 const querySchema = require("zod").z.object({
   search: require("zod").z.string().trim().max(120).optional(),
@@ -146,7 +151,8 @@ function createController(key) {
         ...(reachable === null ? {} : { id: { in: reachable } }),
         ...(vertical && definition.scopedBy === "vertical" ? { vertical } : {}),
         ...(active !== undefined ? { isActive: active === "true" } : {}),
-        ...(search ? { OR: [{ name: { contains: search } }, { code: { contains: search } }] } : {}),
+        // Word Chunk Search: every word typed, any order.
+        ...(search ? { AND: everyChunk(search, (chunk) => ({ OR: [{ name: { contains: chunk } }, { code: { contains: chunk } }] })) } : {}),
       };
       try {
         const [data, total] = await prisma.$transaction([
@@ -213,7 +219,9 @@ function createController(key) {
         const renaming = existing && parsed.data.name !== undefined && String(parsed.data.name).trim() !== String(existing.name).trim();
         const [updated, renamed] = await prisma.$transaction(async (tx) => [
           await tx[definition.model].update({ where: { id }, data: { ...parsed.data, ...actorFields(definition, req, false) }, ...options }),
-          renaming ? await renameUsage(tx, definition, existing.name, parsed.data.name) : 0,
+          renaming ? await renameUsage(tx, definition, existing.name, parsed.data.name, { id }) : 0,
+          // A branch renamed from this screen remembers its old name too, the way Settings -> Branches does.
+          renaming && definition.model === "branch" ? await rememberAlias(tx, "branch", id, existing.name) : null,
         ]);
         forgetCachedLists(key);
         /*

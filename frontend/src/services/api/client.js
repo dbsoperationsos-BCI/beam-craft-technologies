@@ -1,6 +1,33 @@
 import { AUTH_EXPIRED_EVENT, clearAccessToken, getAccessToken } from "@/lib/auth";
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
+const CONFIGURED_API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
+const LOOPBACK = new Set(["localhost", "127.0.0.1"]);
+
+/*
+ * The API address, as this browser can reach it.
+ *
+ * Local development points NEXT_PUBLIC_API_URL at localhost. A phone on the same Wi-Fi opens the app
+ * at the Mac's network address, and to the phone "localhost" is the phone - so a page served from
+ * any other host asks the API on that same host instead. That keeps phone testing working however
+ * often the Wi-Fi hands the Mac a new address, with nothing to edit. A real deployment names a real
+ * API host, which is never a loopback, and is used exactly as configured; so is the server side.
+ */
+function resolveApiUrl() {
+  if (typeof window === "undefined") return CONFIGURED_API_URL;
+  try {
+    const url = new URL(CONFIGURED_API_URL);
+    const page = window.location.hostname;
+    if (LOOPBACK.has(url.hostname) && page && !LOOPBACK.has(page)) {
+      url.hostname = page;
+      return url.origin;
+    }
+  } catch {
+    // Not a URL we can read - use it as given, and let the request say what went wrong.
+  }
+  return CONFIGURED_API_URL;
+}
+
+export const API_URL = resolveApiUrl();
 
 export async function apiRequest(path, options = {}) {
   const headers = new Headers(options.headers);

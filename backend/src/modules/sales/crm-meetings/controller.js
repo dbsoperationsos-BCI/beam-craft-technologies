@@ -1,5 +1,6 @@
 const { z } = require("zod");
-const { listAllMeetings, searchLeads } = require("./service");
+const { listAllMeetings } = require("./service");
+const { cancelMeeting, createMeeting, meetingSchema } = require("../crm-leads/meetingService");
 
 // Both bounds are optional: no window at all means every meeting ever booked, which is what
 // the Meetings page asks for when it first opens.
@@ -36,19 +37,33 @@ async function list(req, res) {
   }
 }
 
-const leadSearchSchema = z.object({
-  q: z.string().trim().max(120).optional().default(""),
-  limit: z.coerce.number().int().min(1).max(50).optional().default(20),
-});
-
-async function leads(req, res) {
-  const parsed = leadSearchSchema.safeParse(req.query);
-  if (!parsed.success) return res.status(400).json({ message: "Invalid lead search." });
+/*
+ * A meeting with no lead: the Calendar's Add Meet. The same fields as a lead's meeting, and the same
+ * booking - a Google Meet on the organiser's calendar - with no lead named; it is seen by its
+ * organiser and its guests (`service.listAllMeetings`). The fields are checked by the lead meeting's
+ * own `meetingSchema`, so the two cannot drift apart.
+ */
+async function schedule(req, res) {
+  const parsed = meetingSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ message: "Invalid meeting details.", errors: parsed.error.flatten() });
   try {
-    return res.json({ data: await searchLeads({ query: parsed.data.q, limit: parsed.data.limit }) });
+    const meeting = await createMeeting({ ...parsed.data, enquiryId: null, userId: req.user?.id });
+    return res.status(201).json({ message: "Meeting scheduled.", data: meeting });
   } catch (error) {
-    return sendError(res, error, "Unable to search leads.");
+    // The code keys the dialog's Connect and Reconnect buttons, as on a lead's meeting.
+    if (error.code) return res.status(error.status || 400).json({ message: error.message, code: error.code });
+    return sendError(res, error, "Unable to schedule this meeting.");
   }
 }
 
-module.exports = { leads, list };
+// Cancels a meeting with no lead - only one this person booked; anybody else's answers 404.
+async function cancel(req, res) {
+  try {
+    const meeting = await cancelMeeting({ id: String(req.params.id || "").trim(), enquiryId: null, userId: req.user?.id });
+    return res.json({ message: "Meeting cancelled.", data: meeting });
+  } catch (error) {
+    return sendError(res, error, "Unable to cancel this meeting.");
+  }
+}
+
+module.exports = { cancel, list, schedule };

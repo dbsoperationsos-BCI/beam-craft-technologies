@@ -145,7 +145,20 @@ test("a file posted in batches reports as one import", () => {
     { received: 200, imported: 198, skipped: 2, errors: [{ row: 5, message: "a" }] },
     { received: 100, imported: 100, skipped: 0, errors: [] },
   ].reduce(mergeImportResults, undefined);
-  assert.deepEqual(merged, { received: 300, imported: 298, skipped: 2, errors: [{ row: 5, message: "a" }] });
+  assert.deepEqual(merged, { received: 300, imported: 298, skipped: 2, errors: [{ row: 5, message: "a" }], replaced: [], restored: [] });
+});
+
+test("a project or shoot restored across two batches is listed once", () => {
+  const project = { kind: "Project", id: "DBS-EVT-1" };
+  const merged = mergeImportResults({ restored: [project] }, { restored: [project, { kind: "Shoot", id: "DBS-EVT-1" }] });
+  assert.deepEqual(merged.restored.map((item) => `${item.kind}:${item.id}`), ["Project:DBS-EVT-1", "Shoot:DBS-EVT-1"]);
+});
+
+test("a project replaced across two batches is listed once", () => {
+  // A booking's shoots can be split between batches, and each batch reports the project it replaced.
+  const project = { eventId: "DBS-EVT-DD-ERD-000001", clientName: "WED ERD A & B" };
+  const merged = mergeImportResults({ replaced: [project] }, { replaced: [project, { eventId: "DBS-EVT-DD-ERD-000002" }] });
+  assert.deepEqual(merged.replaced.map((item) => item.eventId), ["DBS-EVT-DD-ERD-000001", "DBS-EVT-DD-ERD-000002"]);
 });
 
 test("the error list is capped, so a wholly bad file does not build one as long as itself", () => {

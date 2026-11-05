@@ -23,8 +23,11 @@ import useEscapeKey from "@/components/shared/useEscapeKey";
  * without a single page having to ask - and it lines up with Add Lead, the ⋮ menu and every other
  * header action, because it is one of them.
  *
- * It opens the row rather than closing it. The primary button belongs at the end, where the eye
- * looks for it; a tool that is present on every screen belongs before it, quietly.
+ * It sits at the end of the row, immediately before the ⋮ (`ModulePageHeader`'s `menu` slot) and
+ * after the page's own buttons. It used to open the row, on the argument that the primary button
+ * belongs at the end where the eye looks for it - which read well on a page whose actions are
+ * buttons and badly on one ending in a ⋮: two quiet icons with the primary button stranded between
+ * them. The two quiet controls now sit together, and Add Lead still has the last bordered place.
  *
  * The panel is unchanged: the same `AIAssistant`, the same module scoping, the same dismissal. Only
  * where it opens from has moved.

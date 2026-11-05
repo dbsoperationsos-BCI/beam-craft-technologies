@@ -28,6 +28,7 @@ import AppLogo from "@/components/shared/AppLogo";
 import useStudioBranding from "@/components/shared/useStudioBranding";
 import { brandNameInProse } from "@/lib/studioBranding.mjs";
 import Button from "@/components/shared/Button";
+import HelpTip from "@/components/shared/HelpTip";
 import RepeatableDetailsField from "@/components/shared/RepeatableDetailsField";
 import RepeatableTextList from "@/components/shared/RepeatableTextList";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
@@ -90,10 +91,18 @@ const LIST_PROPS = {
   experiences: { hint: "Add each company you have worked at, with the role and how long. Attach the experience or relieving letter where you have one." },
 };
 
+/* The ⓘ beside each custom control's label, where the section list does not give one of its own.
+   The two lists need none here: their own hint is already their ⓘ. */
+const CUSTOM_HELP = {
+  portfolioLinks: "Links that show your work, such as a portfolio, Instagram or Drive folder.",
+};
+const helpFor = (field, name) => field?.helperText || CUSTOM_HELP[name] || "";
+
 const renderers = {
   ...Object.fromEntries(LISTS.map((name) => [name, ({ values, onChange, field, error }) => <RepeatableDetailsField
     {...employeeDetailLists[name].props}
     {...(LIST_PROPS[name] || {})}
+    helperText={helpFor(field, name)}
     required={field?.required}
     value={values[name] || []}
     errors={error && typeof error === "object" ? error : {}}
@@ -110,12 +119,11 @@ const renderers = {
    */
   /*
    * The candidate's links: one box to begin with, a plus to add the next, up to three. The cap is
-   * said in the hint rather than drawn as a disabled plus, because a control that exists only to
+   * said in the label's ⓘ rather than drawn as a disabled plus, because a control that exists only to
    * refuse is not one this application puts on screen.
    */
   portfolioLinks: ({ values, onChange, field, error }) => <RepeatableTextList
-    label={field?.label || "Portfolio / Links"}
-    hint={`Your portfolio, Instagram, Drive folder — whatever shows your work. Up to ${MAX_PORTFOLIO_LINKS}.`}
+    label={<>{field?.label || "Portfolio / Links"}<HelpTip text={`${helpFor(field, "portfolioLinks")} Up to ${MAX_PORTFOLIO_LINKS}.`} /></>}
     max={MAX_PORTFOLIO_LINKS}
     rowLabel={(index) => `Link ${index + 1}`}
     addAriaLabel="Add another link"
@@ -136,6 +144,7 @@ const renderers = {
    */
   totalExperience: ({ values, field }) => <TextField
     label={field?.label || "Total Experience"}
+    helperText={field?.helperText || "Added up from your experience rows, or Fresher; it cannot be typed."}
     value={values.experienceLevel === EXPERIENCED ? (totalExperienceFrom(values.experiences) || "") : (values.experienceLevel || "")}
     onChange={() => {}}
     readOnly
@@ -233,6 +242,11 @@ export default function PublicApplicationForm({ token }) {
 
   async function verify(event) {
     event.preventDefault();
+    // Checked here rather than sent blank for the server to refuse.
+    if (!identifier.trim()) {
+      setFieldErrors({ identifier: "Enter your email or phone number." });
+      return;
+    }
     setVerifying(true);
     try {
       const result = await verifyApplicationInvite(token, identifier);
@@ -460,7 +474,7 @@ export default function PublicApplicationForm({ token }) {
       {!verified ? <form onSubmit={verify} className="mx-auto max-w-lg py-7">
         <h2 className="text-lg font-semibold text-slate-900">Verify your link</h2>
         <p className="mt-1 text-sm text-slate-600">Enter the email address or phone number this link was sent to.</p>
-        <TextField className="mt-5" required label="Email or Phone Number" value={identifier} onChange={(event) => setIdentifier(event.target.value)} />
+        <TextField className="mt-5" required label="Email or Phone Number" helperText="Must match the email or phone this link was sent to." value={identifier} onChange={(event) => { setIdentifier(event.target.value); setFieldErrors({}); }} error={fieldErrors.identifier} />
         <Button className="mt-5 w-full" variant="primary" size="lg" disabled={verifying}>{verifying ? "Verifying…" : "Continue"}</Button>
       </form> : <form onSubmit={submit} className="pt-7">
         {/* `data-schema-section` is the anchor `scrollToSection` finds a heading by - the same

@@ -119,8 +119,9 @@ test("both usage reports read the measured table, not the gaps between actions",
    * application report reads that alone, and the WhatsApp report reads its own to answer the
    * narrower question of how much of the time was spent in the chat.
    */
-  assert.match(reports, /measuredUsage\(\{ from: clean\.from, to: clean\.to, context: "whatsapp" \}\)/);
-  assert.match(reports, /measuredUsage\(\{ from: clean\.from, to: clean\.to, context: "app" \}\)/);
+  // Narrowed to the reader's people like the application report, so neither read is about anyone else.
+  assert.match(reports, /measuredUsage\(\{ from: clean\.from, to: clean\.to, context: "whatsapp", scope \}\)/);
+  assert.match(reports, /measuredUsage\(\{ from: clean\.from, to: clean\.to, context: "app", scope, employees \}\)/);
   assert.doesNotMatch(reports, /measuredUsage\(\{ from: clean\.from, to: clean\.to \}\)/,
     "a report is summing every context again, which counts time in the chat panel twice");
 });

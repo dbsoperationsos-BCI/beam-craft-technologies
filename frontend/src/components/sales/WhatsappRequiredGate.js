@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Dialog from "@/components/ui/Dialog";
 import Button from "@/components/shared/Button";
-import { connectWhatsapp, getWhatsappSession } from "@/services/sales/whatsapp-chat.service";
+import { connectWhatsapp, getMyWhatsappSession } from "@/services/sales/whatsapp-chat.service";
 import { whatsappLinkNeeded } from "@/lib/whatsappGate.mjs";
 
 /*
@@ -41,6 +41,15 @@ import { whatsappLinkNeeded } from "@/lib/whatsappGate.mjs";
  * with fifteen left to scan. Reading is cheap - it is a status call, not a registration.
  */
 const QR_REFRESH_MS = 5 * 1000;
+
+/*
+ * How often the session is read while the gate is **not** holding anybody - an administrator, a
+ * linked user, somebody the switch is off for. Only to notice the switch being turned on or a
+ * linked phone dropping off. This gate is mounted on every page of every tab, and reading at
+ * `QR_REFRESH_MS` for everybody was twelve requests a minute per tab that changed nothing - on the
+ * live server, a steady load of permission and settings queries from people never blocked.
+ */
+const IDLE_REFRESH_MS = 60 * 1000;
 
 /*
  * The least time between two pairing requests from this screen.
@@ -105,12 +114,21 @@ export default function WhatsappRequiredGate() {
   /*
    * Read the session, then keep reading it. This is how a rotated code arrives and how the scan
    * succeeding is noticed - which is what takes the dialog away without anything being pressed.
+   *
+   * `/my-session`, not `/session`: the latter sits behind `SALES / CRM Leads`, so anybody Allow
+   * WhatsApp was ticked for outside that permission got a 403 on every poll - which this gate reads
+   * exactly like a hiccup and holds nobody for, silently exempting them from a switch an
+   * administrator had deliberately turned on. `/my-session` answers the identical question -
+   * same `status` handler, same `isAdmin`/`linkRequired` shape - with only `protect` in front of
+   * it, which is what "everybody except an administrator" above actually requires.
    */
+  // Fast only while the gate is up and a code may be rotating; otherwise at the idle pace.
+  const holding = Boolean(session && session.linkRequired === true && whatsappLinkNeeded(session));
   useEffect(() => {
     let cancelled = false;
     const read = async () => {
       try {
-        const response = await getWhatsappSession();
+        const response = await getMyWhatsappSession();
         // Merged for the same reason `start` merges: a partial reply must never be able to unlock
         // the application by omission.
         if (!cancelled && response?.data) setSession((current) => ({ ...(current || {}), ...response.data }));
@@ -119,9 +137,9 @@ export default function WhatsappRequiredGate() {
       }
     };
     void read();
-    const timer = window.setInterval(read, QR_REFRESH_MS);
+    const timer = window.setInterval(read, holding ? QR_REFRESH_MS : IDLE_REFRESH_MS);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, []);
+  }, [holding]);
 
   // One tick a second, and only while the button is actually waiting.
   useEffect(() => {

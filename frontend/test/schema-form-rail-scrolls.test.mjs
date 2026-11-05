@@ -56,7 +56,8 @@ test("the rail's nav does not try to stick", () => {
   // It never could: before this the aside did not scroll, so there was nothing to stick against,
   // and now that it does the nav fills it exactly and has nowhere to move. A rule that cannot fire
   // reads as a decision somebody made.
-  const nav = SIDEBAR.match(/<nav className="([^"]+)" aria-label=\{ariaLabel\}>\s*\{sections\.map\(\(section\) => entry\(section, false\)\)\}/);
+  // A rail with a search hides its nav under a search rather than unmounting it, so the class is a template.
+  const nav = SIDEBAR.match(/<nav className=\{`([^`]+)`\} aria-label=\{ariaLabel\}>\s*\{sections\.map\(\(section\) => entry\(section, false\)\)\}/);
   assert.ok(nav, "the wide-screen nav is no longer drawn the way this test reads it");
   assert.doesNotMatch(nav[1], /\bsticky\b/);
 });
@@ -64,8 +65,21 @@ test("the rail's nav does not try to stick", () => {
 test("the narrow strip still scrolls sideways instead", () => {
   // Below `lg` the rail is one horizontal strip of every screen, groups flattened into it. That is
   // a different answer to the same problem and this change must not have disturbed it.
-  const strip = SIDEBAR.match(/<nav className="([^"]+)" aria-label=\{ariaLabel\}>\s*\{sections\.map\(\(section\) => entry\(section, true\)\)\}/);
+  // Under a search the strip lists the results in place of the screens; otherwise it is the screens as before.
+  const strip = SIDEBAR.match(/<nav className="([^"]+)" aria-label=\{ariaLabel\}>\s*\{searching \? <SearchResults search=\{search\} mobile \/> : sections\.map\(\(section\) => entry\(section, true\)\)\}/);
   assert.ok(strip, "the narrow-screen strip is no longer drawn the way this test reads it");
   assert.match(strip[1], /\boverflow-x-auto\b/);
   assert.match(strip[1], /\blg:hidden\b/);
+});
+
+test("a panel's submit stops at its own form, so a panel stacked on another never submits the one beneath", () => {
+  const panel = fs.readFileSync(new URL("../src/components/schema-form/SchemaFormPanel.js", import.meta.url), "utf8");
+  const handler = panel.slice(panel.indexOf("function handleSubmit(event) {"), panel.indexOf("onSubmit(event);", panel.indexOf("function handleSubmit(event) {")));
+  assert.match(handler, /event\.stopPropagation\(\);\n\s+if \(loading\)/);
+});
+
+test("the status-history remark is drawn on <body>, so it shows above a stage editor stacked on the project panel", () => {
+  const dialog = fs.readFileSync(new URL("../src/components/project-management/StageUpdateRemarkDialog.js", import.meta.url), "utf8");
+  assert.match(dialog, /return createPortal\(<ConfirmDialog/);
+  assert.match(dialog, /<\/ConfirmDialog>, document\.body\);/);
 });

@@ -3,6 +3,7 @@ const path = require("path");
 const multer = require("multer");
 const prisma = require("../../../config/db");
 const { readableProject } = require("../../../services/projectScope");
+const { compressImage } = require("../../../services/imageCompression");
 
 const uploadRoot = path.join(__dirname, "..", "..", "..", "..", "uploads", "project-attachments");
 
@@ -59,19 +60,47 @@ function uploadSingle(req, res, next) {
   return upload.single("file")(req, res, next);
 }
 
+/**
+ * Compresses an uploaded image in place, the same way every other image in the app is compressed,
+ * and answers with the file multer actually left on disk.
+ *
+ * Multer has already written the original to `uploadRoot`; this reads it back, re-encodes it to
+ * WebP, and writes the result under a `.webp` name - `express.static` serves `/uploads` straight
+ * off disk and reads its `Content-Type` from the extension, so the name has to agree with the
+ * bytes it now holds, unlike an object-storage key whose reader trusts the stored metadata
+ * instead. The original is removed once the compressed file is safely written. A photo
+ * `compressImage` cannot shrink (corrupt, a format it does not decode) is left exactly as multer
+ * wrote it - compression is a saving here too, never a reason to refuse the upload.
+ */
+async function compressStoredImage(file) {
+  if (!file.mimetype?.startsWith("image/")) return file;
+  try {
+    const compressed = await compressImage(fs.readFileSync(file.path));
+    const storedName = `${path.basename(file.filename, path.extname(file.filename))}.${compressed.extension}`;
+    const storedPath = path.join(path.dirname(file.path), storedName);
+    fs.writeFileSync(storedPath, compressed.buffer);
+    if (storedPath !== file.path) fs.unlinkSync(file.path);
+    return { ...file, filename: storedName, path: storedPath, mimetype: compressed.mimeType, size: compressed.buffer.length };
+  } catch (error) {
+    console.warn("[project-attachments] Image not compressed, storing as received:", error.message);
+    return file;
+  }
+}
+
 async function createProjectAttachment(req, res) {
   try {
     const project = await readableProject({ userId: req.user.id, projectId: req.params.id, permissions: req.permission });
     if (!project) return res.status(404).json({ message: "Project not found." });
     if (!req.file) return res.status(400).json({ message: "Please choose a file to upload." });
+    const file = await compressStoredImage(req.file);
     const attachment = await prisma.projectAttachment.create({
       data: {
         projectId: project.id,
-        originalName: req.file.originalname,
-        storedName: req.file.filename,
-        mimeType: req.file.mimetype,
-        size: req.file.size,
-        filePath: req.file.path,
+        originalName: file.originalname,
+        storedName: file.filename,
+        mimeType: file.mimetype,
+        size: file.size,
+        filePath: file.path,
         uploadedByUserId: req.user?.id || null,
       },
     });
@@ -109,4 +138,5 @@ module.exports = {
   createProjectAttachment,
   deleteProjectAttachment,
   listProjectAttachments,
+  compressStoredImage,
 };

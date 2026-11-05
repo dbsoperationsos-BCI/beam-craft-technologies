@@ -20,8 +20,14 @@ import { apiRequest } from "@/services/api/client";
  * which is what lets the bell tell "nothing is waiting" from "you cannot see any of this" - two
  * very different empty states.
  */
+// The request already on its way, shared: the bell's stored notices and its derived ones
+// (`useStoredNotifications`, `useSourceNotices`) both read this list on every page and every poll,
+// and asked the server for it separately - three calls per page load where one answers both.
+let pending = null;
+
 export function getNotifications() {
-  return apiRequest("/api/notifications");
+  if (!pending) pending = apiRequest("/api/notifications").finally(() => { pending = null; });
+  return pending;
 }
 
 /**

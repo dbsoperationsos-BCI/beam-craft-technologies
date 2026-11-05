@@ -27,9 +27,12 @@ test("the brand's PDF Content tab asks the question first, and saves it with the
   const tab = SETTINGS.slice(SETTINGS.indexOf("function PdfContentTab"), SETTINGS.indexOf("export function QuotationGeneralSettingsPanel"));
   assert.ok(tab.indexOf('label="Allow Client Download"') > -1, "the field is on the PDF Content tab");
   // The pictures have a tab of their own now - PDF Image - so the question opens PDF Content.
-  assert.equal(tab.indexOf('sectionTitle("Pictures")'), -1, "the pictures are not on the PDF Content tab");
+  assert.equal(tab.indexOf('sectionTitle("Pictures",'), -1, "the pictures are not on the PDF Content tab");
+  // Each heading carries its explanation as the ⓘ: sectionTitle(text, tip).
+  assert.ok(tab.indexOf('sectionTitle("Client download", "Whether the client reading this brand\'s quotation link may save it as a PDF.') > -1, "the question's heading explains it in its ⓘ");
+  assert.ok(tab.indexOf('sectionTitle("Wording on the client\'s copy", ') > -1, "the wording has its heading");
   assert.ok(
-    tab.indexOf('sectionTitle("Client download")') < tab.indexOf('sectionTitle("Wording on the client\'s copy")'),
+    tab.indexOf('sectionTitle("Client download", ') < tab.indexOf('sectionTitle("Wording on the client\'s copy", '),
     "the question is asked above the wording, where the studio asked for it",
   );
   // Yes/No in that order, not the alphabet's, and No is where an unanswered brand opens.

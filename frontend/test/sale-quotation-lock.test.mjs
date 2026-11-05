@@ -74,3 +74,11 @@ test("moving to another enquiry gives up the quotation that was picked", () => {
   // written underneath it, and the amount stays locked to a figure taken from nowhere.
   assert.match(source, /nextEnquiryId === current\.enquiryId \? \{\} : \{ quotationId: "", quotationRowId: "" \}/);
 });
+
+test("choosing a quotation preselects the project's vertical from its brand, unless a reserved group name decides it", () => {
+  const select = source.slice(source.indexOf("function selectQuotation("), source.indexOf("const selectedQuotation ="));
+  assert.match(select, /const quotedGroupType = GROUP_TYPES\.includes\(quotation\?\.vertical\) \? quotation\.vertical : "";/);
+  assert.match(select, /\.\.\.\(quotedGroupType && !current\.whatsappGroupNameId \? \{ groupType: quotedGroupType, vertical: projectVerticalFor\(\{ groupType: quotedGroupType \}\) \} : \{\}\),/);
+  // Preselected, not locked: the Vertical field stays the person's to change.
+  assert.match(source, /label="Vertical" helperText="The brand this project falls under, used to sort and report it\." required/);
+});

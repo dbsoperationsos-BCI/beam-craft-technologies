@@ -5,6 +5,8 @@ import {
   DEFAULT_MEETING_SOURCE,
   MEETING_SOURCES,
   PROJECT_SOURCES,
+  attendanceClock,
+  attendanceWorked,
   formatDuration,
   meetingStatusLabel,
   permittedSources,
@@ -131,13 +133,12 @@ test("the calendar's sources hold the bookings they name", () => {
 
   assert.deepEqual(sourceScheduleEntries("meetings", entries, options).map((row) => row.id), ["meeting:1"]);
   /*
-   * Projects is both kinds, not the main events alone. A project puts its shoots on the grid as
-   * well, and they are the days the studio actually works - a source called Projects that hid them
-   * would be the emptier half of the register wearing the register's name.
+   * Projects is the projects' shoots - the days the studio actually works. A project's main event is
+   * not a calendar entry any more, so one that still arrived would not be drawn.
    */
   assert.deepEqual(
     sourceScheduleEntries("projects", entries, options).map((row) => row.id),
-    ["shoot:7", "project:2"],
+    ["shoot:7"],
   );
 });
 
@@ -159,23 +160,23 @@ test("the studio's holidays survive every source the switch offers", () => {
     const ids = sourceScheduleEntries(source, entries, options).map((row) => row.id);
     assert.ok(ids.includes("holiday:1"), `the "${source}" source drops the studio's holidays`);
   }
-  // And a viewer who may read nothing else is left with the holidays rather than an empty month.
+  // And a viewer who may read nothing else is left with the holidays rather than an empty month -
+  // the server sends such a viewer no shoots, and a shoot it did send is never dropped here.
   assert.deepEqual(
-    sourceScheduleEntries("all", entries, { projects: [], sources: [] }).map((row) => row.id),
+    sourceScheduleEntries("all", entries.filter((row) => row.kind !== "shoot"), { projects: [], sources: [] }).map((row) => row.id),
     ["holiday:1"],
   );
 });
 
 test("a calendar booking is at the stage its own project is at", () => {
-  // Matched back to the register by the event id both sides carry - a shoot's `subject`, a main
-  // event's `reference` - so the grid and the table cannot disagree about what "Pre Production"
-  // means for the same wedding.
+  // Matched back to the register by the event id both sides carry - a shoot's `subject` - so the
+  // grid and the table cannot disagree about what "Pre Production" means for the same wedding.
   const entries = [shootEntry("7", "DBS-SID-2"), mainEventEntry("2", "DBS-SID-2"), shootEntry("8", "DBS-SID-3")];
   const projects = [withPre("2"), withPost("3")];
 
   assert.deepEqual(
     sourceScheduleEntries("pre-production", entries, { projects, sources: ALL_SOURCES }).map((row) => row.id),
-    ["shoot:7", "project:2"],
+    ["shoot:7"],
   );
   assert.deepEqual(
     sourceScheduleEntries("post-production", entries, { projects, sources: ALL_SOURCES }).map((row) => row.id),
@@ -195,9 +196,11 @@ test("All draws the whole diary, minus what the viewer may not read", () => {
     sourceScheduleEntries("all", entries, { projects: [], sources: ALL_SOURCES }).map((row) => row.id),
     ["meeting:1", "shoot:7", "project:2"],
   );
+  // A shoot is the server's to send or not (it narrows them to the viewer's own), so All keeps any
+  // it sent; the project register's own rows still need a project source.
   assert.deepEqual(
     sourceScheduleEntries("all", entries, { projects: [], sources: ["meetings"] }).map((row) => row.id),
-    ["meeting:1"],
+    ["meeting:1", "shoot:7"],
   );
   assert.deepEqual(
     sourceScheduleEntries("all", entries, { projects: [], sources: ["pre-production"] }).map((row) => row.id),
@@ -217,24 +220,24 @@ test("a source is only offered to somebody its endpoint would answer", () => {
   const holds = (granted) => ({ module, feature }) => granted.includes(`${module}:${feature}`);
 
   /*
-   * Employee Attendance is on every one of these, and it is the exception that proves the rule:
-   * a person's own attendance is their own record and no permission stands between them and it.
-   * The server decides the *scope* - their own days, or the studio's for HRM - so offering the word
-   * to everybody is safe by construction. It is `always` in the registry rather than a permission
-   * nobody could name.
+   * My Attendance answers to `HRM / Employee Attendance`, the permission the person's own
+   * Attendance page and the server's calendar source both answer to - a role with attendance turned
+   * off does not get it back through the calendar.
    */
+  const ATT = "HRM:Employee Attendance";
   assert.deepEqual(
-    permittedSources(holds(["SALES:CRM Leads"])).map((entry) => entry.value),
+    permittedSources(holds(["SALES:CRM Leads", ATT])).map((entry) => entry.value),
     ["all", "meetings", "attendance"],
   );
+  assert.deepEqual(permittedSources(holds(["SALES:CRM Leads"])).map((entry) => entry.value), ["meetings"]);
 
   assert.deepEqual(
-    permittedSources(holds(["PROJECT:Post Production"])).map((entry) => entry.value),
+    permittedSources(holds(["PROJECT:Post Production", ATT])).map((entry) => entry.value),
     ["all", "post-production", "attendance"],
   );
 
   assert.deepEqual(
-    permittedSources(holds(["SALES:CRM Leads", "PROJECT:Pre Production"])).map((entry) => entry.value),
+    permittedSources(holds(["SALES:CRM Leads", "PROJECT:Pre Production", ATT])).map((entry) => entry.value),
     ["all", "pre-production", "meetings", "attendance"],
   );
 
@@ -244,11 +247,11 @@ test("a source is only offered to somebody its endpoint would answer", () => {
   assert.ok(permittedSources(holds(["PROJECT:Projects", "SALES:CRM Leads"])).some((entry) => entry.value === "projects"));
 
   /*
-   * Nothing granted is attendance alone - and no All above it, because one source is not a choice.
-   * Somebody who holds no module permission at all still has their own days, which is the whole
-   * point of the source being ungated.
+   * Attendance alone is attendance alone - and no All above it, because one source is not a choice.
+   * Nothing granted is nothing offered.
    */
-  assert.deepEqual(permittedSources(holds([])).map((entry) => entry.value), ["attendance"]);
+  assert.deepEqual(permittedSources(holds([ATT])).map((entry) => entry.value), ["attendance"]);
+  assert.deepEqual(permittedSources(holds([])).map((entry) => entry.value), []);
 });
 
 /* ──────────────────────────────────────────────────────── Interviews as a source ── */
@@ -338,12 +341,13 @@ test("the calendar's switch narrows to the interviews and to nothing else", () =
   // All asks for the kind by name, so an interview reaches only somebody who was offered them.
   assert.deepEqual(
     sourceScheduleEntries("all", entries, { sources: ["interviews"] }).map((e) => e.id),
-    ["interview:1"],
+    ["interview:1", "s1"],
+    "a shoot the server sent is kept - it narrows shoots to the viewer's own",
   );
   assert.deepEqual(
     sourceScheduleEntries("all", entries, { sources: ["meetings"] }).map((e) => e.id),
-    ["m1"],
-    "All is showing interviews to somebody who may not read the register",
+    ["m1", "s1"],
+    "All is showing interviews to somebody who may not read the register (a shoot the server sent is kept)",
   );
 });
 
@@ -354,7 +358,7 @@ test("Interviews is offered only to somebody the register would answer", () => {
    * router mounts - a screen may not be given a finer permission than the endpoint it reads.
    */
   assert.deepEqual(
-    permittedSources(holds(["HRM:Interview"])).map((entry) => entry.value),
+    permittedSources(holds(["HRM:Interview", "HRM:Employee Attendance"])).map((entry) => entry.value),
     ["all", "interviews", "attendance"],
   );
   assert.ok(!permittedSources(holds(["SALES:CRM Leads"])).some((entry) => entry.value === "interviews"));
@@ -390,9 +394,12 @@ test("a row says its own name, reference and owner whatever it is", () => {
   assert.equal(rowTitle(p), "Client 1");
   assert.equal(rowReference(p), "DBS-SID-1");
   assert.equal(rowOwner(p), "Anil");
-  // A project's vertical is shown as the register stores it: folded, "QQ" would come back as
-  // Dum Dum, which is `resolveBranch`'s documented fallback for a lead and a wrong answer here.
-  assert.equal(rowVertical(p), "QQ");
+  // A project's stored code is named the way a lead's vertical is, so the two read and filter alike -
+  // and Dum Dum's internal "WED" never reaches the screen. An unknown code is shown as it is rather
+  // than folded onto Dum Dum, which is the lead table's fallback and a wrong answer for a project.
+  assert.equal(rowVertical(p), "Qua Qua");
+  assert.equal(rowVertical({ ...p, project: { ...p.project, vertical: "WED" } }), "Dum Dum");
+  assert.equal(rowVertical({ ...p, project: { ...p.project, vertical: "XYZ" } }), "XYZ");
 });
 
 test("a day's meetings sort into the order they are sat through", () => {
@@ -425,7 +432,7 @@ test("the switch opens on All, and the register-backed sources are named once", 
   assert.equal(DEFAULT_MEETING_SOURCE, "all");
   // The order is the meaning: All, the register, the two stages as production runs, the meetings,
   // and attendance last - it is the only one that is not something the studio books.
-  assert.deepEqual(ALL_SOURCES, ["all", "projects", "pre-production", "post-production", "meetings", "interviews", "attendance"]);
+  assert.deepEqual(ALL_SOURCES, ["all", "projects", "pre-production", "post-production", "shoots", "meetings", "interviews", "attendance", "team-attendance"]);
   assert.deepEqual(PROJECT_SOURCES, ["projects", "pre-production", "post-production"]);
   // Each says something different when it is empty, so a blank table names why.
   const messages = ALL_SOURCES.map(sourceEmptyMessage);
@@ -459,26 +466,40 @@ test("Employee Attendance is its own entry in the switch, and its own table", ()
 
 test("an attendance row reads as who, when and what the day said", () => {
   const attendance = [{
-    id: "attendance:1:2026-09-02", kind: "attendance", title: "Half day", day: "2026-09-02",
-    owner: "Priya S", reference: "Priya S",
-    meta: { status: "HALF_DAY", workedMinutes: 173, source: "marked", note: "Left after lunch" },
+    id: "attendance:2026-09-02", kind: "attendance", title: "Half day", day: "2026-09-02",
+    owner: "Priya S", reference: "",
+    meta: { status: "Half day", workedMinutes: 173, loginAt: "2026-09-02T04:00:00.000Z", logoutAt: "2026-09-02T06:53:00.000Z", source: "register" },
   }];
   const [row] = sourceRows("attendance", { attendance });
   assert.equal(row.source, "attendance");
   assert.equal(row.day, "2026-09-02");
 
-  const columns = Object.fromEntries(sourceColumns("attendance").map((column) => [column.id, column]));
-  assert.equal(columns.employee.value(row), "Priya S");
-  assert.equal(columns.status.value(row), "Half day");
-  // Hours, and sorted on the minutes rather than the words - "46m" files above "2h 53m" on the
-  // alphabet, which is the wrong way round.
-  assert.equal(columns.worked.value(row), "2h 53m");
-  assert.equal(columns.worked.sort(row), 173);
-  // The column that says whether the application saw it or somebody decided it.
-  assert.equal(columns.source.value(row), "Marked");
-  assert.equal(columns.note.value(row), "Left after lunch");
-  // And a day with no hours shows nothing rather than "0m".
-  assert.equal(columns.worked.value({ attendance: { meta: {} } }), "");
+  const columns = sourceColumns("attendance");
+  const byId = Object.fromEntries(columns.map((column) => [column.id, column]));
+  // Only ever the viewer's own days, so no column repeats their name down every row.
+  assert.equal(byId.employee, undefined);
+
+  /*
+   * The day is **one** column, Attendance, with the register's times behind it in the popup.
+   *
+   * It used to be four - a status and three clocks - and three of them were blank on exactly the
+   * days this list is read for: an absence and a day's leave have no login, no logout and no hours.
+   */
+  assert.deepEqual(columns.map((column) => column.label), ["Date", "Attendance"]);
+  for (const gone of ["login", "logout", "worked"]) assert.equal(byId[gone], undefined, `${gone} is read in the popup now`);
+  assert.equal(byId.status.value(row), "Half day");
+  // Its id stays `status`: the board groups this list by that column and filters it by the six
+  // statuses the calendar shows, and both are still exactly what the column holds.
+  assert.deepEqual(byId.status.options, ["Absent", "On leave", "Comp off", "Late", "Half day", "Early exit"]);
+
+  // The times themselves still read the way the popup draws them, hours sorted on the minutes
+  // rather than on the words - "46m" would file above "2h 53m" on the alphabet.
+  assert.equal(attendanceWorked(row), "2h 53m");
+  assert.ok(attendanceClock(row.attendance.meta.loginAt));
+  assert.equal(attendanceClock(undefined), "");
+  // And a day with no hours says nothing rather than "0m".
+  assert.equal(attendanceWorked({ attendance: { meta: {} } }), "");
+
 });
 
 test("the calendar's switch narrows to attendance and to nothing else", () => {
@@ -497,12 +518,26 @@ test("the calendar's switch narrows to attendance and to nothing else", () => {
    */
   assert.deepEqual(
     sourceScheduleEntries("all", entries, { sources: ["attendance"] }).map((e) => e.id),
-    ["a1"],
-    "All no longer shows attendance to somebody whose only source it is",
+    ["a1", "s1"],
+    "All no longer shows attendance to somebody whose only source it is (a shoot the server sent is kept)",
   );
   assert.deepEqual(
     sourceScheduleEntries("all", entries, { sources: ["projects"] }).map((e) => e.id),
     ["s1"],
     "All is showing attendance to somebody who was never offered it",
   );
+});
+
+test("a production team member gets My Shoots - and All with it - rather than attendance alone", async () => {
+  const { permittedSources, sourceScheduleEntries, sourceRows } = await import("../src/lib/meetingSources.js");
+  const holds = (...held) => ({ module, feature }) => held.includes(`${module}/${feature}`);
+  const crew = permittedSources(holds("PROJECT/Production", "HRM/Employee Attendance")).map((source) => source.value);
+  assert.deepEqual(crew, ["all", "shoots", "attendance"], "the switch appears and opens on All");
+  assert.equal(permittedSources(holds("PROJECT/Production", "PROJECT/Projects")).some((source) => source.value === "shoots"), false, "somebody sent every shoot has Projects instead");
+  const entries = [{ id: "shoot:1", kind: "shoot", day: "2026-11-01", title: "Rituals", subject: "E1", meta: { projectName: "Anu & Ravi" } }, { id: "a", kind: "attendance", day: "2026-10-31" }];
+  assert.deepEqual(sourceScheduleEntries("shoots", entries).map((entry) => entry.kind), ["shoot"]);
+  const [row] = sourceRows("shoots", { shoots: entries.slice(0, 1) });
+  assert.equal(row.project.eventId, "E1");
+  assert.equal(row.project.whatsappGroupName, "Rituals — Anu & Ravi");
+  assert.equal(sourceRows("all", { shoots: entries.slice(0, 1), sources: ["all", "shoots"] }).length, 1, "All's table holds them too");
 });

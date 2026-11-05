@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { getNotifications, markAllNotificationsRead, markNotificationRead } from "@/services/notifications.service";
+import { getNotifications, markNotificationRead } from "@/services/notifications.service";
 import { storedNotifications } from "@/lib/notificationFeed.mjs";
 
 /**
@@ -27,6 +27,15 @@ import { storedNotifications } from "@/lib/notificationFeed.mjs";
  */
 
 const POLL_INTERVAL_MS = 60000;
+const CHANGED_EVENT = "stored-notifications-changed";
+
+/**
+ * Tells the bell to read again now rather than at the next poll - for a screen whose own action
+ * takes a notice away, such as approving the request it was about.
+ */
+export function refreshStoredNotifications() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(CHANGED_EVENT));
+}
 
 /** How long a notice stays worth showing a relative time for; older ones read as a date. */
 const formatWhen = (value) => {
@@ -72,40 +81,42 @@ export default function useStoredNotifications({ onOpen } = {}) {
   useEffect(() => {
     const initial = window.setTimeout(() => void load(), 0);
     const timer = window.setInterval(() => void load(), POLL_INTERVAL_MS);
+    const reload = () => void load();
+    window.addEventListener(CHANGED_EVENT, reload);
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(timer);
+      window.removeEventListener(CHANGED_EVENT, reload);
     };
   }, [load]);
 
   /**
-   * Opening a notice: it goes where it points, and stops being unread.
+   * Marking a notice read: it leaves the bell.
+   *
+   * The server lists unread notices only, so a read one is gone for good; it is taken off here as
+   * well, and the badge corrected, so it vanishes the moment it is opened rather than at the next
+   * poll. Opening the bell does not mark anything read - that would empty it on sight - and there
+   * is no "Mark as read" button: a notice stays until the page it points at has been opened.
+   */
+  const markRead = useCallback((notification) => {
+    setNotifications((current) => current.filter((row) => row.id !== notification.id));
+    setUnreadCount((current) => Math.max(0, current - 1));
+    void markNotificationRead(notification.id).catch(() => {});
+  }, []);
+
+  /**
+   * Opening a notice: it goes where it points, and is read.
    *
    * Marked here rather than left to the page it opens, so a notice about a task that has since been
-   * deleted still clears instead of sitting unread for ever. The badge is corrected locally as well
-   * as on the server, so the number moves the moment it is pressed rather than at the next poll.
+   * deleted still clears instead of sitting on the bell for ever.
    */
   const open = useCallback((notification) => {
-    if (!notification.readAt) {
-      setUnreadCount((current) => Math.max(0, current - 1));
-      setNotifications((current) => current.map((row) => row.id === notification.id ? { ...row, readAt: new Date().toISOString() } : row));
-      void markNotificationRead(notification.id).catch(() => {});
-    }
+    markRead(notification);
     onOpen?.(notification);
-  }, [onOpen]);
-
-  /** What opening the bell does: everything in it has now been looked at. */
-  const markAllRead = useCallback(() => {
-    if (unreadCount === 0) return;
-    setUnreadCount(0);
-    setNotifications((current) => current.map((row) => row.readAt ? row : { ...row, readAt: new Date().toISOString() }));
-    void markAllNotificationsRead().catch(() => {});
-  }, [unreadCount]);
+  }, [markRead, onOpen]);
 
   /*
-   * The rows, ready for the menu. An unread one is marked so the panel still says which is new
-   * after the badge has cleared — opening the bell clears the count, and without this the reader
-   * would lose track of what they had just been told.
+   * The rows, ready for the menu - every one of them unread, since a read one is no longer listed.
    *
    * Empty is **empty**, and no longer a line reading "No task notifications." Two things turn on
    * that: the bar draws the plain, unopenable bell for a reader with nothing anywhere at all, and it
@@ -114,10 +125,10 @@ export default function useStoredNotifications({ onOpen } = {}) {
    * with nothing in them read as one sentence rather than three.
    */
   const items = notifications.map((notification) => ({
-    label: `${notification.readAt ? "" : "• "}${notification.title}`,
+    label: notification.title,
     detail: [notification.body, formatWhen(notification.createdAt)].filter(Boolean).join(" · "),
     onSelect: () => open(notification),
   }));
 
-  return { items, unreadCount, markAllRead, reload: load };
+  return { items, unreadCount, reload: load };
 }

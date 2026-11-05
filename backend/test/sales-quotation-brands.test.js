@@ -60,7 +60,8 @@ test("the GST a version is raised under is what it was priced with, then the bra
   assert.equal(gstPercentFor({ rates: { gstPercent: 12 } }, { gstPercent: 5 }, { gstPercent: 18 }), 12);
   assert.equal(gstPercentFor({}, { gstPercent: 5 }, { gstPercent: 18 }), 5);
   assert.equal(gstPercentFor({}, { gstPercent: null }, { gstPercent: 18 }), 18);
-  assert.equal(gstPercentFor({}, null, null), 18);
+  // Nothing configured anywhere: no rate is assumed.
+  assert.equal(gstPercentFor({}, null, null), null);
   // Zero is a rate, not an absence: a brand that charges no GST says so.
   assert.equal(gstPercentFor({}, { gstPercent: 0 }, { gstPercent: 18 }), 0);
 });
@@ -261,4 +262,31 @@ test("the sets are the brand's to hold and never travel onto the page or into a 
   const page = fs.readFileSync(path.resolve(__dirname, "../../frontend/src/components/sales/PublicQuotationPage.js"), "utf8");
   assert.equal(page.includes("coverSets"), false, "the client's copy must not branch on picture sets");
   assert.ok(page.includes("assets.coverImageUrl"), "the page still prints assets.coverImageUrl");
+});
+
+/*
+ * ── A save MySQL refused, said in words ──────────────────────────────────────────────────────
+ *
+ * `enquiry_id` is a real foreign key onto the CRM lead, and the Enquire ID box on the generator is
+ * a suggestion box rather than a closed list - an id can be typed straight in for an enquiry the
+ * CRM has not been given yet. Type one that is not a lead and the insert is refused with P2003,
+ * which the retry loop rethrows and the catch used to turn into "Unable to create quotation." and
+ * nothing else. The one answer the person had to change was the one thing they were not told.
+ */
+test("a foreign key refusal names the answer to fix, and never the data behind it", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "modules", "sales", "projects", "controller.js"), "utf8");
+  assert.match(source, /function quotationSaveRefusal\(error\) \{/);
+  // Only P2003 - anything else is still a 500 and still logged in full.
+  assert.match(source, /if \(error\?\.code !== "P2003"\) return null;/);
+  assert.match(source, /if \(\/enquiry\/i\.test\(constraint\)\)/);
+  assert.match(source, /That Enquire ID does not belong to any lead in the CRM\./);
+  // Every save path answers it - a new quotation, the next version, and a draft saved or generated
+  // (one shared `sendDraftSaveError`) - and all answer 400 rather than 500: it is the request that
+  // is wrong, and there is something the person can do about it.
+  assert.equal(source.split("const refusal = quotationSaveRefusal(error);").length - 1, 3);
+  assert.equal(source.split("return res.status(400).json({ message: refusal });").length - 1, 3);
+  // The code and the constraint are logged; the payload, which carries the client's own details,
+  // is not.
+  assert.match(source, /console\.error\("Unable to create quotation:", error\.code, error\.meta\);/);
+  assert.match(source, /console\.error\("Unable to create the next quotation version:", error\.code, error\.meta\);/);
 });

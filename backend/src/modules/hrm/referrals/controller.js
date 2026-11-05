@@ -33,12 +33,6 @@ const settingsSchema = z
     message: "Send how many instalments, or the months they fall on - not both.",
   });
 
-const payoutSchema = z.object({
-  status: z.enum(["Pending", "Paid", "Cancelled"]),
-  paidOn: z.string().trim().min(1).nullable().optional(),
-  remarks: z.string().trim().max(500).nullable().optional(),
-});
-
 function fail(res, error, fallback) {
   if (error?.status) return res.status(error.status).json({ message: error.message });
   console.error(fallback, error);
@@ -81,16 +75,38 @@ async function listReferrals(req, res) {
   }
 }
 
+/*
+ * Settling one instalment by hand: only ever to Paid. Paid is not reversible here - a correction is
+ * an Accounts entry - and Pending or Cancelled are not things this screen sets.
+ */
+const payoutSchema = z.object({
+  status: z.literal("Paid"),
+  paidOn: z.string().trim().min(1).refine((value) => !Number.isNaN(new Date(value).getTime()), "Give the date it was paid.").nullable().optional(),
+  remarks: z.string().trim().max(500).nullable().optional(),
+}).strict();
+
 async function updatePayout(req, res) {
   const id = Number.parseInt(req.params.payoutId, 10);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: "A referral instalment id is required." });
   const parsed = payoutSchema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ message: "Validation failed.", errors: parsed.error.flatten() });
+  if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message || "Validation failed." });
   try {
     return res.json({ data: await service.updatePayout(id, parsed.data, req.user.id) });
   } catch (error) {
-    return fail(res, error, "Unable to update this referral instalment.");
+    return fail(res, error, "Unable to mark this referral instalment paid.");
   }
 }
 
-module.exports = { getSettings, saveSettings, listReferrals, updatePayout };
+/** One referral deleted from the register's ⋮ - refused once anything on it has been paid. */
+async function deleteReferral(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: "A referral id is required." });
+  try {
+    await service.deleteReferral(id, req.user.id);
+    return res.json({ message: "Referral deleted." });
+  } catch (error) {
+    return fail(res, error, "Unable to delete this referral.");
+  }
+}
+
+module.exports = { getSettings, saveSettings, listReferrals, updatePayout, deleteReferral };

@@ -45,6 +45,13 @@ test("an unmarked review is null rather than an empty string", () => {
   assert.equal(reviewPayload({ reviewDate: "2026-03-01", outcome: "Shine" }).outcome, "Shine");
 });
 
+test("remarks are trimmed, and a remark of only spaces reaches the server as null", () => {
+  assert.equal(reviewPayload({ reviewDate: "2026-03-01", remarks: "  Good progress  " }).remarks, "Good progress");
+  assert.equal(reviewPayload({ reviewDate: "2026-03-01", remarks: "   " }).remarks, null);
+  assert.equal(reviewPayload({ reviewDate: "2026-03-01", remarks: "" }).remarks, null);
+  assert.equal(reviewPayload({ reviewDate: "2026-03-01" }).remarks, null);
+});
+
 test("a review with no increment adds nothing to the totals", () => {
   const totals = reviewTotals([
     { reviewDate: "2025-03-01", incrementAmount: 12000 },

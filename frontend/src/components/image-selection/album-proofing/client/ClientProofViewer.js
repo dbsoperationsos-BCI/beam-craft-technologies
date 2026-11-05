@@ -111,9 +111,10 @@ export default function ClientProofViewer({ token, sessionToken, meta }) {
     return () => window.clearTimeout(timer);
   }, [load]);
 
-  const pages = proof?.pages || [];
+  // Held still between renders, so the memos below are not rebuilt each time for a fresh empty list.
+  const pages = useMemo(() => proof?.pages || [], [proof]);
   const page = pages[index] || null;
-  const corrections = proof?.corrections || [];
+  const corrections = useMemo(() => proof?.corrections || [], [proof]);
   const pageCorrections = useMemo(() => corrections.filter((correction) => correction.versionPageId === page?.id), [corrections, page]);
   const bySpread = useMemo(() => {
     const map = new Map();

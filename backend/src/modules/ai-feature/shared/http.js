@@ -1,3 +1,4 @@
+const { expiredLinkBody } = require("../../../services/expiredLink");
 /**
  * The three helpers every AI Feature controller repeats: a typed HTTP error, zod validation that
  * answers the request itself, and one place a thrown error becomes a response.
@@ -16,7 +17,7 @@ function validate(schema, value, res, message = "Invalid request.") {
 
 function handleError(error, res, action) {
   if (res.headersSent) { console.error(`Unable to ${action} (AI Feature):`, error); return undefined; }
-  if (error.status) return res.status(error.status).json({ message: error.message, ...(error.details ? { details: error.details } : {}) });
+  if (error.status) return res.status(error.status).json({ message: error.message, ...(error.details ? { details: error.details } : {}), ...expiredLinkBody(error) });
   if (error.code === "P2002") return res.status(409).json({ message: "That already exists." });
   if (error.code === "P2025") return res.status(404).json({ message: "Not found." });
   console.error(`Unable to ${action} (AI Feature):`, error);

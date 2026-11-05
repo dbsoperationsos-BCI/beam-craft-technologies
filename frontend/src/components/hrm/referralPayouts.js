@@ -11,6 +11,17 @@
 export const PAYOUT_STATUSES = ["Pending", "Paid", "Cancelled"];
 
 /**
+ * **Stopped**: an instalment that will never be handed over, because the employee the referral was
+ * for had left before its month came.
+ *
+ * Not a stored status - the server works it out from that employee's own status every time the
+ * register is read (`referrals/service.js`), so nobody has to remember to write it when somebody is
+ * relieved. It behaves like Cancelled everywhere here: nothing outstanding, nothing to act on, and
+ * the referral settles on what was already paid.
+ */
+export const STOPPED = "Stopped";
+
+/**
  * The ordinal the studio reads an instalment by: 3 is "3rd month", 6 is "6th month".
  *
  * Written out properly rather than as "3rd or else th". The studio pays at the third month and the
@@ -59,7 +70,29 @@ export function outstandingTotal(referrals) {
   );
 }
 
-/** Whether this instalment still has something a person can do to it. */
+/** Whether a referral may be deleted: nothing on it paid yet - a paid instalment is money that left the studio. */
+export const isDeletable = (referral) => !(referral?.payouts || []).some((payout) => payout?.status === "Paid");
+
+/**
+ * How far a referral has got through its instalments, as the register's Instalments column reads it:
+ * "1/3 Paid" - those paid, by payroll or by hand, out of every instalment it was promised in.
+ */
+export function instalmentProgress(referral) {
+  const payouts = referral?.payouts || [];
+  return `${payouts.filter((payout) => payout?.status === "Paid").length}/${payouts.length} Paid`;
+}
+
+/**
+ * The instalment months the register needs a column for: every month any referral on it is paid
+ * in - 3 and 6, and 9 where a referral was recorded over three - in order. Two instalments, 3 and 6,
+ * the studio's default, when there is nothing to read them from.
+ */
+export function instalmentMonthsOf(referrals) {
+  const months = new Set((referrals || []).flatMap((referral) => (referral?.payouts || []).map((payout) => Number(payout?.monthOffset)).filter(Number.isFinite)));
+  return months.size ? [...months].sort((a, b) => a - b) : [3, 6];
+}
+
+/** Whether an instalment can still be settled by hand: Pending only - not Paid, Cancelled or Stopped. */
 export const isSettleable = (payout) => payout?.status === "Pending";
 
 /**
@@ -71,6 +104,10 @@ export const isSettleable = (payout) => payout?.status === "Pending";
  * when it was called off rather than paid. A referral with no instalments at all reads as
  * Outstanding rather than as settled: nothing has been handed over, and calling that "Paid" would
  * quietly drop a promise off the register.
+ *
+ * A **Stopped** instalment is nothing left to hand over, so a referral whose employee left after one
+ * instalment reads Paid and sits under Settled - which is what the studio asked for: what was paid
+ * stands, and the rest is not money anybody is waiting for.
  */
 export function referralStatus(referral, now = new Date()) {
   const payouts = referral?.payouts || [];

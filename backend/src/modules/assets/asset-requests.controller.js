@@ -1,3 +1,4 @@
+const { withUserNames } = require("../../services/userNames");
 const { z } = require("zod");
 const prisma = require("../../config/db");
 const iamService = require("../../services/iam.service");
@@ -41,17 +42,13 @@ async function verifyCategories(input) {
   if (subCategory.parentId !== category.id) throw fail(400, "That sub category does not belong to the category chosen.");
 }
 
-/** Attaches the requesting and deciding users' names so a list can show who asked and who ruled. */
+/**
+ * Attaches who asked and who ruled, by name - each a user, read through to their linked employee
+ * (`services/userNames`), as every list names a person.
+ */
 async function decorate(rows) {
   const list = Array.isArray(rows) ? rows : [rows];
-  const ids = [...new Set(list.flatMap((row) => [row.requestedBy, row.decidedBy]).filter(Boolean))];
-  const users = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [];
-  const names = new Map(users.map((user) => [user.id, user.name]));
-  const result = list.map((row) => ({
-    ...row,
-    requestedByName: row.requestedBy ? names.get(row.requestedBy) || null : null,
-    decidedByName: row.decidedBy ? names.get(row.decidedBy) || null : null,
-  }));
+  const result = await withUserNames(list);
   return Array.isArray(rows) ? result : result[0];
 }
 
@@ -84,7 +81,7 @@ exports.list = handler(async (req) => {
     ...(mayDecide ? {} : { requestedBy: Number(req.user.id) }),
   };
   const [rows, total] = await Promise.all([
-    prisma.assetRequest.findMany({ where, include, orderBy: { createdAt: "desc" }, skip: (input.page - 1) * input.limit, take: input.limit }),
+    prisma.assetRequest.findMany({ where, include, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip: (input.page - 1) * input.limit, take: input.limit }),
     prisma.assetRequest.count({ where }),
   ]);
   return { data: await decorate(rows), pagination: { page: input.page, limit: input.limit, total, totalPages: Math.ceil(total / input.limit) } };

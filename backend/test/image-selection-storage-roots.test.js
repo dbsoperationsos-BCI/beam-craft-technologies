@@ -49,6 +49,21 @@ test("renaming onto another living root's name is refused; renaming onto your ow
   assert.equal((await service.update("root-a", { name: "NAS_A" })).name, "NAS_A");
 });
 
+test("a name the database still holds on a retired root is refused as a 409 that says so, never a 500", async () => {
+  // The living-roots check passes (the retired row is filtered out), then the database's own unique
+  // index refuses the write: Prisma's P2002 is the only way that collision reaches the service.
+  const repo = fakeRepository([{ id: "root-a", name: "ARCHIVE_HDD", deletedAt: new Date() }, { id: "root-b", name: "NAS_B" }]);
+  const clash = Object.assign(new Error("Unique constraint failed on the fields: (`name`)"), { code: "P2002" });
+  repo.createRoot = async () => { throw clash; };
+  repo.updateRoot = async () => { throw clash; };
+  const service = createStorageRootService(repo);
+  await assert.rejects(() => service.create({ name: "ARCHIVE_HDD" }), (error) => error.status === 409 && /retired storage root/.test(error.message));
+  await assert.rejects(() => service.update("root-b", { name: "ARCHIVE_HDD" }), (error) => error.status === 409 && /retired storage root/.test(error.message));
+  // Any other database failure is still the 500 it was.
+  repo.createRoot = async () => { throw new Error("connection lost"); };
+  await assert.rejects(() => service.create({ name: "FRESH" }), (error) => error.status === undefined);
+});
+
 test("missing roots answer 404", async () => {
   const service = createStorageRootService(fakeRepository());
   await assert.rejects(() => service.update("nope", { name: "X" }), { status: 404 });

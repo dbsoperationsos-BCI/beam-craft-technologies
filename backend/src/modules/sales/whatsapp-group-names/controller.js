@@ -83,7 +83,8 @@ function buildGeneratedName(data) {
     return [head, data.socialMediaPosting, data.place, date].filter(Boolean).join(" | ");
   }
   if (data.groupType === "Qua Qua") {
-    const details = [`QQ${data.branch}`, data.offerName, data.clientName].filter(Boolean).join(" ");
+    // "QQ ERD", not "QQERD": a segment of its own, as the branch already is on the other two verticals.
+    const details = ["QQ", data.branch, data.offerName, data.clientName].filter(Boolean).join(" ");
     return [details, data.eventName, data.socialMediaPosting, data.houseType, data.gou ? "GOU" : null, data.place, date].filter(Boolean).join(" | ");
   }
   return [["CORP", data.branch, data.offerName, data.clientName].filter(Boolean).join(" "), data.place, date].filter(Boolean).join(" | ");

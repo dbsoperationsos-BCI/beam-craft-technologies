@@ -3,12 +3,25 @@
 import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import DownloadRounded from "@mui/icons-material/DownloadRounded";
+import ScheduleRounded from "@mui/icons-material/ScheduleRounded";
+import LocalOfferOutlined from "@mui/icons-material/LocalOfferOutlined";
+import LoyaltyOutlined from "@mui/icons-material/LoyaltyOutlined";
 import { durationForSessionTiming, shootTimingsOf, shootTypesOf } from "@/components/project-management/AddShootDialog";
-import AppLogo, { DocumentLogo } from "@/components/shared/AppLogo";
+import ExpiredClientLink from "@/components/shared/ExpiredClientLink";
+import DeviceViewport from "@/components/shared/DeviceViewport";
+import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
+import { expiredLinkFrom, linkTimeLeft } from "@/lib/expiredLink.mjs";
+import { eventCount, eventTypeNames, mainEventTypeSummary } from "@/lib/quotationEventTypes.mjs";
+import { shootDisplayName } from "@/lib/shootDisplay.mjs";
+import { DocumentLogo } from "@/components/shared/AppLogo";
 import InfrastructureImageGrid from "@/components/shared/InfrastructureImageGrid";
 import useStudioBranding from "@/components/shared/useStudioBranding";
 import { getPublicQuotation, publicQuotationPdfUrl } from "@/services/sales/public-quotation.service";
-import { displayUrl, gstLabel, hrefFor, templateContentFor } from "./quotationTemplateContent";
+import { displayUrl, hrefFor, templateContentFor } from "./quotationTemplateContent";
+import { quotationDiscountBreakdown } from "@/lib/quotationBrand.mjs";
+import { Eyebrow, GOLD, GOLD_DEEP } from "./quotationSheetParts";
+import { QuotationPricingCard, UpdatedTotalCard } from "./QuotationPricingCards";
+import QuotationExtraSection from "./QuotationExtraSection";
 
 /*
  * The client's copy of a quotation, at `/q/<token>`.
@@ -27,8 +40,7 @@ import { displayUrl, gstLabel, hrefFor, templateContentFor } from "./quotationTe
  * itself is one for every brand.
  */
 
-export const GOLD = "#b9974f";
-export const GOLD_DEEP = "#8a7a4a";
+export { GOLD, GOLD_DEEP, Eyebrow };
 export const INK = "#1c1c1c";
 const NAVY_TOP = "#0d1624";
 const NAVY_BOTTOM = "#0a121e";
@@ -45,16 +57,23 @@ const withAlpha = (hex, alpha) => `rgba(${parseInt(hex.slice(1, 3), 16)}, ${pars
 /** The ground the sheet is printed on, shared with the Terms & Conditions page. */
 export const sheetBackground = "linear-gradient(180deg, #faf7ef 0%, #f8f3ea 60%, #faf7ef 100%)";
 
+/**
+ * The sheet's running text: the design's face, then Tamil (`--q-font-tamil-sans`, set by the
+ * quotation's layout in `app/q/quotationFonts.js`), then the system's. Shared with the Terms &
+ * Conditions and payment pages, which are the same sheet.
+ */
+export const QUOTATION_BODY_FONT = "var(--q-font-body), var(--q-font-tamil-sans), 'Plus Jakarta Sans', 'Helvetica Neue', Arial, sans-serif";
+
 /*
  * The sheet's own stylesheet: the five faces the design is set in, the two card grounds, and what
  * changes when it is printed. Exported because the Terms & Conditions page at `/q/<token>/terms` is
  * the same sheet and must not describe any of it a second time.
  */
 export const SHEET_CSS = `
-      .q-display { font-family: var(--q-font-display), 'Cormorant Garamond', Georgia, 'Times New Roman', serif; }
-      .q-script { font-family: var(--q-font-script), 'Great Vibes', 'Brush Script MT', cursive; }
-      .q-condensed { font-family: var(--q-font-condensed), Oswald, 'Arial Narrow', sans-serif; }
-      .q-footer { font-family: var(--q-font-footer), Poppins, 'Segoe UI', Arial, sans-serif; }
+      .q-display { font-family: var(--q-font-display), var(--q-font-tamil-serif), 'Cormorant Garamond', Georgia, 'Times New Roman', serif; }
+      .q-script { font-family: var(--q-font-script), var(--q-font-tamil-serif), 'Great Vibes', 'Brush Script MT', cursive; }
+      .q-condensed { font-family: var(--q-font-condensed), var(--q-font-tamil-sans), Oswald, 'Arial Narrow', sans-serif; }
+      .q-footer { font-family: var(--q-font-footer), var(--q-font-tamil-sans), Poppins, 'Segoe UI', Arial, sans-serif; }
       .q-mono { font-family: 'Courier New', Courier, monospace; letter-spacing: 0; }
       .q-label { letter-spacing: .28em; text-transform: uppercase; }
       .q-card { background: linear-gradient(180deg, rgba(255,255,255,0.72), rgba(252,249,245,0.9)); box-shadow: 0 1px 2px rgba(28,28,28,0.03), 0 18px 40px -30px rgba(28,28,28,0.25); }
@@ -95,6 +114,17 @@ const subscribeToPageScale = (onChange) => {
   return () => viewport.removeEventListener("resize", onChange);
 };
 const pageScale = () => (typeof window === "undefined" ? 1 : window.visualViewport?.scale || 1);
+/*
+ * Whether the screen itself is phone-sized. Not a media query: the route declares a 1112px viewport,
+ * so on every phone the layout is 1112 wide and `sm:`/`md:` never fire. The visible width times the
+ * scale is the screen's own width in unscaled CSS pixels, and it holds still through a pinch -
+ * zooming in shrinks one as much as it grows the other - so the controls do not jump size mid-zoom.
+ */
+const PHONE_SCREEN_PX = 640;
+const onPhone = () => {
+  const viewport = typeof window === "undefined" ? null : window.visualViewport;
+  return Boolean(viewport) && viewport.width * viewport.scale < PHONE_SCREEN_PX;
+};
 
 /**
  * Download, as an icon in the top-right corner that stays there while the quotation scrolls.
@@ -108,9 +138,13 @@ const pageScale = () => (typeof window === "undefined" ? 1 : window.visualViewpo
  * inverse keeps it that size to the eye on a phone, a tablet and a laptop alike, and the margin
  * inside the scaled wrapper means its distance from the corner holds too. `no-print` and the caller's `printMode`
  * both keep it out of the PDF, which is printed from this same page.
+ *
+ * On a phone it is a 42px disc with an 18px arrow, 10px off the corner: at a third scale the sheet's
+ * own type is a few pixels tall, and the full-size control towered over the document beside it.
  */
 function FloatingDownload({ onDownload }) {
   const scale = useSyncExternalStore(subscribeToPageScale, pageScale, () => 1);
+  const phone = useSyncExternalStore(subscribeToPageScale, onPhone, () => false);
 
   return <div
     className="no-print fixed right-0 top-0 z-50"
@@ -132,10 +166,73 @@ function FloatingDownload({ onDownload }) {
        * photographs, where a flat wash would take on whatever happened to be underneath. Its colour
        * is the sheet's, in `SHEET_CSS` beside the grounds it has to sit on.
        */
-      className="q-download m-3 flex h-11 w-11 items-center justify-center rounded-full backdrop-blur-sm transition focus:outline-none"
+      className={`q-download flex items-center justify-center rounded-full backdrop-blur-sm transition focus:outline-none ${phone ? "m-2.5" : "m-3 h-11 w-11"}`}
+      // The arrow in the deeper gold, matching the expiry chip below it - the colour `.q-download`
+      // already turns on hover, so hovering changes only the fill and ring. Inline, so the payment
+      // page's button, which shares the class, keeps its own light gold.
+      style={{ color: GOLD_DEEP, ...(phone ? { width: 42, height: 42 } : {}) }}
     >
-      <DownloadRounded fontSize="small" />
+      <DownloadRounded sx={{ fontSize: phone ? 18 : 20 }} />
     </button>
+  </div>;
+}
+
+/**
+ * How long this link still opens, in the bottom-right corner - clear of Download at the top right,
+ * pinned and sized the same way (against the page scale, so it is the same size to the eye on a
+ * phone and a laptop) and in the same gold. Two short lines, "Expires in 3d" over "22h 39m", so it
+ * stays narrow - the time left to the minute, a unit left out where it is nought ("Expires in" over
+ * "12h 45m" on the last day), running on its own, with no date. A small status chip rather than a
+ * second button: lower and tighter than Download, which is the control.
+ *
+ * Read off the link's own expiry (`linkExpiresAt`), the date the server checks, and decides nothing:
+ * a lapsed link never reaches this page - the server refuses it and the shared expired page is shown.
+ * Kept out of the PDF (`no-print`, and the caller's `printMode`), which is a copy kept, not a link.
+ *
+ * On a phone it is one line instead ("Expires in 3d 5h 54m") in a slim pill 10px off the corner -
+ * lower than the two-line chip, so it covers less of the sheet's closing sections. Same countdown,
+ * same label; only the box changes.
+ */
+function FloatingExpiry({ expiresAt }) {
+  const scale = useSyncExternalStore(subscribeToPageScale, pageScale, () => 1);
+  const phone = useSyncExternalStore(subscribeToPageScale, onPhone, () => false);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    // Twice a minute, so the minutes turn over on time without a refresh.
+    const timer = window.setInterval(() => setNow(Date.now()), 30000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const left = linkTimeLeft(expiresAt, now);
+  if (!left) return null;
+  const inset = phone ? 10 : 12;
+  return <div
+    className="no-print fixed bottom-0 right-0 z-50"
+    // Anchored to the corner it is pinned to, so growing it against the page scale keeps it on screen.
+    style={{ transform: `scale(${1 / (scale || 1)})`, transformOrigin: "bottom right" }}
+  >
+    <div
+      role="status"
+      aria-live="off"
+      aria-label={left.label}
+      className={`q-download flex backdrop-blur-sm ${phone ? "max-w-[190px] items-center gap-1 rounded-full pl-2 pr-2.5" : "items-start gap-1.5 rounded-xl py-1.5 pl-2 pr-2.5"}`}
+      // The chip keeps Download's gold box, but its words and clock are the deeper gold: it is read,
+      // not pressed, and the light gold on the gold tint was too faint to read at a glance. Inline, so
+      // it wins over `.q-download`'s colour for this chip alone; the icon follows through `currentColor`.
+      style={{ color: GOLD_DEEP, marginRight: `max(${inset}px, env(safe-area-inset-right))`, marginBottom: `max(${inset}px, env(safe-area-inset-bottom))`, ...(phone && { paddingBlock: 5 }) }}
+    >
+      {phone
+        ? <>
+          <ScheduleRounded aria-hidden="true" sx={{ fontSize: 13 }} />
+          <span className="whitespace-nowrap text-[11px] font-semibold leading-none tabular-nums">{left.label}</span>
+        </>
+        : <>
+          <ScheduleRounded aria-hidden="true" sx={{ fontSize: 14, mt: "1px" }} />
+          <span className="flex flex-col gap-0.5 whitespace-nowrap leading-none tabular-nums">
+            <span className="text-[11px] font-medium">{left.lead}</span>
+            {left.rest && <span className="text-[12px] font-semibold">{left.rest}</span>}
+          </span>
+        </>}
+    </div>
   </div>;
 }
 
@@ -173,7 +270,7 @@ function durationText(shoot) {
     if (words) parts.push(`${words} Duration`);
   }
   if (timings.includes("Half Session")) parts.push("Half Session (4-5 Hours)");
-  if (timings.includes("Full Session")) parts.push("Full Session (10-12 Hours)");
+  if (timings.includes("Full Session")) parts.push("Full Session (8-10 Hours)");
   return parts.join(" • ");
 }
 
@@ -203,11 +300,6 @@ function careLine(shoot, brandName) {
 
 /* ── Small pieces of the design ─────────────────────────────────────────────────────────────── */
 
-/** A small label in gold small caps: "CEREMONIAL ITINERARY", "SERVICES", "EVENT DATE". */
-function Eyebrow({ children, className = "", color = GOLD_DEEP, size = "text-[11px]" }) {
-  return <p className={`q-label ${size} font-semibold ${className}`} style={{ color }}>{children}</p>;
-}
-
 /** A serif heading with a short rule either side of it. */
 export function RuledTitle({ children, size = "text-[34px]", className = "" }) {
   return <div className={`flex items-center justify-center gap-5 ${className}`}>
@@ -217,11 +309,15 @@ export function RuledTitle({ children, size = "text-[34px]", className = "" }) {
   </div>;
 }
 
-/** One cell of the proposal card's grid. */
-function DetailCell({ label, value, mono = false, italic = false }) {
-  return <div className="min-w-0 rounded-xl px-3.5 py-3" style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" }}>
+/**
+ * One cell of the proposal card's grid: the label in the card's small caps, and the value in the one
+ * type every value shares - the Client Name's - so an ID, a number, a venue and the event read as
+ * one set rather than four.
+ */
+function DetailCell({ label, value }) {
+  return <div className="relative min-w-0 rounded-xl px-3.5 py-3" style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" }}>
     <p className="q-label text-[10px] font-medium" style={{ color: "#8f9bb0" }}>{label}</p>
-    <p className={`mt-1 break-words font-semibold text-white ${mono ? "q-mono text-[12.5px]" : "text-[14px]"} ${italic ? "italic" : ""}`}>{value}</p>
+    <p className="mt-1 break-words text-[14px] font-semibold text-white">{value}</p>
   </div>;
 }
 
@@ -255,6 +351,43 @@ function StorageIcon() {
   </svg>;
 }
 
+/*
+ * The discounts the quotation was saved with, on a card of their own between the events and the
+ * price: the rupees it came to - never the percentage - then each extra discount by its reason. Read
+ * from the saved quotation (`quotationDiscountBreakdown`) and never taken off again - the price
+ * below is the saved total, which already has them taken off. Nothing at all when there are none,
+ * so a quotation without a discount prints exactly as it did.
+ */
+function DiscountLine({ label, amount }) {
+  return <div className="flex items-start justify-between gap-4 py-1.5">
+    <span className="min-w-0 break-words">{label}</span>
+    <span className="shrink-0 whitespace-nowrap font-semibold tabular-nums">- {currency(amount)}</span>
+  </div>;
+}
+
+function DiscountHeading({ icon: Icon, children }) {
+  return <div className="flex items-center gap-2.5">
+    <Icon style={{ fontSize: 20, color: GOLD }} aria-hidden="true" />
+    <Eyebrow className="tracking-[0.24em]">{children}</Eyebrow>
+  </div>;
+}
+
+function DiscountCard({ breakdown }) {
+  if (!breakdown.any) return null;
+  return <section className="mx-[18px] mt-6 sm:mx-[45px]">
+    <div className="q-card rounded-2xl px-5 py-5 text-[14px] sm:px-8" style={{ color: "#3b3b3b" }}>
+      {breakdown.discount && <div>
+        <DiscountHeading icon={LocalOfferOutlined}>Discount</DiscountHeading>
+        <div className="mt-2"><DiscountLine label="Discount" amount={breakdown.discount.amount} /></div>
+      </div>}
+      {breakdown.extras.length > 0 && <div className={breakdown.discount ? "mt-4 border-t pt-4" : ""} style={breakdown.discount ? { borderColor: withAlpha(GOLD, 0.25) } : undefined}>
+        <DiscountHeading icon={LoyaltyOutlined}>Extra Discount</DiscountHeading>
+        <div className="mt-2">{breakdown.extras.map((entry, index) => <DiscountLine key={index} label={entry.reason || "Extra Discount"} amount={entry.amount} />)}</div>
+      </div>}
+    </div>
+  </section>;
+}
+
 function PhoneIcon() {
   return <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.9 2z" />
@@ -283,29 +416,81 @@ function Collage({ group }) {
   </div>;
 }
 
-export default function PublicQuotationPage({ token }) {
-  const [quotation, setQuotation] = useState(null);
-  const [loading, setLoading] = useState(true);
+/*
+ * `previewQuotation` is the studio's Preview (`/q/preview/<key>`): a quotation not yet generated,
+ * handed in already loaded (`POST /api/sales/quotations/preview`) rather than fetched by a token it
+ * does not have, and handed in again, newer, each time the generator's Preview is pressed. It prints the same sheet and nothing a link has - no Download, no expiry, and the
+ * Terms & Conditions and payment labels as text, since there is no page behind them yet. A client's
+ * link never passes it, so its Download and expiry are exactly as they were.
+ */
+export default function PublicQuotationPage({ token, previewQuotation = null }) {
+  const preview = Boolean(previewQuotation);
+  // A preview is whatever it was last handed - each Preview press in the generator hands it a newer
+  // one - and a link is what it fetched.
+  const [fetchedQuotation, setQuotation] = useState(null);
+  const quotation = preview ? previewQuotation : fetchedQuotation;
+  const [loading, setLoading] = useState(!preview);
   const [error, setError] = useState("");
   // A link that has run out is its own state, not a failure: the page says so plainly and tells the
   // client what to do about it, rather than showing them a red error box.
-  const [expired, setExpired] = useState(false);
+  // Whether the link has expired (`expiredLinkFrom`) - an empty marker - or null while it is live.
+  const [expired, setExpired] = useState(null);
   // Read from the URL rather than held in state: the renderer appends `?print=1` before the page
   // loads and never changes it, so there is nothing to synchronise.
-  const printMode = useSearchParams().get("print") === "1";
+  const searchParams = useSearchParams();
+  const printMode = searchParams.get("print") === "1";
+  // A download the server refused comes back as `?download=failed` (`backToPage`) instead of an
+  // error page in place of the quotation: said once, and taken off the address.
+  const downloadFailed = searchParams.get("download") === "failed";
+  const { notice, showError, clearNotice } = useNotice();
+  useEffect(() => {
+    if (!downloadFailed) return undefined;
+    // The address is tidied after the notice is up: tidying it first changes the search params,
+    // which would run this cleanup and cancel the notice before it showed.
+    const timer = window.setTimeout(() => {
+      showError("The PDF could not be downloaded. Please try again.");
+      const url = new URL(window.location.href);
+      url.searchParams.delete("download");
+      window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [downloadFailed, showError]);
   // The live Global Name and Global Logo, only ever read for a version so old its snapshot holds
   // neither. See `templateContentFor`.
   const branding = useStudioBranding();
 
+  /*
+   * Shown inside the client's app (`#embed=app&pass=…`): the app has already signed the client in,
+   * so it hands over a pass for this quotation, and the page leaves out what the app does not offer -
+   * Download, and the link's expiry. Both are read once and kept for this tab (a refresh keeps them),
+   * then taken off the address.
+   */
+  const [embed] = useState(() => {
+    if (typeof window === "undefined") return { app: false, pass: null };
+    const key = `dbs_quotation_embed_${token}`;
+    const hash = new URLSearchParams(window.location.hash.slice(1));
+    if (hash.get("embed") === "app") {
+      window.sessionStorage.setItem(key, JSON.stringify({ pass: hash.get("pass") || null }));
+      window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}`);
+    }
+    try {
+      const kept = JSON.parse(window.sessionStorage.getItem(key) || "null");
+      return kept ? { app: true, pass: kept.pass } : { app: false, pass: null };
+    } catch {
+      return { app: false, pass: null };
+    }
+  });
+
   useEffect(() => {
+    if (preview) return undefined;
     let active = true;
     setLoading(true);
-    getPublicQuotation(token)
-      .then((response) => { if (active) { setQuotation(response.data); setError(""); setExpired(false); } })
-      .catch((requestError) => { if (active) { setExpired(Boolean(requestError.expired)); setError(requestError.message || "Unable to load quotation."); } })
+    getPublicQuotation(token, embed.pass)
+      .then((response) => { if (active) { setQuotation(response.data); setError(""); setExpired(null); } })
+      .catch((requestError) => { if (active) { setExpired(expiredLinkFrom(requestError)); setError(requestError.message || "Unable to load quotation."); } })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [token]);
+  }, [token, preview, embed.pass]);
 
   const payload = quotation?.payload || {};
   const content = useMemo(() => templateContentFor(quotation, branding), [quotation, branding]);
@@ -319,22 +504,22 @@ export default function PublicQuotationPage({ token }) {
    * renderer waits for the attribute, prints `ready`, and fails loudly on the other two.
    */
   if (loading) return <main className="grid min-h-dvh place-items-center bg-white p-6 text-slate-500">Loading quotation…</main>;
-  if (expired) return <main data-quotation-state="expired" className="grid min-h-dvh place-items-center bg-white p-6 text-center">
-    <div className="w-full max-w-md">
-      <AppLogo variant="print" />
-      <h1 className="mt-8 text-2xl font-normal" style={{ fontFamily: "Georgia, 'Times New Roman', serif", color: INK }}>This link has expired</h1>
-      <p className="mt-3 text-sm leading-relaxed text-slate-600">{error}</p>
-      <p className="mt-6 text-xs text-slate-400">Your quotation has not been withdrawn — only the link has lapsed, and it can be reopened for you.</p>
-    </div>
-  </main>;
-  if (error) return <main data-quotation-state="error" className="grid min-h-dvh place-items-center bg-white p-6"><p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-700">{error}</p></main>;
+  // The shared expired page, the same one every client link lapses to; the state attribute is what
+  // the PDF renderer reads to refuse printing it.
+  if (expired) return <ExpiredClientLink {...expired} data-quotation-state="expired" />;
+  // Laid out for the phone itself, as the expired card is: in the sheet's 1112px viewport it was
+  // drawn at a third of its size. An error is not gone back from, so the viewport stays switched.
+  if (error) return <DeviceViewport><main data-quotation-state="error" className="grid min-h-dvh place-items-center bg-white p-6"><p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-700">{error}</p></main></DeviceViewport>;
 
   const { assets, brandName, contact } = content;
   // The couple, or whoever the quotation is for. `name` is what the vertical form asks for and
   // `clientName` is what quotations raised before it stored, so both are read.
   const clientName = payload.name || quotation.clientName || "Our Client";
-  const mainShoot = shoots.find((shoot) => shoot.isMainEvent) || shoots[0] || null;
-  const eventType = mainShoot?.shoot || payload.offerType || "";
+  // The Main Event's type and how many other events there are - "Wedding +2 events"
+  // (`mainEventTypeSummary`); a quotation with no events names the offer it was raised for, as it
+  // always did.
+  const eventTypes = eventTypeNames(shoots);
+  const eventType = eventTypes.length ? mainEventTypeSummary(eventTypes, eventCount(shoots)) : payload.offerType || "";
   const website = contact.websiteUrl;
   // The salesperson's note for this client, else the studio's standard note from Settings ->
   // Quotation Settings -> General; nothing at all prints no card.
@@ -347,7 +532,11 @@ export default function PublicQuotationPage({ token }) {
    * origin, so `window.location.origin` is exactly the host a client can reach.
    */
   const termsPath = `/q/${encodeURIComponent(token)}/terms`;
-  const termsHref = printMode && typeof window !== "undefined" ? `${window.location.origin}${termsPath}` : termsPath;
+  const termsHref = preview ? undefined : printMode && typeof window !== "undefined" ? `${window.location.origin}${termsPath}` : termsPath;
+  // Where the client pays - `/q/<token>/payment`, the same sheet - made absolute for the PDF the
+  // same way, and printed only where the Assigned Branch holds some way to be paid.
+  const paymentPath = `/q/${encodeURIComponent(token)}/payment`;
+  const paymentHref = preview ? undefined : printMode && typeof window !== "undefined" ? `${window.location.origin}${paymentPath}` : paymentPath;
   const infrastructure = (assets.infrastructure || []).filter((group) => group.photos?.length);
 
   /*
@@ -356,22 +545,22 @@ export default function PublicQuotationPage({ token }) {
    * dash in its own cell instead, so the card reads the same whatever was filled in.
    */
   const details = [
-    ["Quotation ID", quotation.quotationId, { mono: true }],
+    ["Quotation ID", quotation.quotationId],
     ["Client Name", clientName],
-    ["Contact Number", quotation.clientMainNumber, { mono: true }],
+    ["Contact Number", quotation.clientMainNumber],
     ["Nearest Branch", quotation.sourceBranch],
     ["Followed By", quotation.followedBy],
-    ["Enquiry ID", quotation.enquiryId, { mono: true }],
+    ["Enquiry ID", quotation.enquiryId],
     ["Referred By", quotation.referredBy],
-    ["Event Venue", quotation.eventVenue, { italic: true }],
-    ["Event Type", eventType, { italic: true }],
+    ["Event Venue", quotation.eventVenue],
+    ["Event Type", eventType],
     ["Created At", createdStamp(quotation.quotationDate)],
-  ].map(([label, value, options]) => [label, String(value || "").trim() || "\u2014", options]);
+  ].map(([label, value]) => [label, String(value || "").trim() || "\u2014"]);
 
   return <main
     data-quotation-state="ready"
     className={`min-h-dvh ${printMode ? "bg-white" : "bg-[#e9e6df] px-0 py-0 sm:px-4 sm:py-8"}`}
-    style={{ fontFamily: "var(--q-font-body), 'Plus Jakarta Sans', 'Helvetica Neue', Arial, sans-serif", color: INK }}
+    style={{ fontFamily: QUOTATION_BODY_FONT, color: INK }}
   >
     <style>{SHEET_CSS}</style>
 
@@ -382,8 +571,11 @@ export default function PublicQuotationPage({ token }) {
       * quotation answered before this existed carries nothing, which reads as No; the file itself
       * is refused by the same answer, so this is the courtesy and not the lock.
       */}
-    {!printMode && quotation.allowClientDownload === true
+    {!printMode && !preview && !embed.app && quotation.allowClientDownload === true
       && <FloatingDownload onDownload={() => { window.location.href = publicQuotationPdfUrl(token); }} />}
+    {!printMode && <FloatingNotice notice={notice} onClose={clearNotice} />}
+    {/* Bottom right, clear of Download: how long the link still opens. Only on a link that opened. */}
+    {!printMode && !preview && !embed.app && <FloatingExpiry expiresAt={quotation.linkExpiresAt} />}
 
     <article className={`q-sheet relative mx-auto w-full max-w-[1080px] overflow-hidden ${printMode ? "" : "shadow-sm"}`} style={{ background: sheetBackground }}>
       <div className="relative">
@@ -418,7 +610,7 @@ export default function PublicQuotationPage({ token }) {
           </h2>
           <div className="mt-7 border-t" style={{ borderColor: "rgba(255,255,255,0.12)" }} />
           <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
-            {details.map(([label, value, options]) => <DetailCell key={label} label={label} value={value} mono={options?.mono} italic={options?.italic} />)}
+            {details.map(([label, value]) => <DetailCell key={label} label={label} value={value} />)}
           </div>
         </section>
 
@@ -439,7 +631,7 @@ export default function PublicQuotationPage({ token }) {
                       <Eyebrow>{content.eventLabel} {String(index + 1).padStart(2, "0")}</Eyebrow>
                       {shoot.isMainEvent && <span className="q-label rounded-full border px-2.5 py-0.5 text-[9px] font-semibold" style={{ borderColor: "#e3cf8f", background: "#fbf3da", color: GOLD_DEEP, letterSpacing: ".18em" }}>★ {content.mainEventBadge}</span>}
                     </div>
-                    <h3 className="q-display mt-1 text-[26px] font-semibold uppercase leading-tight tracking-[0.02em] sm:text-[32px]" style={{ color: INK }}>{shoot.shoot || "Shoot"}</h3>
+                    <h3 className="q-display mt-1 text-[26px] font-semibold uppercase leading-tight tracking-[0.02em] sm:text-[32px]" style={{ color: INK }}>{shootDisplayName(shoot, "Shoot")}</h3>
                     {Boolean(meta) && <p className="mt-1.5 text-[14px]" style={{ color: "#5c5c5c" }}>{meta}</p>}
                     {care && <p className="mt-1 text-[14px]" style={{ color: "#5c5c5c" }}>{care}</p>}
                   </div>
@@ -451,7 +643,19 @@ export default function PublicQuotationPage({ token }) {
                 {(services.length > 0 || deliverables.length > 0) && <div className="mt-6 border-t" style={{ borderColor: "#eee7d9" }} />}
                 <div className="mt-6 space-y-8">
                   <LineList title={content.servicesTitle} rows={services} nameOf={(row) => row.serviceName || row.serviceDefinition?.name || "Service"} />
-                  <LineList title={content.deliverablesTitle} rows={deliverables} nameOf={(row) => row.deliverableName || row.deliverableDefinition?.name || "Deliverable"} />
+                  {/* A deliverable line reads as the studio configured it - "Album Printing -
+                      Canvera - 12x18 - 1.5 inch" - and not as the deliverable's bare name. Both
+                      are already on the row: the label is the one `deliverableVariantLabel` built
+                      when the variant was picked, which is the same sentence the generator's own
+                      table and the deliverables picker show, so the client is sent what the studio
+                      chose rather than a shorter version of it.
+
+                      `deliverableName` is left exactly as it is, here and everywhere: it is the
+                      deliverable's own name and what a project raised off this quotation matches
+                      by. It answers below only where there is no label - a line added without a
+                      variant, or a quotation saved before variants existed - which is what keeps
+                      every quotation already sent reading as it was sent. */}
+                  <LineList title={content.deliverablesTitle} rows={deliverables} nameOf={(row) => row.deliverableVariantLabel || row.deliverableName || row.deliverableDefinition?.name || "Deliverable"} />
                 </div>
               </article>;
             })}
@@ -462,16 +666,35 @@ export default function PublicQuotationPage({ token }) {
           </div>}
         </section>}
 
+        {/* ── The discounts, when there are any ── */}
+        <DiscountCard breakdown={quotationDiscountBreakdown(quotation)} />
+
         {/* ── The money ── */}
-        <section className="q-navy mx-[18px] mt-7 rounded-[26px] px-6 py-8 text-center text-white sm:mx-[45px] sm:px-10">
-          <Eyebrow color={GOLD} size="text-[12px]" className="tracking-[0.32em]">{content.pricingLabel}</Eyebrow>
-          <p className="mt-3 text-[48px] font-semibold leading-none tracking-tight sm:text-[64px]">{currency(quotation.amount)}</p>
-          <p className="q-label mt-3 text-[13px] font-medium tracking-[0.12em]" style={{ color: GOLD }}>{gstLabel(content.gstPercent)}</p>
-          {Boolean(content.validityText) && <>
-            <div className="mx-auto mt-6 h-px w-full max-w-3xl" style={{ background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent)" }} />
-            <p className="mt-4 text-[13px]" style={{ color: "#e8ecf3" }}>{content.validityText}</p>
-          </>}
-        </section>
+        {/* Each part prints while its switch is on (Settings → Quotation Settings → General →
+            Pricing & Total), and the card as a whole too. The figure is the saved total either way;
+            switching a part off changes no number. */}
+        {content.sections.pricing && (() => {
+          /*
+           * The link, not the account: the Assigned Branch's details are read on a page of their own
+           * rather than printed under the price, and absent where the branch has nothing to be paid
+           * into, so a quotation from a branch without bank details prints exactly as before.
+           */
+          const gstLine = content.sections.gst && content.gstLine ? content.gstLine : "";
+          const paymentLabel = content.sections.payment && content.paymentLabel && quotation.paymentDetailsAvailable === true ? content.paymentLabel : "";
+          const validityText = content.sections.validity && content.validityText ? content.validityText : "";
+          /*
+           * The quotation's own card, always exactly as it was. Once the studio has published extras on
+           * this booked quotation - the latest published revision only, so a draft never shows - the
+           * EXTRA section and the Updated Total follow it; the GST line on both is this same switch.
+           */
+          return <>
+            <QuotationPricingCard label={content.pricingLabel} amountText={currency(quotation.amount)} gstLine={gstLine} paymentHref={paymentHref} paymentLabel={paymentLabel} validityText={validityText} />
+            {quotation.saleExtras && <>
+              <QuotationExtraSection extras={quotation.saleExtras} />
+              <UpdatedTotalCard extras={quotation.saleExtras} gstLine={gstLine} />
+            </>}
+          </>;
+        })()}
 
         {/* ── The notes ── */}
         {/* Each of the four cards below prints only while its switch is on - Settings → Quotation

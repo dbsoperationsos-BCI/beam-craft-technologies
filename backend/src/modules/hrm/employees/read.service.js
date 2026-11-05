@@ -1,4 +1,5 @@
 const prisma = require("../../../config/db");
+const { everyChunk } = require("../../../services/wordChunks");
 const { workingEmployeeStatuses, FALLBACK_WORKING_STATUSES } = require("../../../services/employeeOptionLists");
 
 /**
@@ -97,18 +98,18 @@ async function branchWhere(branchIds) {
 
 /** Employees matching a search, in the safe shape. */
 async function searchEmployees({ search, department, status, limit, branchIds, active } = {}) {
-  // The branch rule sits under AND so the search's own OR below cannot stand in for it.
+  // The branch rule sits under AND so the search below cannot stand in for it.
   const where = { archivedAt: null, AND: [await branchWhere(branchIds)], ...(active ? { employmentStatus: { in: await workingEmployeeStatuses() } } : {}) };
 
-  const term = String(search || "").trim();
-  if (term) {
-    where.OR = [
-      { employeeId: { contains: term } },
-      { employeeName: { contains: term } },
-      { designation: { contains: term } },
-      { department: { contains: term } },
-    ];
-  }
+  // Word Chunk Search: every word typed, any order - beside the branch rule, never replacing it.
+  where.AND.push(...everyChunk(search, (chunk) => ({
+    OR: [
+      { employeeId: { contains: chunk } },
+      { employeeName: { contains: chunk } },
+      { designation: { contains: chunk } },
+      { department: { contains: chunk } },
+    ],
+  })));
   const inDepartment = String(department || "").trim();
   if (inDepartment) where.department = inDepartment;
   const employmentStatus = String(status || "").trim();

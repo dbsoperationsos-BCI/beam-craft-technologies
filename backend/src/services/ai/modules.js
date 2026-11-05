@@ -104,6 +104,36 @@ const AI_MODULES = {
      */
     description: "Users, roles and access.",
   },
+  /*
+   * Attendance is not a panel of its own but a **companion**: offered beside whichever module the
+   * panel is in, to whoever holds its permission - so "how many of them are present today" can be
+   * asked from Projects about the people the project list just named. Its permission is the
+   * attendance router's own (HRM / Employee Attendance); seeing anybody but yourself is a second
+   * rule the tool checks itself (`tools/attendance.js`).
+   */
+  ATTENDANCE: {
+    id: "ATTENDANCE",
+    label: "Attendance",
+    permissionModule: "HRM",
+    feature: "Employee Attendance",
+    companion: true,
+    description: "Who is present, late, absent or on leave on a day.",
+  },
+  /*
+   * HRM requests - leave, permission, on duty and the rest - as the HRM → Requests screen shows
+   * them, offered beside every panel the same way. Its permission is the requests routes' own: the
+   * router admits either HRM / Employee Attendance or HRM / Requests (`REQUEST_PERMISSIONS`), so
+   * either one here (`anyOf`). Which requests is the screen's own rule again (`tools/requests.js`).
+   */
+  REQUESTS: {
+    id: "REQUESTS",
+    label: "Requests",
+    permissionModule: "HRM",
+    feature: "Requests",
+    anyOf: [{ module: "HRM", feature: "Employee Attendance" }, { module: "HRM", feature: "Requests" }],
+    companion: true,
+    description: "Leave, permission and other HRM requests: raised, waiting and decided.",
+  },
 };
 
 /** Every registered module id, not including GLOBAL. */
@@ -139,8 +169,14 @@ function isGlobal(id) {
  * Separate from whether the asker may use it - that is `accessContext.js`. This only says the name
  * corresponds to something real.
  */
+// A panel's scope: a module of its own, never a companion - those come only alongside one.
 function isKnownScope(id) {
-  return isGlobal(id) || Boolean(findModule(id));
+  return isGlobal(id) || Boolean(findModule(id) && !findModule(id).companion);
 }
 
-module.exports = { AI_MODULES, GLOBAL, moduleIds, findModule, permissionModuleFor, isGlobal, isKnownScope };
+/** The modules offered beside every panel, to whoever holds their permission. */
+function companionModules() {
+  return Object.values(AI_MODULES).filter((module) => module.companion);
+}
+
+module.exports = { AI_MODULES, GLOBAL, moduleIds, findModule, permissionModuleFor, isGlobal, isKnownScope, companionModules };

@@ -3,8 +3,12 @@
 import { createPortal } from "react-dom";
 import useStickyTab from "@/components/shared/useStickyTab";
 import useSubmitOnce from "@/components/shared/useSubmitOnce";
+import useFormErrors from "@/components/shared/useFormErrors";
+import { markedFieldsMessage } from "@/lib/formErrors.mjs";
 import { usePreference } from "@/components/preferences/PreferencesProvider";
 import ToggleSwitch from "@/components/shared/ToggleSwitch";
+import HelpTip from "@/components/shared/HelpTip";
+import { detailHelpFor } from "@/constants/detailHelp";
 import { Fragment, cloneElement, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ModulePageHeader from "@/components/layout/ModulePageHeader";
 import { useModuleAccess, useRouteAccess } from "@/components/auth/PermissionsProvider";
@@ -12,17 +16,34 @@ import { toIsoDay } from "@/lib/crmLeadDates";
 import { useRouter, useSearchParams } from "next/navigation";
 import Button from "@/components/shared/Button";
 import Dropdown from "@/components/shared/Dropdown";
+import MultiSelectField from "@/components/shared/MultiSelectField";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import ReadOnlyFieldset from "@/components/shared/ReadOnlyFieldset";
 import BulkImportLeadsDialog from "@/components/sales/BulkImportLeadsDialog";
+// The studio's own clock, which several of this board's own stamps are read in. The call formatters
+// that also used it have moved to `@/lib/callFormats.mjs` and carry their own copy of it.
+const ACTIVITY_TIME_ZONE = "Asia/Kolkata";
+
+import CallTranscriptsTab from "@/components/shared/CallTranscriptsTab";
+// The two call formatters the popup and the shared tab both read a call by.
+import { formatActivityTime, formatCallDuration } from "@/lib/callFormats.mjs";
 import LeadAiPanel from "@/components/sales/LeadAiPanel";
 import LeadNebulaPanel from "@/components/ai/LeadNebulaPanel";
 import LeadNebulaButton from "@/components/ai/LeadNebulaButton";
 import ContextMenu from "@/components/ui/ContextMenu";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import { MOVE_TARGETS, VERTICAL_MOVE_CLEARS, verticalMoveWarning } from "@/lib/crmVerticalMove.mjs";
 import useUnsavedGuard from "@/components/shared/useUnsavedGuard";
 import { leadFormHasEntries } from "@/lib/crmLeadForm.mjs";
 import { MAX_REMARK_ATTACHMENTS, leadRemarkEntries, normalizeRemarkAttachments, normalizeRemarkEntries, remarkSummary } from "@/lib/crmRemarks.mjs";
+/*
+ * The notes composer, which used to be defined in this file. Moved to `shared/` because the Interview
+ * register needs the same control and had grown a second, poorer answer to the same question; nothing
+ * about it changed for the lead.
+ */
+import NotesComposer from "@/components/shared/NotesComposer";
+import CrmKanbanBoard from "@/components/sales/CrmKanbanBoard";
+import { formatDateTime } from "@/lib/formatDateTime.mjs";
 import { openNebula } from "@/lib/ai/nebulaPanel";
 import DataTable from "@/components/data-table/DataTable";
 import SimpleTable from "@/components/data-table/SimpleTable";
@@ -49,7 +70,6 @@ import IconButton from "@/components/shared/IconButton";
 import ChevronIcon from "@/components/ui/ChevronIcon";
 import { setActiveVertical } from "@/lib/ai/activeVertical";
 import CloseIcon from "@/components/ui/CloseIcon";
-import Checkbox from "@/components/shared/Checkbox";
 import FilterCombobox from "@/components/shared/FilterCombobox";
 import FilterDateInput from "@/components/shared/FilterDateInput";
 import { apiRequest } from "@/lib/apiClient";
@@ -58,7 +78,7 @@ import { calculatorTotals, serviceQuantitiesFromRows, serviceRowsFromQuantities,
 import { generatorDraftFromCalculator } from "@/lib/quotationCalculatorHandoff.mjs";
 import { stashQuotationGeneratorDraft } from "@/lib/quotationGeneratorDraft";
 import { getProjectDeliverableDefinitions, getProjectServiceDefinitions } from "@/services/project-management/project-workflow.service";
-import { getCrmLead } from "@/services/sales/crm-leads.service";
+import { getCrmLead, moveCrmLeadVertical } from "@/services/sales/crm-leads.service";
 import { durationForSessionTiming } from "@/components/project-management/AddShootDialog";
 import QuotationCalculatorLines from "@/components/sales/QuotationCalculatorLines";
 import { checkCsvAgainstTable } from "@/lib/csvTemplateCheck";
@@ -73,9 +93,8 @@ import FormatListNumberedRoundedIcon from "@mui/icons-material/FormatListNumbere
 import OpenInFullRoundedIcon from "@mui/icons-material/OpenInFullRounded";
 import CloseFullscreenRoundedIcon from "@mui/icons-material/CloseFullscreenRounded";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
-import { CustomFieldInput, defaultOptionValue } from "@/components/sales/TableSettingsPanel";
+import { CustomFieldInput, customFieldProblem, defaultOptionValue } from "@/components/sales/TableSettingsPanel";
 import MeetingsDialog from "@/components/sales/MeetingsDialog";
 import DuplicateEnquiryDialog from "@/components/sales/DuplicateEnquiryDialog";
 import { getDuplicateEnquiries } from "@/services/sales/crm-lead-duplicates.service";
@@ -93,10 +112,13 @@ import useBranchOptions from "@/components/sales/useBranchOptions";
 import useLeadSuggestionLists from "@/components/sales/useLeadSuggestionLists";
 // The four boards this module is read through, and the rule that says which one a lead is on.
 import { CALLS_BOARD, CALLS_BOARD_LABEL, boardOptions, isCallRecord, isUnassignedCall } from "@/lib/crmBoards";
+import { CRM_BOARD_STATUS_ORDER, crmBoardColumnStatuses } from "@/lib/crmBoardOrder.mjs";
 import DateRangeSwitch from "@/components/shared/DateRangeSwitch";
 import { ALL_TIME, resolveDateRange, showsDateRange } from "@/lib/crmDateRange.mjs";
 import { getCrmEmployees } from "@/services/sales/employees.service";
 import { TABLE_SETTINGS_SAVED_EVENT } from "@/lib/globalSettings";
+import { verticalCode } from "@/components/sales/whatsappGroupNameUtils";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 // The four boards the dropdown offers, as ids - what `useStickyTab` checks a remembered board
 // against, so the two can never name different sets.
 const boardIds = boardOptions.map((option) => option.value);
@@ -306,7 +328,35 @@ const WHATSAPP_STATUS_POLL_MS = 15000;
 // so it has no follow-up date to record and the picker is closed off for them.
 const STATUSES_WITHOUT_FOLLOW_UP = ["Invalid", "Rejected"];
 
+/*
+ * Whether a lead at this status carries no next follow-up: the two above everywhere, and plain
+ * Converted on **Dum Dum and Corp** - a wedding or corporate client who has booked is not called back
+ * about the enquiry, and the day it converted is its Last Follow-up Date. A Qua Qua client comes back
+ * (the newborn, the birthday, the next shoot), so a Converted Qua Qua lead keeps an optional next
+ * follow-up. "Converted & Followup" always keeps one.
+ *
+ * `vertical` is the lead's own vertical text, read the way the server's `board_key` reads it (blank
+ * is Dum Dum), so the form and the server agree on which leads this is. Kept apart from the list
+ * above because that one also decides what a turned-down lead may be saved without
+ * (`REJECTED_LEAD_FIELDS`), and a converted lead still needs everything a lead needs. Mirrors
+ * `endsTheConversation` in backend/src/modules/sales/crm-leads/crmLeadService.js.
+ */
+const isQuaQuaVertical = (vertical) => String(vertical ?? "").trim().replace(/ /g, "").toLowerCase() === "quaqua";
+function dropsNextFollowUp(status, vertical) {
+  const current = String(status ?? "").trim();
+  return STATUSES_WITHOUT_FOLLOW_UP.includes(current) || (current === "Converted" && !isQuaQuaVertical(vertical));
+}
+
 const CONVERTED_AND_FOLLOWUP_STATUS = "Converted & Followup";
+
+/*
+ * Statuses that may not be saved without a Next Follow-up Date: the lead is still being chased,
+ * so when the next call is due has to be written down. The rest either end the chase
+ * (`dropsNextFollowUp`) or have no status yet, and the Last Follow-up Date - stamped
+ * by every save - is all they keep.
+ */
+const NEXT_FOLLOW_UP_REQUIRED_STATUSES = ["CNA", "Interested", "Followup", CONVERTED_AND_FOLLOWUP_STATUS];
+const NEXT_FOLLOW_UP_FIELD = { key: "nextFollowUpDate", label: "Next Follow-up Date", message: "Next Follow-up Date is required for this status." };
 const CONVERTED_AND_FOLLOWUP_VERTICAL = "Qua Qua";
 
 /*
@@ -378,6 +428,12 @@ const INACTIVE_STATUS = "Inactive";
  * thing for the tab, its count and the Status column the server prints.
  */
 const UNASSIGNED_STATUS = "Unassigned";
+/*
+ * Every project of the lead is in Resource Management → Recycling Bin. Shown, never stored and never
+ * offered as a status to choose: the server reads it (`PROJECT_DELETED_SQL` in crmLeadService.js) and
+ * the lead reads its own status again once the project is restored.
+ */
+const PROJECT_DELETED_STATUS = "Project deleted";
 const isUnassignedLead = (lead = {}, details = {}) => !String(lead?.crm ?? details?.crm ?? "").trim();
 
 /**
@@ -457,6 +513,7 @@ function occasionValue(lead, details, key) {
  * out exactly the rows this prints that label on.
  */
 function resolveLeadStatus(lead = {}, details = {}) {
+  if (lead.projectDeleted || details.projectDeleted) return PROJECT_DELETED_STATUS;
   // Before everything else, occasions included: an occasion nobody has been given is no more being
   // worked than an ordinary lead is. See `UNASSIGNED_STATUS`.
   if (isUnassignedLead(lead, details)) return UNASSIGNED_STATUS;
@@ -517,7 +574,7 @@ function occasionEcho(record, key, value) {
 }
 
 /**
- * What a status change to Invalid or Rejected takes with it.
+ * What a status change to Invalid, Rejected or Converted takes with it.
  *
  * A lead being turned down is not being chased, so it has no next call to book - and the popup
  * takes the two fields off the form when one of those is chosen. Hiding them is not enough on its
@@ -532,7 +589,7 @@ function occasionEcho(record, key, value) {
  * Add Lead applies the same rule in `updateForm`, against a form that has no occasion to echo to.
  */
 function followUpClearedBy(record, key, value) {
-  if (key !== "leadStatus" || !STATUSES_WITHOUT_FOLLOW_UP.includes(String(value ?? "").trim())) return {};
+  if (key !== "leadStatus" || !dropsNextFollowUp(value, record?.vertical)) return {};
   return {
     nextFollowUpDate: "",
     nextFollowUpTime: "",
@@ -567,6 +624,32 @@ const LEAD_STATUS_OPTIONS = [
   { value: "Converted", className: "bg-[#00973e] text-white border-[#00973e]" },
   { value: CONVERTED_AND_FOLLOWUP_STATUS, className: "bg-[#10b981] text-white border-[#10b981]" },
 ];
+
+/*
+ * The order the **board's** columns stand in, which is the pipeline's own: a lead nobody owns, one
+ * not yet rung, the two states it is worked in, then the ways it ends.
+ *
+ * Deliberately not the order of `LEAD_STATUS_OPTIONS` above, and the list above is deliberately not
+ * reordered to match: that one is the order the **pills** offer a status in, inside the lead popup
+ * and the info panel, and it is read by people choosing one rather than by somebody reading a
+ * pipeline left to right. Two different questions, two orders.
+ *
+ * A status missing from this list is **not** dropped - it falls in after the ones named, which is
+ * what keeps a status added to the module later from quietly having no column. A status named here
+ * that the vertical does not offer simply does not appear; `Converted & Followup` is Qua Qua's alone.
+ */
+const BOARD_STATUS_ORDER = CRM_BOARD_STATUS_ORDER;
+
+/** The vertical's statuses in the board's order, with anything unnamed kept at the end. */
+function boardStatusOptions(vertical) {
+  const options = leadStatusOptionsForVertical(vertical);
+  const rank = (option) => {
+    const at = BOARD_STATUS_ORDER.indexOf(option.value);
+    return at === -1 ? BOARD_STATUS_ORDER.length : at;
+  };
+  // `sort` is stable, so the unnamed ones keep the order the module lists them in.
+  return [...options].sort((a, b) => rank(a) - rank(b));
+}
 
 function leadStatusOptionsForVertical(vertical) {
   if (normalizeVertical(vertical) === CONVERTED_AND_FOLLOWUP_VERTICAL) return LEAD_STATUS_OPTIONS;
@@ -677,242 +760,6 @@ const ACTIVITY_TITLES = {
 // whether the lead is a wedding, a baby shoot or a corporate enquiry.
 
 /*
- * The Transcripts tab's own small vocabulary.
- *
- * A transcript is made after the call, by a worker, so most of what this renders is a state: queued,
- * running, done, or failed with a reason. Only the last one has a conversation to show.
- */
-const TRANSCRIPT_STATUS_TONES = {
-  PENDING: { label: "Queued", className: "bg-slate-100 text-slate-600 ring-slate-200" },
-  PROCESSING: { label: "Transcribing", className: "bg-blue-50 text-blue-700 ring-blue-200" },
-  COMPLETED: { label: "Ready", className: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
-  FAILED: { label: "Unavailable", className: "bg-red-50 text-red-700 ring-red-200" },
-};
-
-/*
- * The language a call was held in, as a name.
- *
- * Transcripts are translated into English whatever was spoken, so this is only ever used to say
- * what it was translated *from* - which a reader needs, because a translated sentence can read
- * stiffly and that is the translation's doing, not the client's.
- */
-const SPOKEN_LANGUAGES = {
-  ta: "Tamil", en: "English", hi: "Hindi", te: "Telugu", ml: "Malayalam",
-  kn: "Kannada", mr: "Marathi", bn: "Bengali", gu: "Gujarati", ur: "Urdu", pa: "Punjabi",
-};
-
-function spokenLanguage(code) {
-  const key = String(code || "").trim().toLowerCase();
-  return SPOKEN_LANGUAGES[key] || (key ? key.toUpperCase() : "");
-}
-
-// A transcript is translated when the call was held in something other than English.
-function wasTranslated(transcript) {
-  const code = String(transcript?.language || "").trim().toLowerCase();
-  return Boolean(code) && code !== "en" && String(transcript?.provider || "").includes("translate");
-}
-
-// mm:ss against the start of the call, which is how a transcript is read - "at 00:14 they said".
-function formatOffset(ms) {
-  const total = Math.max(0, Math.round(Number(ms) || 0) / 1000);
-  const minutes = Math.floor(total / 60);
-  return `${String(minutes).padStart(2, "0")}:${String(Math.floor(total % 60)).padStart(2, "0")}`;
-}
-
-// The speaker as a person, not as an enum. UNKNOWN says "Speaker" rather than guessing a side.
-function speakerLabel(speaker) {
-  if (speaker === "EMPLOYEE") return "Employee";
-  if (speaker === "CLIENT") return "Client";
-  return "Speaker";
-}
-
-/**
- * The Transcripts tab.
- *
- * One card per recorded call: when it happened, which way it went, who took it, how long it ran,
- * and a player. Underneath, what the model made of it - a summary, the outcome, the next action -
- * and the spoken text itself behind **View Full Transcript**.
- *
- * It **reads, and writes nothing**. The model also proposed fields for the lead - a status, a
- * follow-up date, a budget - each with a tick box and an Apply button. The studio does not want a
- * machine transcript of a noisy phone call in two languages deciding what a lead says, even with a
- * press in between, so the panel is gone and so is the route behind it. What is left is the call,
- * described.
- */
-function TranscriptsTab({ transcripts = [], loading = false, onNotice, onError }) {
-  const [openId, setOpenId] = useState("");
-  const [detail, setDetail] = useState(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-
-  async function openTranscript(id) {
-    setOpenId(id);
-    setDetail(null);
-    setDetailLoading(true);
-    try {
-      const response = await apiRequest(`/api/sales/crm-leads/transcripts/${encodeURIComponent(id)}`);
-      setDetail(response?.data || null);
-    } catch (error) {
-      onError?.(error.message || "Unable to load that transcript.");
-      setOpenId("");
-    } finally {
-      setDetailLoading(false);
-    }
-  }
-
-  if (loading) {
-    return <div className="flex min-h-[20rem] items-center justify-center p-5 text-sm text-slate-500">Loading transcripts...</div>;
-  }
-  if (!transcripts.length) {
-    return (
-      <div className="flex min-h-[20rem] flex-col items-center justify-center gap-1 p-5 text-center text-sm text-slate-500">
-        <p>No transcripts yet.</p>
-        {/* Said plainly: an empty tab on a lead with calls otherwise reads as broken. */}
-        <p className="text-xs text-slate-400">A transcript appears a few minutes after a recorded call arrives from Callyzer.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
-      {transcripts.map((transcript) => {
-        const tone = TRANSCRIPT_STATUS_TONES[transcript.status] || TRANSCRIPT_STATUS_TONES.PENDING;
-
-        return (
-          <section key={transcript.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-            <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-200 px-4 py-3 sm:px-5">
-              <span className="text-sm font-semibold text-slate-800">{formatActivityTime(transcript.createdAt) || "—"}</span>
-              <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ring-inset ${tone.className}`}>
-                {tone.label}
-              </span>
-              {transcript.durationSeconds > 0 && (
-                <span className="text-xs text-slate-500">{formatCallDuration(transcript.durationSeconds)}</span>
-              )}
-              {wasTranslated(transcript)
-                ? <span className="text-xs text-slate-500">Translated from {spokenLanguage(transcript.language)}</span>
-                : transcript.language ? <span className="text-xs text-slate-500">{spokenLanguage(transcript.language)}</span> : null}
-              {transcript.recordingUrl && (
-                <audio controls preload="none" src={transcript.recordingUrl} className="ml-auto h-9 w-56 max-w-full" />
-              )}
-            </header>
-
-            <div className="space-y-3 px-4 py-4 text-sm sm:px-5">
-              {transcript.status === "FAILED" && (
-                <p className="text-sm text-red-700">
-                  {transcript.errorCode === "NO_RECORDING"
-                    ? "This call has no recording, so there is nothing to transcribe."
-                    : transcript.errorMessage || "The transcription could not be completed."}
-                </p>
-              )}
-              {(transcript.status === "PENDING" || transcript.status === "PROCESSING") && (
-                <p className="text-sm text-slate-500">The recording is being transcribed. This usually takes a few minutes.</p>
-              )}
-
-              {transcript.summary && (
-                <div>
-                  <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">AI Summary</h4>
-                  <p className="mt-1 whitespace-pre-line text-slate-700">{transcript.summary}</p>
-                </div>
-              )}
-              <div className="grid gap-3 sm:grid-cols-2">
-                {transcript.callOutcome && (
-                  <div>
-                    <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Call Outcome</h4>
-                    <p className="mt-1 text-slate-700">{transcript.callOutcome}</p>
-                  </div>
-                )}
-                {transcript.nextAction && (
-                  <div>
-                    <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Next Action</h4>
-                    <p className="mt-1 text-slate-700">{transcript.nextAction}</p>
-                  </div>
-                )}
-              </div>
-
-              {transcript.status === "COMPLETED" && (
-                <Button variant="secondary" className="rounded-md" onClick={() => openTranscript(transcript.id)}>
-                  View Full Transcript
-                </Button>
-              )}
-            </div>
-          </section>
-        );
-      })}
-
-      {openId && (
-        <FullTranscriptDialog
-          transcript={detail}
-          loading={detailLoading}
-          onClose={() => { setOpenId(""); setDetail(null); }}
-        />
-      )}
-    </div>
-  );
-}
-
-/**
- * The conversation, line by line.
- *
- * A dialog rather than an expanding card: a ten-minute call is a long read, and it should not push
- * the other calls off the screen. The speaker note at the top is not decoration - the labels are
- * inferred from the call's direction, and a reader who assumes otherwise will misread who promised
- * what.
- */
-function FullTranscriptDialog({ transcript, loading, onClose }) {
-  useEscapeKey(onClose);
-  if (typeof document === "undefined") return null;
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/45 p-3 sm:p-4"
-      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Full transcript"
-        className="themed-surface flex max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
-      >
-        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 px-5 py-4">
-          <h2 className="text-lg font-medium text-slate-800">Full Transcript</h2>
-          <IconButton label="Close transcript" onClick={onClose} className="text-slate-500 hover:bg-slate-50"><CloseIcon className="h-4 w-4" /></IconButton>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          {loading && <p className="py-8 text-center text-sm text-slate-500">Loading transcript...</p>}
-          {!loading && !transcript && <p className="py-8 text-center text-sm text-slate-500">That transcript could not be loaded.</p>}
-          {!loading && transcript && (
-            <>
-              <p className="mb-4 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
-                {wasTranslated(transcript)
-                  ? `This call was held in ${spokenLanguage(transcript.language)} and machine-translated into English, so the wording is the translator's rather than the speaker's. `
-                  : ""}
-                Speaker names are inferred from the call&apos;s direction and the pauses between turns, not from the
-                voices themselves. They can be the wrong way round.
-              </p>
-              {(transcript.segments || []).length === 0 && (
-                <p className="py-8 text-center text-sm text-slate-500">No speech was detected in this recording.</p>
-              )}
-              <div className="space-y-3">
-                {(transcript.segments || []).map((segment) => (
-                  <div key={segment.id} className="grid grid-cols-[3.5rem_1fr] gap-3">
-                    <span className="pt-0.5 text-xs tabular-nums text-slate-400">{formatOffset(segment.startMs)}</span>
-                    <div>
-                      <span className={`text-xs font-semibold ${segment.speaker === "CLIENT" ? "text-emerald-700" : segment.speaker === "EMPLOYEE" ? "text-blue-700" : "text-slate-500"}`}>
-                        {speakerLabel(segment.speaker)}
-                      </span>
-                      <p className="text-sm text-slate-700">{segment.text}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
-/*
  * The views that live behind the ⋮ at the end of the tab strip rather than on it.
  *
  * Six tabs already overflow a laptop and scroll on a phone; a seventh would push the strip past
@@ -980,34 +827,6 @@ function activityDetail(entry) {
 }
 
 // 12-hour clock, e.g. "06 Aug 2026 06:40 pm".
-const ACTIVITY_TIME_ZONE = "Asia/Kolkata";
-
-function formatActivityTime(value) {
-  if (!value) return "";
-  const when = new Date(value);
-  if (Number.isNaN(when.getTime())) return "";
-  const date = new Intl.DateTimeFormat("en-GB", { timeZone: ACTIVITY_TIME_ZONE, day: "2-digit", month: "short", year: "numeric" }).format(when);
-  const time = new Intl.DateTimeFormat("en-GB", { timeZone: ACTIVITY_TIME_ZONE, hour: "2-digit", minute: "2-digit", hourCycle: "h12" }).format(when);
-  return `${date} ${time.toLowerCase()}`;
-}
-
-/**
- * How long a call lasted, read the way a person says it.
- *
- * Callyzer counts in seconds, and "310" tells nobody anything at a glance. A missed call is zero
- * seconds and says "—": there is no duration to report, and printing "0s" invites the reader to
- * wonder whether the call connected.
- */
-function formatCallDuration(seconds) {
-  const total = Math.max(0, Math.round(Number(seconds) || 0));
-  if (!total) return "—";
-  if (total < 60) return `${total}s`;
-  const minutes = Math.floor(total / 60);
-  const rest = total % 60;
-  if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
-}
 
 /*
  * The colour a call type carries.
@@ -1463,6 +1282,7 @@ function normalizeLeadStatus(value) {
   if (status === "interested") return "Interested";
   if (status === "yet to connect" || status === "yettoconnect") return YET_TO_CONNECT_STATUS;
   if (status === "unassigned") return UNASSIGNED_STATUS;
+  if (status === "project deleted") return PROJECT_DELETED_STATUS;
   if (status === "inactive") return INACTIVE_STATUS;
   return value || "—";
 }
@@ -1504,6 +1324,9 @@ function statusAppearance(value) {
       return { dot: "bg-[#7c3aed]", text: "text-slate-600", border: "border-slate-300" };
     case YET_TO_CONNECT_STATUS:
       return { dot: "bg-[#c3c7ce]", text: "text-slate-600", border: "border-slate-300" };
+    case PROJECT_DELETED_STATUS:
+      // Brown, which no other status wears: the lead's own work is done, its booking is in the bin.
+      return { dot: "bg-[#92400e]", text: "text-slate-600", border: "border-slate-300" };
     case INACTIVE_STATUS:
       return { dot: "bg-[#6b7280]", text: "text-slate-600", border: "border-slate-300" };
     /*
@@ -1681,7 +1504,10 @@ function getTabsForBoard(board) {
 // were arrays here, a second copy of the quotation's, that no studio could add to. Both fields stay
 // typed-with-suggestions: anything not listed can still be typed straight in.
 
-const shootOptions = ["Haldi", "Bride Haldi", "Groom Haldi", "New Born", "Baby Shoot IH", "Baby Shoot OH", "Birthday Shoot", "Engagement", "Pre Wedding", "Mehandi", "Wedding", "Post Wedding", "Baby Shower", "Maternity IH", "Maternity OH", "Reception", "Couple Shoot IH", "Naming ceremony", "Family", "Corporate", "Wedding + Reception"];
+// Shoot Type and Offer Type are the studio's lists too, read by the same hook: Shoot Type is the
+// lead's vertical's own shoots (Settings -> Fields -> Shoot Types, a tab per brand - the list the
+// Quotation Generator's Add Shoot offers for that brand), Offer Type the `offer-types` list. There
+// is no array here to stand in for either: an entry removed there is gone from the form.
 
 // Columns whose values come from a known set. The list is a convenience on top of the text
 // box, not a restriction - sheets and imports put their own spellings in these columns.
@@ -1692,9 +1518,13 @@ const CHOICE_FILTER_OPTIONS = {
   callType: ["Incoming", "Outgoing", "Missed", "Rejected"],
   // `assignedBranch` and `crm` are not here: both are fetched rather than written down - the
   // branches the studio maintains, and the Sales roster - so the page merges them in at render.
-  shootType: shootOptions,
-  eventPlannedType: shootOptions,
-  offerType: shootOptions,
+  // Shoot Type, Event Planned Type and Offer Type are lists the studio keeps in Settings → Fields.
+  // `true` here means "a choice column" and nothing more: the arrays in this object are never read
+  // as the choices either - `columnFilterKind` asks only whether a column is named - and every
+  // choice filter offers whatever its rows actually hold (`columnValues`).
+  shootType: true,
+  eventPlannedType: true,
+  offerType: true,
   ihOh: ["IH", "OH"],
 };
 
@@ -1858,16 +1688,18 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("en-GB", { dateStyle: "medium" }).format(date);
 }
 
-function formatDateTime(value) {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("en-GB", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    // h12, not hour12: en-GB's hour12 uses an 0-11 cycle, which renders noon as "00:06 pm".
-    hourCycle: "h12",
-  }).format(date);
+/*
+ * The studio's date and time of day, in India, whatever zone this computer's clock is set to.
+ * A lead's Added Time and Enquiry Date are facts about the studio; taken from the machine they came
+ * out 5:30 behind on a laptop set to UTC. The server fills the same two from the same zone when a
+ * record brings none (`services/studioTime.js`).
+ */
+function studioDateKey(date = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: ACTIVITY_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+
+function studioClockTime(date = new Date()) {
+  return new Intl.DateTimeFormat("en-GB", { timeZone: ACTIVITY_TIME_ZONE, hour: "2-digit", minute: "2-digit", hourCycle: "h12" }).format(date).toLowerCase();
 }
 
 function getLocalDateKey(date = new Date()) {
@@ -1905,12 +1737,12 @@ const leadWorkedTodayPatch = () => ({ lastFollowUpDate: getLocalDateKey() });
 // Required on every vertical. Each is stored in its own column, so a lead captured here
 // shows up in the table column of the same name.
 const REQUIRED_LEAD_FIELDS = [
-  { key: "name", label: "Enquire Name" },
-  { key: "phone", label: "Contact" },
-  { key: "assignedBranch", label: "Assigned Branch" },
+  { key: "name", label: "Enquire Name", message: "Enter the client's name." },
+  { key: "phone", label: "Contact", message: "Enter the contact number." },
+  { key: "assignedBranch", label: "Assigned Branch", message: "Choose a branch." },
   // What the studio reckons the lead is worth. Required on all three verticals, unlike the budget
   // fields beside it: those are what the client said, and a client who has not said is common.
-  { key: "estimatedValue", label: "Estimated Value" },
+  { key: "estimatedValue", label: "Estimated Value", message: "Enter the estimated value." },
 ];
 
 /*
@@ -1936,7 +1768,7 @@ const REQUIRED_LEAD_FIELDS = [
  * see `REJECTED_LEAD_FIELDS`. See `UNKNOWN_CALLER_UNASKED_FIELDS` and `UNANSWERED_LEAD_STATUSES`.
  */
 const POPUP_REQUIRED_FIELDS = {
-  "Qua Qua": [{ key: "dateOfBirthOrEdod", label: "Date of Birth (or) EDOD" }],
+  "Qua Qua": [{ key: "dateOfBirthOrEdod", label: "Date of Birth (or) EDOD", message: "Choose the date of birth or EDOD." }],
 };
 
 /*
@@ -2021,9 +1853,12 @@ function requiredLeadFields(status = "", name = "", { vertical = "", popup = fal
    */
   const current = normalizeLeadStatus(status);
   if (STATUSES_WITHOUT_FOLLOW_UP.includes(current)) return REJECTED_LEAD_FIELDS;
-  const asked = popup
-    ? [...REQUIRED_LEAD_FIELDS, ...(POPUP_REQUIRED_FIELDS[String(vertical || "").trim()] || [])]
-    : REQUIRED_LEAD_FIELDS;
+  const asked = [
+    ...REQUIRED_LEAD_FIELDS,
+    ...(popup ? POPUP_REQUIRED_FIELDS[String(vertical || "").trim()] || [] : []),
+    // A lead still being chased has to say when the next call is - see `NEXT_FOLLOW_UP_REQUIRED_STATUSES`.
+    ...(NEXT_FOLLOW_UP_REQUIRED_STATUSES.includes(current) ? [NEXT_FOLLOW_UP_FIELD] : []),
+  ];
   // The caller nobody reached, or a call to this lead that went unanswered. Both leave Estimated
   // Value and - on Qua Qua - the date unknowable, so both excuse the same two fields.
   if (!isUnknownCallerName(name) && !UNANSWERED_LEAD_STATUSES.includes(current)) return asked;
@@ -2041,6 +1876,25 @@ function missingRequiredLeadFields(form, options = {}) {
   // them again.
   return requiredLeadFields(form?.leadStatus, form?.name, options)
     .filter(({ key }) => !String(form?.[key] ?? "").trim());
+}
+
+/** The same, as the message under each box: `{ phone: "Enter the contact number." }`. */
+function leadFieldProblems(form, options = {}) {
+  return Object.fromEntries(missingRequiredLeadFields(form, options).map(({ key, message }) => [key, message]));
+}
+
+/**
+ * The vertical's own Table Settings fields the studio marked required, as `{ "custom:<key>": message }`.
+ * Prefixed so a custom key can never land on a built-in box of the same name.
+ */
+function customLeadFieldProblems(form, fields = []) {
+  return Object.fromEntries((fields || []).map((field) => [`custom:${field.key}`, customFieldProblem(field, form?.customFields?.[field.key])]));
+}
+
+/** The message a required lead box shows while it is marked and still empty, "" otherwise. */
+function leadFieldMessage(key, marked, form, options = {}) {
+  if (!marked) return "";
+  return missingRequiredLeadFields(form, options).find((field) => field.key === key)?.message || "";
 }
 
 /**
@@ -2077,8 +1931,8 @@ function emptyLeadForm() {
     name: "",
     // A time, not a date - the column is "Added Time", and the date is already carried
     // by createdDate and the row timestamp.
-    addedTime: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hourCycle: "h12" }).toLowerCase(),
-    createdDate: getLocalDateKey(),
+    addedTime: studioClockTime(),
+    createdDate: studioDateKey(),
     phone: "",
     vertical: "Dum Dum",
     crm: "",
@@ -2191,6 +2045,40 @@ function leadFormFromCall(lead = {}, details = {}) {
   };
 }
 
+/**
+ * An **existing** lead as the Add Lead form holds it, for assigning one nobody owns.
+ *
+ * A lead with no CRM reads as "Unassigned" on the board whatever its status, and the lead popup has
+ * no Assign To field - the only control that picks an employee is this form's. So dragging an
+ * unassigned card onto a status opens the form on the lead it already is: its own details, its own
+ * enquiry id, Assign To waiting, and the status it was dropped on already chosen.
+ *
+ * Unlike `leadFormFromCall` above, **the id is kept**: there is a lead here already and the save is
+ * an update of it, not a new enquiry. Its vertical is kept for the same reason - the lead is on a
+ * board already, and re-seeding it onto Dum Dum would move a Qua Qua lead by opening a form.
+ *
+ * Every field the form offers is taken from the record, details first where both hold a value: the
+ * details row is what the popup writes, so it is the newer of the two.
+ */
+function leadFormFromLead(lead = {}, details = {}, status = "") {
+  const merged = { ...lead, ...Object.fromEntries(Object.entries(details).filter(([, value]) => value !== null && value !== undefined && value !== "")) };
+  const entries = leadRemarkEntries(details.remarkEntries, lead.remarkEntries, details.remarks, lead.remarks);
+  const blank = emptyLeadForm();
+  const taken = Object.fromEntries(Object.keys(blank).map((key) => [key, merged[key] ?? blank[key]]));
+  return {
+    ...taken,
+    // Its own, not a new one: this form is updating the lead rather than writing another.
+    id: lead.id || "",
+    vertical: normalizeVertical(merged.vertical) || blank.vertical,
+    // The column it was dropped on. Left as it was if the drop carried nothing.
+    leadStatus: status || merged.leadStatus || "",
+    remarkEntries: entries,
+    remarks: remarkSummary(entries),
+    attachments: details.attachments || [],
+    customFields: merged.customFields || blank.customFields,
+  };
+}
+
 // Event Details stores one "City, State" string. The CRM table has separate City and
 // State columns, so split it on the last comma; with no comma the whole value is the city.
 function splitDistrictState(value) {
@@ -2220,23 +2108,31 @@ function resolveLeadVertical(lead = {}, details = {}) {
 }
 
 const CLIENT_FIELD_SECTIONS = {
-  // Each inner array is one row of the form. Groom, bride and reference each get their own,
-  // so a person's three fields read across together instead of wrapping mid-way through.
+  /*
+   * Each inner array is one row of the popup's Client Details, and every row but the last is three
+   * across - which is what the grid is. A short row leaves an empty column beside it and starts the
+   * next group lower, a gap through the middle of the form. Groom, bride and the baby keep a row of
+   * their own, so a person's fields read across together.
+   *
+   * The first two rows are the same on every vertical: who the client is and the numbers they are
+   * reached on (WhatsApp beside Contact, to be compared), then where the lead sits and who works it.
+   * Vertical and Assign To are the lead popup's own - picking a vertical moves the lead.
+   */
   "Dum Dum": [
     [
       ["Enquiry Name", "name"],
       ["Contact", "phone"],
-      // Beside Contact on every vertical: the number a client is messaged on is not always the
-      // one they enquired from, and the two belong side by side to be compared.
       ["WhatsApp Number", "whatsappNumber"],
     ],
-    // Three to a row, which is what the grid is. A fourth field in the row above pushed Assigned
-    // Branch onto a line of its own with two empty columns beside it, and the next group started
-    // below that - a band of empty space through the middle of the form.
     [
       ["Assigned Branch", "assignedBranch"],
+      ["Vertical", "vertical"],
+      ["Assign To", "crm"],
+    ],
+    [
       ["Relationship", "relationship"],
       ["Referred From", "referredFrom"],
+      ["Estimated Value", "estimatedValue"],
     ],
     [
       ["Groom Name", "groomName"],
@@ -2251,41 +2147,32 @@ const CLIENT_FIELD_SECTIONS = {
     [
       ["Referenced Person Name", "referenceName"],
       ["Reference Contact", "referenceContact"],
-      // Asked for on every vertical, so it fills the third place in a row that had two.
-      ["Estimated Value", "estimatedValue"],
     ],
   ],
   "Qua Qua": [
     [
       ["Enquiry Name", "name"],
       ["Contact", "phone"],
-      // Beside Contact on every vertical: the number a client is messaged on is not always the
-      // one they enquired from, and the two belong side by side to be compared.
       ["WhatsApp Number", "whatsappNumber"],
     ],
-    // Three to a row, as on Dum Dum. Offer Type moves down to keep these rows full rather than
-    // leaving Assigned Branch stranded on a line of its own.
     [
       ["Assigned Branch", "assignedBranch"],
+      ["Vertical", "vertical"],
+      ["Assign To", "crm"],
+    ],
+    [
       ["Relationship", "relationship"],
       ["Referred From", "referredFrom"],
+      ["Offer Type", "offerType"],
     ],
-    // The baby's own three fields read across together, the way groom and bride do on
-    // Dum Dum.
-    // Two across rather than three: the third was a second "Contact", directly under the Contact in
-    // the first row, and both read the lead's phone number.
+    // No third "Contact" here: it read the lead's phone number, already in the first row.
     [
       ["Baby (or) Mother Name", "babyOrMotherName"],
       ["Date of Birth (or) EDOD", "dateOfBirthOrEdod"],
-    ],
-    [
-      ["Offer Type", "offerType"],
       ["Location", "location"],
-      ["Last Converted Date", "lastConvertedDate"],
     ],
-    // A row of its own: every row above is already three across, and none of them is worth
-    // reshuffling to make room for one field.
     [
+      ["Last Converted Date", "lastConvertedDate"],
       ["Estimated Value", "estimatedValue"],
     ],
   ],
@@ -2293,34 +2180,68 @@ const CLIENT_FIELD_SECTIONS = {
     [
       ["Enquiry Name", "name"],
       ["Contact", "phone"],
-      // Beside Contact on every vertical: the number a client is messaged on is not always the
-      // one they enquired from, and the two belong side by side to be compared.
       ["WhatsApp Number", "whatsappNumber"],
     ],
-    // Three to a row, as on the other two verticals. Assigned Branch leads the company block
-    // rather than sitting alone above it.
     [
       ["Assigned Branch", "assignedBranch"],
+      ["Vertical", "vertical"],
+      ["Assign To", "crm"],
+    ],
+    [
       ["Company Name (or) Client organisation", "companyName"],
       ["Primary decision maker - Contact", "primaryDecisionMaker"],
+      ["Designation", "designation"],
     ],
     [
-      ["Designation", "designation"],
       ["Company Website", "companyWebsite"],
       ["Company Type", "companyType"],
+      ["Official Email ID", "officialEmailId"],
     ],
+    // The two money fields side by side: what the client said they would spend, and what the
+    // studio reckons the work is worth.
     [
       ["Location", "location"],
-      ["Official Email ID", "officialEmailId"],
-      ["Referred From", "referredFrom"],
-    ],
-    // The two money fields together, which is how they are read: what the client said they would
-    // spend, and what the studio reckons the work is worth.
-    [
       ["Budget Expected", "expectedBudget"],
       ["Estimated Value", "estimatedValue"],
     ],
+    [
+      ["Referred From", "referredFrom"],
+    ],
   ],
+};
+
+// The ⓘ line beside each lead field, by its key - shared by the lead popup and Add Lead.
+const LEAD_FIELD_HELP = {
+  name: "The client's name, as the lead is listed on the board.",
+  phone: "The client's main number, used to call and to spot repeat enquiries.",
+  whatsappNumber: "The number WhatsApp chats are held on; saved once it is complete.",
+  contactNumber: "Another number the client can be reached on.",
+  assignedBranch: "The branch that will handle this lead.",
+  vertical: "Pick another vertical to move the lead there when you press Update.",
+  crm: "The salesperson who follows up this lead.",
+  relationship: "How the person enquiring is related to the client.",
+  referredFrom: "Where or from whom the enquiry came to the studio.",
+  estimatedValue: "What the studio expects this work to be worth, in rupees.",
+  groomName: "The groom's name, as the couple want it used.",
+  groomContact: "The groom's own number, if different from the main contact.",
+  groomLocation: "The groom's town or city.",
+  brideName: "The bride's name, as the couple want it used.",
+  brideContact: "The bride's own number, if different from the main contact.",
+  brideLocation: "The bride's town or city.",
+  referenceName: "The person who referred this client to the studio.",
+  referenceContact: "The referring person's number, to thank or follow up.",
+  offerType: "The studio offer or package the client asked about.",
+  babyOrMotherName: "The baby's name, or the mother's if the baby is not born yet.",
+  dateOfBirthOrEdod: "The baby's birth date, or the expected due date if not born yet.",
+  location: "Where the client is based or the shoot will happen.",
+  lastConvertedDate: "The date this client last booked with the studio.",
+  companyName: "The company or organisation the work is for.",
+  primaryDecisionMaker: "The number of the person who decides on the booking.",
+  designation: "The decision maker's job title at the company.",
+  companyWebsite: "The company's website, to learn about the client before calling.",
+  companyType: "What kind of business it is, such as hotel or factory.",
+  officialEmailId: "The company email address to send quotations and updates to.",
+  expectedBudget: "What the client says they plan to spend.",
 };
 
 // Fields the popup renders with something other than a plain text box, matching Add Lead.
@@ -2337,6 +2258,8 @@ const POPUP_FIELD_CONTROLS = {
   assignedBranch: "branch",
   relationship: "combo",
   referredFrom: "combo",
+  vertical: "vertical",
+  crm: "crm",
 };
 
 /**
@@ -2426,602 +2349,6 @@ function csvValueOrPosition(row, headerMap, position, ...headers) {
   return position === null || position === undefined ? "" : String(row[position] || "").trim();
 }
 
-function escapeListLine(line) {
-  return line.replace(/^\s*(?:•\s*|\d+\.\s*)/, "");
-}
-
-function getLineBounds(text, cursor) {
-  const source = String(text || "");
-  const safeCursor = Math.max(0, Math.min(cursor ?? 0, source.length));
-  let start = source.lastIndexOf("\n", safeCursor - 1);
-  start = start === -1 ? 0 : start + 1;
-  let end = source.indexOf("\n", safeCursor);
-  end = end === -1 ? source.length : end;
-  return { start, end, line: source.slice(start, end) };
-}
-
-function updateListText(value, selectionStart, selectionEnd, mode) {
-  const text = String(value || "");
-  const lines = text.split("\n");
-  let cursor = 0;
-  let startLine = 0;
-  let endLine = 0;
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const nextCursor = cursor + lines[index].length;
-    if (selectionStart >= cursor && selectionStart <= nextCursor + 1) startLine = index;
-    if (selectionEnd >= cursor && selectionEnd <= nextCursor + 1) {
-      endLine = index;
-      break;
-    }
-    cursor = nextCursor + 1;
-  }
-
-  const nextLines = [...lines];
-  for (let index = startLine; index <= endLine; index += 1) {
-    const current = nextLines[index] || "";
-    const clean = escapeListLine(current);
-    if (mode === "bullet") {
-      nextLines[index] = current.trimStart().startsWith("• ") ? clean : `• ${clean}`;
-    } else {
-      const numbering = `${index - startLine + 1}. `;
-      nextLines[index] = current.trimStart().match(/^\d+\.\s+/) ? clean.replace(/^\d+\.\s*/, numbering) : `${numbering}${clean}`;
-    }
-  }
-
-  return nextLines.join("\n");
-}
-
-function nextListLinePrefix(text, cursor) {
-  const { line } = getLineBounds(text, cursor);
-  const bullet = /^•\s*/.exec(line);
-  if (bullet) return "• ";
-  const numbered = /^(\d+)\.\s*/.exec(line);
-  if (numbered) return `${Number(numbered[1]) + 1}. `;
-  return "";
-}
-
-function toggleListPrefix(lineText, mode) {
-  const cleanLine = escapeListLine(lineText);
-  const trimmed = String(lineText || "").trimStart();
-  if (mode === "bullet") {
-    return trimmed.startsWith("• ") ? cleanLine : `• ${cleanLine}`;
-  }
-
-  if (/^\d+\.\s+/.test(trimmed)) {
-    return cleanLine;
-  }
-
-  return `1. ${cleanLine}`;
-}
-
-function formatAttachmentSize(bytes) {
-  const size = Number(bytes || 0);
-  if (!Number.isFinite(size) || size <= 0) return "";
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
-}
-
-/**
- * Opens one attachment.
- *
- * A file stored in the bucket has a key rather than a link, and the endpoint that serves it is
- * behind the same login as everything else - so the bytes are fetched with the token and handed
- * over as a blob. That is what keeps the bucket private: there is no public URL to a client's
- * attachment, only this request.
- *
- * Remarks written before the bucket still carry a `url` - a base64 data URI - and open directly.
- */
-async function openAttachment(attachment) {
-  let target = attachment?.url || attachment?.href || attachment?.previewUrl;
-  if (!target && attachment?.key) {
-    try {
-      target = await fetchRemarkAttachment(attachment.key);
-    } catch {
-      return;
-    }
-  }
-  if (!target) return;
-  const opened = window.open(target, "_blank", "noopener,noreferrer");
-  // A window opened after an await can be refused by the browser's popup blocking. The anchor
-  // is not, so a blocked tab becomes a download rather than a button that did nothing.
-  if (!opened) {
-    const link = document.createElement("a");
-    link.href = target;
-    link.download = attachment?.name || "attachment";
-    link.rel = "noopener";
-    link.click();
-  }
-}
-
-/**
- * One file on a remark. The remove control cannot sit inside the chip - a button may not
- * contain another button - so the two are siblings in a positioned wrapper.
- */
-function RemarkFileChip({ file, onRemove }) {
-  return (
-    <span className="relative inline-flex max-w-full">
-      <button
-        type="button"
-        onClick={() => void openAttachment(file)}
-        className="inline-flex max-w-full items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-left text-[13px] text-slate-700 transition hover:border-blue-300 hover:bg-blue-50"
-        title={file.url || file.key ? `Open ${file.name}` : file.name}
-      >
-        <AttachFileRoundedIcon sx={{ fontSize: 14 }} className="shrink-0 text-slate-400" />
-        <span className="truncate">{file.name}</span>
-        {formatAttachmentSize(file.size) && <span className="shrink-0 text-slate-400">{formatAttachmentSize(file.size)}</span>}
-      </button>
-      {onRemove && (
-        <button
-          type="button"
-          onClick={onRemove}
-          aria-label={`Remove ${file.name}`}
-          title={`Remove ${file.name}`}
-          className="absolute -right-1.5 -top-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-200 bg-white text-[12px] leading-none text-slate-500 shadow-sm transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600"
-        >
-          ×
-        </button>
-      )}
-    </span>
-  );
-}
-
-function NotesComposer({
-  entries = [],
-  onEntriesChange,
-  attachments = [],
-  onAttachmentsChange,
-  // The lead an attachment belongs to, which decides the client folder it is filed under in the
-  // bucket. Empty on Add Lead, where the lead does not exist yet - the server files those apart
-  // rather than refusing them.
-  enquiryId = "",
-  className = "",
-  label = "Remarks",
-  placeholder = "I add your notes here...",
-  showEmptyState = true,
-  // Let a caller know whether anything is waiting to be posted, and post it on the caller's
-  // behalf. The lead popup and the info panel use both: neither will update a lead without a
-  // remark, and a note typed but never posted should count as one rather than being thrown
-  // away on save.
-  onPendingChange,
-  commitRef,
-  // The panel replaces the send button with its own Update and Next, so the same action is
-  // not offered twice within a few centimetres of itself.
-  showSendButton = true,
-}) {
-  const textRef = useRef(null);
-  const fileRef = useRef(null);
-  const [expandedComposer, setExpandedComposer] = useState(false);
-  const [draftText, setDraftText] = useState("");
-  const draft = draftText;
-  // Files chosen for the note being written. They belong to the remark, and are only stored
-  // once it is posted - so cancelling a half-written note takes its files with it.
-  const [pendingFiles, setPendingFiles] = useState([]);
-  // Mirrors pendingFiles so an attach handler wired up by an earlier render still appends to
-  // the list as it stands now rather than as it stood then.
-  const pendingFilesRef = useRef([]);
-  // Counts up for the lifetime of the composer, so two copies of the same file are still two
-  // attachments with two ids.
-  const attachmentSeqRef = useRef(0);
-  // Says why a file was refused. Cleared by the next successful attach.
-  const [attachNotice, setAttachNotice] = useState("");
-
-  function reportPending(text, files) {
-    onPendingChange?.(Boolean(String(text ?? "").trim()) || (files || []).length > 0);
-  }
-
-  // Every path that changes the note - typing, the list buttons, posting, picking a remark
-  // to rewrite - goes through here, so the caller cannot be told a stale draft.
-  function setDraft(value) {
-    setDraftText(value);
-    reportPending(value, pendingFiles);
-  }
-
-  function setFiles(files) {
-    pendingFilesRef.current = files;
-    setPendingFiles(files);
-    // Read from the box rather than the render's copy: files are read asynchronously, and
-    // the user may have typed while that was happening.
-    reportPending(textRef.current?.value ?? draftText, files);
-  }
-  const [editingIndex, setEditingIndex] = useState(null);
-  const [openEntryIds, setOpenEntryIds] = useState(() => new Set());
-  const normalizedEntries = useMemo(() => normalizeRemarkEntries(entries), [entries]);
-
-  const attachmentInputId = useMemo(
-    () => `attach-${String(label || "remarks").replace(/\s+/g, "-").toLowerCase()}`,
-    [label],
-  );
-
-  // Remarks start collapsed and open only when their chevron is clicked. There used to be
-  // an effect here that pruned ids and, finding none open, expanded the first entry - which
-  // is why opening the panel always showed one remark already unfolded. Pruning is not
-  // needed either: an id is only ever looked up against an entry that still exists, and
-  // ids are unique per remark, so a stale one can never match a later entry.
-
-  function insertFormatting(mode) {
-    const input = textRef.current;
-    if (!input) return;
-    const start = input.selectionStart ?? 0;
-    const end = input.selectionEnd ?? 0;
-    const fullValue = input.value || "";
-    const lineStart = fullValue.lastIndexOf("\n", start - 1) + 1;
-    const lineEndIndex = fullValue.indexOf("\n", end);
-    const lineEnd = lineEndIndex === -1 ? fullValue.length : lineEndIndex;
-    const lineText = fullValue.slice(lineStart, lineEnd);
-    const hasSelection = start !== end;
-
-    if (!hasSelection) {
-      const nextLine = toggleListPrefix(lineText, mode);
-      const nextValue = `${fullValue.slice(0, lineStart)}${nextLine}${fullValue.slice(lineEnd)}`;
-      setDraft(nextValue);
-      window.requestAnimationFrame(() => {
-        input.focus();
-        input.setSelectionRange(lineStart + nextLine.length, lineStart + nextLine.length);
-      });
-      return;
-    }
-
-    const nextValue = updateListText(input.value, start, end, mode);
-    setDraft(nextValue);
-    window.requestAnimationFrame(() => {
-      input.focus();
-      input.setSelectionRange(start, start);
-    });
-  }
-
-  // `overrideText` is needed when the caller has just rewritten the draft: setDraft has not
-  // been applied yet at that point, so the state still holds the previous text.
-  function submitDraft(overrideText) {
-    const text = String(overrideText ?? draft ?? "").trim();
-    const files = normalizeRemarkAttachments(pendingFiles);
-    // A file on its own is a remark. Only an empty box with nothing clipped to it is not.
-    if (!text && !files.length) return null;
-    const nextEntries = [...normalizedEntries];
-    const editingExisting = editingIndex !== null && editingIndex >= 0 && editingIndex < normalizedEntries.length;
-    // Built from the posting time and the position in the list rather than a random suffix:
-    // two remarks cannot be written in the same millisecond at the same length, and a random
-    // id is a value that changes on its own, which React's rules do not allow here.
-    const createdAt = normalizedEntries[editingIndex]?.createdAt || new Date().toISOString();
-    const nextEntry = {
-      id: normalizedEntries[editingIndex]?.id || `remark-${createdAt}-${normalizedEntries.length}`,
-      text,
-      createdAt,
-      // Only a rewrite is stamped. The original posting time stays in `createdAt`, so the
-      // remark still reads in the order it was written.
-      editedAt: editingExisting ? new Date().toISOString() : "",
-      attachments: files,
-    };
-    if (editingIndex !== null && editingIndex >= 0 && editingIndex < nextEntries.length) {
-      nextEntries[editingIndex] = nextEntry;
-    } else {
-      nextEntries.push(nextEntry);
-    }
-    onEntriesChange?.(nextEntries);
-    setEditingIndex(null);
-    setDraftText("");
-    pendingFilesRef.current = [];
-    setPendingFiles([]);
-    setAttachNotice("");
-    // Reported directly: setDraft and setFiles each read the other's pre-clear value, and
-    // between them would report the box as still holding something.
-    onPendingChange?.(false);
-    window.requestAnimationFrame(() => textRef.current?.focus());
-    // Handed back as well as reported through onEntriesChange. A caller that saves in the
-    // same breath as committing cannot read the posted remark out of state yet - the update
-    // has not been applied - so it needs the new list in its hand. Null when there was
-    // nothing to post.
-    return nextEntries;
-  }
-
-  // No dependency list: the handle is re-pointed on every render, because submitDraft closes
-  // over the draft and the entries as they are now.
-  useEffect(() => {
-    if (!commitRef) return undefined;
-    commitRef.current = submitDraft;
-    return () => {
-      commitRef.current = null;
-    };
-  });
-
-  /*
-   * The composer is unmounted when the panel moves to Activity Logs, and an unposted note
-   * goes with it. The caller is told the box is empty on the way out, or the lead popup
-   * would still believe a remark was waiting and let the lead be updated without one.
-   */
-  const draftReportRef = useRef(onPendingChange);
-  useEffect(() => {
-    draftReportRef.current = onPendingChange;
-  });
-  useEffect(() => () => draftReportRef.current?.(false), []);
-
-  function handleKeyDown(event) {
-    if (event.key !== "Enter") return;
-    // Shift+Enter keeps its usual meaning - a line break within the note being written.
-    if (event.shiftKey) return;
-    const input = textRef.current;
-    if (!input) return;
-    const cursor = input.selectionStart ?? 0;
-    const { line } = getLineBounds(input.value, cursor);
-    const trimmed = line.trimStart();
-    const bulletMatch = /^•\s*(.*)$/.exec(trimmed);
-    const numberMatch = /^(\d+)\.\s*(.*)$/.exec(trimmed);
-
-    // Enter on an empty bullet or number ends the list and posts the note. Dropping the
-    // empty item and stopping there left no way out: the line above is still a list item,
-    // so the next Enter simply started a new one and a note containing a list could never
-    // be added at all.
-    if ((bulletMatch && !bulletMatch[1]) || (numberMatch && !numberMatch[2])) {
-      event.preventDefault();
-      const fullValue = String(input.value || "");
-      const lineStart = fullValue.lastIndexOf("\n", cursor - 1) + 1;
-      const lineEndIndex = fullValue.indexOf("\n", cursor);
-      const lineEnd = lineEndIndex === -1 ? fullValue.length : lineEndIndex;
-      const nextValue = `${fullValue.slice(0, lineStart)}${fullValue.slice(lineEnd + 1)}`;
-      setDraft(nextValue);
-      // A lone empty bullet has nothing to post; it is just cleared.
-      submitDraft(nextValue);
-      return;
-    }
-
-    // Outside a list, Enter posts the note. submitDraft had no caller at all before this,
-    // so a note could be typed but never actually added to the remarks.
-    if (!bulletMatch && !numberMatch) {
-      event.preventDefault();
-      submitDraft();
-      return;
-    }
-
-    const prefix = bulletMatch ? "• " : `${Number(numberMatch[1]) + 1}. `;
-    event.preventDefault();
-    const { selectionStart = 0, selectionEnd = 0, value: currentValue } = input;
-    const nextValue = `${currentValue.slice(0, selectionStart)}\n${prefix}${currentValue.slice(selectionEnd)}`;
-    setDraft(nextValue);
-    window.requestAnimationFrame(() => {
-      const position = selectionStart + 1 + prefix.length;
-      input.focus();
-      input.setSelectionRange(position, position);
-    });
-  }
-
-  /**
-   * Reads the chosen files onto the note being written.
-   *
-   * Three things this has to get right, none of which it used to:
-   *
-   *   * A cap. A remark carries at most MAX_REMARK_ATTACHMENTS files, and they are stored
-   *     inline as data URLs on the lead, so an unbounded pile is a row that will not save.
-   *     Whatever fits is taken and the rest are refused out loud.
-   *   * Unique ids. The id was name-lastModified-size, so attaching the same photo twice gave
-   *     two files sharing one id - React saw duplicate keys, and removing either removed both.
-   *     A counter makes every attachment its own.
-   *   * The current list. It appended to `pendingFiles` as captured by the render that wired
-   *     this handler up, so picking files twice in quick succession dropped the first batch.
-   *     The ref is always up to date.
-   *
-   * A file the browser could not read is left out rather than attached as an empty one.
-   */
-  function handleAttach(event) {
-    const files = Array.from(event.target.files || []);
-    // Cleared straight away, or picking the same file again fires no change event at all.
-    event.target.value = "";
-    if (!files.length) return;
-
-    const current = pendingFilesRef.current;
-    const room = Math.max(0, MAX_REMARK_ATTACHMENTS - current.length);
-    if (room === 0) {
-      setAttachNotice(`A remark can carry ${MAX_REMARK_ATTACHMENTS} attachments. Remove one to add another.`);
-      return;
-    }
-    const accepted = files.slice(0, room);
-    const refused = files.length - accepted.length;
-
-    /*
-     * Uploaded rather than read into the note.
-     *
-     * Each file used to be turned into a base64 data URI and kept on the lead, so a photo on a
-     * remark was carried by every query that read that lead - and cost a third more than the
-     * bytes it encoded. Now it goes to the bucket under the client it belongs to, and what the
-     * remark keeps is the key.
-     */
-    Promise.all(accepted.map(async (file, index) => {
-      const id = `${file.name}-${file.lastModified}-${file.size}-${attachmentSeqRef.current += 1}-${index}`;
-      try {
-        const response = await uploadRemarkAttachment(file, enquiryId);
-        const stored = response?.data;
-        return stored?.key ? { id, ...stored, fileType: stored.type } : null;
-      } catch {
-        // Answered as unreadable below, which is what the user already sees for a file that
-        // could not be taken - the reason differs, the outcome does not.
-        return null;
-      }
-    })).then((read) => {
-      const usable = read.filter((file) => file && file.key);
-      const unreadable = read.length - usable.length;
-      setFiles([...pendingFilesRef.current, ...usable]);
-      setAttachNotice(refused || unreadable
-        ? [
-            refused ? `only ${MAX_REMARK_ATTACHMENTS} attachments are allowed on a remark, so ${refused} ${refused === 1 ? "file was" : "files were"} left out` : "",
-            unreadable ? `${unreadable} ${unreadable === 1 ? "file" : "files"} could not be uploaded` : "",
-          ].filter(Boolean).join("; ")
-        : "");
-    });
-  }
-
-  function startEdit(index) {
-    const entry = normalizedEntries[index];
-    if (!entry) return;
-    setEditingIndex(index);
-    pendingFilesRef.current = entry.attachments || [];
-    setPendingFiles(entry.attachments || []);
-    setDraft(entry.text);
-    // setDraft reported against the files as they were before the line above, so the count
-    // is stated again now that both are set.
-    reportPending(entry.text, entry.attachments || []);
-    window.requestAnimationFrame(() => {
-      textRef.current?.focus();
-    });
-  }
-
-  function toggleEntry(entryId) {
-    setOpenEntryIds((current) => {
-      const next = new Set(current);
-      if (next.has(entryId)) next.delete(entryId);
-      else next.add(entryId);
-      return next;
-    });
-  }
-
-  return (
-    <div className={`w-full ${className}`}>
-      <div className="sr-only">{label}</div>
-      <div className="flex w-full flex-col">
-        <div className="w-full">
-          <div className="flex w-full flex-col gap-3">
-            {normalizedEntries.length ? (
-              normalizedEntries.map((entry, index) => (
-                <div key={entry.id || `${index}`} className="w-full overflow-hidden rounded-[1.35rem] bg-blue-50">
-                  <div className="flex items-start justify-between gap-3 px-5 py-4">
-                    <button
-                      type="button"
-                      onClick={() => toggleEntry(entry.id)}
-                      className="flex min-w-0 items-start gap-2 text-left text-[15px] text-slate-700"
-                      aria-label={openEntryIds.has(entry.id) ? "Collapse remark" : "Expand remark"}
-                    >
-                      <span className="mt-0.5 text-[22px] leading-none text-slate-700">{openEntryIds.has(entry.id) ? "⌄" : "›"}</span>
-                      <span className="min-w-0 break-words">
-                        <span className="font-medium">{formatDateTime(entry.createdAt)}</span>
-                        {entry.editedAt && (
-                          <span className="ml-1.5 text-[13px] text-slate-400" title={`Edited ${formatDateTime(entry.editedAt)}`}>(edited)</span>
-                        )}
-                        <span className="text-slate-500"> : {entry.text.split("\n")[0] || entry.attachments?.[0]?.name || ""}</span>
-                        {/* Collapsed, a remark shows only its first line, and a file clipped
-                            to it would be invisible until opened. */}
-                        {entry.attachments?.length > 0 && (
-                          <span className="ml-2 inline-flex items-center gap-0.5 align-middle text-[13px] text-slate-500">
-                            <AttachFileRoundedIcon sx={{ fontSize: 14 }} />
-                            {entry.attachments.length}
-                          </span>
-                        )}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => startEdit(index)}
-                      className="shrink-0 p-1 text-slate-800 transition hover:text-slate-950"
-                      aria-label={`Edit remark ${index + 1}`}
-                    >
-                      <EditRoundedIcon sx={{ fontSize: 18 }} />
-                    </button>
-                  </div>
-                  {openEntryIds.has(entry.id) && (
-                    <div className="px-12 pb-5">
-                      <div className="text-[15px] leading-6 text-slate-500 whitespace-pre-wrap">
-                        {entry.text.split("\n").slice(1).join("\n")}
-                      </div>
-                      {entry.attachments?.length > 0 && (
-                        <div className="mt-3 flex flex-wrap gap-2 pr-1.5 pt-1.5">
-                          {entry.attachments.map((file) => (
-                            <RemarkFileChip key={file.id} file={file} />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))
-            ) : showEmptyState ? (
-              <div className="w-full rounded-[1.35rem] bg-blue-50 px-5 py-5 text-[15px] text-slate-500">
-                No remarks yet.
-              </div>
-            ) : null}
-          </div>
-        </div>
-
-        <div className="mt-3 w-full rounded-[1rem] border border-slate-300 bg-white">
-          <textarea
-            ref={textRef}
-            value={draft}
-            onChange={(event) => {
-              setDraft(event.target.value);
-            }}
-            onKeyDown={handleKeyDown}
-            placeholder={placeholder}
-            className={`block w-full resize-none border-0 bg-white px-4 py-3 text-[15px] leading-6 text-slate-700 outline-none placeholder:text-slate-400 focus:ring-0 ${pendingFiles.length ? "rounded-t-[1rem]" : "rounded-[1rem]"} ${expandedComposer ? "min-h-[14rem]" : "min-h-[12rem]"}`}
-          />
-          {/* Inside the box, under the text, because these files are part of the note being
-              written - not a list belonging to the lead. They are stored with the remark when
-              it is posted, and go with it if it is never posted. */}
-          {pendingFiles.length > 0 && (
-            <div className="flex flex-wrap gap-2 border-t border-slate-200 px-4 pb-3 pr-5 pt-4">
-              {pendingFiles.map((file) => (
-                <RemarkFileChip
-                  key={file.id}
-                  file={file}
-                  onRemove={() => setFiles(pendingFiles.filter((item) => item.id !== file.id))}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Files from before attachments belonged to a remark. Nothing new is ever added
-            here - the paperclip clips to the note being written - so this row appears only
-            for the few leads that already carry one, and empties as they are removed. */}
-        {(attachments || []).length > 0 && (
-          <div className="mt-3 flex w-full flex-wrap items-center gap-2 pr-1.5 pt-1.5">
-            <span className="text-[13px] text-slate-500">Attached to this lead:</span>
-            {attachments.map((file) => (
-              <RemarkFileChip
-                key={file.id}
-                file={file}
-                onRemove={onAttachmentsChange ? () => onAttachmentsChange((attachments || []).filter((item) => item.id !== file.id)) : undefined}
-              />
-            ))}
-          </div>
-        )}
-
-        {/* Said only when something was actually refused - a count sitting there permanently
-            would be noise on the great majority of notes, which carry no files at all. */}
-        {attachNotice && (
-          <p role="alert" className="px-1 pb-1 text-xs font-medium text-rose-600">{attachNotice}</p>
-        )}
-
-        <div className="flex items-center justify-end gap-4 px-1 py-2 text-slate-800">
-          <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png,.txt" multiple onChange={handleAttach} className="sr-only" id={attachmentInputId} />
-          <label htmlFor={attachmentInputId} className="inline-flex cursor-pointer items-center justify-center rounded-md p-1 hover:bg-slate-100" aria-label="Attach files">
-            <AttachFileRoundedIcon sx={{ fontSize: 18 }} />
-          </label>
-          <button type="button" onClick={() => insertFormatting("bullet")} className="inline-flex items-center justify-center rounded-md p-1 hover:bg-slate-100" aria-label="Bullet list">
-            <FormatListBulletedRoundedIcon sx={{ fontSize: 18 }} />
-          </button>
-          <button type="button" onClick={() => insertFormatting("number")} className="inline-flex items-center justify-center rounded-md p-1 hover:bg-slate-100" aria-label="Numbered list">
-            <FormatListNumberedRoundedIcon sx={{ fontSize: 18 }} />
-          </button>
-          <button type="button" onClick={() => setExpandedComposer((current) => !current)} className="inline-flex items-center justify-center rounded-md p-1 hover:bg-slate-100" aria-label="Resize notes">
-            {expandedComposer ? <CloseFullscreenRoundedIcon sx={{ fontSize: 18 }} /> : <OpenInFullRoundedIcon sx={{ fontSize: 18 }} />}
-          </button>
-          {/* Appears only once something has been typed, last in the row after the resize
-              control. Enter already posts the note; this is the same action for a mouse, and
-              the only visible sign that a note has to be posted at all. In the module's blue
-              rather than the messaging-app green, so it reads as this CRM's primary action. */}
-          {showSendButton && (draft.trim() || pendingFiles.length > 0) && (
-            <button
-              type="button"
-              onClick={() => submitDraft()}
-              aria-label={editingIndex !== null ? "Save remark" : "Add remark"}
-              title={editingIndex !== null ? "Save remark" : "Add remark"}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white transition hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
-            >
-              <SendRoundedIcon sx={{ fontSize: 17 }} />
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /*
  * ── The board's rows, drawn by `DataTable` ────────────────────────────────────────────────────
@@ -3166,185 +2493,15 @@ function cnaExhausted(lead) {
 }
 
 /**
- * The module's tick-list picker, used for the CRM field in Update Details.
+ * The lead as a save would write it, for asking what that save needs filled in.
  *
- * Ticking more than one name is meaningful rather than an error: the leads being updated are
- * shared out between the ticked CRMs one at a time in turn. That is what the standalone
- * Assign Leads dialog used to do, and it now lives here so a bulk edit is one action rather
- * than two.
- *
- * Select All and the search box are there because a board can hold far more CRMs than fit
- * the menu; Select All applies to what the search has narrowed the list to, not to the whole
- * list, so it always does what the rows on screen suggest it will.
- *
- * The menu is portalled and fixed-positioned rather than absolutely placed. The dialog that
- * hosts this field clips its own overflow, so an absolutely placed menu is cut off at the
- * dialog edge instead of opening over it.
+ * A button can name the status (CNA and Proceed Next), and the press past the CNA limit writes
+ * Rejected instead - which needs no next follow-up, so it must not be refused for lacking one.
  */
-function CrmMultiSelectField({ ariaLabel, disabled = false, label = "CRM", onChange, options = [], placeholder = "Select", values = [] }) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [menuStyle, setMenuStyle] = useState(null);
-  const wrapperRef = useRef(null);
-  const menuRef = useRef(null);
-
-  const picked = new Set(values);
-  const search = query.trim().toLowerCase();
-  const filtered = search ? options.filter((option) => option.label.toLowerCase().includes(search)) : options;
-  const allFilteredPicked = filtered.length > 0 && filtered.every((option) => picked.has(option.value));
-  const someFilteredPicked = filtered.some((option) => picked.has(option.value));
-
-  // Closing clears the search here rather than in an effect on `open`, so a stale filter
-  // cannot survive into the next opening and no render is spent undoing it afterwards.
-  const closeMenu = useCallback(() => {
-    setOpen(false);
-    setQuery("");
-  }, []);
-
-  // Closes this menu and nothing under it.
-  useEscapeKey(closeMenu, open);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const close = (event) => {
-      if (wrapperRef.current?.contains(event.target)) return;
-      if (menuRef.current?.contains(event.target)) return;
-      closeMenu();
-    };
-    document.addEventListener("mousedown", close);
-    return () => {
-      document.removeEventListener("mousedown", close);
-    };
-  }, [closeMenu, open]);
-
-  /**
-   * Keeps the menu pinned under the trigger for as long as it is open.
-   *
-   * A fixed-position menu is placed from the trigger's viewport rect, so it has to be told
-   * whenever that rect moves. Listening for window resize and scroll is not enough here: the
-   * dialog hosting this field is centred, and ticking a CRM grows it - the split table
-   * appears underneath the fields - which shifts the trigger without either event firing.
-   * The menu then hung well below the box it belongs to.
-   *
-   * Reading the rect each frame covers that and every other cause of movement without having
-   * to enumerate them. It is a handful of reads per frame for as long as a menu is open, and
-   * the state is only set when the position actually changes, so it does not re-render.
-   */
-  useEffect(() => {
-    if (!open) return undefined;
-    let frame = 0;
-    let previous = "";
-    const updatePosition = () => {
-      const rect = wrapperRef.current?.querySelector("button")?.getBoundingClientRect();
-      if (rect) {
-        const padding = 12;
-        const below = window.innerHeight - rect.bottom - padding;
-        const above = rect.top - padding;
-        const openAbove = below < 220 && above > below;
-        const next = {
-          position: "fixed",
-          left: rect.left,
-          width: rect.width,
-          top: openAbove ? "auto" : rect.bottom + 6,
-          bottom: openAbove ? window.innerHeight - rect.top + 6 : "auto",
-          maxHeight: Math.max(200, Math.min(320, openAbove ? above : below)),
-        };
-        const signature = JSON.stringify(next);
-        if (signature !== previous) {
-          previous = signature;
-          setMenuStyle(next);
-        }
-      }
-      frame = window.requestAnimationFrame(updatePosition);
-    };
-    updatePosition();
-    return () => window.cancelAnimationFrame(frame);
-  }, [open]);
-
-  function toggle(value) {
-    onChange?.(picked.has(value) ? values.filter((item) => item !== value) : [...values, value]);
-  }
-
-  function toggleFiltered() {
-    const shown = filtered.map((option) => option.value);
-    if (allFilteredPicked) onChange?.(values.filter((value) => !shown.includes(value)));
-    else onChange?.([...new Set([...values, ...shown])]);
-  }
-
-  // Two names still read as names; beyond that the trigger would truncate anyway, so it
-  // reports the count instead.
-  const summary = values.length === 0
-    ? placeholder
-    : values.length <= 2
-      ? options.filter((option) => picked.has(option.value)).map((option) => option.label).join(", ")
-      : `${values.length} selected`;
-
-  const menu = open && menuStyle && typeof document !== "undefined" ? createPortal(
-    <div
-      ref={menuRef}
-      role="dialog"
-      aria-label={`${label} options`}
-      style={menuStyle}
-      className="z-[400] flex flex-col overflow-hidden rounded-lg border border-slate-200 bg-white text-sm shadow-[0_12px_28px_rgba(15,23,42,0.16)]"
-    >
-      <label className="flex shrink-0 cursor-pointer items-center gap-3 border-b border-slate-200 px-3 py-2.5 text-slate-700 hover:bg-slate-50">
-        <Checkbox
-          ariaLabel={`Select all ${label} options`}
-          checked={allFilteredPicked}
-          indeterminate={someFilteredPicked}
-          disabled={filtered.length === 0}
-          onChange={toggleFiltered}
-        />
-        <span className="font-medium">Select All</span>
-      </label>
-      <div className="shrink-0 border-b border-slate-200 px-3 py-2">
-        <input
-          type="search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search"
-          aria-label={`Search ${label} options`}
-          className="block w-full bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400"
-        />
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto py-1">
-        {filtered.length === 0 ? (
-          <p className="px-3 py-3 text-slate-500">No matches.</p>
-        ) : (
-          filtered.map((option) => (
-            <label
-              key={option.value}
-              className="flex cursor-pointer items-center gap-3 px-3 py-2.5 text-slate-700 hover:bg-slate-50"
-            >
-              <Checkbox ariaLabel={option.label} checked={picked.has(option.value)} onChange={() => toggle(option.value)} />
-              <span className="truncate">{option.label}</span>
-            </label>
-          ))
-        )}
-      </div>
-    </div>,
-    document.body,
-  ) : null;
-
-  return (
-    <div ref={wrapperRef} className="block text-xs font-semibold text-slate-600">
-      <span>{label}</span>
-      <span className="relative mt-1.5 block">
-        <button
-          type="button"
-          disabled={disabled}
-          aria-label={ariaLabel || label}
-          aria-expanded={open}
-          onClick={() => (open ? closeMenu() : setOpen(true))}
-          className="flex min-h-9 w-full items-center justify-between gap-2 rounded-lg border border-slate-300 bg-white px-3 text-left text-sm font-normal text-slate-700 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50"
-        >
-          <span className={`truncate ${values.length ? "" : "text-slate-400"}`}>{summary}</span>
-          <ExpandMoreIcon aria-hidden="true" className={`shrink-0 text-slate-700 transition-transform ${open ? "rotate-180" : ""}`} fontSize="small" />
-        </button>
-      </span>
-      {menu}
-    </div>
-  );
+function leadAsSaved(lead, forcedStatus = "") {
+  if (!forcedStatus) return lead;
+  const rejected = forcedStatus === "CNA" && getLeadCnaSequence(lead) + 1 > MAX_CNA_ATTEMPTS;
+  return { ...lead, leadStatus: rejected ? "Rejected" : forcedStatus };
 }
 
 /**
@@ -3415,7 +2572,7 @@ function DistrictStateField({ value, onChange, className = "" }) {
 
   const filteredOptions = useMemo(() => {
     if (!query) return districtStateOptions;
-    return districtStateOptions.filter((option) => option.toLowerCase().includes(query));
+    return districtStateOptions.filter((option) => matchesWordChunks(option, query));
   }, [query]);
 
   // Closes the suggestions without closing the form they are being typed into.
@@ -3540,7 +2697,26 @@ function shootRowFilled(shoot) {
  * Nothing is thrown away by committing - the row is already in the list as it is typed. Enter
  * only opens the next one.
  */
-function ShootDetailsTable({ shoots = [], onChangeRow, onRemoveRow, onAddRow }) {
+/*
+ * `shootTypeOptions` is the Shoot Types list of the lead's vertical from Settings → Fields - the
+ * brand's own shoots, the same list the Quotation Generator offers - and `shootTypeStatus`
+ * is why it might be empty - "loading", "error" or "ready" - so the control says so rather than
+ * offering a blank menu with no explanation. A row already holding a word the list no longer has
+ * (renamed or removed in Settings since the lead was filed) keeps that word as a choice, so the
+ * lead reads as it was saved and nothing is changed by opening it.
+ */
+const SHOOT_TYPE_PLACEHOLDER = { loading: "Loading…", error: "Could not load", ready: "Select" };
+
+function shootTypeRowOptions(options, current) {
+  return current && !options.includes(current) ? [...options, current] : options;
+}
+
+function ShootDetailsTable({ shoots = [], onChangeRow, onRemoveRow, onAddRow, shootTypeOptions = [], shootTypeStatus = "ready", onRetryShootTypes }) {
+  const shootTypePlaceholder = shootTypeStatus === "ready" && !shootTypeOptions.length ? "No shoot types" : SHOOT_TYPE_PLACEHOLDER[shootTypeStatus] || "Select";
+  // The list is the brand's shoots, edited under Settings → Fields → Shoot Types, which answers to
+  // `SETTINGS / Quotation Settings` Read/Write. Somebody who cannot open it is told to ask, not
+  // sent somewhere closed.
+  const { canWrite: canEditFieldLists } = useModuleAccess("SETTINGS", "Quotation Settings");
   // Enter is caught on the row rather than wired into each field, so every input in it
   // behaves the same. Buttons are left alone: Enter on the Shoot Type control opens its menu,
   // and on the delete control it deletes, neither of which should also add a row.
@@ -3579,11 +2755,11 @@ function ShootDetailsTable({ shoots = [], onChangeRow, onRemoveRow, onAddRow }) 
       <div className="w-full overflow-x-auto">
         <div className="w-full min-w-[40rem] lg:min-w-0">
           <div className="grid grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,0.95fr)_minmax(0,0.9fr)_44px] items-center border-b border-slate-200 px-4 py-4 text-sm font-semibold text-slate-600 sm:px-5">
-            <div>Shoot Type</div>
-            <div>Venue</div>
-            <div>District &amp; State</div>
-            <div>Date</div>
-            <div>Time</div>
+            <div>Shoot Type<HelpTip text="Pick the kind of shoot the client is asking for." /></div>
+            <div>Venue<HelpTip text="Where this shoot takes place, such as the hall or the home." /></div>
+            <div>District &amp; State<HelpTip text="Pick or type the district and state the venue is in." /></div>
+            <div>Date<HelpTip text="The day this shoot happens." /></div>
+            <div>Time<HelpTip text="The time this shoot starts." /></div>
             <div />
           </div>
           <div className="divide-y divide-slate-200">
@@ -3598,8 +2774,8 @@ function ShootDetailsTable({ shoots = [], onChangeRow, onRemoveRow, onAddRow }) 
                   ariaLabel={`Shoot type row ${index + 1}`}
                   value={shoot.shootType || ""}
                   onChange={(value) => onChangeRow(index, "shootType", value)}
-                  options={shootOptions}
-                  placeholder="Select"
+                  options={shootTypeRowOptions(shootTypeOptions, shoot.shootType)}
+                  placeholder={shootTypePlaceholder}
                   className="min-w-0 w-full"
                 />
                 <TextField
@@ -3646,6 +2822,19 @@ function ShootDetailsTable({ shoots = [], onChangeRow, onRemoveRow, onAddRow }) 
           </div>
         </div>
       </div>
+      {/* Said once under the rows rather than guessed from an empty menu: where the list is kept,
+          or that it did not arrive. Nothing is shown while it loads or when it is simply there. */}
+      {shootTypeStatus === "error" && (
+        <div role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-slate-200 px-4 py-2 text-xs text-red-600 sm:px-5">
+          <span>Shoot types could not be loaded.</span>
+          {onRetryShootTypes && <Button type="button" variant="secondary" size="sm" onClick={onRetryShootTypes}>Try again</Button>}
+        </div>
+      )}
+      {shootTypeStatus === "ready" && !shootTypeOptions.length && (
+        <p role="status" className="border-t border-slate-200 px-4 py-2 text-xs text-slate-500 sm:px-5">
+          No shoot types for this vertical yet. {canEditFieldLists ? "Add them in Settings → Fields → Sales & CRM → Leads & Followups → Shoot Types." : "Ask an administrator to add them in Settings."}
+        </p>
+      )}
     </div>
   );
 }
@@ -3676,6 +2865,8 @@ function LeadPopupModal({
   onUpdateShootRow,
   onMoveNext,
   onConvert,
+  // Moves this lead to another vertical, once Update has saved the rest. Throws its refusal.
+  onMoveVertical,
   onBack,
   onNotice,
   onError,
@@ -3690,7 +2881,11 @@ function LeadPopupModal({
 }) {
   // Declared before the early return: a hook cannot sit behind one, or the hook count
   // changes as the popup opens and React tears the component down.
-  const [showRequiredErrors, setShowRequiredErrors] = useState(false);
+  // The boxes the last refused save marked; each clears as it is answered.
+  const requiredMarks = useFormErrors();
+  // The status the last refused save was writing, when a button named one - so the Next Follow-up
+  // Date is marked against CNA and Proceed Next rather than against the pills.
+  const [requiredForStatus, setRequiredForStatus] = useState("");
   /*
    * The popup's own "one press, one update". Not about duplicate records - writing the same values
    * twice leaves the lead as it was - but about **Update and Proceed Next**, which advances the
@@ -3712,6 +2907,29 @@ function LeadPopupModal({
    * nothing about branches. Reading it here is the only arrangement where no caller can forget.
    */
   const { branches: branchOptions } = useBranchOptions();
+  // The Sales roster for Assign To, read here for the reason above: the Contacts popup has none.
+  const [crmEmployees, setCrmEmployees] = useState([]);
+  useEffect(() => {
+    if (!open) return undefined;
+    let active = true;
+    void getCrmEmployees()
+      .then((response) => { if (active) setCrmEmployees(response?.data || []); })
+      .catch(() => { if (active) setCrmEmployees([]); });
+    return () => { active = false; };
+  }, [open]);
+  /*
+   * The vertical picked in Client Details, held like any other edit until Update. Update then asks
+   * the data-loss question (`confirmMove`, the press it interrupted), saves the rest, and moves.
+   * A different lead opened in the same popup starts with nothing picked.
+   */
+  const [pendingVertical, setPendingVertical] = useState("");
+  const [confirmMove, setConfirmMove] = useState(null);
+  const [pendingFor, setPendingFor] = useState(lead?.id);
+  if (pendingFor !== lead?.id) {
+    setPendingFor(lead?.id);
+    setPendingVertical("");
+    setConfirmMove(null);
+  }
   /**
    * Which option Assigned Branch should be sitting on, for a lead whose text is not the register's
    * own spelling.
@@ -3746,8 +2964,12 @@ function LeadPopupModal({
       : branchOptions.find((option) => option.id != null && option.id === lead.branchId);
     return filedUnder ? filedUnder.value : "";
   }, [branchOptions]);
-  // The suggestions behind the Relationship and Referred From combos - the studio's lists.
-  const suggestions = useLeadSuggestionLists();
+  // The lead's vertical, read before the early return below so the hook under it is called on
+  // every render: the Shoot Types offered on its Event Details rows are that vertical's own.
+  const vertical = lead ? resolveLeadVertical(mergeLeadDisplayRecord(lead, details), details) : "";
+  // The suggestions behind the Relationship and Referred From combos and the Shoot Type rows -
+  // the studio's lists, the shoots being the lead's vertical's.
+  const suggestions = useLeadSuggestionLists({ vertical });
   /*
    * What the dot on the WhatsApp Chat tab is saying, in three states rather than two.
    *
@@ -3864,6 +3086,24 @@ function LeadPopupModal({
   // Raised only once an update has actually been attempted without one, the way the required
   // field marking works. A lead that has just been opened is not owed a telling-off.
   const [showRemarkError, setShowRemarkError] = useState(false);
+
+  /** The Remarks tab's scrolling pane, so a refusal can put the box and the reason back on screen. */
+  const remarksPane = useRef(null);
+
+  /**
+   * Bring the remark box, and the message above it, into view to be answered.
+   *
+   * Asking for the tab is not enough: Remarks is the tab the popup **opens** on, so it is usually a
+   * no-op, and both the box and the refusal sit at the top of a pane the reader has very likely
+   * scrolled down through a long lead's history. Refused for a box and a reason that are off the top
+   * of the pane, somebody sees nothing happen - which is the thing this path was written to prevent.
+   */
+  function revealRemarkBox() {
+    setLeadTab?.("remarks");
+    // After the tab has rendered, or it is the outgoing pane that gets scrolled.
+    requestAnimationFrame(() => remarksPane.current?.scrollTo({ top: 0, behavior: "smooth" }));
+  }
+
   /*
    * The Activity Logs filter row.
    *
@@ -3957,7 +3197,6 @@ function LeadPopupModal({
   if (!open || !lead) return null;
   const displayLead = mergeLeadDisplayRecord(lead, details);
   const shoots = Array.isArray(displayLead.shoots) && displayLead.shoots.length ? displayLead.shoots : [emptyShootRow()];
-  const vertical = resolveLeadVertical(displayLead, details);
   const cnaCount = cnaSequence > 0 ? cnaSequence : getLeadCnaSequence(displayLead);
   const headerPhone = displayLead.phone || "—";
   // At least one: this lead is itself an enquiry, and the server may raise it.
@@ -3977,19 +3216,15 @@ function LeadPopupModal({
     const user = activityFilters.user.trim().toLowerCase();
     const time = activityFilters.time.trim().toLowerCase();
     const text = activityFilters.activity.trim().toLowerCase();
-    if (user && !String(entry.actorName || "User").toLowerCase().includes(user)) return false;
+    if (user && !matchesWordChunks(entry.actorName || "User", user)) return false;
     if (time) {
       const printed = formatActivityTime(entry.createdAt).toLowerCase();
       const iso = String(entry.createdAt || "").slice(0, 10).toLowerCase();
       if (!printed.includes(time) && !iso.includes(time)) return false;
     }
-    if (text && !`${activityTitle(entry)} ${activityDetail(entry) || ""}`.toLowerCase().includes(text)) return false;
+    if (text && !matchesWordChunks(`${activityTitle(entry)} ${activityDetail(entry) || ""}`, text)) return false;
     return true;
   });
-  // `popup`, so this form asks for the date Add Lead and Bulk Entry deliberately do not - and asks
-  // it against the vertical resolved above rather than the lead's own blank column.
-  const missingRequired = missingRequiredLeadFields(displayLead, { vertical, popup: true });
-
   /**
    * Saves, or shows what is stopping it.
    *
@@ -4009,15 +3244,14 @@ function LeadPopupModal({
    * message - the reader is taken to the problem instead of being told about it.
    */
   function attemptConvert(status) {
-    if (missingRequired.length) {
-      setShowRequiredErrors(true);
-      return;
-    }
-    setShowRequiredErrors(false);
+    // Asked of the status being written: Converted & Followup needs its next call booked, and
+    // Converted needs none.
+    setRequiredForStatus(status);
+    if (!requiredMarks.check(leadFieldProblems(leadAsSaved(displayLead, status), { vertical, popup: true }))) return;
     onConvert?.(status);
   }
 
-  function attemptSave(closeAfter, advanceAfter, forcedStatus) {
+  function attemptSave(closeAfter, advanceAfter, forcedStatus, moveConfirmed = false) {
     /*
      * One press, one update - refused before any of the checks below, so a second press cannot even
      * re-raise the phone-clash dialog or re-commit the note in the box.
@@ -4028,23 +3262,31 @@ function LeadPopupModal({
      * two - and the one it skipped is the one nobody then works.
      */
     if (updatingLead) return;
-    if (missingRequired.length) {
-      setShowRequiredErrors(true);
-      return;
-    }
-    setShowRequiredErrors(false);
+    // Asked of the status this save writes: CNA and Proceed Next records CNA whatever the pills say,
+    // and CNA needs its next call booked.
+    const savedLead = leadAsSaved(displayLead, forcedStatus);
+    setRequiredForStatus(forcedStatus ? savedLead.leadStatus : "");
+    // `popup`, so this form asks for the date Add Lead and Bulk Entry deliberately do not - and asks
+    // it against the vertical resolved above rather than the lead's own blank column.
+    if (!requiredMarks.check(leadFieldProblems(forcedStatus ? savedLead : displayLead, { vertical, popup: true }))) return;
 
     // CNA is exempt. Nobody picked up, so there is nothing to write down, and a run of
     // unanswered attempts has to stay one press each.
     if (!hasRemark && forcedStatus !== "CNA") {
       setShowRemarkError(true);
-      // The message lives under the notes box, so the notes box is where the user is sent -
-      // pressing Update from the Details tab would otherwise flag a field on a tab they
-      // cannot see and read as a button that does nothing.
-      setLeadTab?.("remarks");
+      // The message sits above the notes box, so the notes box is where the user is sent, scrolled
+      // to - pressing Update would otherwise flag a field they cannot see and read as a button that
+      // does nothing.
+      revealRemarkBox();
       return;
     }
     setShowRemarkError(false);
+
+    // A vertical picked in Client Details: the data-loss warning, then this same press again.
+    if (pendingVertical && !moveConfirmed) {
+      setConfirmMove({ closeAfter, advanceAfter, forcedStatus });
+      return;
+    }
 
     /*
      * And last: has this number been edited onto a client the CRM already holds?
@@ -4111,8 +3353,18 @@ function LeadPopupModal({
    * and there is no update left for it to race.
    */
   async function saveWithCommittedNote(closeAfter, advanceAfter, forcedStatus, committedEntries) {
-    const saved = await onSave(closeAfter, advanceAfter, forcedStatus, committedEntries);
+    // With a move to follow, the save keeps the popup where it is - the move closes it, as the lead
+    // leaves this vertical - and the rest of the edits are written first, on the vertical they are for.
+    const moving = pendingVertical;
+    const saved = await onSave(moving ? false : closeAfter, moving ? false : advanceAfter, forcedStatus, committedEntries);
     if (saved === false && committedEntries) onUpdateRemarks?.(committedEntries, { post: true });
+    if (!moving || saved === false) return;
+    try {
+      await onMoveVertical(moving);
+      setPendingVertical("");
+    } catch (error) {
+      onError?.(error.message || "Unable to move this lead.");
+    }
   }
 
   return createPortal(
@@ -4185,8 +3437,11 @@ function LeadPopupModal({
         <ReadOnlyFieldset canWrite={canWrite} reason="You have read-only access to CRM leads." className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto lg:overflow-hidden">
           <div className="grid min-h-0 gap-3 p-3 lg:h-full lg:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)]">
-            <div className="flex flex-col gap-4 lg:min-h-0 lg:overflow-hidden">
-              <section className="overflow-hidden rounded-[1.3rem] bg-white">
+            {/* The left column scrolls on its own from `lg`: Client Details is taller than a laptop
+                screen leaves it, and held to the screen it squeezed Event Details to a strip with
+                its shoots out of reach. */}
+            <div className="flex flex-col gap-4 lg:min-h-0 lg:overflow-y-auto">
+              <section className="shrink-0 overflow-hidden rounded-[1.3rem] bg-white">
                 <div className="border-b border-slate-200 px-5 py-4">
                   <h3 className="text-[18px] font-medium text-slate-700">Client Details</h3>
                 </div>
@@ -4198,7 +3453,7 @@ function LeadPopupModal({
                     const required = isRequiredLeadField(key, displayLead.leadStatus, displayLead.name, { vertical, popup: true });
                     // Only after an update has been attempted: marking a field red before the
                     // user has tried to save is scolding them for not having finished yet.
-                    const missing = showRequiredErrors && required && !String(displayLead[key] ?? "").trim();
+                    const missing = Boolean(requiredMarks.errors[key]) && required && !String(displayLead[key] ?? "").trim();
                     // Each control exposes a different inner element, so the red border is
                     // aimed at whichever one it actually renders.
                     const invalidRing = missing ? "[&_input]:border-rose-400 [&_select]:border-rose-400 [&_button]:border-rose-400" : "";
@@ -4219,10 +3474,10 @@ function LeadPopupModal({
                      */
                     const duplicate = key === "phone" ? phoneClashWarning : null;
                     const field = (node) => (
-                      <div key={key} className={invalidRing}>
+                      <div key={key} className={invalidRing} data-invalid={missing ? "true" : undefined}>
                         {node}
                         {missing && (
-                          <p role="alert" className="mt-1 text-xs font-normal text-rose-600">{label} is required.</p>
+                          <p role="alert" className="mt-1 text-xs font-normal text-rose-600">{requiredMarks.errors[key]}</p>
                         )}
                         {!missing && duplicate && (
                           <button
@@ -4250,6 +3505,7 @@ function LeadPopupModal({
                           searchable
                           ariaLabel={label}
                           label={label}
+                          helperText={LEAD_FIELD_HELP[key]}
                           required={required}
                           // The branch this lead is filed under, named the way the register names
                           // it - see `branchOptionFor`. Not the text as stored, which is whatever
@@ -4264,9 +3520,47 @@ function LeadPopupModal({
                       return field(
                         <DateField
                           label={label}
+                          helperText={LEAD_FIELD_HELP[key]}
                           required={required}
                           value={displayLead[key] || ""}
                           onChange={(value) => onUpdateLead(key, value)}
+                        />
+                      );
+                    }
+                    if (control === "vertical") {
+                      return field(
+                        <>
+                          <Dropdown
+                            ariaLabel={label}
+                            label={label}
+                            helperText={LEAD_FIELD_HELP[key]}
+                            value={pendingVertical || vertical}
+                            options={MOVE_TARGETS.map((target) => ({ label: target, value: target }))}
+                            sorted={false}
+                            searchable={false}
+                            disabled={!onMoveVertical}
+                            onChange={(value) => setPendingVertical(value && value !== vertical ? value : "")}
+                          />
+                          {/* Nothing moves yet: said here so the pick is not mistaken for done. */}
+                          {pendingVertical && (
+                            <p className="mt-1 text-xs font-normal text-amber-700">
+                              Moves to {pendingVertical} when you press Update - you will be asked to confirm.
+                            </p>
+                          )}
+                        </>
+                      );
+                    }
+                    if (control === "crm") {
+                      return field(
+                        <Dropdown
+                          searchable
+                          ariaLabel={label}
+                          label={label}
+                          helperText={LEAD_FIELD_HELP[key]}
+                          value={displayLead.crm || ""}
+                          onChange={(value) => onUpdateLead(key, value || "")}
+                          // The current owner stays listed even when they have left the roster.
+                          options={crmOptionsFrom(crmEmployees, [displayLead.crm].filter(Boolean))}
                         />
                       );
                     }
@@ -4274,6 +3568,7 @@ function LeadPopupModal({
                       return field(
                         <ComboBoxField
                           label={label}
+                          helperText={LEAD_FIELD_HELP[key]}
                           required={required}
                           value={displayLead[key] || ""}
                           onChange={(value) => onUpdateLead(key, value)}
@@ -4293,6 +3588,7 @@ function LeadPopupModal({
                     return field(
                       <FieldControl
                         label={label}
+                        helperText={LEAD_FIELD_HELP[key]}
                         required={required}
                         value={displayLead[key] || ""}
                         onChange={isPhone
@@ -4324,13 +3620,15 @@ function LeadPopupModal({
               </section>
 
               {/* Same as the tabs card opposite: `flex-1` is a share of a column that only
-                  exists from `lg`, and stacked it collapsed Event Details to nothing. */}
-              <section className="flex flex-col overflow-hidden rounded-[1.3rem] bg-white lg:min-h-0 lg:flex-1">
+                  exists from `lg`, and stacked it collapsed Event Details to nothing. From `lg` it
+                  fills what Client Details leaves, but never less than room for its rows - past
+                  that the column scrolls. */}
+              <section className="flex flex-col overflow-hidden rounded-[1.3rem] bg-white lg:min-h-[20rem] lg:flex-1">
                 <div className="border-b border-slate-200 px-5 py-4">
                   <h3 className="text-[18px] font-medium text-slate-700">Event Details</h3>
                 </div>
                 <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
-                  <ShootDetailsTable shoots={shoots} onChangeRow={(index, key, value) => onUpdateShootRow(index, key, value)} onRemoveRow={(index) => onUpdateShootRow(index, "remove")} onAddRow={() => onUpdateShootRow(-1, "add")} />
+                  <ShootDetailsTable shoots={shoots} shootTypeOptions={suggestions.shootType} shootTypeStatus={suggestions.status?.shootType} onRetryShootTypes={suggestions.reload} onChangeRow={(index, key, value) => onUpdateShootRow(index, key, value)} onRemoveRow={(index) => onUpdateShootRow(index, "remove")} onAddRow={() => onUpdateShootRow(-1, "add")} />
                 </div>
               </section>
             </div>
@@ -4423,7 +3721,7 @@ function LeadPopupModal({
                 </div>
 
                 {leadTab === "remarks" && (
-                  <div className="flex min-h-0 h-full flex-1 flex-col overflow-y-auto px-4 py-4 sm:px-5">
+                  <div ref={remarksPane} className="flex min-h-0 h-full flex-1 flex-col overflow-y-auto px-4 py-4 sm:px-5">
                     {/* Above the remarks rather than below the composer.
 
                         The list of remarks and the box for a new one can be taller than the pane,
@@ -4438,6 +3736,8 @@ function LeadPopupModal({
                       </p>
                     )}
                     <NotesComposer
+                      onUploadAttachment={uploadRemarkAttachment}
+                      onFetchAttachment={fetchRemarkAttachment}
                       key={displayLead.id}
                       value={displayLead.remarks || ""}
                       entries={leadRemarkEntries(displayLead.remarkEntries, displayLead.remarks)}
@@ -4630,10 +3930,11 @@ function LeadPopupModal({
                 {leadTab === "ai" && <LeadAiPanel leadId={lead?.id} lead={lead} onError={onError} />}
 
                 {leadTab === "transcripts" && (
-                  <TranscriptsTab
+                  <CallTranscriptsTab
                     transcripts={transcripts}
                     loading={transcriptsLoading}
-                    onNotice={onNotice}
+                    // A lead's transcripts are the CRM's own, behind `SALES / CRM Leads`.
+                    loadDetail={(id) => apiRequest(`/api/sales/crm-leads/transcripts/${encodeURIComponent(id)}`)}
                     onError={onError}
                   />
                 )}
@@ -4674,7 +3975,7 @@ function LeadPopupModal({
                               { key: "clientMainNumber", label: "Client Main Number", cellClassName: "whitespace-nowrap text-slate-600", render: (project) => project.clientMainNumber || "—" },
                               { key: "convertedAmount", label: "Converted Amount", cellClassName: "whitespace-nowrap text-slate-600", render: (project) => formatConvertedAmount(project.initialConvertedValue) },
                               { key: "crm", label: "CRM", headerClassName: "!whitespace-normal", cellClassName: "text-slate-600", render: (project) => project.crmName || "—" },
-                              { key: "branch", label: "Branch", headerClassName: "!whitespace-normal", cellClassName: "text-slate-600", render: (project) => project.sourceBranch || project.vertical || "—" },
+                              { key: "branch", label: "Branch", headerClassName: "!whitespace-normal", cellClassName: "text-slate-600", render: (project) => project.sourceBranch || verticalCode(project.vertical) || "—" },
                               // A project can be started before the date is settled, which the form
                               // records as its own flag rather than as a blank date.
                               { key: "mainEventDate", label: "Main Event Date", cellClassName: "whitespace-nowrap text-slate-600", render: (project) => (project.mainEventDate ? formatDate(project.mainEventDate) : project.mainEventDateKnown ? "—" : "Not decided") },
@@ -4788,7 +4089,7 @@ function LeadPopupModal({
                 </div>
                 <div className="space-y-4 px-5 py-5">
                   <fieldset className="space-y-2">
-                    <legend className="text-[15px] font-semibold text-slate-600">Lead Status</legend>
+                    <legend className="text-[15px] font-semibold text-slate-600">Lead Status<HelpTip text="Pick where this lead stands after the latest follow-up." /></legend>
                     <LeadStatusPills
                       value={displayLead.leadStatus}
                       /*
@@ -4829,7 +4130,14 @@ function LeadPopupModal({
                       list, and the one place the popup was still asking. The press that chooses
                       the status also clears whatever date the lead was carrying; see
                       `followUpClearedBy` for why hiding the fields alone would not be enough. */}
-                  {STATUSES_WITHOUT_FOLLOW_UP.includes(String(displayLead.leadStatus || "").trim()) ? (
+                  {/* A converted lead has had its last follow-up and has no next call to book. The
+                      date is said rather than offered as a field: every save from this popup stamps
+                      it with today (`leadWorkedTodayPatch`), so an edit here would not survive. */}
+                  {String(displayLead.leadStatus || "").trim() === "Converted" && dropsNextFollowUp(displayLead.leadStatus, displayLead.vertical) ? (
+                    <p className="text-xs font-normal text-slate-500 sm:text-sm">
+                      {displayLead.lastFollowUpDate ? `Last Follow-up Date: ${displayLead.lastFollowUpDate}. ` : ""}Converted leads have no next follow-up.
+                    </p>
+                  ) : STATUSES_WITHOUT_FOLLOW_UP.includes(String(displayLead.leadStatus || "").trim()) ? (
                     /* Said rather than left as a gap, in the same words Bulk Update uses: two
                        fields that were there a moment ago and are now missing is worth one line. */
                     <p className="text-xs font-normal text-slate-500 sm:text-sm">
@@ -4837,8 +4145,17 @@ function LeadPopupModal({
                     </p>
                   ) : (
                     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                      <DateField label="Next Follow-up Date" value={displayLead.nextFollowUpDate || ""} onChange={(value) => onUpdateDetails?.("nextFollowUpDate", value)} />
-                      <TimeField label="Next Follow-up Time" value={displayLead.nextFollowUpTime || ""} onChange={(event) => onUpdateDetails?.("nextFollowUpTime", event.target.value)} />
+                      <DateField
+                        label="Next Follow-up Date"
+                        helperText="The day this lead is due a call; it shows on Pending Followups."
+                        value={displayLead.nextFollowUpDate || ""}
+                        onChange={(value) => onUpdateDetails?.("nextFollowUpDate", value)}
+                        required={isRequiredLeadField("nextFollowUpDate", requiredForStatus || displayLead.leadStatus, displayLead.name, { vertical, popup: true })}
+                        error={requiredMarks.errors.nextFollowUpDate && !String(displayLead.nextFollowUpDate ?? "").trim()
+                          && isRequiredLeadField("nextFollowUpDate", requiredForStatus || displayLead.leadStatus, displayLead.name, { vertical, popup: true })
+                          ? requiredMarks.errors.nextFollowUpDate : ""}
+                      />
+                      <TimeField label="Next Follow-up Time" helperText="The time to call back on the follow-up day." value={displayLead.nextFollowUpTime || ""} onChange={(event) => onUpdateDetails?.("nextFollowUpTime", event.target.value)} />
                     </div>
                   )}
                 </div>
@@ -4848,13 +4165,22 @@ function LeadPopupModal({
         </div>
         </ReadOnlyFieldset>
 
-        <div className="border-t border-slate-200 bg-white px-5 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+        {/* A `<footer>` rather than a bordered `<div>`: it is the popup's footer, and the rule about
+            where a footer's buttons sit is read off every footer in the application
+            (`test/form-footer-buttons.test.mjs`) - a footer that does not say it is one escapes it. */}
+        {/* `pr-24` keeps the last button clear of the Nebula AI button, which floats over this corner. */}
+        <footer className="border-t border-slate-200 bg-white py-4 pl-5 pr-24">
+          {/* One group at the right, as every footer in the application now reads (`SchemaFormPanel`,
+              `ui/Dialog`). It was `justify-between`, which left Back alone at the far edge with a
+              hole across the middle of the row. */}
+          <div className="flex flex-wrap items-center gap-3 sm:justify-end">
             {/* Back rather than Cancel: the popup writes each edit as it is made, so there
                 was never anything for a Cancel to undo - it only closed. Stepping back to the
                 lead above is the useful other half of Update and Proceed Next, and the × in
                 the header still closes. */}
-            <Button variant="secondary" onClick={() => onBack?.()} className="rounded-md">Back</Button>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button variant="secondary" onClick={() => onBack?.()} className="rounded-md">Back</Button>
+            </div>
             {canWrite && <div className="flex flex-wrap items-center gap-3">
               {/* The buttons stay live and answer when pressed. Disabled ones with a list of
                   names beside them left the user to work out which box on a long form the
@@ -4862,18 +4188,15 @@ function LeadPopupModal({
               <Button variant="secondary" onClick={() => attemptSave(false, true, "CNA")} busy={updatingLead} className="rounded-md bg-blue-50 text-blue-600">
                 CNA and Proceed Next
               </Button>
-              {/* Held shut until every required field is filled. `CNA and Proceed Next`
-                  beside them stays live, and marks the missing boxes red when pressed, so
-                  there is still a way to find out what is outstanding. */}
-              <Button variant="primary" onClick={() => attemptSave(true)} busy={updatingLead} disabled={missingRequired.length > 0} className="rounded-md disabled:bg-slate-300">
+              <Button variant="primary" onClick={() => attemptSave(true)} busy={updatingLead} className="rounded-md disabled:bg-slate-300">
                 Update and Close
               </Button>
-              <Button variant="primary" onClick={() => attemptSave(false, true)} busy={updatingLead} disabled={missingRequired.length > 0} className="rounded-md disabled:bg-slate-300">
+              <Button variant="primary" onClick={() => attemptSave(false, true)} busy={updatingLead} className="rounded-md disabled:bg-slate-300">
                 Update and Proceed Next
               </Button>
             </div>}
           </div>
-        </div>
+        </footer>
       </div>
 
       {/* "This number is already an enquiry", over the popup that is about to save it.
@@ -4930,6 +4253,23 @@ function LeadPopupModal({
           } : undefined}
         />
       )}
+
+      {/* Update with a vertical picked: the same words Bulk Update gives, before anything is written. */}
+      <ConfirmDialog
+        open={Boolean(confirmMove && pendingVertical)}
+        layer="confirmOverDialog"
+        title={`Update and move ${displayLead.id || "this lead"} to ${pendingVertical}?`}
+        message={`${verticalMoveWarning(vertical, pendingVertical)} If this number is already an enquiry in ${pendingVertical}, the lead is not moved.`}
+        confirmLabel={`Update and move to ${pendingVertical}`}
+        cancelLabel="Go back"
+        tone="danger"
+        onCancel={() => setConfirmMove(null)}
+        onConfirm={() => {
+          const press = confirmMove;
+          setConfirmMove(null);
+          attemptSave(press.closeAfter, press.advanceAfter, press.forcedStatus, true);
+        }}
+      />
 
       {/* Nebula for the lead on screen, in the one corner of a form that is reliably empty.
           `scope="lead"` inside the panel is what keeps it about this person rather than the
@@ -4997,7 +4337,6 @@ export function LeadPopupHost({ leadId, queue = [], canWrite = true, onOpenLead,
   // Convert navigates in this tab now rather than opening a second one.
   const router = useRouter();
   const [confirmConvert, setConfirmConvert] = useState("");
-  const [showQuotationCalculator, setShowQuotationCalculator] = useState(false);
   const [meetingsOpen, setMeetingsOpen] = useState(false);
 
   useEffect(() => {
@@ -5245,9 +4584,9 @@ export function LeadPopupHost({ leadId, queue = [], canWrite = true, onOpenLead,
   async function save(closeAfter = false, advanceAfter = false, forcedStatus = "", committedEntries = null) {
     if (!record || !displayLead) return false;
     // The same question the panel's own asterisks asked, so the refusal and the marking agree.
-    const missing = missingRequiredLeadFields(displayLead, { vertical: resolveLeadVertical(displayLead, details), popup: true });
+    const missing = missingRequiredLeadFields(leadAsSaved(displayLead, forcedStatus), { vertical: resolveLeadVertical(displayLead, details), popup: true });
     if (missing.length) {
-      onError?.(`Fill in ${missing.map((field) => field.label).join(", ")} before updating this lead.`);
+      onError?.(markedFieldsMessage(missing.length));
       return false;
     }
     try {
@@ -5377,9 +4716,17 @@ export function LeadPopupHost({ leadId, queue = [], canWrite = true, onOpenLead,
       onNotice={onNotice}
       onError={onError}
       onConvert={(status) => setConfirmConvert(status || "Converted")}
+      onMoveVertical={canWrite ? async (target) => {
+        const response = await moveCrmLeadVertical(leadId, target);
+        onNotice?.(response?.message || `${leadId} moved to ${target}.`);
+        onChanged?.();
+        onClose?.();
+      } : undefined}
       onBack={() => stepTo(previousLeadId)}
       onMoveNext={(action) => {
-        if (action === "quotation") setShowQuotationCalculator(true);
+        // The calculator is a page now, opened in a tab of its own on the lead being read - see the
+        // note where the dialog used to be defined.
+        if (action === "quotation") window.open(`/sales/quotation-calculator?lead=${encodeURIComponent(leadId || "")}`, "_blank", "noopener,noreferrer");
         if (action === "meetings") setMeetingsOpen(true);
       }}
     />
@@ -5391,7 +4738,6 @@ export function LeadPopupHost({ leadId, queue = [], canWrite = true, onOpenLead,
         nothing, which reads as a press that did nothing at all. That layer exists for exactly this:
         a confirmation over a form being filled in. */}
     <ConfirmDialog {...closeConfirmProps} layer="dialogOverPanel" />
-    <QuotationCalculatorModal open={showQuotationCalculator} onClose={() => setShowQuotationCalculator(false)} leadId={leadId} />
     {meetingsOpen && <MeetingsDialog
       lead={displayLead || { id: leadId }}
       onClose={() => setMeetingsOpen(false)}
@@ -5430,429 +4776,26 @@ export function LeadPopupHost({ leadId, queue = [], canWrite = true, onOpenLead,
     )}
   </>;
 }
+/*
+ * The **Quotation Calculator** was here - `QuotationCalculatorModal`, a portal over the lead popup,
+ * with the money formatter and the discount list it used. It is a page of its own since
+ * 2026-10-08: `components/sales/QuotationCalculatorPage.js`, at `/sales/quotation-calculator`,
+ * reached from this popup's own button, which opens it in a tab of its own carrying the lead and
+ * leaves the popup where it was. Pricing a quotation is a screen somebody sits on, not a question
+ * they dismiss - and it is read against the lead, which stays open beside it.
+ */
 
-const rupeeFormat = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 });
-
-// The money boxes are typed into, so what arrives is whatever the user pressed. Anything that is
-// not part of a number is dropped rather than turning the total into NaN.
-function formatRupees(value) {
-  return `₹ ${rupeeFormat.format(Math.max(0, Math.round(value || 0)))}`;
-}
-
-// Discounts are offered in fives, the way the studio quotes them.
-const discountOptions = Array.from({ length: 21 }, (_, index) => {
-  const percent = index * 5;
-  return { label: `${percent}`, value: String(percent) };
-});
+// How the leads are shown: the table, or the status board.
+const VIEW_OPTIONS = [{ value: "table", label: "Table" }, { value: "board", label: "Board" }];
 
 /**
- * Prices what the studio is quoting for, against the same service and deliverable master data the
- * Sales Manager module works from — there is no second copy of the catalogue kept here.
- *
- * What it charges is the base package price plus extras, plus every chosen service line and
- * deliverable at the price Settings gave it, less a discount. The rows are chosen the way the
- * Quotation Generator chooses them - Add Service, Add Deliverable, the same variant list, the same
- * auto-added deliverables - and no unit price is printed beside them; see
- * `QuotationCalculatorLines` and `lib/quotationCalculator.mjs`.
+ * The header's date range narrowed by a board column's own period: the later start and the earlier
+ * end, so a column asked for its last 7 days inside "This month" reads only what is in both.
  */
-function QuotationCalculatorModal({ open, onClose, leadId = null }) {
-  // Apply to Quotation opens the Quotation Generator on these choices, and raising a quotation is
-  // Quotation Management's Read / Write - the same permission the generator itself is offered on.
-  const { canWrite: canApply } = useModuleAccess("SALES", "Quotation Management");
-  const router = useRouter();
-  const [eventDate, setEventDate] = useState("");
-  // null until a date has been asked about, so "no bookings" is only ever said about a day that
-  // was actually looked up.
-  const [bookings, setBookings] = useState(null);
-  const [bookingsError, setBookingsError] = useState("");
-  const [catalogue, setCatalogue] = useState(null);
-  const [catalogueError, setCatalogueError] = useState("");
-  // Bumped by Try again. A catalogue that failed once - the backend restarting, a dropped
-  // connection - is worth asking for again without closing the dialog and losing what is typed.
-  const [catalogueAttempt, setCatalogueAttempt] = useState(0);
-  // One row per chosen service: the pricing line it is priced as - blank while a service priced
-  // under several bookings waits for the option to be picked on its row - and its quantity. What
-  // is priced, synced and saved is the quantities by line these resolve to.
-  const [serviceRows, setServiceRows] = useState([]);
-  const serviceQuantities = useMemo(() => serviceQuantitiesFromRows(serviceRows), [serviceRows]);
-  // Keyed by the deliverable's id, or by `deliverable::brand::variant` for a chosen variant.
-  const [deliverableQuantities, setDeliverableQuantities] = useState({});
-  // No. of Count per deliverable row, where its definition asks for one.
-  const [deliverableCounts, setDeliverableCounts] = useState({});
-  // Which deliverable rows a service line brought in, so removing the line takes them with it.
-  const [autoDeliverables, setAutoDeliverables] = useState({});
-  const [basePackagePrice, setBasePackagePrice] = useState("");
-  const [extras, setExtras] = useState("");
-  const [discountPercent, setDiscountPercent] = useState("0");
-  // The state of handing these choices to the Quotation Generator.
-  const [applying, setApplying] = useState(false);
-  const [applyError, setApplyError] = useState("");
-  // What Apply to Quotation has to say before it goes: the figures the generator has no line for.
-  const [handoffNotice, setHandoffNotice] = useState(null);
-
-  /*
-   * Escape closes this, and this only.
-   *
-   * It was the one overlay on the board that never registered, and because the calculator is opened
-   * *from* the lead popup the omission did not read as "Escape does nothing" - it read as Escape
-   * closing the wrong thing. The popup underneath was the top of the stack, so a press meant for the
-   * calculator dismissed the lead behind it and left the calculator standing over an empty board.
-   *
-   * `open` is the whole of the ordering. The component is mounted for as long as the popup is, so
-   * registering unconditionally would have put it on the stack *below* the popup - a child's effect
-   * runs before its parent's - and pressed the same fault the other way round. Keyed on `open`, it
-   * joins the stack at the moment it is shown, which is after the popup is already on it.
-   */
-  useEscapeKey(() => onClose?.(), open);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    let active = true;
-    void getQuotationCatalogue()
-      .then((response) => {
-        if (!active) return;
-        const data = response?.data || {};
-        setCatalogue({
-          services: Array.isArray(data.services) ? data.services : [],
-          deliverables: Array.isArray(data.deliverables) ? data.deliverables : [],
-        });
-        setCatalogueError("");
-      })
-      .catch((error) => {
-        if (!active) return;
-        setCatalogue({ services: [], deliverables: [] });
-        setCatalogueError(error?.message || "Unable to load the quotation catalogue.");
-      });
-    return () => {
-      active = false;
-    };
-  }, [open, catalogueAttempt]);
-
-  /*
-   * Reopens where it was left: the quantities, base package, extras and discount the lead's last
-   * applied quote was built from. A lead never quoted, or one the reader may not see, starts
-   * empty - the same screen as before, with nothing to undo.
-   */
-  useEffect(() => {
-    if (!open || !leadId) return undefined;
-    let active = true;
-    void getLeadQuote(leadId)
-      .then((response) => {
-        if (!active) return;
-        const data = response?.data || {};
-        const draft = data.draft || {};
-        // A draft saved before rows existed is read back from its quantities by line.
-        setServiceRows(Array.isArray(draft.serviceRows) ? draft.serviceRows : serviceRowsFromQuantities(draft.serviceQuantities || {}));
-        setDeliverableQuantities(draft.deliverableQuantities || {});
-        setDeliverableCounts(draft.deliverableCounts || {});
-        setAutoDeliverables(draft.autoDeliverables || {});
-        setBasePackagePrice(draft.basePackagePrice || "");
-        setExtras(draft.extras || "");
-        setDiscountPercent(draft.discountPercent || "0");
-      })
-      .catch(() => { /* Nothing saved for this lead: the calculator opens empty. */ });
-    return () => { active = false; };
-  }, [open, leadId]);
-
-  useEffect(() => {
-    if (!open || !eventDate) return undefined;
-    let active = true;
-    void getQuotationBookings(eventDate)
-      .then((response) => {
-        if (!active) return;
-        setBookings(Array.isArray(response?.data) ? response.data : []);
-        setBookingsError("");
-      })
-      .catch((error) => {
-        if (!active) return;
-        setBookings([]);
-        setBookingsError(error?.message || "Unable to load bookings for the selected date.");
-      });
-    return () => {
-      active = false;
-    };
-  }, [open, eventDate]);
-
-  const services = catalogue?.services || [];
-  const deliverables = catalogue?.deliverables || [];
-
-  const { lines: linesCost, serviceCost, totalCost } = calculatorTotals({ services, deliverables, serviceQuantities, deliverableQuantities, deliverableCounts, basePackagePrice, extras, discountPercent });
-
-  /*
-   * A service added, removed, or booked under another option changes what the services bring with
-   * them, so the deliverables are worked out again from the rows as they now stand - the Quotation
-   * Generator's rule, applied by the same helper the totals read. Stepping a quantity changes
-   * nothing about what is brought, so it does not re-sync (and cannot put back a deliverable
-   * somebody has just taken off).
-   */
-  const applyServiceRows = (nextRows) => {
-    setServiceRows(nextRows);
-    const synced = syncAutoDeliverables({ services, deliverables, serviceQuantities: serviceQuantitiesFromRows(nextRows), deliverableQuantities, deliverableCounts, autoDeliverables });
-    setDeliverableQuantities(synced.deliverableQuantities);
-    setDeliverableCounts(synced.deliverableCounts);
-    setAutoDeliverables(synced.autoDeliverables);
-  };
-  const addService = (serviceId, lineId = "") => {
-    if (serviceRows.some((row) => row.serviceId === serviceId)) return;
-    // The booking picked, or - where none was and the service is priced under one only - that one.
-    const lines = (services.find((service) => service.id === serviceId)?.lines || []).filter((line) => line.price !== null);
-    const chosen = lines.find((line) => line.id === lineId)?.id || (lines.length === 1 ? lines[0].id : "");
-    applyServiceRows([...serviceRows, { serviceId, lineId: chosen, quantity: 1 }]);
-  };
-  const setServiceLine = (serviceId, lineId) => {
-    applyServiceRows(serviceRows.map((row) => (row.serviceId === serviceId ? { ...row, lineId: lineId || "" } : row)));
-  };
-  const removeService = (serviceId) => {
-    applyServiceRows(serviceRows.filter((row) => row.serviceId !== serviceId));
-  };
-  const setServiceQuantity = (serviceId, next) => {
-    setServiceRows((current) => current.map((row) => (row.serviceId === serviceId ? { ...row, quantity: next } : row)));
-  };
-  const addDeliverableRow = (key) => {
-    setDeliverableQuantities((current) => (current[key] > 0 ? current : { ...current, [key]: 1 }));
-  };
-  const removeDeliverableRow = (key) => {
-    const without = (current) => { const next = { ...current }; delete next[key]; return next; };
-    setDeliverableQuantities(without);
-    setDeliverableCounts(without);
-    setAutoDeliverables(without);
-  };
-  const setDeliverableQuantity = (key, next) => {
-    setDeliverableQuantities((current) => ({ ...current, [key]: next }));
-  };
-  const setDeliverableCount = (key, next) => {
-    setDeliverableCounts((current) => ({ ...current, [key]: next }));
-  };
-
-  /*
-   * Apply to Quotation: these choices, handed to the Quotation Generator as its own rows.
-   *
-   * The generator is where a quotation is raised, so nothing is saved here - not onto the lead, not
-   * as a quotation. The catalogue the generator draws rows from is read (a row carries its whole
-   * definition), the lead the calculator was opened for is read for its vertical and enquiry id,
-   * and `generatorDraftFromCalculator` builds the payload; it is stashed for the Quotations screen
-   * to open on, and the person is sent there. A choice the generator cannot carry - a service whose
-   * option is still unchosen, a variant Settings has since removed - stops the handoff and is
-   * named, rather than dropped on the way.
-   */
-  async function buildHandoff() {
-    const [serviceResult, deliverableResult, leadResult] = await Promise.all([
-      getProjectServiceDefinitions(),
-      getProjectDeliverableDefinitions(),
-      leadId ? getCrmLead(leadId).catch(() => null) : Promise.resolve(null),
-    ]);
-    return generatorDraftFromCalculator({
-      catalogue,
-      serviceRows,
-      deliverableQuantities,
-      deliverableCounts,
-      autoDeliverables,
-      eventDate,
-      basePackagePrice,
-      extras,
-      discountPercent,
-      serviceDefinitions: Array.isArray(serviceResult?.data) ? serviceResult.data : [],
-      deliverableDefinitions: Array.isArray(deliverableResult?.data) ? deliverableResult.data : [],
-      lead: leadResult?.data?.lead || null,
-      leadId: leadId || "",
-      durationFor: durationForSessionTiming,
-    });
-  }
-
-  function openGeneratorWith(draft) {
-    stashQuotationGeneratorDraft(draft);
-    onClose?.();
-    router.push("/sales/quotation");
-  }
-
-  async function applyToQuotation() {
-    setApplying(true);
-    setApplyError("");
-    try {
-      const handoff = await buildHandoff();
-      if (handoff.skipped.length) {
-        setApplyError(`Not applied. ${handoff.skipped.join(" ")}`);
-        return;
-      }
-      /*
-       * The generator prices services and deliverables and has no line for a base package or for
-       * extras, so those figures travel as words in Additional Notes rather than as money in the
-       * total - said before leaving, so the total the generator shows is not a surprise.
-       */
-      if (handoff.carriedAsNote.length) {
-        setHandoffNotice(handoff);
-        return;
-      }
-      openGeneratorWith(handoff.draft);
-    } catch (error) {
-      setApplyError(error?.message || "Unable to open the Quotation Generator with these choices.");
-    } finally {
-      setApplying(false);
-    }
-  }
-
-  if (!open) return null;
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/45 p-3 sm:p-4"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Quotation Calculator"
-        className="themed-surface flex max-h-[calc(100dvh-1.5rem)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
-      >
-        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 px-5 py-4 sm:px-6">
-          <h2 className="text-lg font-medium text-slate-800">Quotation Calculator</h2>
-          <CloseButton onClick={onClose} ariaLabel="Close quotation calculator" />
-        </div>
-
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-slate-50 px-5 py-5 sm:px-6">
-          <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-            <DateField label="Event / Shoot Date" value={eventDate} onChange={setEventDate} className="max-w-xs" />
-            {bookingsError && <p role="alert" className="text-xs text-red-600 sm:text-sm">{bookingsError}</p>}
-            {!bookingsError && eventDate && bookings !== null && (
-              bookings.length === 0
-                ? <p className="text-xs text-slate-500 sm:text-sm">No Bookings on the selected Date</p>
-                : (
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold text-slate-600 sm:text-sm">Bookings ({bookings.length})</p>
-                    {/* Scrolls inside its own box: a long list of bookings must not widen the
-                        dialog or push the calculator below the fold. */}
-                    <SimpleTable
-                      variant="form"
-                      /* Scrolls inside its own box: a long list of bookings must not widen the
-                         dialog or push the calculator below the fold. */
-                      classNames={{
-                        wrapper: "max-w-2xl",
-                        table: "min-w-[32rem] text-xs sm:text-sm",
-                        head: "!bg-transparent !text-slate-600 !tracking-normal !text-xs sm:!text-sm",
-                        headRow: "border-b border-slate-200",
-                        th: "font-semibold",
-                        row: "!border-t-0 border-b border-slate-100 text-slate-600 last:border-b-0",
-                      }}
-                      columns={[
-                        { key: "bookingId", label: "Booking ID", render: (booking) => booking.bookingId || "—" },
-                        { key: "branch", label: "Branch", render: (booking) => booking.branch || "—" },
-                        { key: "vertical", label: "Vertical", render: (booking) => booking.vertical || "—" },
-                        { key: "details", label: "Details", render: (booking) => booking.details || "—" },
-                      ]}
-                      rows={bookings}
-                    />
-                  </div>
-                )
-            )}
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <TextField
-              label="Base Package Price"
-              inputMode="decimal"
-              value={basePackagePrice}
-              onChange={(event) => setBasePackagePrice(event.target.value)}
-              className="rounded-xl border border-slate-200 bg-white p-4"
-            />
-            <TextField
-              label="Extras"
-              inputMode="decimal"
-              value={extras}
-              onChange={(event) => setExtras(event.target.value)}
-              className="rounded-xl border border-slate-200 bg-white p-4"
-            />
-          </div>
-
-          {catalogueError && (
-            <div role="alert" className="flex flex-wrap items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
-              <p className="min-w-0 flex-1 text-xs text-red-700 sm:text-sm">{catalogueError}</p>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  setCatalogue(null);
-                  setCatalogueError("");
-                  setCatalogueAttempt((current) => current + 1);
-                }}
-              >
-                Try again
-              </Button>
-            </div>
-          )}
-
-          {/* Only what has been chosen, with no unit price beside it. The totals below carry the
-              figures; the per-row price is read from the catalogue and never printed here. */}
-          <QuotationCalculatorLines
-            catalogue={catalogue}
-            catalogueError={catalogueError}
-            serviceRows={serviceRows}
-            deliverableQuantities={deliverableQuantities}
-            deliverableCounts={deliverableCounts}
-            onAddService={addService}
-            onServiceLine={setServiceLine}
-            onRemoveService={removeService}
-            onServiceQuantity={setServiceQuantity}
-            onAddDeliverable={addDeliverableRow}
-            onRemoveDeliverable={removeDeliverableRow}
-            onDeliverableQuantity={setDeliverableQuantity}
-            onDeliverableCount={setDeliverableCount}
-          />
-
-          {/* Under the deliverables' column on a wide screen, as it always sat; full width below `lg`. */}
-          <section className="rounded-xl bg-blue-50 px-4 py-3 text-slate-700 lg:ml-auto lg:w-[calc(50%-0.5rem)]">
-            <div className="flex items-center justify-between gap-3 text-xs sm:text-sm">
-              <span>Services &amp; Deliverables :</span>
-              <span className="tabular-nums">{formatRupees(linesCost)}</span>
-            </div>
-            <div className="mt-2 flex items-center justify-between gap-3 text-xs sm:text-sm">
-              <span>Service Cost :</span>
-              <span className="tabular-nums">{formatRupees(serviceCost)}</span>
-            </div>
-            <div className="mt-2 flex items-center justify-between gap-3 text-xs sm:text-sm">
-              <span>Discount in %</span>
-              <Dropdown
-                mode="input"
-                ariaLabel="Discount in %"
-                value={discountPercent}
-                onChange={setDiscountPercent}
-                options={discountOptions}
-                className="w-20 [&>span]:hidden [&_button]:mt-0"
-              />
-            </div>
-            <div className="mt-2 flex items-center justify-between gap-3 border-t border-blue-100 pt-2">
-              <span className="text-sm font-medium text-slate-800 sm:text-base">Total Cost :</span>
-              <span className="text-lg font-medium tabular-nums text-slate-800 sm:text-xl">{formatRupees(totalCost)}</span>
-            </div>
-          </section>
-          {applyError && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700 sm:text-sm">{applyError}</p>}
-        </div>
-
-        <div className="flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-slate-200 bg-white px-5 py-4 sm:px-6">
-          {/* Apply opens the Quotation Generator on these choices; the quotation is raised there,
-              by Generate Quotation, and nothing is written until then. Absent without the
-              permission to raise one. OK closes the calculator and keeps what was chosen. */}
-          {canApply && (
-            <Button type="button" variant="secondary" disabled={applying} onClick={() => void applyToQuotation()}>
-              {applying ? "Applying..." : "Apply to Quotation"}
-            </Button>
-          )}
-          <Button type="button" variant="primary" onClick={onClose}>OK</Button>
-        </div>
-      </div>
-      <ConfirmDialog
-        open={Boolean(handoffNotice)}
-        title="Open the Quotation Generator?"
-        message={`The generator prices services and deliverables only. ${(handoffNotice?.carriedAsNote || []).join(" ")} These will be written into Additional Notes and are not added to the quotation's total.`}
-        confirmLabel="Open generator"
-        onCancel={() => setHandoffNotice(null)}
-        onConfirm={() => { const draft = handoffNotice?.draft; setHandoffNotice(null); if (draft) openGeneratorWith(draft); }}
-      />
-    </div>,
-    document.body,
-  );
+function narrowedRange(dateFrom, dateTo, range) {
+  const later = (a, b) => (!a ? b : !b ? a : a > b ? a : b);
+  const earlier = (a, b) => (!a ? b : !b ? a : a < b ? a : b);
+  return { from: later(dateFrom, range?.dateFrom), to: earlier(dateTo, range?.dateTo) };
 }
 
 export default function CRMPage() {
@@ -5918,8 +4861,6 @@ export default function CRMPage() {
    * the one that used to be written here named six branches the studio does not have.
    */
   const { branches: branchOptions } = useBranchOptions();
-  // The suggestions behind the Relationship and Referred From combos - the studio's lists.
-  const suggestions = useLeadSuggestionLists();
   /*
    * The filter also offers whatever is already on the rows, so a lead filed against a branch
    * that has since been renamed or closed can still be found - the same rule `crmChoices`
@@ -5990,6 +4931,121 @@ export default function CRMPage() {
    * Default `false`, which is that same board: everything the reader may see, exactly as before.
    */
   const [mineOnly, setMineOnly] = usePreference("crm:my-leads", false);
+  /*
+   * Table or board, remembered per person like the board, the tab and My Leads beside it: somebody who
+   * works in columns should not have to choose them every morning.
+   *
+   * Default "table", which is the screen everybody has now - a view switch is not a reason to move
+   * anybody off the one they know.
+   */
+  const [view, setView] = usePreference("tab:crm-view", "table");
+  /*
+   * Bumped whenever the leads have changed under the board.
+   *
+   * The table re-reads itself after a write and on its own poller, and both now stand down while the
+   * board is shown - so without this a lead whose status was just changed in the popup would sit in
+   * its old column while the screen claimed to be current. The counter is part of `fetchLeadColumn`'s
+   * identity, which is what every column's read already depends on, so bumping it re-reads all of them.
+   */
+  const [leadsChangedAt, setLeadsChangedAt] = useState(0);
+  /*
+   * Whether anybody reports to this reader, which is the only case the "My Leads" switch means
+   * anything in - see `readerManagesAnyone` on the server.
+   *
+   * For everybody else the two states are the same board: they are named on their own leads and on
+   * nobody else's, so both answers return the same rows. A switch that changes nothing invites
+   * somebody to flip it, see no difference, and conclude the board is broken.
+   *
+   * Three states, not two: `null` until the first page has answered. Started at `false`, the board
+   * read `showingAllLeads` as true on that first load, so a manager whose stored answer was "only
+   * mine" got the whole team's leads fetched and drawn, then the answer arrived and it all refetched
+   * narrowed - a flash of other people's leads and a doubled page-and-counts query on every load.
+   * Unknown means "use what they chose", which is right either way: for somebody who turns out to
+   * manage nobody, "only mine" returns exactly the leads their scope already limits them to.
+   */
+  const [managesAnyone, setManagesAnyone] = useState(null);
+  /*
+   * The statuses this tab's leads actually read as, on the board - the Status column's own
+   * `column-values`, so it is narrowed by exactly the scope, tab, range, filters and My Leads the
+   * columns are read with. `null` until it answers; `pipelineColumns` stands up a column for each.
+   */
+  const [boardStatuses, setBoardStatuses] = useState(null);
+  /*
+   * ── The board's columns ───────────────────────────────────────────────────────────────────────
+   *
+   * The vertical's statuses, led by **Yet to connect**.
+   *
+   * That one is not a status anybody chooses - `LEAD_STATUS_OPTIONS` is what the pills offer, and a
+   * lead is at Yet to connect precisely by not having been chosen for anything. It is what the Status
+   * cell *displays* for a lead with none (`unsetStatusSql` on the server, `resolveLeadStatus` here),
+   * which is also why it filters like every other column without anything new on the server: the
+   * filter matches the displayed status.
+   *
+   * Without it the board described almost nothing. Leads with no status match no status column, and on
+   * this studio's register that is the overwhelming majority of them - so the board showed a handful of
+   * Converted cards beside five empty lanes. It leads the board because that is what it is: the work
+   * nobody has picked up yet, which is where a pipeline starts.
+   */
+  const pipelineColumns = useMemo(() => {
+    const tones = new Map([
+      /*
+       * **Unassigned** leads them, and it is the one that decides whether this board is any use at all.
+       *
+       * The Status column checks `crm = ''` before it looks at the status, so a lead nobody has been
+       * given reads "Unassigned" whatever its status - 543 of this studio's 556. Without a column they
+       * matched nothing and the board was empty, worst of all for an administrator, who sees the whole
+       * register including every unowned lead.
+       *
+       * Ahead of Yet to connect because it is further from being worked: that one is owned and not yet
+       * rung, this one is not even somebody's.
+       */
+      /*
+       * Shown **only to somebody who hands work out**.
+       *
+       * An individual gets the leads that are theirs; a lane of leads belonging to nobody is one they can
+       * neither work nor clear, and on this register it would be the largest column on their board. The
+       * CRM already draws this line - the server surfaces an unowned lead to a reader who sees everything,
+       * because "they are the ones who hand leads out" - and `managesAnyone` is the page's own form of
+       * that question, already answered for the My Leads switch.
+       *
+       * Or to anybody whose tab holds such a lead after all: the scope still shows a reader the unowned
+       * leads they typed in themselves, and a branch admin their branch's, and a lead the table lists
+       * on this tab has to stand in some column of it.
+       */
+      [UNASSIGNED_STATUS, "bg-[#7c3aed] text-white border-[#7c3aed]"],
+      [YET_TO_CONNECT_STATUS, "bg-[#c3c7ce] text-slate-900 border-[#c3c7ce]"],
+      /*
+       * In the **pipeline's** order - see `BOARD_STATUS_ORDER` - and the board draws them as given.
+       *
+       * It used to draw them by how many each held, largest first, re-sorting as the counts arrived.
+       * A pipeline read out of sequence says nothing about the pipeline, and the board would not keep
+       * still: seven columns answer at seven moments, so it re-sorted itself as they landed and a
+       * column could move out from under somebody reading it.
+       */
+      ...LEAD_STATUS_OPTIONS.map((option) => [option.value, option.className]),
+      // Last, and nothing may be dropped into it: it is read from the project, not chosen.
+      [PROJECT_DELETED_STATUS, "bg-[#92400e] text-white border-[#92400e]"],
+    ]);
+    /*
+     * Plus a column for **any status this tab's leads actually hold** - see `crmBoardColumnStatuses`
+     * and `boardStatuses` below. Every column is its own paged read of one status, so a lead whose
+     * status had no column was in the table and on no lane: an imported "Inactive", Converted &
+     * Followup outside Qua Qua, and an Unassigned lead shown to somebody who manages nobody (one they
+     * typed in themselves, or their branch admin's). Nothing is widened by it: the statuses are read
+     * from the very rows the columns then page through.
+     */
+    return crmBoardColumnStatuses({
+      offered: boardStatusOptions(board).map((option) => option.value),
+      occurring: boardStatuses,
+      showUnassigned: Boolean(managesAnyone),
+      unassigned: UNASSIGNED_STATUS,
+      yetToConnect: YET_TO_CONNECT_STATUS,
+      projectDeleted: PROJECT_DELETED_STATUS,
+    // A status the module has no colour for is slate, the board's own neutral (`DEFAULT_TONE`), as
+    // an exact colour like the rest so the dark tiers cannot repaint it.
+    }).map((value) => ({ value, className: tones.get(value) || "bg-[#475569] text-white border-[#475569]" }));
+  }, [board, managesAnyone, boardStatuses]);
+  const markLeadsChanged = useCallback(() => setLeadsChangedAt((count) => count + 1), []);
   /*
    * Checked against the tabs the board on screen actually has.
    *
@@ -6063,22 +5119,6 @@ export default function CRMPage() {
   const [appliedFilters, setAppliedFilters] = useState(NO_FILTERS);
   const [totalRows, setTotalRows] = useState(0);
   const [serverCounts, setServerCounts] = useState(EMPTY_TAB_COUNTS);
-  /*
-   * Whether anybody reports to this reader, which is the only case the "My Leads" switch means
-   * anything in - see `readerManagesAnyone` on the server.
-   *
-   * For everybody else the two states are the same board: they are named on their own leads and on
-   * nobody else's, so both answers return the same rows. A switch that changes nothing invites
-   * somebody to flip it, see no difference, and conclude the board is broken.
-   *
-   * Three states, not two: `null` until the first page has answered. Started at `false`, the board
-   * read `showingAllLeads` as true on that first load, so a manager whose stored answer was "only
-   * mine" got the whole team's leads fetched and drawn, then the answer arrived and it all refetched
-   * narrowed - a flash of other people's leads and a doubled page-and-counts query on every load.
-   * Unknown means "use what they chose", which is right either way: for somebody who turns out to
-   * manage nobody, "only mine" returns exactly the leads their scope already limits them to.
-   */
-  const [managesAnyone, setManagesAnyone] = useState(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const leadsRef = useRef([]);
   const loadingRef = useRef(false);
@@ -6100,11 +5140,25 @@ export default function CRMPage() {
    * record rather than creating a second lead for a client the CRM already holds.
    */
   const [assigningCallId, setAssigningCallId] = useState("");
+  /*
+   * The **existing** lead this form is assigning, when that is what it is doing.
+   *
+   * The form has three jobs now: a new lead, placing a call, and giving an unassigned lead an owner.
+   * The third is reached by dragging a card out of the board's Unassigned column, and it is the only
+   * one that **updates** rather than writes - which is why it is held here rather than inferred, the
+   * same reasoning as `assigningCallId` above it: everything that follows has to agree about which
+   * job it is doing, and an id is the one thing that cannot be mistaken for another.
+   */
+  const [assigningLeadId, setAssigningLeadId] = useState("");
   // Import Leads: several clients typed at once, each with its own vertical. See
   // `BulkImportLeadsDialog`, and `@/lib/crmBulkImport.mjs` for what each vertical asks.
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showBulkUpdateDialog, setShowBulkUpdateDialog] = useState(false);
   const [bulkUpdateLeadStatus, setBulkUpdateLeadStatus] = useState("");
+  // Another vertical to move the selection to; blank leaves it where it is. A move asks once more.
+  const [bulkUpdateVertical, setBulkUpdateVertical] = useState("");
+  const [confirmVerticalMove, setConfirmVerticalMove] = useState(false);
+  // The lead popup's Change Vertical: `{ id, from }` while its dialog is open.
   const [bulkUpdateLastUpdatedDate, setBulkUpdateLastUpdatedDate] = useState("");
   // When the selection is to be called back, as opposed to when it was last worked. Its own
   // field because the two answer different questions and a bulk edit may set either or both.
@@ -6124,6 +5178,25 @@ export default function CRMPage() {
   // Convert navigates in this tab now rather than opening a second one.
   const router = useRouter();
   const [convertLead, setConvertLead] = useState(null);
+  /*
+   * ── Converted, and whether to book it now ─────────────────────────────────────────────────────
+   *
+   * A lead saved as Converted or Converted & Followup is marked but not **booked**: those two statuses
+   * stand for a project, and the project is a form of its own. The register has always allowed that
+   * gap - the conversion dialog's "Update and Close" is exactly it, "converted but not being booked
+   * yet" - so what was missing is only the offer to go on.
+   *
+   * Asked **after** the save, which is the point of asking here rather than when the status is chosen:
+   * the reader fills the lead in, presses Update, and the write happens with the required fields, the
+   * mandatory remark and the status's own rules all enforced. Only then is Create Project offered, and
+   * declining costs nothing because the lead is already saved as converted. Offered first - as the
+   * status pills do it - the dialog has to do the writing, and it writes what it can see rather than
+   * what is held in the popup's draft.
+   *
+   * Reached by a status **drafted** into the popup, which today means a card dropped on one of those
+   * two columns on the board. The pills still raise `convertLead` exactly as they always have.
+   */
+  const [convertedAsk, setConvertedAsk] = useState(null);
   const [duplicateEnquiries, setDuplicateEnquiries] = useState(null);
   // Deleting a lead cannot be undone, so it is confirmed first - the same guard the Employees
   // table puts in front of its own red Delete.
@@ -6283,10 +5356,43 @@ export default function CRMPage() {
    */
   const openLeadPopupRef = useRef(openLeadPopup);
   const openLinkedLeadRef = useRef(openLinkedLead);
+  const openAssignLeadRef = useRef(openAssignLead);
   const customFieldsByVerticalRef = useRef(customFieldsByVertical);
   useEffect(() => { openLeadPopupRef.current = openLeadPopup; });
   useEffect(() => { openLinkedLeadRef.current = openLinkedLead; });
+  useEffect(() => { openAssignLeadRef.current = openAssignLead; });
   useEffect(() => { customFieldsByVerticalRef.current = customFieldsByVertical; });
+
+  /**
+   * Opens Add Lead on a lead that has no owner, to give it one - what a card dragged out of the
+   * board's Unassigned column does.
+   *
+   * The lead is **fetched** rather than looked for among the rows: the board pages a column at a
+   * time and the table stands down behind it, so the row is usually in neither. Its details come
+   * with it, which is what fills the form - the popup's own fields live in that row.
+   *
+   * `status` is the column it was dropped on. The form opens with it chosen, so Confirm both assigns
+   * the lead and moves it; left unassigned, the board goes on reading it as unassigned whatever the
+   * status says, which is the behaviour this relies on rather than works around.
+   */
+  function openAssignLead(id, status = "") {
+    const leadId = String(id || "").trim();
+    if (!leadId) return;
+    void apiRequest(`/api/sales/crm-leads/${encodeURIComponent(leadId)}`)
+      .then((response) => {
+        const record = response?.data;
+        if (!record?.lead) {
+          showError("That lead could not be opened.");
+          return;
+        }
+        setAssigningCallId("");
+        setAssigningLeadId(leadId);
+        setAddLeadForm(leadFormFromLead(leadFromRecord(record), record.details || {}, status));
+        addLeadMarks.clearAll();
+        setShowAddLead(true);
+      })
+      .catch((error) => showError(error.message || "That lead could not be opened."));
+  }
 
   /*
    * A lead named in the URL, opened however the board happens to be filtered.
@@ -6357,10 +5463,15 @@ export default function CRMPage() {
   const [selection, setSelection] = useState(emptySelection);
   const clearSelection = useCallback(() => setSelection(emptySelection()), []);
   const [addLeadForm, setAddLeadForm] = useState(emptyLeadForm());
-  const addLeadMissing = missingRequiredLeadFields(addLeadForm);
+  // The suggestions behind the Relationship and Referred From combos and the Shoot Type rows - the
+  // studio's lists, the shoots being those of the vertical the form is on. Declared here rather
+  // than with the other hooks above because it reads the form, and refetched when its Vertical
+  // radio moves: a Qua Qua lead is offered Qua Qua's shoots and none of Dum Dum's.
+  const suggestions = useLeadSuggestionLists({ vertical: addLeadForm.vertical });
   // Nothing is marked until Confirm has been pressed, so a form being filled in is not red
-  // from the moment it opens.
-  const [showAddLeadErrors, setShowAddLeadErrors] = useState(false);
+  // from the moment it opens; a marked box clears as it is answered.
+  const addLeadMarks = useFormErrors();
+  const clearAddLeadMarks = addLeadMarks.clearAll;
 
   /*
    * ── One number, one enquiry ───────────────────────────────────────────────────────────────
@@ -6404,7 +5515,12 @@ export default function CRMPage() {
     if (!showAddLead || !isCompletePhoneNumber(phone)) return undefined;
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      void getDuplicateEnquiries({ phone })
+      /*
+       * `excludeId` because a lead being **assigned** already holds the number in the box - itself.
+       * Without it the form would open warning that this client is already an enquiry, naming the
+       * very lead on screen, and the only way past it would be to acknowledge a clash with itself.
+       */
+      void getDuplicateEnquiries({ phone, excludeId: assigningLeadId || "" })
         .then((response) => {
           if (cancelled) return;
           const leads = response?.data?.leads || [];
@@ -6415,7 +5531,7 @@ export default function CRMPage() {
         .catch(() => { if (!cancelled) setAddLeadDuplicates(null); });
     }, 400);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [showAddLead, addLeadForm.phone]);
+  }, [showAddLead, addLeadForm.phone, assigningLeadId]);
 
   // The warning that is outstanding for the number currently in the form, or null. Null once
   // somebody has read it and chosen to go on with that same number.
@@ -6428,14 +5544,14 @@ export default function CRMPage() {
   /**
    * Wraps a required Add Lead field so its own message can sit beneath it.
    *
-   * Mirrors the lead popup: a red border on whichever inner element the control renders, and
-   * the reason directly under the field rather than in a list at the foot of the form.
+   * The control's own `error`: a red border and the reason directly under the field rather than in
+   * a list at the foot of the form.
    */
-  function requiredField(key, label, node) {
+  function requiredField(key, node) {
     // Not required at all on a lead being turned down - see `requiredLeadFields`. Asked of the same
     // rule that refuses the save, so the red border and the refusal cannot disagree.
     const required = isRequiredLeadField(key, addLeadForm.leadStatus, addLeadForm.name);
-    const missing = required && showAddLeadErrors && !String(addLeadForm[key] ?? "").trim();
+    const missing = leadFieldMessage(key, addLeadMarks.errors[key], addLeadForm);
     /*
      * "This number is already an enquiry", under the Contact field it is about.
      *
@@ -6449,12 +5565,11 @@ export default function CRMPage() {
      */
     const duplicate = key === "phone" ? addLeadDuplicateWarning : null;
     return (
-      <div className={missing ? "[&_input]:border-rose-400 [&_select]:border-rose-400 [&_button]:border-rose-400" : ""}>
+      <div>
         {/* The asterisk comes from the same answer the refusal does, rather than from the call
             site: a field marked required that saves without it, or the reverse, is the form
             disagreeing with itself in front of the person filling it in. */}
-        {cloneElement(node, { required })}
-        {missing && <p role="alert" className="mt-1 text-xs font-normal text-rose-600">{label} is required.</p>}
+        {cloneElement(node, { required, error: missing })}
         {!missing && duplicate && (
           <button
             type="button"
@@ -6504,7 +5619,8 @@ export default function CRMPage() {
   );
   const requestCloseAddLead = () => guardAddLeadClose(() => closeAddLead());
   useEscapeKey(requestCloseAddLead, showAddLead);
-  useEscapeKey(() => setShowBulkUpdateDialog(false), showBulkUpdateDialog);
+  // Not while its vertical move is being confirmed: Escape there answers the confirmation, and only that.
+  useEscapeKey(() => setShowBulkUpdateDialog(false), showBulkUpdateDialog && !confirmVerticalMove);
   useEscapeKey(() => setAskingAboutLead(null), Boolean(askingAboutLead));
   useEscapeKey(() => setPendingDeleteLead(null), Boolean(pendingDeleteLead) && !deletingLead);
   useEscapeKey(() => setPendingBulkDelete(false), pendingBulkDelete && !bulkDeleting);
@@ -6541,7 +5657,6 @@ export default function CRMPage() {
   // is, so one lead's projects are never shown against another.
   const [leadProjects, setLeadProjects] = useState({ leadId: "", rows: [] });
   const [activityRefreshKey, setActivityRefreshKey] = useState(0);
-  const [showQuotationCalculator, setShowQuotationCalculator] = useState(false);
   const detailsByLeadRef = useRef({});
   const leadVersionRef = useRef(null);
   // Mirrors whether an editing surface is open, so the background refresh can hold off.
@@ -6622,27 +5737,88 @@ export default function CRMPage() {
    */
   const showingAllLeads = managesAnyone === false ? true : !mineOnly;
 
+  /**
+   * The query both views are read with.
+   *
+   * One builder rather than two: the table's page and a board column ask the same question of the same
+   * endpoint and differ only in `view`, the status filter and the paging. Written twice, a parameter
+   * added for the table - a new filter, a new date - would quietly stop reaching the board, and the
+   * two would describe different sets of leads while claiming to be the same board.
+   */
+  const leadPageQuery = useCallback(({ view: askedView, offset, limit, appending = false, leadStatus = "", range = null, search = "" } = {}) => { const { from, to } = narrowedRange(dateFrom, dateTo, range); const columnFilters = { ...(leadStatus ? { status: [leadStatus] } : {}), ...(search.trim() ? { _search: search.trim() } : {}) }; return new URLSearchParams({
+    board: board || "Dum Dum",
+    view: askedView,
+    offset: String(offset),
+    limit: String(limit),
+    today: getLocalDateKey(),
+    ...(sort ? { sortColumn: sort.id, sortDirection: sort.direction } : {}),
+    /*
+     * A column adds its own status to whatever the filter row already holds, so the board honours a
+     * filtered board exactly as the table does.
+     *
+     * The key is **`status`**, the column's own id - not `leadStatus`, which is what the lead object
+     * calls the field. The server filters by column id and maps `status` to `statusDisplaySql`, so the
+     * filter matches the value the Status cell actually shows. Keyed on anything else it matches
+     * nothing and is quietly ignored, which is how every column came back holding the whole page.
+     */
+    filters: JSON.stringify(Object.keys(columnFilters).length ? { ...(appliedFilters || {}), ...columnFilters } : (appliedFilters || {})),
+    // Only when there is one. An empty `dateFrom` on the query string is a parameter the server would
+    // have to know to ignore; leaving it off says the same thing and cannot be got wrong.
+    ...(from ? { dateFrom: from } : {}),
+    ...(to ? { dateTo: to } : {}),
+    ...(appending ? { append: "true" } : {}),
+    // "only mine" is what the board asks for when My Leads is on, which is what `showingAllLeads` has
+    // already turned back the other way round. Sent as the word, because the server reads it as one.
+    mine: showingAllLeads ? "false" : "true",
+  }); }, [board, sort, appliedFilters, dateFrom, dateTo, showingAllLeads]);
+
   function fetchLeadPage(offset, limit, { appending = false } = {}) {
-    const query = new URLSearchParams({
-      board: board || "Dum Dum",
-      view: activeTab,
-      offset: String(offset),
-      limit: String(limit),
-      today: getLocalDateKey(),
-      ...(sort ? { sortColumn: sort.id, sortDirection: sort.direction } : {}),
-      filters: JSON.stringify(appliedFilters || {}),
-      // Only when there is one. An empty `dateFrom` on the query string is a parameter the server
-      // would have to know to ignore; leaving it off says the same thing and cannot be got wrong.
-      ...(dateFrom ? { dateFrom } : {}),
-      ...(dateTo ? { dateTo } : {}),
-      ...(appending ? { append: "true" } : {}),
-      // "only mine" is what the board asks for when My Leads is on, which is what `showingAllLeads`
-      // has already turned back the other way round.
-      // Sent as the word rather than as a flag's presence, because the server reads it as one.
-      mine: showingAllLeads ? "false" : "true",
-    });
+    const query = leadPageQuery({ view: activeTab, offset, limit, appending });
     return apiRequest(`/api/sales/crm-leads/page?${query.toString()}`);
   }
+
+  /**
+   * One board column's leads: the same query with that column's status added.
+   *
+   * It honours the **tab** as well, rather than forcing "all". The tab strip stays on screen in this
+   * view, and a control that is visible and does nothing is worse than one that is not there: pressing
+   * Today would have left the board unchanged. So a column answers "of this tab's leads, how many are
+   * at this status" - which is the question the tab and the column each already ask, asked together.
+   *
+   * **Memoised on exactly the things the query is made of.** As a plain function it was re-created on
+   * every render of this page - and this page re-renders constantly: a keystroke in the search box, the
+   * sync timer, opening a lead. Each new identity re-ran every column's effect, so all seven refetched
+   * from offset zero and every Load more somebody had pressed was thrown away.
+   */
+  // `range` and `search` are a board column's own period and search box (`CrmKanbanBoard`).
+  const fetchLeadColumn = useCallback(async (leadStatus, offset, limit, range = null, search = "") => {
+    const query = leadPageQuery({ view: activeTab, offset, limit, leadStatus, range, search });
+    // A column's first page also asks what its leads are worth, for the ₹ in its heading; the
+    // one-row reads the trend makes do not.
+    if (offset === 0 && limit > 1) query.set("values", "true");
+    const response = await apiRequest(`/api/sales/crm-leads/page?${query.toString()}`);
+    /*
+     * Learned here as well as from the table's own page, because on the board the table does not fetch.
+     *
+     * It decides whether the My Leads switch is offered and, while it is still `null`, what
+     * `showingAllLeads` resolves to - so a board that never learned it left a reader whose stored My
+     * Leads was on asking `mine=true` in every column, with the switch hidden and no way to undo it.
+     * An administrator, rarely the named CRM on any lead, got an empty board and no way out of it.
+     */
+    if (response?.managesAnyone !== undefined) setManagesAnyone(Boolean(response.managesAnyone));
+    /*
+     * Flattened here, as the table flattens its own page.
+     *
+     * The endpoint answers **records** - `{ lead, details }` - not leads. Handed on untouched, every
+     * card got a wrapper instead of a lead: `name`, `id` and the number were all undefined, so each
+     * one read "Client_Name" with no enquiry id and no number, and they shared a React key of
+     * `undefined`. `leadFromRecord` is the same mapping the table's rows go through, which is what
+     * makes a card and a row show the same fields with the same values.
+     */
+    return { ...response, data: (Array.isArray(response?.data) ? response.data : []).map(leadFromRecord) };
+  }, [leadPageQuery, activeTab]);
+
+
 
   /**
    * The values one column actually holds, on the tab being read - which is what its filter offers.
@@ -6675,6 +5851,24 @@ export default function CRMPage() {
     });
     return apiRequest(`/api/sales/crm-leads/column-values?${query.toString()}`);
   }
+
+  /*
+   * Which statuses the board's leads hold, so `pipelineColumns` can give each one a column.
+   *
+   * Asked again whenever what the columns are read with changes - and on `leadsChangedAt`, which a
+   * write bumps - and only while the board is the view: the table has a Status column and needs no
+   * lanes. A failed read keeps the last answer, or the fixed columns when there is none.
+   */
+  useEffect(() => {
+    if (view !== "board" || board === CALLS_BOARD) return undefined;
+    let cancelled = false;
+    fetchColumnValues("status")
+      .then((response) => { if (!cancelled) setBoardStatuses(Array.isArray(response?.data) ? response.data : []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // `fetchColumnValues` is re-created every render; these are what it is made of.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, board, activeTab, appliedFilters, dateFrom, dateTo, showingAllLeads, leadsChangedAt]);
 
   /** `append` adds the next page as the table is scrolled; anything else re-reads the first. */
   async function loadLeads({ silent = false, append = false } = {}) {
@@ -6718,7 +5912,15 @@ export default function CRMPage() {
         records.filter((record) => record.lead?.id).map((record) => [record.lead.id, record.details || {}]),
       );
 
-      const nextLeads = append ? [...leadsRef.current, ...pageLeads] : pageLeads;
+      /*
+       * An appended page leaves out the leads already on screen. Pages are cut by offset, so a lead
+       * edited while somebody is scrolled - its status changed, say - moves between pages and comes
+       * back on the next one; added twice, the board drew it twice and React warned of two rows with
+       * one key. The server's order is fixed (`leadQueryService` breaks every tie on the enquiry id),
+       * so this only catches what changed between the two reads.
+       */
+      const onScreen = append ? new Set(leadsRef.current.map(leadRowId)) : null;
+      const nextLeads = append ? [...leadsRef.current, ...pageLeads.filter((lead) => !onScreen.has(leadRowId(lead)))] : pageLeads;
       leadsRef.current = nextLeads;
       setLeads(nextLeads);
       detailsByLeadRef.current = append ? { ...detailsByLeadRef.current, ...pageDetails } : pageDetails;
@@ -6730,6 +5932,13 @@ export default function CRMPage() {
       // Absent on a scroll append, which is the same board and cannot have changed it.
       if (response?.managesAnyone !== undefined) setManagesAnyone(Boolean(response.managesAnyone));
       setLastSync(new Date());
+      /*
+       * And the board with it. On the board this function runs only when something was written - its
+       * effect, its poller and its reload listener all stand down there - so a bump here is exactly
+       * "the leads have changed", which is what a column needs to hear to re-read itself. On the table
+       * the columns are not mounted, so it costs nothing.
+       */
+      markLeadsChanged();
     } catch (error) {
       if (!silent) showError(error.message || "Unable to load CRM leads.");
     } finally {
@@ -6753,7 +5962,42 @@ export default function CRMPage() {
     void loadLeads({ append: true, silent: true });
   }
 
+  /*
+   * The tab counts, on the board.
+   *
+   * On the table they arrive with its page (`loadLeads`), but that whole read stands down on the
+   * board - see the effect below - so the strip kept whichever counts the table last read: switch
+   * the vertical on the board and every column re-read itself while the tab labels went on showing
+   * the vertical before. The columns' own answers cannot stand in: each adds its status to the
+   * filters, and the open tab's count follows the filters, so it would be one column's number.
+   *
+   * So the board asks once for the counts, with the same query the columns use minus the status -
+   * one row, since only the counts are wanted - whenever that query or the leads change.
+   */
   useEffect(() => {
+    if (view !== "board") return undefined;
+    let cancelled = false;
+    apiRequest(`/api/sales/crm-leads/page?${leadPageQuery({ view: activeTab, offset: 0, limit: 1 }).toString()}`)
+      .then((response) => {
+        if (cancelled) return;
+        if (response?.counts) setServerCounts(response.counts);
+        if (response?.managesAnyone !== undefined) setManagesAnyone(Boolean(response.managesAnyone));
+      })
+      // The columns say for themselves when the board cannot be read; a failed count read keeps the
+      // last labels rather than raising a second error over the same fault.
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [view, leadPageQuery, activeTab, leadsChangedAt]);
+
+  useEffect(() => {
+    /*
+     * Nothing is read for a table nobody is looking at.
+     *
+     * This effect is the table's page, its reload listener and its change poller. On the board they are
+     * a second set of queries against the same endpoint the columns are already asking, for rows that
+     * are not on screen - so the board doubled the load on the server and on the connection.
+     */
+    if (view !== "table") return undefined;
     const timer = window.setTimeout(() => {
       void loadLeads();
     }, 0);
@@ -6798,7 +6042,7 @@ export default function CRMPage() {
     // `showingAllLeads` is listed for the same reason: changing whose leads are shown changes the
     // rows and every tab count, so it has to refetch rather than filter what is already here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [board, activeTab, appliedFilters, sort, dateFrom, dateTo, showingAllLeads]);
+  }, [view, board, activeTab, appliedFilters, sort, dateFrom, dateTo, showingAllLeads]);
 
   // Typing in a column filter should not fire a query per keystroke.
   useEffect(() => {
@@ -7046,6 +6290,7 @@ export default function CRMPage() {
   // across the form, so they can be handed to the server as one `customFields` payload and
   // can never be mistaken for one of the built-in lead columns.
   function updateCustomField(key, value) {
+    addLeadMarks.clear(`custom:${key}`);
     setAddLeadForm((current) => ({ ...current, customFields: { ...(current.customFields || {}), [key]: value } }));
   }
 
@@ -7057,6 +6302,7 @@ export default function CRMPage() {
       field={field}
       value={addLeadForm.customFields?.[field.key] ?? ""}
       onChange={(value) => updateCustomField(field.key, value)}
+      error={addLeadMarks.errors[`custom:${field.key}`]}
     />
   ));
 
@@ -7077,7 +6323,13 @@ export default function CRMPage() {
    * offering them here would be asking somebody to retype what the row already says.
    */
   const addLeadStatusOptions = useMemo(() => {
-    const hidden = assigningCallId ? ["CNA", "Invalid"] : ["CNA", "Invalid", "Rejected"];
+    /*
+     * Nothing is hidden while **assigning** an unassigned lead: the card was dragged out of
+     * Unassigned onto one of the board's columns, and the board offers every status - CNA, Invalid
+     * and Rejected among them. Hiding the pill for the column it was dropped on would leave the form
+     * holding a status it does not show, which is a value saved without having been seen.
+     */
+    const hidden = assigningLeadId ? [] : assigningCallId ? ["CNA", "Invalid"] : ["CNA", "Invalid", "Rejected"];
     const offered = leadStatusOptionsForVertical(addLeadForm.vertical).filter((option) => !hidden.includes(option.value));
     /*
      * Rejected goes last, after Converted.
@@ -7091,7 +6343,7 @@ export default function CRMPage() {
      * popup shows all three together where the grouping is right.
      */
     return [...offered.filter((option) => option.value !== "Rejected"), ...offered.filter((option) => option.value === "Rejected")];
-  }, [assigningCallId, addLeadForm.vertical]);
+  }, [assigningCallId, assigningLeadId, addLeadForm.vertical]);
 
   function updateForm(key, value) {
     setAddLeadForm((current) => {
@@ -7103,10 +6355,12 @@ export default function CRMPage() {
        * a date typed before that would be saved anyway - booked against a lead nobody is chasing,
        * and showing up in somebody's Pending Followups tomorrow morning.
        */
-      if (key === "leadStatus" && STATUSES_WITHOUT_FOLLOW_UP.includes(value)) {
+      if (key === "leadStatus" && dropsNextFollowUp(value, next.vertical)) {
         next.nextFollowUpDate = "";
         next.nextFollowUpTime = "";
       }
+      // Added already converted: today is its last follow-up.
+      if (key === "leadStatus" && value === "Converted") next.lastFollowUpDate = getLocalDateKey();
       // The status and the custom fields both follow the vertical; see `leadFormForVertical`, which
       // is also what the Add Lead button uses to open the form on the board being read.
       if (key === "vertical") return leadFormForVertical(next, value, customFieldsByVertical);
@@ -7123,9 +6377,12 @@ export default function CRMPage() {
     // The call being placed, if this is that. Read once here so the whole of what follows agrees
     // about which of the form's two jobs it is doing.
     const placing = assigningCallId;
+    // The unassigned lead being given an owner, if that is this form's job. Read once here for the
+    // reason `placing` is: everything below has to agree about which of the three it is doing.
+    const assigning = assigningLeadId;
     const missing = missingRequiredLeadFields(addLeadForm);
     if (missing.length) {
-      showError(`Fill in ${missing.map((field) => field.label).join(", ")} before adding this lead.`);
+      showError(markedFieldsMessage(missing.length));
       return;
     }
     /*
@@ -7139,6 +6396,11 @@ export default function CRMPage() {
      */
     const lead = {
       ...addLeadForm,
+      // Stamped now, at save, in India time - not when the form was opened, and not in this
+      // computer's zone. A call being placed keeps the time the call came in, and a lead being
+      // assigned keeps its own: it arrived when it arrived, and giving it an owner is not its
+      // arrival.
+      ...(placing || assigning ? {} : { addedTime: studioClockTime(), createdDate: studioDateKey() }),
       id: addLeadForm.id.trim(),
       name: addLeadForm.name.trim(),
       phone: addLeadForm.phone.trim(),
@@ -7179,7 +6441,17 @@ export default function CRMPage() {
        * The Call ID is not sent. It is not a lead id, and the call keeps it either way - what links
        * the two is the number, which is how the Call Logs tab has always found a client's calls.
        */
-      const saved = await apiRequest("/api/sales/crm-leads", { method: "POST", body: JSON.stringify({ lead, details }) });
+      /*
+       * An unassigned lead is **written over, not written**.
+       *
+       * It exists already and holds its own enquiry id, so a POST would mint a second one against
+       * the same client - which is the whole reason this mode exists rather than the form simply
+       * being opened with values in it. The update endpoint takes a patch, so the form's own fields
+       * are what change and nothing it does not carry is touched.
+       */
+      const saved = assigning
+        ? await apiRequest(`/api/sales/crm-leads/${encodeURIComponent(assigning)}`, { method: "PUT", body: JSON.stringify({ lead, details }) })
+        : await apiRequest("/api/sales/crm-leads", { method: "POST", body: JSON.stringify({ lead, details }) });
       const savedId = saved?.data?.lead?.id || lead.id;
       // Unguarded on purpose: this lead has just been written, so there is nothing to ask about.
       // `closeAddLead` empties the form, so the next Add Lead starts from nothing.
@@ -7193,11 +6465,23 @@ export default function CRMPage() {
        * are worth saying: somebody who thinks the row has moved goes looking for it on a board it
        * was never going to leave.
        */
+      /*
+       * What happened, in the words of the job it was doing - and for an assignment that is who it
+       * is with now, which is the answer somebody dragged the card to get. Where they left Assign To
+       * empty, it says so rather than claiming an owner: the card is still in Unassigned and a
+       * message reading "assigned" over a card that has not moved is the worse of the two.
+       */
       showSuccess(placing
         ? `${lead.name || savedId} added to ${lead.vertical} as ${savedId}.`
-        : `${lead.name || savedId} added.`);
+        : assigning
+          ? (String(lead.crm || "").trim()
+            ? `${lead.name || savedId} is with ${String(lead.crm).trim()}${String(lead.leadStatus || "").trim() ? ` at ${String(lead.leadStatus).trim()}` : ""}.`
+            : `${lead.name || savedId} saved. It stays unassigned until somebody is named on it.`)
+          : `${lead.name || savedId} added.`);
     } catch (error) {
-      showError(error.message || (placing ? "Unable to add this call as a lead." : "Unable to add CRM lead."));
+      showError(error.message || (placing
+        ? "Unable to add this call as a lead."
+        : assigning ? "Unable to assign this lead." : "Unable to add CRM lead."));
     }
   }
 
@@ -7234,7 +6518,7 @@ export default function CRMPage() {
       // blank rather than on their defaults; switching vertical re-seeds through `updateForm`.
       setAddLeadForm({ ...form, customFields: customFieldDefaults(customFieldsByVerticalRef.current[form.vertical]) });
       setAssigningCallId(id);
-      setShowAddLeadErrors(false);
+      clearAddLeadMarks();
       setShowAddLead(true);
     };
 
@@ -7251,7 +6535,7 @@ export default function CRMPage() {
       return;
     }
     addLeadForCall();
-  }, []);
+  }, [clearAddLeadMarks]);
 
   /**
    * Shuts the form and forgets which of its two jobs it was doing.
@@ -7274,9 +6558,10 @@ export default function CRMPage() {
    */
   function closeAddLead() {
     setShowAddLead(false);
-    setShowAddLeadErrors(false);
+    addLeadMarks.clearAll();
     setAddLeadForm(emptyLeadForm());
     setAssigningCallId("");
+    setAssigningLeadId("");
     // A decision to go ahead with a number the CRM already holds belongs to the form that was open
     // when it was made. Carried across, the next lead added on that number would be written with no
     // warning at all - which is the one case this whole check exists for.
@@ -7706,6 +6991,81 @@ export default function CRMPage() {
    */
   const activateLeadRow = useCallback((lead) => activateLead(lead.id), [activateLead]);
   const openLeadRow = useCallback((lead) => openLead(lead.id), [openLead]);
+  /*
+   * ── A card on the board opens its lead the way a link does ────────────────────────────────────
+   *
+   * `openLead` looks the lead up among the table's rows, and the table stands down while the board is
+   * shown - so `leads` is **empty** and the popup, which resolves what it shows out of that array, had
+   * nothing to show. A card opened nothing at all on a board reached directly, which a remembered view
+   * means every morning; switching to the board from the table in the same session left the rows
+   * loaded and it worked, which is why it looked unreliable rather than broken. And where a lead was
+   * found, its *details* still were not - they come with the table's page too - so the status pills,
+   * which read a lead's status off its details, came up empty on the one screen whose whole purpose is
+   * to open a lead at a status.
+   *
+   * `openLinkedLead` is the path written for this: "a lead that is not among the rows on screen",
+   * fetched with its details and handed to the popup as its own, leaving the table's state untouched.
+   * Through the ref, so this keeps one identity and the cards are not redrawn on every render.
+   */
+  const openBoardLead = useCallback((lead) => {
+    if (lead?.id) openLinkedLeadRef.current(lead.id);
+  }, []);
+
+  /*
+   * ── Dropping a lead on a status ───────────────────────────────────────────────────────────────
+   *
+   * One column refuses: **Unassigned** is not a status anybody sets - it is what the Status column
+   * prints when a lead has no CRM at all - so writing it as one would be a lie about the record.
+   *
+   * **Converted and Converted & Followup used to refuse too**, because they are not written either:
+   * they book a project, and a drafted "Converted" would have sat in the popup looking like a status
+   * while nothing had converted. But that made the two columns somebody most wants to drag a lead into
+   * the two they could not - and on a Qua Qua board they are the far end of the rail as well, which is
+   * where the refusal read as the board being broken rather than as a rule. They take the drop now and
+   * it goes to the conversion dialog instead of to the draft; see the pending-drop effect.
+   *
+   * The column a card came from is refused by the board itself, since dropping a lead where it already
+   * is is not a move.
+   */
+  /*
+   * Nor does a column stood up only because a lead holds that status - an imported "Inactive", or
+   * Converted & Followup outside Qua Qua: neither is one this vertical offers, so neither may be chosen.
+   */
+  const canDropAt = useCallback((status) => status !== UNASSIGNED_STATUS && status !== PROJECT_DELETED_STATUS
+    && (status === YET_TO_CONNECT_STATUS || leadStatusOptionsForVertical(board).some((option) => option.value === status)), [board]);
+
+  /**
+   * A dropped card opens its lead with the target status **drafted** - it does not write it.
+   *
+   * So what follows is the ordinary save: the popup refuses without a remark, and the register can
+   * still say why the lead moved. The drag reaches the editor with the answer filled in; it is not a
+   * second way of changing a lead.
+   *
+   * The status is applied a tick later, through `draftPopupDetails` - the very path a press on the
+   * status pill takes - so the occasion's own copy, the cleared follow-up date and the custom-field
+   * write all happen exactly as they do when somebody chooses it by hand. Deferred because the popup
+   * has to be the open one before its draft can be written.
+   */
+  const [pendingDropStatus, setPendingDropStatus] = useState(null);
+  const openLeadAtStatus = useCallback((lead, status) => {
+    if (!lead?.id) return;
+    /*
+     * A card dragged out of **Unassigned** opens Add Lead on that lead instead of the popup.
+     *
+     * What such a lead is missing is an owner, and the popup cannot give it one - the only Assign To
+     * control in this module is on this form. So the form opens on the lead it already is, with the
+     * dropped status chosen and Assign To waiting, and Confirm updates it. Leave Assign To empty and
+     * the card stays in Unassigned, which needs no rule of its own: the board reads any lead with no
+     * CRM as unassigned whatever its status.
+     */
+    if (resolveLeadStatus(lead) === UNASSIGNED_STATUS) {
+      openAssignLeadRef.current(lead.id, status);
+      return;
+    }
+    // The board's own way in - see `openBoardLead` for why the table's lookup cannot answer here.
+    openLinkedLeadRef.current(lead.id);
+    setPendingDropStatus({ id: lead.id, status });
+  }, []);
   // Right-click opens the row's own menu instead of the browser's. The row is activated first, so
   // the menu is unmistakably acting on the row under the pointer.
   const openLeadRowMenu = useCallback((lead, event) => {
@@ -7715,30 +7075,37 @@ export default function CRMPage() {
     activateLead(lead.id);
     openRowMenu(event, lead);
   }, [activateLead, openRowMenu]);
+  /*
+   * One list for the row's ⋮ and the board card's ⋮. `open` is how the entry opens the lead: the
+   * table's `openLead`, or on the board `openBoardLead`, since `openLead` reads the table's rows and
+   * the table stands down while the board is shown.
+   */
+  const leadActionItems = useCallback((lead, open) => [
+    // Edit and a red Delete are the pair every table in the OS offers. Meetings sits between
+    // them because it is this module's own action, the way the Employees table adds Review and
+    // Cancel Invite to the same two.
+    // "Edit" opens the lead; without READ_WRITE the same panel is what reads it, so the entry
+    // stays and the panel itself is what refuses to save. On a call it opens the Add Lead form,
+    // or the lead the caller was added as - `openLead` decides which.
+    { label: lead.callRow ? "Add Lead" : canWrite ? "Edit" : "View", onSelect: () => open(lead) },
+    /*
+     * Neither on a call. Both act on a lead named by the row's id, and a call's id is a Call ID
+     * - so Meetings would book a meeting against a lead that does not exist and Delete would
+     * delete nothing while saying it had. A call is not deletable in any case: it is a record
+     * of something that happened, and the studio does not get to unhappen it.
+     */
+    ...(lead.callRow ? [] : [{ label: "Meetings", onSelect: () => setMeetingsLeadId(lead.id) }]),
+    ...(canDeleteLeads && !lead.callRow ? [{ label: "Delete", tone: "danger", onSelect: () => setPendingDeleteLead(lead) }] : []),
+  ], [canWrite, canDeleteLeads]);
   const renderLeadActions = useCallback((lead) => (
     <OptionsMenu
       ariaLabel={`Actions for ${lead.name || lead.id}`}
       zIndex={130}
       menuClassName="w-44"
-      items={[
-        // Edit and a red Delete are the pair every table in the OS offers. Meetings sits between
-        // them because it is this module's own action, the way the Employees table adds Review and
-        // Cancel Invite to the same two.
-        // "Edit" opens the lead; without READ_WRITE the same panel is what reads it, so the entry
-        // stays and the panel itself is what refuses to save. On a call it opens the Add Lead form,
-        // or the lead the caller was added as - `openLead` decides which.
-        { label: lead.callRow ? "Add Lead" : canWrite ? "Edit" : "View", onSelect: () => openLead(lead.id) },
-        /*
-         * Neither on a call. Both act on a lead named by the row's id, and a call's id is a Call ID
-         * - so Meetings would book a meeting against a lead that does not exist and Delete would
-         * delete nothing while saying it had. A call is not deletable in any case: it is a record
-         * of something that happened, and the studio does not get to unhappen it.
-         */
-        ...(lead.callRow ? [] : [{ label: "Meetings", onSelect: () => setMeetingsLeadId(lead.id) }]),
-        ...(canDeleteLeads && !lead.callRow ? [{ label: "Delete", tone: "danger", onSelect: () => setPendingDeleteLead(lead) }] : []),
-      ]}
+      items={leadActionItems(lead, openLeadRow)}
     />
-  ), [canWrite, canDeleteLeads, openLead]);
+  ), [leadActionItems, openLeadRow]);
+  const boardLeadActions = useCallback((lead) => leadActionItems(lead, openBoardLead), [leadActionItems, openBoardLead]);
   /*
    * The values a closed-set column offers, asked of the server when its menu opens - see
    * `openColumnFilter`. `has` is which columns are lists at all: Status and the choice columns, the
@@ -7767,7 +7134,7 @@ export default function CRMPage() {
    */
   async function applyBulkUpdateDetails() {
     if (!selectedCount) return;
-    if (!bulkUpdateLeadStatus && !bulkUpdateLastUpdatedDate && !bulkUpdateNextFollowUpDate && !bulkUpdateCrms.length) return;
+    if (!bulkUpdateLeadStatus && !bulkUpdateLastUpdatedDate && !bulkUpdateNextFollowUpDate && !bulkUpdateCrms.length && !bulkUpdateVertical) return;
 
     setBulkUpdating(true);
     let ids;
@@ -7791,11 +7158,14 @@ export default function CRMPage() {
       // webhook. That is unnoticeable against a handful of local leads and slow enough on the
       // server for the proxy to answer first - with an error carrying no CORS headers, which
       // the browser cannot read at all, so the app reports the API as unreachable.
-      if (bulkUpdateLeadStatus || bulkUpdateLastUpdatedDate || bulkUpdateNextFollowUpDate) {
-        await apiRequest("/api/sales/crm-leads/bulk-status", {
+      let statusMessage = "";
+      if (bulkUpdateLeadStatus || bulkUpdateLastUpdatedDate || bulkUpdateNextFollowUpDate || bulkUpdateVertical) {
+        const response = await apiRequest("/api/sales/crm-leads/bulk-status", {
           method: "POST",
           body: JSON.stringify({
             ids,
+            // The vertical moves first on the server, then any status or date lands where the leads now are.
+            ...(bulkUpdateVertical ? { vertical: bulkUpdateVertical } : {}),
             ...(bulkUpdateLeadStatus ? { status: bulkUpdateLeadStatus } : {}),
             ...(bulkUpdateLastUpdatedDate ? { lastFollowUpDate: bulkUpdateLastUpdatedDate } : {}),
             ...(bulkUpdateNextFollowUpDate ? { nextFollowUpDate: bulkUpdateNextFollowUpDate } : {}),
@@ -7805,6 +7175,8 @@ export default function CRMPage() {
             today: getLocalDateKey(),
           }),
         });
+        // A move names how many went and how many stayed behind for a number already there - worth reading.
+        if (bulkUpdateVertical) statusMessage = response?.message || "";
       }
 
       // One ticked CRM gives every lead that CRM; several share the leads out between them
@@ -7822,7 +7194,7 @@ export default function CRMPage() {
       setShowBulkUpdateDialog(false);
       // The server's own wording is preferred when it assigned, because it names the split
       // per CRM; the plain count is only the fallback for a status or date edit.
-      setSuccessDialog({ title: "Updated!", message: assignMessage || `${leadCount} updated successfully.` });
+      setSuccessDialog({ title: "Updated!", message: [statusMessage, assignMessage].filter(Boolean).join(" ") || `${leadCount} updated successfully.` });
       clearSelection();
       await loadLeads({ silent: true });
     } catch (error) {
@@ -8075,6 +7447,29 @@ export default function CRMPage() {
       details: current.leadId === showLeadPopupId ? current.details : {},
     }));
   }
+
+  /*
+   * The status a dropped card asked for, written once its popup is the open one.
+   *
+   * Deferred by a tick, the way every other first write on this page is: `draftPopupDetails` reads
+   * `showLeadPopupId` and `leadPopup`, so it has to run after the open has settled rather than in the
+   * same pass. Cleared as it fires, so re-opening the same lead later does not re-apply it.
+   *
+   * **Every status it can carry, including the two that book a project.** Converted and Converted &
+   * Followup are drafted here like any other and answered by the footer: the lead is filled in and
+   * saved, and Create Project is offered afterwards - see `convertedAsk`. Raising the conversion
+   * dialog as the card landed was tried first and was wrong twice over - it asked before the reader
+   * had seen the lead, and the dialog answering it wrote what it could see rather than the details
+   * they had just filled in.
+   */
+  useEffect(() => {
+    if (!pendingDropStatus || showLeadPopupId !== pendingDropStatus.id || !leadPopup) return undefined;
+    const timer = window.setTimeout(() => {
+      draftPopupDetails("leadStatus", pendingDropStatus.status);
+      setPendingDropStatus(null);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  });
 
   function draftPopupDetails(key, value) {
     setPopupDraft((current) => {
@@ -8362,9 +7757,9 @@ export default function CRMPage() {
 
   async function savePopupLead(closeAfter = false, advanceAfter = false, forcedStatus = "", committedEntries = null) {
     if (!leadPopup) return false;
-    const missing = missingRequiredLeadFields(leadPopup, { vertical: resolveLeadVertical(leadPopup, leadPopupDetails), popup: true });
+    const missing = missingRequiredLeadFields(leadAsSaved(leadPopup, forcedStatus), { vertical: resolveLeadVertical(leadPopup, leadPopupDetails), popup: true });
     if (missing.length) {
-      showError(`Fill in ${missing.map((field) => field.label).join(", ")} before updating this lead.`);
+      showError(markedFieldsMessage(missing.length));
       return false;
     }
     try {
@@ -8466,6 +7861,19 @@ export default function CRMPage() {
             ? `Lead marked CNA (attempt ${nextSequence} of ${MAX_CNA_ATTEMPTS}).`
             : "CRM lead updated.",
       );
+      /*
+       * Marked as converted and written down. Whether it is booked now is the next question, and
+       * either answer leaves the lead saying what it was just saved as - see `convertedAsk`.
+       *
+       * On the status this save **chose**, not on the one the lead happens to hold: read off
+       * `requestedStatus` it would have asked again every time somebody saved a remark against a lead
+       * that converted weeks ago, which is a dialog in the way of ordinary work. A drafted status is a
+       * status somebody picked in this popup - today, a card dropped on one of those two columns - and
+       * `forcedStatus` is a button that names one.
+       */
+      if (opensProjectFor(forcedStatus || popupEdits.details.leadStatus || "")) {
+        setConvertedAsk({ id: leadPopup.id, name: leadPopup.name || leadPopup.id, status: requestedStatus });
+      }
       return true;
     } catch (error) {
       showError(error.message || "Unable to update CRM lead.");
@@ -8524,7 +7932,9 @@ export default function CRMPage() {
     const currentDetails = detailsByLeadRef.current[id] || detailsByLead[id] || {};
     const currentLead = leads.find((row) => row.id === id) || lead;
     const merged = mergeLeadDisplayRecord(currentLead, currentDetails);
-    const patch = leadStatusPatch(merged, status);
+    // The status, and the next follow-up it clears when it is plain Converted - which the server
+    // clears as well; this keeps the screen saying the same until the next read.
+    const patch = { ...leadStatusPatch(merged, status), ...followUpClearedBy(merged, "leadStatus", status) };
     // Both halves, as every other status write here does: the table reads the status off the lead
     // and the popup off the details, and leaving one behind shows the same lead two ways.
     const nextLead = { ...currentLead, ...patch };
@@ -8732,6 +8142,32 @@ export default function CRMPage() {
             {/* Not on the Call Box: that board is answered from the call log by `callBoardService`,
                 which takes no `mine` at all, so the switch would be a control that changes nothing -
                 the exact thing drawing it only for managers is meant to avoid. */}
+            {/*
+              Table or Board, beside My Leads because both answer "what am I looking at" rather than
+              doing something to it.
+
+              Not on the Calls board: that one is answered from the call log by `callBoardService` and
+              its rows are calls, which have three outcomes rather than a lead's statuses - there are no
+              columns to stand them in.
+            */}
+            {/* A dropdown like the board switch beside it, rather than a pair of tabs. */}
+            {board !== CALLS_BOARD && <Dropdown
+              mode="switch"
+              ariaLabel="How the leads are shown"
+              value={view}
+              onChange={(next) => {
+                setView(next);
+                // The rows on screen are about to be a different set, so a selection made against the
+                // old one is dropped - the same thing switching board and tab already do.
+                clearSelection();
+              }}
+              options={VIEW_OPTIONS}
+              searchable={false}
+              sorted={false}
+              placeholder="Select"
+              // Fixed width, so switching between the two does not shift the header beside it.
+              className="w-[6.5rem] shrink-0"
+            />}
             {managesAnyone && board !== CALLS_BOARD && <ToggleSwitch
               label="My Leads"
               ariaLabel="Show only my own leads, or all of them"
@@ -8793,6 +8229,7 @@ export default function CRMPage() {
                   variant="primary"
                   onClick={() => {
                     setBulkUpdateLeadStatus("");
+                    setBulkUpdateVertical("");
                     setBulkUpdateLastUpdatedDate("");
                     setBulkUpdateNextFollowUpDate("");
                     setBulkUpdateCrms([]);
@@ -8851,39 +8288,43 @@ export default function CRMPage() {
                 setShowAddLead(true);
               }}>Add Lead</Button>
             )}
-            {canWrite && <OptionsMenu
-              ariaLabel="More CRM actions"
-              // The component's own quiet trigger: no border, so the icon reads as an icon rather
-              // than as a second button competing with Add Lead beside it.
-              menuClassName="w-44"
-              /*
-               * The two ways in that are not Add Lead, and nothing else.
-               *
-               * **Import** is a CSV, and it is the right answer for a file somebody already has -
-               * an export from an ad platform, a list a planner sent over. It takes the vertical's
-               * whole template, one table at a time. It asks for `SALES / CRM Lead Import` on top of
-               * the board's own Read / Write and is absent without it, because a file lands as many
-               * leads as it has rows, from a source the studio did not type and cannot proof-read.
-               *
-               * **Bulk Entry** is the other half of that: names being typed, several at a sitting -
-               * a day off one event, one campaign, one call with a planner. It asks the few fields
-               * that make a lead findable and assignable rather than the template's thirty. Between
-               * them there is no batch that has to be added one lead at a time through Add Lead. It
-               * needs no permission beyond the board's: typing five leads is adding five leads, and
-               * it is what is left for a role that may not import a file.
-               *
-               * Settings used to sit here as a shortcut into the application's own Settings. It is
-               * gone from every module's ⋮ now: Settings is one screen reached from the header, and
-               * a per-module doorway into it made the same rail look like it belonged to whichever
-               * board it was opened from.
-               */
-              items={[
-                ...(canImportLeads ? [{ label: "Import", onSelect: openImportDialog }] : []),
-                { label: "Bulk Entry", onSelect: () => setShowBulkImport(true) },
-              ]}
-            />}
           </>
         )}
+        /* The ⋮ ends the row, in the header's own trailing slot, so every page's header ends the
+           same way: the page's buttons, then Nebula, then this. */
+        menu={<>
+          {canWrite && <OptionsMenu
+            ariaLabel="More CRM actions"
+            // The component's own quiet trigger: no border, so the icon reads as an icon rather
+            // than as a second button competing with Add Lead beside it.
+            menuClassName="w-44"
+            /*
+             * The two ways in that are not Add Lead, and nothing else.
+             *
+             * **Import** is a CSV, and it is the right answer for a file somebody already has -
+             * an export from an ad platform, a list a planner sent over. It takes the vertical's
+             * whole template, one table at a time. It asks for `SALES / CRM Lead Import` on top of
+             * the board's own Read / Write and is absent without it, because a file lands as many
+             * leads as it has rows, from a source the studio did not type and cannot proof-read.
+             *
+             * **Bulk Entry** is the other half of that: names being typed, several at a sitting -
+             * a day off one event, one campaign, one call with a planner. It asks the few fields
+             * that make a lead findable and assignable rather than the template's thirty. Between
+             * them there is no batch that has to be added one lead at a time through Add Lead. It
+             * needs no permission beyond the board's: typing five leads is adding five leads, and
+             * it is what is left for a role that may not import a file.
+             *
+             * Settings used to sit here as a shortcut into the application's own Settings. It is
+             * gone from every module's ⋮ now: Settings is one screen reached from the header, and
+             * a per-module doorway into it made the same rail look like it belonged to whichever
+             * board it was opened from.
+             */
+            items={[
+              ...(canImportLeads ? [{ label: "Import", onSelect: openImportDialog }] : []),
+              { label: "Bulk Entry", onSelect: () => setShowBulkImport(true) },
+            ]}
+          />}
+        </>}
       />
 
       {/* The same snackbar Sales Manager and the rest of the app use - one dark bar at the foot
@@ -8896,9 +8337,40 @@ export default function CRMPage() {
               this is the answer to "is what I am looking at current?" - and a date alone answered it
               with "today", which is true of every sync the reader will ever see. `formatDateTime`
               renders its own em dash before the first load lands. */}
-          <span>Last sync: {formatDateTime(lastSync)}</span><span>{loadingMore ? "Loading more..." : `Showing ${rows.length.toLocaleString()} of ${totalRows.toLocaleString()}`}</span></TableFooter>}>
+          {/*
+            The footer describes the **table**, so on the board it says nothing rather than something
+            untrue. "Showing 100 of 4,312" counts rows the board is not drawing, and "Last sync" is the
+            table's own read - the board's columns fetch themselves and each says its own total in its
+            heading, which is the honest place for a count here.
+          */}
+          <span>{view === "table" ? `Last sync: ${formatDateTime(lastSync)}` : ""}</span><span>{view !== "table" ? "" : loadingMore ? "Loading more..." : `Showing ${rows.length.toLocaleString()} of ${totalRows.toLocaleString()}`}</span></TableFooter>}>
           <div className="relative flex min-h-0 flex-1 overflow-hidden">
-            <DataTable
+            {/*
+              The board, in the table's place.
+
+              Inside the same shell so the header, the tabs, the filters and the footer are the one set
+              of controls whichever view is on - switching view changes how the leads are drawn and
+              nothing about which leads they are.
+            */}
+            {view === "board" ? <CrmKanbanBoard
+              /* The board **is** the vertical here - "Dum Dum", "Qua Qua" - so Converted & Followup is a
+                 column on the one vertical that has it and nowhere else, exactly as it is on the pills
+                 inside the lead popup. See `boardColumns` for why Yet to connect leads them. */
+              columns={pipelineColumns}
+              fetchColumn={fetchLeadColumn}
+              /* Bumped by any write - see `markLeadsChanged`. Said as a prop rather than smuggled into
+                 the fetcher's dependency list, where it would be a value the callback never reads. */
+              refreshKey={leadsChangedAt}
+              /* So an empty column can say whether a filter emptied it. */
+              filtered={Object.values(appliedFilters || {}).some(Boolean)}
+              onOpenLead={openBoardLead}
+              /* The card's ⋮ is the row's ⋮. */
+              leadActions={boardLeadActions}
+              /* A drop opens the lead with the status drafted - see `openLeadAtStatus`. The board asks
+                 which columns will take one, because the answer is the page's to give. */
+              canDropAt={canDropAt}
+              onDropLead={openLeadAtStatus}
+            /> : <DataTable
               tableId={getCrmTableId(board)}
               ariaLabel={`CRM ${boardLabel} table`}
               // The key the board's own arrangement was always kept under, so nothing anybody
@@ -8950,7 +8422,7 @@ export default function CRMPage() {
                 infiniteScroll: { onEndReached: loadMoreLeads },
                 csvExport: { enabled: true, onExport: exportLeadsCsv },
               }}
-            />
+            />}
             <DataTableInfoPanel
               title="Info"
               entity={selectedLead}
@@ -8989,7 +8461,7 @@ export default function CRMPage() {
                   {infoPanelTab === "remarks" && !showingCall ? (
                     <div className="space-y-4">
                     <div>
-                      <span className="block text-xs font-semibold text-slate-600">Lead Status</span>
+                      <span className="block text-xs font-semibold text-slate-600">Lead Status<HelpTip text="Pick where this lead stands after the latest follow-up." /></span>
                       <LeadStatusPills
                         // The held status wins while there is one, so the pill shows what
                         // Update and Next is about to write rather than what the row still says.
@@ -9030,6 +8502,8 @@ export default function CRMPage() {
                           place look and behave identically - minus its send button, which
                           Update and Next below stands in for. */}
                       <NotesComposer
+                      onUploadAttachment={uploadRemarkAttachment}
+                      onFetchAttachment={fetchRemarkAttachment}
                         key={selectedLead.id}
                         entries={leadRemarkEntries(selectedLead.remarkEntries, selectedLead.remarks)}
                         showSendButton={false}
@@ -9084,7 +8558,7 @@ export default function CRMPage() {
                               Dum" over a row that has no vertical at all. */}
                           {getInfoFieldsForBoard(selectedLead.callRow ? CALLS_BOARD : selectedLead.vertical, customFieldsByVertical).map((field) => (
                             <div key={field.key}>
-                              <dt className="text-sm font-semibold text-slate-700">{field.label}</dt>
+                              <dt className="flex items-center text-sm font-semibold text-slate-700">{field.label}<HelpTip text={detailHelpFor(selectedLead.callRow ? "Call" : "Lead", field.key)} /></dt>
                               <dd className="mt-0.5 break-words text-sm leading-6 text-slate-600">
                                 {getLeadCellValue(selectedLead, field.key)}
                               </dd>
@@ -9157,7 +8631,9 @@ export default function CRMPage() {
           }
         }}
       />}
-      {showBulkUpdateDialog && (
+      {/* Stepped aside while its vertical move is confirmed: this dialog sits above every confirm layer,
+          and its values live in this page's state, so Go back finds it exactly as it was left. */}
+      {showBulkUpdateDialog && !confirmVerticalMove && (
         <div
           className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/55 p-4"
           onMouseDown={(event) => {
@@ -9187,10 +8663,30 @@ export default function CRMPage() {
               {/* Two per row rather than three: the fourth field would otherwise sit alone on a
                   second row, and four controls across a 640px dialog leave no date readable. */}
               <div className="mt-5 grid items-start gap-4 sm:grid-cols-2">
+                {/* Moving the selection to another vertical. Its statuses then follow the vertical
+                    chosen, and a status that vertical does not have is let go. */}
+                <Dropdown
+                  mode="input"
+                  ariaLabel="Bulk vertical"
+                  label="Vertical"
+                  helperText="Moves every selected lead to this vertical; blank keeps them here."
+                  placeholder={`Keep on ${board}`}
+                  clearable
+                  clearLabel={`Keep on ${board}`}
+                  value={bulkUpdateVertical}
+                  onChange={(value) => {
+                    const next = value || "";
+                    setBulkUpdateVertical(next);
+                    const offered = leadStatusOptionsForVertical(next || board).map((option) => option.value);
+                    if (bulkUpdateLeadStatus && !offered.includes(bulkUpdateLeadStatus)) setBulkUpdateLeadStatus("");
+                  }}
+                  options={MOVE_TARGETS.filter((target) => target !== board).map((target) => ({ label: target, value: target }))}
+                />
                 <Dropdown
                   mode="input"
                   ariaLabel="Bulk lead status"
                   label="Lead Status"
+                  helperText="The status every selected lead is set to; blank leaves it."
                   placeholder="Select status"
                   value={bulkUpdateLeadStatus}
                   onChange={(value) => {
@@ -9201,24 +8697,36 @@ export default function CRMPage() {
                       setBulkUpdateLastUpdatedDate("");
                       setBulkUpdateNextFollowUpDate("");
                     }
+                    // Converted has no next call, and today is its last follow-up unless changed.
+                    if (value === "Converted") {
+                      setBulkUpdateLastUpdatedDate((current) => current || getLocalDateKey());
+                      if (dropsNextFollowUp(value, bulkUpdateVertical || board)) setBulkUpdateNextFollowUpDate("");
+                    }
                   }}
-                  options={leadStatusOptionsForVertical(board).map((option) => ({ label: option.value, value: option.value }))}
+                  options={leadStatusOptionsForVertical(bulkUpdateVertical || board).map((option) => ({ label: option.value, value: option.value }))}
                 />
                 <DateField
                   label="Last Updated Date"
+                  helperText="The day these leads were last followed up."
                   value={bulkUpdateLastUpdatedDate}
                   disabled={STATUSES_WITHOUT_FOLLOW_UP.includes(bulkUpdateLeadStatus)}
                   onChange={(value) => setBulkUpdateLastUpdatedDate(value)}
                 />
                 <DateField
                   label="Next Follow-up Date"
+                  helperText="The day these leads are next due a call."
                   value={bulkUpdateNextFollowUpDate}
-                  disabled={STATUSES_WITHOUT_FOLLOW_UP.includes(bulkUpdateLeadStatus)}
+                  disabled={dropsNextFollowUp(bulkUpdateLeadStatus, bulkUpdateVertical || board)}
                   onChange={(value) => setBulkUpdateNextFollowUpDate(value)}
                 />
-                <CrmMultiSelectField
-                  ariaLabel="Assign to CRM"
+                {/* The same multi-select every other several-answer field uses - Manage Users on a
+                    role included - with its search, Select all and Clear. Ticking more than one
+                    CRM shares the leads out between them in turn; the table below previews it. */}
+                <MultiSelectField
                   label="CRM"
+                  helperText="Pick several to share the selected leads out between them in turn."
+                  searchable
+                  placeholder="Select CRMs"
                   options={crmChoices}
                   values={bulkUpdateCrms}
                   onChange={setBulkUpdateCrms}
@@ -9229,6 +8737,18 @@ export default function CRMPage() {
               {STATUSES_WITHOUT_FOLLOW_UP.includes(bulkUpdateLeadStatus) && (
                 <p className="mt-2 text-xs font-normal text-slate-500">
                   Follow-up dates are not set for {bulkUpdateLeadStatus} leads.
+                </p>
+              )}
+              {bulkUpdateLeadStatus === "Converted" && (
+                <p className="mt-2 text-xs font-normal text-slate-500">
+                  {dropsNextFollowUp(bulkUpdateLeadStatus, bulkUpdateVertical || board) ? "Converted leads have no next follow-up. " : ""}Last Updated Date is set to today unless you change it.
+                </p>
+              )}
+              {/* Said before the press, and asked again after it: what a move clears cannot be got back. */}
+              {bulkUpdateVertical && (
+                // The dialog's own note, as its follow-up notes above are - in amber, being a warning.
+                <p role="alert" className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-normal text-amber-800 sm:text-sm">
+                  Moving to {bulkUpdateVertical} permanently clears what only {board} asks - {VERTICAL_MOVE_CLEARS[board]} - and {board}&apos;s custom fields. A lead whose number is already an enquiry in {bulkUpdateVertical} stays on {board}.
                 </p>
               )}
               {/* The split is shown before it is committed, not reported after: sharing
@@ -9262,9 +8782,10 @@ export default function CRMPage() {
               <Button
                 type="button"
                 variant="primary"
-                onClick={() => void applyBulkUpdateDetails()}
+                // A move asks once more before it runs; anything else saves straight away.
+                onClick={() => (bulkUpdateVertical ? setConfirmVerticalMove(true) : void applyBulkUpdateDetails())}
                 disabled={bulkUpdating
-                  || (!bulkUpdateLeadStatus && !bulkUpdateLastUpdatedDate && !bulkUpdateNextFollowUpDate && !bulkUpdateCrms.length)}
+                  || (!bulkUpdateLeadStatus && !bulkUpdateLastUpdatedDate && !bulkUpdateNextFollowUpDate && !bulkUpdateCrms.length && !bulkUpdateVertical)}
               >
                 {bulkUpdating ? "Updating..." : "Update"}
               </Button>
@@ -9272,6 +8793,16 @@ export default function CRMPage() {
           </section>
         </div>
       )}
+      <ConfirmDialog
+        open={confirmVerticalMove}
+        title={`Move ${selectedCount.toLocaleString()} lead${selectedCount === 1 ? "" : "s"} to ${bulkUpdateVertical}?`}
+        message={`Data may be lost. Moving from ${board} permanently clears ${VERTICAL_MOVE_CLEARS[board] || "what only that vertical asks"}, and ${board}'s custom fields - it cannot be undone by moving them back. Leads whose number is already an enquiry in ${bulkUpdateVertical} stay where they are.`}
+        confirmLabel={`Move to ${bulkUpdateVertical}`}
+        cancelLabel="Go back"
+        tone="danger"
+        onCancel={() => setConfirmVerticalMove(false)}
+        onConfirm={() => { setConfirmVerticalMove(false); void applyBulkUpdateDetails(); }}
+      />
       {meetingsLeadId && (
         <MeetingsDialog
           lead={leads.find((item) => item.id === meetingsLeadId) || { id: meetingsLeadId }}
@@ -9416,6 +8947,23 @@ export default function CRMPage() {
           </section>
         </div>
       )}
+      {/* Two answers, because there are only two: book it now, or leave it marked and come back to it
+          from Bookings & Converted. The lead is already saved either way, so neither is a refusal. */}
+      <ConfirmDialog
+        open={Boolean(convertedAsk)}
+        title="Open Create Project on this lead?"
+        message={`${convertedAsk?.name || "This lead"} is marked ${convertedAsk?.status || "Converted"} and saved. Create Project opens on it with its details filled in; it can also be booked later from Bookings & Converted.`}
+        confirmLabel="Open Create Project"
+        cancelLabel="Not now"
+        tone="primary"
+        onCancel={() => setConvertedAsk(null)}
+        onConfirm={() => {
+          const ask = convertedAsk;
+          setConvertedAsk(null);
+          if (ask?.id) router.push(convertProjectUrl(ask.id, ask.status));
+        }}
+      />
+
       {convertLead?.lead && (
         <div
           className="fixed inset-0 z-[190] flex items-center justify-center bg-slate-950/55 p-4"
@@ -9572,6 +9120,7 @@ export default function CRMPage() {
                       mode="input"
                       ariaLabel="Select System Table"
                       label="Select System Table"
+                      helperText="The board the CSV's leads are imported into."
                       placeholder="Select a table"
                       value={importTable}
                       onChange={(value) => setImportTable(value)}
@@ -9591,7 +9140,7 @@ export default function CRMPage() {
 
                   <div className="grid items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
                     <label className="block text-xs font-semibold text-slate-600">
-                      <span>CSV File</span>
+                      <span>CSV File<HelpTip text="The filled-in CSV template of leads to bring into the CRM." /></span>
                       <span className="mt-1.5 flex min-h-9 w-full min-w-0 items-center rounded-lg border border-slate-300 bg-white px-3 text-sm font-normal text-slate-700">
                         <span className={`truncate ${importFile ? "" : "text-slate-400"}`}>
                           {importFile ? importFile.name : "No file selected"}
@@ -9687,6 +9236,15 @@ export default function CRMPage() {
         onNotice={showSuccess}
         onError={showError}
         onConvert={(status) => setConvertLead({ lead: leadPopup, status: status || "Converted" })}
+        onMoveVertical={canWrite ? async (target) => {
+          const response = await moveCrmLeadVertical(leadPopup.id, target);
+          // It has left this board: the popup closes, and the board reads itself again.
+          discardPopupDraft();
+          setShowLeadPopupId(null);
+          showSuccess(response?.message || `${leadPopup.id} moved to ${target}.`);
+          markLeadsChanged();
+          await loadLeads({ silent: true });
+        } : undefined}
         onBack={() => {
           const visibleIndex = rows.findIndex((row) => row.id === leadPopup?.id);
           // Wraps to the last lead from the first, the way Proceed Next wraps to the first
@@ -9700,7 +9258,15 @@ export default function CRMPage() {
         duplicateEnquiries={duplicateEnquiries?.leadId === showLeadPopupId ? duplicateEnquiries : null}
         onMoveNext={(action) => {
           if (action === "quotation") {
-            setShowQuotationCalculator(true);
+            /*
+             * A tab of its own, with the lead left open behind it.
+             *
+             * Pricing a quotation is read off the lead - the dates, the shoots, what was discussed -
+             * so taking this tab to the calculator meant going back and opening the lead again to
+             * check anything. `noopener,noreferrer` as everywhere else: the new tab gets no handle
+             * on this one.
+             */
+            window.open(`/sales/quotation-calculator?lead=${encodeURIComponent(leadPopup?.id || "")}`, "_blank", "noopener,noreferrer");
             return;
           }
           if (action === "meetings") {
@@ -9712,7 +9278,6 @@ export default function CRMPage() {
       {/* Save-or-discard, asked before the popup above goes. Beside it rather than inside, because
           it outlives the press that raised it, and above it - see the note on the Contacts copy. */}
       <ConfirmDialog {...popupCloseConfirmProps} layer="dialogOverPanel" />
-      <QuotationCalculatorModal open={showQuotationCalculator} onClose={() => setShowQuotationCalculator(false)} leadId={leadPopup?.id || null} />
       {/*
         * "This number is already an enquiry", raised over whichever form is asking.
         *
@@ -9785,6 +9350,17 @@ export default function CRMPage() {
                   {addLeadForm.phone ? ` (${addLeadForm.phone})` : ""} from the Calls board.
                 </p>
               )}
+              {/* Which lead this is, named, because the form is about to write over it rather than
+                  add one - and because a form that opens filled in reads as a new lead somebody has
+                  half typed unless it says whose details these are. The enquiry id is the part that
+                  makes it unmistakable. */}
+              {assigningLeadId && (
+                <p className="mb-3 text-sm text-slate-600">
+                  Assigning <span className="font-medium text-slate-800">{addLeadForm.name || assigningLeadId}</span>
+                  {addLeadForm.phone ? ` (${addLeadForm.phone})` : ""} · {assigningLeadId}. Choose who it is with below;
+                  left empty it stays unassigned.
+                </p>
+              )}
               {/* No Enquiry Date field. The form stamps today - `emptyLeadForm` sets `createdDate`,
                   and `leadFormForVertical` carries it across a change of vertical - which is what a
                   lead typed in as it comes in is, and the studio does not want to be asked. A lead
@@ -9792,7 +9368,7 @@ export default function CRMPage() {
 
                   It is still the date the board files the lead by: Today New Leads and the Status
                   pill both read it, so a manual entry made today lands on today and nowhere else. */}
-              <RadioGroupField label="Vertical" value={addLeadForm.vertical} onChange={(value) => updateForm("vertical", value)} options={["Dum Dum", "Qua Qua", "Corp"]} className="mb-3 max-w-2xl" />
+              <RadioGroupField label="Vertical" helperText="The board the lead goes on; it decides the questions below." value={addLeadForm.vertical} onChange={(value) => updateForm("vertical", value)} options={["Dum Dum", "Qua Qua", "Corp"]} className="mb-3 max-w-2xl" />
               <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
                 <section className="overflow-hidden rounded-2xl bg-white">
                   <h3 className="border-b border-slate-200 px-5 py-3 text-lg font-medium text-slate-700">Client Details</h3>
@@ -9801,90 +9377,90 @@ export default function CRMPage() {
                       being filled in. */}
                   {addLeadForm.vertical === "Dum Dum" && (
                     <div className="space-y-5 p-5">
-                      <div className="grid gap-5 md:grid-cols-3">
-                        {requiredField("name", "Enquire Name", <TextField label="Enquire Name" required value={addLeadForm.name} onChange={(event) => updateForm("name", event.target.value)} />)}
-                        {requiredField("phone", "Contact", <PhoneField label="Contact" required value={addLeadForm.phone} onChange={(_field, phone) => updateForm("phone", phone)} />)}
-                        {requiredField("assignedBranch", "Assigned Branch", <Dropdown mode="input" searchable ariaLabel="Assigned Branch" label="Assigned Branch" required value={addLeadForm.assignedBranch} onChange={(value) => updateForm("assignedBranch", value)} options={branchOptions} />)}
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        {requiredField("name", <TextField helperText={LEAD_FIELD_HELP.name} label="Enquire Name" required value={addLeadForm.name} onChange={(event) => updateForm("name", event.target.value)} />)}
+                        {requiredField("phone", <PhoneField helperText={LEAD_FIELD_HELP.phone} label="Contact" required value={addLeadForm.phone} onChange={(_field, phone) => updateForm("phone", phone)} />)}
+                        {requiredField("assignedBranch", <Dropdown helperText={LEAD_FIELD_HELP.assignedBranch} mode="input" searchable ariaLabel="Assigned Branch" label="Assigned Branch" required value={addLeadForm.assignedBranch} onChange={(value) => updateForm("assignedBranch", value)} options={branchOptions} />)}
                       </div>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <ComboBoxField label="Relationship" value={addLeadForm.relationship} onChange={(value) => updateForm("relationship", value)} options={suggestions.relationship} />
-                        <ComboBoxField label="Referred From" value={addLeadForm.referredFrom} onChange={(value) => updateForm("referredFrom", value)} options={suggestions.referredFrom} />
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        <ComboBoxField helperText={LEAD_FIELD_HELP.relationship} label="Relationship" value={addLeadForm.relationship} onChange={(value) => updateForm("relationship", value)} options={suggestions.relationship} />
+                        <ComboBoxField helperText={LEAD_FIELD_HELP.referredFrom} label="Referred From" value={addLeadForm.referredFrom} onChange={(value) => updateForm("referredFrom", value)} options={suggestions.referredFrom} />
                       </div>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <TextField label="Groom Name" value={addLeadForm.groomName} onChange={(event) => updateForm("groomName", event.target.value)} />
-                        <PhoneField label="Groom Contact" value={addLeadForm.groomContact} onChange={(_field, phone) => updateForm("groomContact", phone)} />
-                        <TextField label="Groom Location" value={addLeadForm.groomLocation} onChange={(event) => updateForm("groomLocation", event.target.value)} />
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        <TextField helperText={LEAD_FIELD_HELP.groomName} label="Groom Name" value={addLeadForm.groomName} onChange={(event) => updateForm("groomName", event.target.value)} />
+                        <PhoneField helperText={LEAD_FIELD_HELP.groomContact} label="Groom Contact" value={addLeadForm.groomContact} onChange={(_field, phone) => updateForm("groomContact", phone)} />
+                        <TextField helperText={LEAD_FIELD_HELP.groomLocation} label="Groom Location" value={addLeadForm.groomLocation} onChange={(event) => updateForm("groomLocation", event.target.value)} />
                       </div>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <TextField label="Bride Name" value={addLeadForm.brideName} onChange={(event) => updateForm("brideName", event.target.value)} />
-                        <PhoneField label="Bride Contact" value={addLeadForm.brideContact} onChange={(_field, phone) => updateForm("brideContact", phone)} />
-                        <TextField label="Bride Location" value={addLeadForm.brideLocation} onChange={(event) => updateForm("brideLocation", event.target.value)} />
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        <TextField helperText={LEAD_FIELD_HELP.brideName} label="Bride Name" value={addLeadForm.brideName} onChange={(event) => updateForm("brideName", event.target.value)} />
+                        <PhoneField helperText={LEAD_FIELD_HELP.brideContact} label="Bride Contact" value={addLeadForm.brideContact} onChange={(_field, phone) => updateForm("brideContact", phone)} />
+                        <TextField helperText={LEAD_FIELD_HELP.brideLocation} label="Bride Location" value={addLeadForm.brideLocation} onChange={(event) => updateForm("brideLocation", event.target.value)} />
                       </div>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <TextField label="Referenced Person Name" value={addLeadForm.referenceName} onChange={(event) => updateForm("referenceName", event.target.value)} />
-                        <PhoneField label="Reference Contact" value={addLeadForm.referenceContact} onChange={(_field, phone) => updateForm("referenceContact", phone)} />
-                        {requiredField("estimatedValue", "Estimated Value", <TextField label="Estimated Value" required inputMode="decimal" value={addLeadForm.estimatedValue} onChange={(event) => updateForm("estimatedValue", event.target.value)} />)}
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        <TextField helperText={LEAD_FIELD_HELP.referenceName} label="Referenced Person Name" value={addLeadForm.referenceName} onChange={(event) => updateForm("referenceName", event.target.value)} />
+                        <PhoneField helperText={LEAD_FIELD_HELP.referenceContact} label="Reference Contact" value={addLeadForm.referenceContact} onChange={(_field, phone) => updateForm("referenceContact", phone)} />
+                        {requiredField("estimatedValue", <TextField helperText={LEAD_FIELD_HELP.estimatedValue} label="Estimated Value" required inputMode="decimal" value={addLeadForm.estimatedValue} onChange={(event) => updateForm("estimatedValue", event.target.value)} />)}
                       </div>
                       {addLeadCustomFields.length > 0 && (
-                        <div className="grid gap-5 md:grid-cols-3">{addLeadCustomFields}</div>
+                        <div className="grid grid-cols-1 gap-5 md:grid-cols-3">{addLeadCustomFields}</div>
                       )}
                     </div>
                   )}
                   {addLeadForm.vertical === "Qua Qua" && (
                     <div className="space-y-5 p-5">
-                      <div className="grid gap-5 md:grid-cols-3">
-                        {requiredField("name", "Enquire Name", <TextField label="Enquire Name" required value={addLeadForm.name} onChange={(event) => updateForm("name", event.target.value)} />)}
-                        {requiredField("phone", "Contact", <PhoneField label="Contact" required value={addLeadForm.phone} onChange={(_field, phone) => updateForm("phone", phone)} />)}
-                        {requiredField("assignedBranch", "Assigned Branch", <Dropdown mode="input" searchable ariaLabel="Assigned Branch" label="Assigned Branch" required value={addLeadForm.assignedBranch} onChange={(value) => updateForm("assignedBranch", value)} options={branchOptions} />)}
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        {requiredField("name", <TextField helperText={LEAD_FIELD_HELP.name} label="Enquire Name" required value={addLeadForm.name} onChange={(event) => updateForm("name", event.target.value)} />)}
+                        {requiredField("phone", <PhoneField helperText={LEAD_FIELD_HELP.phone} label="Contact" required value={addLeadForm.phone} onChange={(_field, phone) => updateForm("phone", phone)} />)}
+                        {requiredField("assignedBranch", <Dropdown helperText={LEAD_FIELD_HELP.assignedBranch} mode="input" searchable ariaLabel="Assigned Branch" label="Assigned Branch" required value={addLeadForm.assignedBranch} onChange={(value) => updateForm("assignedBranch", value)} options={branchOptions} />)}
                       </div>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <ComboBoxField label="Relationship" value={addLeadForm.relationship} onChange={(value) => updateForm("relationship", value)} options={suggestions.relationship} />
-                        <ComboBoxField label="Referred From" value={addLeadForm.referredFrom} onChange={(value) => updateForm("referredFrom", value)} options={suggestions.referredFrom} />
-                        <Dropdown mode="input" ariaLabel="Offer Type" label="Offer Type" value={addLeadForm.offerType} onChange={(value) => updateForm("offerType", value)} options={shootOptions} />
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        <ComboBoxField helperText={LEAD_FIELD_HELP.relationship} label="Relationship" value={addLeadForm.relationship} onChange={(value) => updateForm("relationship", value)} options={suggestions.relationship} />
+                        <ComboBoxField helperText={LEAD_FIELD_HELP.referredFrom} label="Referred From" value={addLeadForm.referredFrom} onChange={(value) => updateForm("referredFrom", value)} options={suggestions.referredFrom} />
+                        <Dropdown helperText={LEAD_FIELD_HELP.offerType} mode="input" ariaLabel="Offer Type" label="Offer Type" value={addLeadForm.offerType} onChange={(value) => updateForm("offerType", value)} options={suggestions.offerType} />
                       </div>
                       {/* The baby's own three fields, together. */}
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <TextField label="Baby (or) Mother Name" value={addLeadForm.babyOrMotherName} onChange={(event) => updateForm("babyOrMotherName", event.target.value)} />
-                        {requiredField("dateOfBirthOrEdod", "Date of Birth (or) EDOD", <DateField label="Date of Birth (or) EDOD" required value={addLeadForm.dateOfBirthOrEdod} onChange={(value) => updateForm("dateOfBirthOrEdod", value)} />)}
-                        <PhoneField label="Contact" value={addLeadForm.contactNumber} onChange={(_field, phone) => updateForm("contactNumber", phone)} />
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        <TextField helperText={LEAD_FIELD_HELP.babyOrMotherName} label="Baby (or) Mother Name" value={addLeadForm.babyOrMotherName} onChange={(event) => updateForm("babyOrMotherName", event.target.value)} />
+                        {requiredField("dateOfBirthOrEdod", <DateField helperText={LEAD_FIELD_HELP.dateOfBirthOrEdod} label="Date of Birth (or) EDOD" required value={addLeadForm.dateOfBirthOrEdod} onChange={(value) => updateForm("dateOfBirthOrEdod", value)} />)}
+                        <PhoneField helperText={LEAD_FIELD_HELP.contactNumber} label="Contact" value={addLeadForm.contactNumber} onChange={(_field, phone) => updateForm("contactNumber", phone)} />
                       </div>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <TextField label="Location" value={addLeadForm.location} onChange={(event) => updateForm("location", event.target.value)} />
-                        <DateField label="Last Converted Date" value={addLeadForm.lastConvertedDate} onChange={(value) => updateForm("lastConvertedDate", value)} />
-                        {requiredField("estimatedValue", "Estimated Value", <TextField label="Estimated Value" required inputMode="decimal" value={addLeadForm.estimatedValue} onChange={(event) => updateForm("estimatedValue", event.target.value)} />)}
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        <TextField helperText={LEAD_FIELD_HELP.location} label="Location" value={addLeadForm.location} onChange={(event) => updateForm("location", event.target.value)} />
+                        <DateField helperText={LEAD_FIELD_HELP.lastConvertedDate} label="Last Converted Date" value={addLeadForm.lastConvertedDate} onChange={(value) => updateForm("lastConvertedDate", value)} />
+                        {requiredField("estimatedValue", <TextField helperText={LEAD_FIELD_HELP.estimatedValue} label="Estimated Value" required inputMode="decimal" value={addLeadForm.estimatedValue} onChange={(event) => updateForm("estimatedValue", event.target.value)} />)}
                       </div>
                       {addLeadCustomFields.length > 0 && (
-                        <div className="grid gap-5 md:grid-cols-3">{addLeadCustomFields}</div>
+                        <div className="grid grid-cols-1 gap-5 md:grid-cols-3">{addLeadCustomFields}</div>
                       )}
                     </div>
                   )}
                   {addLeadForm.vertical === "Corp" && (
                     <div className="space-y-5 p-5">
-                      <div className="grid gap-5 md:grid-cols-3">
-                        {requiredField("name", "Enquire Name", <TextField label="Enquire Name" required value={addLeadForm.name} onChange={(event) => updateForm("name", event.target.value)} />)}
-                        {requiredField("phone", "Contact", <PhoneField label="Contact" required value={addLeadForm.phone} onChange={(_field, phone) => updateForm("phone", phone)} />)}
-                        {requiredField("assignedBranch", "Assigned Branch", <Dropdown mode="input" searchable ariaLabel="Assigned Branch" label="Assigned Branch" required value={addLeadForm.assignedBranch} onChange={(value) => updateForm("assignedBranch", value)} options={branchOptions} />)}
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        {requiredField("name", <TextField helperText={LEAD_FIELD_HELP.name} label="Enquire Name" required value={addLeadForm.name} onChange={(event) => updateForm("name", event.target.value)} />)}
+                        {requiredField("phone", <PhoneField helperText={LEAD_FIELD_HELP.phone} label="Contact" required value={addLeadForm.phone} onChange={(_field, phone) => updateForm("phone", phone)} />)}
+                        {requiredField("assignedBranch", <Dropdown helperText={LEAD_FIELD_HELP.assignedBranch} mode="input" searchable ariaLabel="Assigned Branch" label="Assigned Branch" required value={addLeadForm.assignedBranch} onChange={(value) => updateForm("assignedBranch", value)} options={branchOptions} />)}
                       </div>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <TextField label="Company Name (or) Client organisation" value={addLeadForm.companyName} onChange={(event) => updateForm("companyName", event.target.value)} />
-                        <PhoneField label="Primary decision maker - Contact" value={addLeadForm.primaryDecisionMaker} onChange={(_field, phone) => updateForm("primaryDecisionMaker", phone)} />
-                        <TextField label="Designation" value={addLeadForm.designation} onChange={(event) => updateForm("designation", event.target.value)} />
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        <TextField helperText={LEAD_FIELD_HELP.companyName} label="Company Name (or) Client organisation" value={addLeadForm.companyName} onChange={(event) => updateForm("companyName", event.target.value)} />
+                        <PhoneField helperText={LEAD_FIELD_HELP.primaryDecisionMaker} label="Primary decision maker - Contact" value={addLeadForm.primaryDecisionMaker} onChange={(_field, phone) => updateForm("primaryDecisionMaker", phone)} />
+                        <TextField helperText={LEAD_FIELD_HELP.designation} label="Designation" value={addLeadForm.designation} onChange={(event) => updateForm("designation", event.target.value)} />
                       </div>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <TextField label="Company Website" value={addLeadForm.companyWebsite} onChange={(event) => updateForm("companyWebsite", event.target.value)} />
-                        <TextField label="Company Type" value={addLeadForm.companyType} onChange={(event) => updateForm("companyType", event.target.value)} />
-                        <TextField label="Location" value={addLeadForm.location} onChange={(event) => updateForm("location", event.target.value)} placeholder="Office / Factory / Hotel...etc" />
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        <TextField helperText={LEAD_FIELD_HELP.companyWebsite} label="Company Website" value={addLeadForm.companyWebsite} onChange={(event) => updateForm("companyWebsite", event.target.value)} />
+                        <TextField helperText={LEAD_FIELD_HELP.companyType} label="Company Type" value={addLeadForm.companyType} onChange={(event) => updateForm("companyType", event.target.value)} />
+                        <TextField helperText={LEAD_FIELD_HELP.location} label="Location" value={addLeadForm.location} onChange={(event) => updateForm("location", event.target.value)} placeholder="Office / Factory / Hotel...etc" />
                       </div>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <TextField label="Official Email ID" value={addLeadForm.officialEmailId} onChange={(event) => updateForm("officialEmailId", event.target.value)} />
-                        <ComboBoxField label="Referred From" value={addLeadForm.referredFrom} onChange={(value) => updateForm("referredFrom", value)} options={suggestions.referredFrom} />
-                        <TextField label="Budget Expected" value={addLeadForm.expectedBudget} onChange={(event) => updateForm("expectedBudget", event.target.value)} />
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        <TextField helperText={LEAD_FIELD_HELP.officialEmailId} label="Official Email ID" value={addLeadForm.officialEmailId} onChange={(event) => updateForm("officialEmailId", event.target.value)} />
+                        <ComboBoxField helperText={LEAD_FIELD_HELP.referredFrom} label="Referred From" value={addLeadForm.referredFrom} onChange={(value) => updateForm("referredFrom", value)} options={suggestions.referredFrom} />
+                        <TextField helperText={LEAD_FIELD_HELP.expectedBudget} label="Budget Expected" value={addLeadForm.expectedBudget} onChange={(event) => updateForm("expectedBudget", event.target.value)} />
                       </div>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        {requiredField("estimatedValue", "Estimated Value", <TextField label="Estimated Value" required inputMode="decimal" value={addLeadForm.estimatedValue} onChange={(event) => updateForm("estimatedValue", event.target.value)} />)}
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                        {requiredField("estimatedValue", <TextField helperText={LEAD_FIELD_HELP.estimatedValue} label="Estimated Value" required inputMode="decimal" value={addLeadForm.estimatedValue} onChange={(event) => updateForm("estimatedValue", event.target.value)} />)}
                       </div>
                       {addLeadCustomFields.length > 0 && (
-                        <div className="grid gap-5 md:grid-cols-3">{addLeadCustomFields}</div>
+                        <div className="grid grid-cols-1 gap-5 md:grid-cols-3">{addLeadCustomFields}</div>
                       )}
                     </div>
                   )}
@@ -9892,6 +9468,9 @@ export default function CRMPage() {
                     <h4 className="mb-3 text-sm font-semibold text-slate-600">Shoot Details</h4>
                     <ShootDetailsTable
                       shoots={addLeadForm.shoots}
+                      shootTypeOptions={suggestions.shootType}
+                      shootTypeStatus={suggestions.status?.shootType}
+                      onRetryShootTypes={suggestions.reload}
                       onChangeRow={updateShootRow}
                       onRemoveRow={removeShootRow}
                       onAddRow={() => setAddLeadForm((current) => ({ ...current, shoots: [...(current.shoots || []), emptyShootRow()] }))}
@@ -9902,7 +9481,7 @@ export default function CRMPage() {
                   <h3 className="border-b border-slate-200 px-5 py-3 text-lg font-medium text-slate-700">Follow-up Details</h3>
                   <div className="space-y-5 p-5">
                     <fieldset>
-                      <legend className="mb-2 text-sm font-semibold text-slate-600">Lead Status</legend>
+                      <legend className="mb-2 text-sm font-semibold text-slate-600">Lead Status<HelpTip text="Pick where this new lead stands right now." /></legend>
                       <LeadStatusPills
                         value={addLeadForm.leadStatus}
                         onChange={(value) => updateForm("leadStatus", value)}
@@ -9912,19 +9491,28 @@ export default function CRMPage() {
                     {/* No Last Follow-up Date here either: a lead being added has not been
                         followed up yet, and the one date worth asking for is the next one. */}
                     <div className="grid gap-4 sm:grid-cols-2">
-                      <Dropdown mode="input" ariaLabel="Assign To" label="Assign To" value={addLeadForm.crm} onChange={(value) => updateForm("crm", value)} options={crmChoices} />
+                      <Dropdown mode="input" ariaLabel="Assign To" label="Assign To" helperText={LEAD_FIELD_HELP.crm} value={addLeadForm.crm} onChange={(value) => updateForm("crm", value)} options={crmChoices} />
                       {/* A lead being turned down is not being chased, so it has no next call to
                           book - the same rule the lead popup applies, through the same list. */}
-                      {!STATUSES_WITHOUT_FOLLOW_UP.includes(addLeadForm.leadStatus) && (
+                      {!dropsNextFollowUp(addLeadForm.leadStatus, addLeadForm.vertical) && (
                         <>
-                          <DateField label="Next Follow-up Date" value={addLeadForm.nextFollowUpDate} onChange={(value) => updateForm("nextFollowUpDate", value)} />
-                          <TimeField label="Next Follow-up Time" value={addLeadForm.nextFollowUpTime} onChange={(event) => updateForm("nextFollowUpTime", event.target.value)} />
+                          <DateField
+                            label="Next Follow-up Date"
+                            helperText="The day this lead is due a call; it shows on Pending Followups."
+                            value={addLeadForm.nextFollowUpDate}
+                            onChange={(value) => updateForm("nextFollowUpDate", value)}
+                            required={isRequiredLeadField("nextFollowUpDate", addLeadForm.leadStatus, addLeadForm.name)}
+                            error={leadFieldMessage("nextFollowUpDate", addLeadMarks.errors.nextFollowUpDate, addLeadForm)}
+                          />
+                          <TimeField label="Next Follow-up Time" helperText="The time to call back on the follow-up day." value={addLeadForm.nextFollowUpTime} onChange={(event) => updateForm("nextFollowUpTime", event.target.value)} />
                         </>
                       )}
                     </div>
                     <div className="space-y-2">
                       <h4 className="text-sm font-semibold text-slate-600">Remarks</h4>
                       <NotesComposer
+                      onUploadAttachment={uploadRemarkAttachment}
+                      onFetchAttachment={fetchRemarkAttachment}
                         key="add-lead-notes"
                         value={addLeadForm.remarks}
                         entries={leadRemarkEntries(addLeadForm.remarkEntries, addLeadForm.remarks)}
@@ -9965,11 +9553,15 @@ export default function CRMPage() {
                 busy={addingLead}
                 busyLabel="Adding..."
                 onClick={() => {
-                  if (addLeadMissing.length) {
-                    setShowAddLeadErrors(true);
+                  // Each missing box says what it needs under itself; the notice only how many.
+                  const problems = {
+                    ...leadFieldProblems(addLeadForm),
+                    ...customLeadFieldProblems(addLeadForm, customFieldsByVertical[addLeadForm.vertical]),
+                  };
+                  if (!addLeadMarks.check(problems)) {
+                    showError(markedFieldsMessage(Object.values(problems).filter(Boolean).length));
                     return;
                   }
-                  setShowAddLeadErrors(false);
                   /*
                    * The last thing before the lead is written: is this number already an enquiry?
                    *

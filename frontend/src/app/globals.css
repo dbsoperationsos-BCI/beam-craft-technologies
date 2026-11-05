@@ -152,6 +152,18 @@ body {
   overflow-x: hidden;
 }
 
+/*
+ * No touchpad swipe back or forward while a panel, dialog or pop-up is open. Two fingers sideways on
+ * a trackpad is the browser's history gesture, and over a half-filled form it left the page and took
+ * the answers with it. Keyed on the overlay being in the document - every one of them carries
+ * `role="dialog"` or `aria-modal` - so ordinary pages keep the gesture. Chrome and Edge honour this;
+ * Safari does not, and `SwipeNavigationGuard` covers it there.
+ */
+html:has([role="dialog"], [aria-modal="true"]),
+html:has([role="dialog"], [aria-modal="true"]) body {
+  overscroll-behavior-x: none;
+}
+
 @keyframes crm-drawer-up {
   from {
     opacity: 0;
@@ -276,7 +288,7 @@ body {
   --employee-table-header: #f8fafc;
   --employee-table-cell: #ffffff;
   --employee-table-selected: #eff6ff;
-  --employee-table-divider: #cbd5e1;
+  --employee-table-divider: #e2e8f0;
   --employee-table-subrow: #eef2f7;
   --employee-table-subrow-hover: #e2e8f0;
 }
@@ -369,9 +381,12 @@ body {
    ground comes out the same way. Light themes leave the image exactly as uploaded.
 
    The fallback mark is exempt: it already ships a file lettered for a dark ground, so inverting it
-   would turn that white lettering black and hide it on the bar it was drawn for. */
-[data-theme="dark"] .app-topbar .app-logo img:not(.studio-logo-fallback),
-[data-theme="enhanced-dark"] .app-topbar .app-logo img:not(.studio-logo-fallback) {
+   would turn that white lettering black and hide it on the bar it was drawn for. So is a dark-mode
+   Global Logo the studio uploaded for exactly this bar (`.studio-logo-own-dark`, set by `AppLogo`
+   only when the mark shown is the dark upload): the inversion is a guess made on a light mark's
+   behalf, and a mark drawn for a dark ground needs no guessing. */
+[data-theme="dark"] .app-topbar .app-logo img:not(.studio-logo-fallback):not(.studio-logo-own-dark),
+[data-theme="enhanced-dark"] .app-topbar .app-logo img:not(.studio-logo-fallback):not(.studio-logo-own-dark) {
   filter: invert(1) hue-rotate(180deg);
   mix-blend-mode: screen;
 }
@@ -536,8 +551,120 @@ body {
   }
 }
 
-/* Keep icon-only controls in page headers visually compact. */
-.module-page-header-actions button[aria-label]:not([aria-haspopup]) {
+/* A Board card's ⋮ opens with a short grow and fade from its corner, so the small menu reads as
+   coming out of the dot that was pressed rather than appearing somewhere near it. */
+@keyframes options-menu-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(-0.25rem);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-options-menu-pop {
+  animation: options-menu-pop 140ms cubic-bezier(0.2, 0, 0, 1);
+  transform-origin: top right;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-options-menu-pop {
+    animation: none;
+  }
+}
+
+/* The expired-link card settles in once - a short fade and a lift of a few pixels - and then holds
+   still: nothing on that page loops, pulses or turns. */
+@keyframes expired-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-expired-card-in {
+  animation: expired-card-in 320ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-expired-card-in {
+    animation: none;
+  }
+}
+
+/* The client gallery viewer on a phone, answering a tap on the photo. A pick is a check that
+   swells in with one soft ring and fades; an unpick is the same check contracting away - never a
+   cross. The photo itself dips by a hair on a pick. Transform and opacity only, so nothing reflows
+   and a swipe straight after stays smooth. Reduced motion keeps only a short fade. */
+@keyframes selection-confirm {
+  0% { opacity: 0; transform: scale(0.75); }
+  20% { opacity: 1; transform: scale(1.08); }
+  42% { transform: scale(1); }
+  72% { opacity: 1; }
+  100% { opacity: 0; transform: scale(1); }
+}
+@keyframes selection-ring {
+  0% { opacity: 0.35; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.7); }
+}
+@keyframes selection-release {
+  from { opacity: 0.9; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.85); }
+}
+@keyframes selection-press {
+  50% { transform: scale(0.992); }
+}
+@keyframes selection-fade {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.selection-feedback-in {
+  animation: selection-confirm 560ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+.selection-feedback-in::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: rgb(16 185 129 / 0.45);
+  animation: selection-ring 520ms ease-out both;
+}
+.selection-feedback-out {
+  animation: selection-release 340ms ease-in both;
+}
+.selection-tap-press {
+  animation: selection-press 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .selection-feedback-in,
+  .selection-feedback-out {
+    animation: selection-fade 220ms linear both;
+  }
+  /* The ring is gone rather than stilled: a stilled ring would sit over the check as a tinted disc. */
+  .selection-feedback-in::after {
+    content: none;
+  }
+  .selection-tap-press {
+    animation: none;
+  }
+}
+
+/* Keep icon-only controls in page headers visually compact.
+ *
+ * `[data-chip-remove]` is excluded because it is not one of them. The × inside a `MultiSelectField`
+ * chip is a 16px button with an `aria-label`, so this rule caught it and forced it to 36px square at
+ * 1rem - a chip taller than the field holding it, which pushed the control past the buttons beside
+ * it and spilled out of its own box. The rule is for a control that stands in the row on its own,
+ * and anything inside another control says so. */
+.module-page-header-actions button[aria-label]:not([aria-haspopup]):not([data-chip-remove]) {
   width: 2.25rem !important;
   min-width: 2.25rem !important;
   height: 2.25rem !important;
@@ -984,9 +1111,11 @@ body {
    the ramp - this is the active tab, the chosen menu row, a link, and the calendar's own meeting
    chips. The 800 and 900 shades are listed with them: they are used the same way, on the same pale
    blue, and are darker still - so leaving them out left exactly the text that needed lifting most
-   sitting unlit on a lifted band. */
-[data-theme="enhanced-dark"] :is(.text-blue-950, .text-blue-900, .text-blue-800, .text-blue-700, .text-blue-600, .text-indigo-900, .text-indigo-800, .text-indigo-700, .text-indigo-600),
-[data-theme="dark"] :is(.text-blue-950, .text-blue-900, .text-blue-800, .text-blue-700, .text-blue-600, .text-indigo-900, .text-indigo-800, .text-indigo-700, .text-indigo-600) {
+   sitting unlit on a lifted band. Sky is the same blue band (`bg-sky-50` is lifted above), so its
+   text shades are lifted with it - left out, the notice above My Profile's payslips read dark on
+   dark. */
+[data-theme="enhanced-dark"] :is(.text-blue-950, .text-blue-900, .text-blue-800, .text-blue-700, .text-blue-600, .text-indigo-900, .text-indigo-800, .text-indigo-700, .text-indigo-600, .text-sky-950, .text-sky-900, .text-sky-800, .text-sky-700, .text-sky-600),
+[data-theme="dark"] :is(.text-blue-950, .text-blue-900, .text-blue-800, .text-blue-700, .text-blue-600, .text-indigo-900, .text-indigo-800, .text-indigo-700, .text-indigo-600, .text-sky-950, .text-sky-900, .text-sky-800, .text-sky-700, .text-sky-600) {
   color: var(--accent-ink);
 }
 
@@ -1111,8 +1240,8 @@ body {
  * dropped rather than reproduced: it exists to let a white card show faintly through another white
  * card, and against a dark ground the same trick only makes the panel muddy.
  */
-[data-theme="enhanced-dark"] :is(.bg-slate-50\/60, .bg-slate-50\/40, .bg-slate-100\/60, .bg-white\/60, .bg-white\/50),
-[data-theme="dark"] :is(.bg-slate-50\/60, .bg-slate-50\/40, .bg-slate-100\/60, .bg-white\/60, .bg-white\/50) {
+[data-theme="enhanced-dark"] :is(.bg-slate-50\/70, .bg-slate-50\/60, .bg-slate-50\/40, .bg-slate-100\/60, .bg-white\/60, .bg-white\/50),
+[data-theme="dark"] :is(.bg-slate-50\/70, .bg-slate-50\/60, .bg-slate-50\/40, .bg-slate-100\/60, .bg-white\/60, .bg-white\/50) {
   background-color: var(--surface-sunken);
 }
 
@@ -1158,6 +1287,60 @@ html.theme-switching *::after {
 }
 
 /*
+ * A slim scrollbar for a panel that scrolls inside the page - the Attendance Register's Present and
+ * Absent boxes. The platform's own bar on Windows is a wide grey gutter with arrow buttons, heavy
+ * next to a list of cards: this is a thin rounded thumb on no track, no arrows, darker on hover,
+ * and toned for each theme.
+ *
+ * WebKit and Blink take the `::-webkit-scrollbar` parts; Firefox, which has none, takes
+ * `scrollbar-width` / `scrollbar-color`. The standard pair sits behind `@supports not` because
+ * Chrome honours it too, and where it is set Chrome ignores the pseudo-elements - arrows and all.
+ */
+.slim-scrollbar {
+  --slim-scrollbar-thumb: #cbd5e1;
+  --slim-scrollbar-thumb-hover: #94a3b8;
+}
+
+[data-theme="enhanced-dark"] .slim-scrollbar,
+[data-theme="dark"] .slim-scrollbar {
+  --slim-scrollbar-thumb: #475569;
+  --slim-scrollbar-thumb-hover: #64748b;
+}
+
+.slim-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.slim-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+  margin-block: 2px;
+}
+
+.slim-scrollbar::-webkit-scrollbar-thumb {
+  background-color: var(--slim-scrollbar-thumb);
+  border-radius: 9999px;
+}
+
+.slim-scrollbar::-webkit-scrollbar-thumb:hover,
+.slim-scrollbar::-webkit-scrollbar-thumb:active {
+  background-color: var(--slim-scrollbar-thumb-hover);
+}
+
+.slim-scrollbar::-webkit-scrollbar-button,
+.slim-scrollbar::-webkit-scrollbar-corner {
+  display: none;
+  background: transparent;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  .slim-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--slim-scrollbar-thumb) transparent;
+  }
+}
+
+/*
  * The "you may not touch this" pointer.
  *
  * `cursor: not-allowed` draws the platform's own answer, which on macOS and Windows is the ordinary
@@ -1198,15 +1381,134 @@ html.theme-switching *::after {
    chip looks is decided here, per theme. Light mode: the color as text on a 10% tint of itself.
    Both dark themes lift the text toward white and deepen the tint, so a bronze or blue that reads
    on white does not sink into a dark rail. */
+
+/*
+ * The public CRD form (`PublicLayout`), on a phone: its fields at 16px and a thumb's height.
+ *
+ * The shared form controls are compact - 12px text, 36px tall - because the studio's screens are
+ * dense. On a client's phone that is hard to read, and iOS zooms the whole page in whenever a field
+ * under 16px is tapped, leaving the client to pinch back out after every answer. Scoped to this
+ * page's shell rather than changed on the controls, so no studio screen moves; unlayered, so it
+ * outranks the utilities on the controls without `!important`. The dropdown-style triggers are the
+ * `aria-haspopup` buttons (phone code, choices) and the date fields' `data-field-control` trigger -
+ * every other button keeps its own size.
+ */
+@media (max-width: 639.98px) {
+  .crd-public-form :is(input:not([type="checkbox"], [type="radio"], [type="file"], [type="hidden"]), textarea, select, button[aria-haspopup], [data-field-control]) {
+    font-size: 16px;
+  }
+
+  .crd-public-form :is(input:not([type="checkbox"], [type="radio"], [type="file"], [type="hidden"]), select, button[aria-haspopup], [data-field-control]) {
+    min-height: 44px;
+  }
+}
+
+
+/*
+ * The client pages' film (`components/client/FilmStrip.js`), and their one orchestrated moment.
+ *
+ * The sprocket holes are drawn, not images: a row of rounded holes in the sand, repeated along the
+ * strip. When a client's project opens, the strip winds in from the right and its frames develop in
+ * order - grey and dim to their colour - and the frame being worked on keeps a slow sheen crossing
+ * it. On the sign-in, the studio's frames drift
+ * slowly past. Every piece of it only for somebody who has not asked their device for less motion:
+ * for them the page is simply there, still and complete.
+ */
+.film-sprockets {
+  background-image: radial-gradient(ellipse 3.5px 2.5px at center, color-mix(in srgb, var(--client-sand) 60%, white) 96%, transparent 100%);
+  background-size: 16px 100%;
+  background-position: 8px center;
+  background-repeat: repeat-x;
+}
+
+@keyframes film-wind {
+  from { opacity: 0; transform: translateX(56px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes frame-develop {
+  from { opacity: 0.2; filter: grayscale(1) brightness(0.5); }
+  to { opacity: 1; filter: none; }
+}
+
+@keyframes frame-sheen {
+  0%, 55% { transform: translateX(-140%) skewX(-18deg); }
+  100% { transform: translateX(320%) skewX(-18deg); }
+}
+
+@keyframes film-drift {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+@keyframes client-fade {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* The shoot timeline's next step (`ShootTimeline.js`): a gold ring that keeps opening out from its
+   dot and fading, so the step the shoot is waiting on reads as alive. Unseen without the motion. */
+.step-pulse { opacity: 0; }
+@keyframes step-pulse {
+  from { opacity: 0.7; transform: scale(1); }
+  to { opacity: 0; transform: scale(2.4); }
+}
+
+/* The curtain between the client's pages (`ClientCurtain.js`): film drawn down over one page, and
+   on down off the next - past its own sprocket edge both ways, so no edge is left on screen. */
+@keyframes curtain-close {
+  from { transform: translateY(calc(-100% - 1rem)); }
+  to { transform: none; }
+}
+
+@keyframes curtain-open {
+  from { transform: none; }
+  to { transform: translateY(calc(100% + 1rem)); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .film-wind { animation: film-wind 0.8s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .frame-develop { animation: frame-develop 0.75s ease-out both; }
+  .frame-sheen::after {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 45%;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.6), transparent);
+    animation: frame-sheen 3.8s ease-in-out 1.6s infinite;
+  }
+  .film-drift { animation: film-drift 70s linear infinite; }
+  .client-fade { animation: client-fade 0.8s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .step-pulse { animation: step-pulse 1.8s cubic-bezier(0, 0, 0.2, 1) infinite; }
+  .curtain-close { animation: curtain-close 0.3s cubic-bezier(0.65, 0, 0.35, 1) both; }
+  .curtain-open { animation: curtain-open 0.4s cubic-bezier(0.65, 0, 0.35, 1) 0.05s both; }
+}
+
 .progress-chip {
   color: var(--progress-color);
   background-color: color-mix(in srgb, var(--progress-color) 10%, transparent);
 }
 
+/* A status chip drawn over a photo (the AI Editing tiles): a solid base under its tint, so the
+   label reads on any picture. */
+.progress-chip-on-photo { background-color: #ffffff; box-shadow: 0 1px 2px rgb(15 23 42 / 0.2); }
+[data-theme="dark"] .progress-chip-on-photo,
+[data-theme="enhanced-dark"] .progress-chip-on-photo { background-color: #0f172a; }
+
 [data-theme="dark"] .progress-chip,
 [data-theme="enhanced-dark"] .progress-chip {
   color: color-mix(in srgb, var(--progress-color) 45%, white);
   background-color: color-mix(in srgb, var(--progress-color) 28%, transparent);
+}
+
+/* The icon pill (`ProgressChip variant="icon"`, the client portal's): a white-to-tint fill under a
+   hairline of the status colour, its words darkened a shade so they hold their contrast on the
+   light fill. The mark before them is drawn in the same colour. */
+.progress-chip-icon {
+  color: color-mix(in srgb, var(--progress-color) 78%, black);
+  background-image: linear-gradient(135deg, white, color-mix(in srgb, var(--progress-color) 14%, white));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--progress-color) 38%, transparent), 0 4px 10px -8px var(--progress-color);
 }
 
 /* The fallback mark (components/shared/BrandFallbackLogo.js) ships two files - black lettering
@@ -1266,3 +1568,63 @@ html:not([data-theme="dark"]):not([data-theme="enhanced-dark"]) .studio-logo-fal
 .dashboard-range-picker > button {
   margin-top: 0;
 }
+
+/*
+ * ── Shoot Board colours, in all three appearances ────────────────────────────────────────────
+ *
+ * The dark tiers repaint the app by matching a set list of utility classes (blue, emerald, amber,
+ * rose text, the slate surfaces). The Shoot Board gives each project its own hue - sky, violet,
+ * teal, fuchsia, lime and the rest - and those classes are not on the list, so in dark mode a chip
+ * kept its dark text on a background that had turned dark, and could not be read. Each hue is named
+ * here once, with a light pair and a dark pair, and the chip reads its colours from it:
+ * `shoot-chip shoot-hue-<name>` (see `PROJECT_COLOURS` in `lib/shootBoard.mjs`). The ring is the one
+ * `ring-1` draws, through Tailwind's own ring-colour variable.
+ */
+.shoot-chip {
+  background-color: var(--shoot-chip-bg);
+  color: var(--shoot-chip-ink);
+  --tw-ring-color: var(--shoot-chip-ring);
+}
+.shoot-hue-sky { --shoot-chip-bg: #f0f9ff; --shoot-chip-ink: #075985; --shoot-chip-ring: #bae6fd; }
+.shoot-hue-amber { --shoot-chip-bg: #fffbeb; --shoot-chip-ink: #92400e; --shoot-chip-ring: #fde68a; }
+.shoot-hue-emerald { --shoot-chip-bg: #ecfdf5; --shoot-chip-ink: #065f46; --shoot-chip-ring: #a7f3d0; }
+.shoot-hue-rose { --shoot-chip-bg: #fff1f2; --shoot-chip-ink: #9f1239; --shoot-chip-ring: #fecdd3; }
+.shoot-hue-violet { --shoot-chip-bg: #f5f3ff; --shoot-chip-ink: #5b21b6; --shoot-chip-ring: #ddd6fe; }
+.shoot-hue-orange { --shoot-chip-bg: #fff7ed; --shoot-chip-ink: #9a3412; --shoot-chip-ring: #fed7aa; }
+.shoot-hue-teal { --shoot-chip-bg: #f0fdfa; --shoot-chip-ink: #115e59; --shoot-chip-ring: #99f6e4; }
+.shoot-hue-fuchsia { --shoot-chip-bg: #fdf4ff; --shoot-chip-ink: #86198f; --shoot-chip-ring: #f5d0fe; }
+.shoot-hue-lime { --shoot-chip-bg: #f7fee7; --shoot-chip-ink: #3f6212; --shoot-chip-ring: #d9f99d; }
+.shoot-hue-slate { --shoot-chip-bg: #f1f5f9; --shoot-chip-ink: #334155; --shoot-chip-ring: #cbd5e1; }
+
+/* Dark and Enhanced dark: a low tint of the hue behind light text of the same hue. */
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-hue-sky { --shoot-chip-bg: rgba(14, 165, 233, 0.18); --shoot-chip-ink: #7dd3fc; --shoot-chip-ring: rgba(56, 189, 248, 0.45); }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-hue-amber { --shoot-chip-bg: rgba(245, 158, 11, 0.18); --shoot-chip-ink: #fcd34d; --shoot-chip-ring: rgba(251, 191, 36, 0.45); }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-hue-emerald { --shoot-chip-bg: rgba(16, 185, 129, 0.18); --shoot-chip-ink: #6ee7b7; --shoot-chip-ring: rgba(52, 211, 153, 0.45); }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-hue-rose { --shoot-chip-bg: rgba(244, 63, 94, 0.18); --shoot-chip-ink: #fda4af; --shoot-chip-ring: rgba(251, 113, 133, 0.45); }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-hue-violet { --shoot-chip-bg: rgba(139, 92, 246, 0.2); --shoot-chip-ink: #c4b5fd; --shoot-chip-ring: rgba(167, 139, 250, 0.45); }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-hue-orange { --shoot-chip-bg: rgba(249, 115, 22, 0.18); --shoot-chip-ink: #fdba74; --shoot-chip-ring: rgba(251, 146, 60, 0.45); }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-hue-teal { --shoot-chip-bg: rgba(20, 184, 166, 0.18); --shoot-chip-ink: #5eead4; --shoot-chip-ring: rgba(45, 212, 191, 0.45); }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-hue-fuchsia { --shoot-chip-bg: rgba(217, 70, 239, 0.18); --shoot-chip-ink: #f0abfc; --shoot-chip-ring: rgba(232, 121, 249, 0.45); }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-hue-lime { --shoot-chip-bg: rgba(132, 204, 22, 0.18); --shoot-chip-ink: #bef264; --shoot-chip-ring: rgba(163, 230, 53, 0.45); }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-hue-slate { --shoot-chip-bg: rgba(148, 163, 184, 0.18); --shoot-chip-ink: #cbd5e1; --shoot-chip-ring: rgba(148, 163, 184, 0.45); }
+
+/* Today's column, and the wash over a stretch of days with no shoots. */
+.shoot-today { background-color: rgba(239, 246, 255, 0.7); }
+.shoot-today-head { background-color: #eff6ff; }
+.shoot-empty-wash { background-color: rgba(255, 255, 255, 0.85); }
+[data-theme="dark"] .shoot-today { background-color: rgba(59, 130, 246, 0.1); }
+[data-theme="dark"] .shoot-today-head { background-color: #1f3350; }
+[data-theme="dark"] .shoot-empty-wash { background-color: rgba(30, 41, 59, 0.88); }
+[data-theme="enhanced-dark"] .shoot-today { background-color: rgba(59, 130, 246, 0.1); }
+[data-theme="enhanced-dark"] .shoot-today-head { background-color: #0f2140; }
+[data-theme="enhanced-dark"] .shoot-empty-wash { background-color: rgba(17, 24, 39, 0.9); }
+
+/*
+ * A shoot card's outline (`ShootBoardCard`): a soft line in light, a quiet one on the dark tiers. A
+ * border rather than a ring - a ring with no colour of its own is drawn in the text colour, which
+ * the dark tiers turn near-white.
+ */
+.shoot-card { border: 1px solid #e2e8f0; }
+.shoot-card:hover { border-color: #cbd5e1; }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-card { border-color: rgba(148, 163, 184, 0.28); }
+:is([data-theme="dark"], [data-theme="enhanced-dark"]) .shoot-card:hover { border-color: rgba(148, 163, 184, 0.5); }

@@ -35,11 +35,14 @@ const imageSelectionSections = [
  * that name, and the workspace below this one sends people to it by name — two unrelated screens
  * answering to one label is how somebody ends up on the wrong one.
  */
-// `actions` is the page's own controls - the dashboard's range, Refresh and New Project - drawn
+// `actions` is the page's own controls - the dashboard's New Project - drawn
 // ahead of the module's ⋮, which stays last at the right-hand end as every module header keeps it.
 // `options` are the page's own entries for the ⋮, placed above Settings - the Projects page adds
 // Match WhatsApp Groups there, under its own permission rather than this component's.
-export default function ImageSelectionNavigation({ onSettingsSaved, actions = null, options = [], title = "Image Selection", sections = imageSelectionSections }) {
+// The default title is the sidebar's name for the module, "Photo Selection": the header reads the
+// sidebar's label for its route first, and the Projects page - which has no entry of its own - fell
+// back to the old "Image Selection" here, so one module wore two names a click apart.
+export default function ImageSelectionNavigation({ onSettingsSaved, actions = null, options = [], title = "Photo Selection", sections = imageSelectionSections }) {
   // Settings edits the studio-wide Image Selection record, which the Settings module serves — not
   // this one. Asked for by name rather than by route, because the route's own permission would have
   // offered the menu to people the API then refuses the save to.
@@ -59,7 +62,9 @@ export default function ImageSelectionNavigation({ onSettingsSaved, actions = nu
     <ModulePageHeader
       title={title}
       titleAccessory={activeSection ? <div className="border-l border-slate-200 pl-3"><DropdownMenu ariaLabel="Image Selection section" items={sections} value={activeSection.value} onChange={(href) => router.push(href)} /></div> : null}
-      actions={actions || menuItems.length ? <>{actions}{menuItems.length > 0 && <OptionsMenu ariaLabel="Image Selection options" items={menuItems} />}</> : null}
+      actions={actions || null}
+      // The ⋮ in the header's own slot, so the row ends Nebula, then ⋮.
+      menu={menuItems.length > 0 ? <OptionsMenu ariaLabel="Image Selection options" items={menuItems} /> : undefined}
     />
     {settingsOpen && <ImageSelectionSettingsForm onClose={() => setSettingsOpen(false)} onSaved={onSettingsSaved} />}
   </>;

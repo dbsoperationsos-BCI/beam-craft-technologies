@@ -37,6 +37,18 @@ export const SCHEDULE_KINDS = [
     cell: "bg-rose-50 text-rose-800 hover:bg-rose-100",
   },
   {
+    /*
+     * A branch's hours held with nothing booked in them (Calendar → a day's ⋮ → Block Period). Next to
+     * the holidays because it is the same kind of fact - time that is not free - and grey, the one
+     * colour that reads as "unavailable" rather than as another thing booked.
+     */
+    value: "block",
+    label: "Blocked Periods",
+    dot: "bg-gray-500",
+    // A step lighter than a chip on the page: the dark themes paint gray-100 as the page itself.
+    cell: "bg-slate-200 text-slate-800 hover:bg-slate-300",
+  },
+  {
     value: "meeting",
     label: "Meetings",
     dot: "bg-blue-500",
@@ -49,12 +61,6 @@ export const SCHEDULE_KINDS = [
     cell: "bg-amber-50 text-amber-900 hover:bg-amber-100",
   },
   {
-    value: "project",
-    label: "Main Events",
-    dot: "bg-emerald-500",
-    cell: "bg-emerald-50 text-emerald-900 hover:bg-emerald-100",
-  },
-  {
     /*
      * A candidate coming in, from the HRM Interview register. Last, because it is the one kind that
      * is nobody's client - and violet, which is the remaining colour far enough from the meetings'
@@ -65,7 +71,47 @@ export const SCHEDULE_KINDS = [
     dot: "bg-violet-500",
     cell: "bg-violet-50 text-violet-900 hover:bg-violet-100",
   },
+  {
+    /*
+     * The signed-in person's own attendance, from the HRM register: a day that was Absent, On leave,
+     * a Comp off, Late, a Half day or an Early exit. Only ever one's own, so it is never somebody
+     * else's crowd of chips. Each status takes its own colour (`ATTENDANCE_CELLS`); this is the
+     * legend's dot and the fallback.
+     */
+    value: "attendance",
+    label: "My Attendance",
+    dot: "bg-slate-500",
+    cell: "bg-slate-100 text-slate-800 hover:bg-slate-200",
+  },
+  {
+    /*
+     * Everybody's absences, for an administrator: **one** chip a day - "Attendance · 5" - with the
+     * names behind it in the pop-up, under the status each is counted as.
+     *
+     * Coloured by status where the day holds only one, as My Attendance is (`ATTENDANCE_CELLS`);
+     * a day holding both absences and leaves has no one colour to take and falls back to this,
+     * which is deliberately neither of theirs - red over a day that is half leave would read as
+     * five absences.
+     */
+    value: "teamAttendance",
+    label: "Team Attendance",
+    dot: "bg-red-500",
+    cell: "bg-slate-100 text-slate-700 hover:bg-slate-200",
+  },
 ];
+
+/**
+ * An attendance chip's colour by its status, so a month reads at a glance: away in red and purple,
+ * a day off taken in lieu in teal, and the days that were worked but not fully in the warm colours.
+ */
+export const ATTENDANCE_CELLS = {
+  Absent: "bg-red-50 text-red-800 hover:bg-red-100",
+  "On leave": "bg-purple-50 text-purple-800 hover:bg-purple-100",
+  "Comp off": "bg-teal-50 text-teal-800 hover:bg-teal-100",
+  Late: "bg-amber-50 text-amber-900 hover:bg-amber-100",
+  "Half day": "bg-orange-50 text-orange-900 hover:bg-orange-100",
+  "Early exit": "bg-pink-50 text-pink-800 hover:bg-pink-100",
+};
 
 /*
  * A kind that is not one of these reads as a meeting rather than as the first row of the list.
@@ -80,16 +126,14 @@ export const scheduleKind = (kind) => SCHEDULE_KINDS.find((entry) => entry.value
 
 
 /**
- * The classes a chip is drawn with.
- *
- * Every kind on this calendar now means one thing — a shoot is a shoot — so a chip takes its kind's
- * colour and nothing varies it. Attendance was the exception, meaning two opposite things and
- * colouring itself by status; it is no longer drawn here, and this went back to a lookup.
- *
- * Kept as a function rather than folded into the caller so the cell has one thing to ask, and so a
- * kind that ever does need varying has a place to say so.
+ * The classes a chip is drawn with: its kind's colour, except attendance, which is coloured by the
+ * day's status - an Absent and a Late are both "attendance" and mean quite different things.
  */
 export function scheduleEntryCell(entry) {
+  if (entry?.kind === "attendance") return ATTENDANCE_CELLS[entry.title] || scheduleKind("attendance").cell;
+  if (entry?.kind === "teamAttendance") return ATTENDANCE_CELLS[entry.meta?.status] || scheduleKind("teamAttendance").cell;
+  // A month day's shoots, counted: the shoots' own colour.
+  if (entry?.kind === "shootCount") return scheduleKind("shoot").cell;
   return scheduleKind(entry?.kind).cell;
 }
 
@@ -175,6 +219,65 @@ export function monthGrid(monthStart) {
 }
 
 /**
+ * A calendar's shoots as the Shoot Board's shoot window reads them (`ShootRunDialog`): the project
+ * they belong to, and each shoot as a card - name, Shoot ID, Main Event, times, venue and who is
+ * going. The shoots are one project's, so the first names it.
+ */
+export function shootRunOf(entries = []) {
+  const first = entries[0] || {};
+  const label = String(first.meta?.projectName || first.subject || "").trim();
+  return {
+    project: { label, eventId: String(first.subject || "").trim() },
+    run: {
+      shoots: entries.map((entry) => ({
+        id: entry.id,
+        shoot: entry.title,
+        shootId: entry.reference,
+        /*
+         * The production record's id, which is what the Production panel opens on; null where
+         * production has not been raised, and then the card has nothing to open.
+         *
+         * It used to be set to the calendar *entry's* id - "shoot:7" - so that the dialog's
+         * `onOpen && shoot.productionShootId` guard would be truthy and the card would open the
+         * Projects board. A field holding something other than what its name says is a trap for
+         * whoever reads it next; the dialog asks `canOpen` now, so the stand-in is gone.
+         */
+        productionShootId: entry.productionShootId ?? null,
+        // The shoot's own record and the board it is on now, which the card's ⋮ opens it by.
+        shootRecordId: entry.meta?.shootRecordId || null,
+        stage: entry.meta?.stage || null,
+        boards: entry.meta?.boards || [],
+        hasPreProduction: Boolean(entry.meta?.hasPreProduction),
+        isMainEvent: Boolean(entry.meta?.isMainEvent),
+        clientName: label,
+        eventId: entry.subject,
+        startTime: entry.meta?.eventStartTime || null,
+        endTime: entry.meta?.eventEndTime || null,
+        shootPlace: entry.location,
+        shootDate: entry.day,
+        /*
+         * Who is going, as the Shoot Board's card words it: the Production Coordinator, the
+         * Production Team and each service with its person. The card has always drawn them; the
+         * calendar simply never sent them, so a shoot opened from the diary said where and when it
+         * was and nothing about who was on it.
+         */
+        coordinator: entry.meta?.coordinator || null,
+        team: entry.meta?.team || [],
+        crew: entry.meta?.crew || [],
+      })),
+    },
+  };
+}
+
+/** "18:30" → "6:30 pm"; "" for anything that is not a time of day. */
+export function blockClock(value) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(value || "").trim());
+  if (!match) return "";
+  const hours = Number(match[1]);
+  return `${hours % 12 || 12}:${match[2]} ${hours < 12 ? "am" : "pm"}`;
+}
+
+/**
  * The lead line of an entry in a day cell: the clock time for a meeting, the reference for
  * anything booked by the day.
  *
@@ -183,6 +286,8 @@ export function monthGrid(monthStart) {
  */
 export function scheduleEntryLead(entry) {
   if (entry?.startAt) return formatMeetingTime(entry.startAt);
+  // A blocked period leads with the time it starts, written as the 12-hour clock the rest read in.
+  if (entry?.kind === "block") return blockClock(entry.meta?.startTime);
   /*
    * A booking kept as a day can still state an hour.
    *
@@ -192,4 +297,90 @@ export function scheduleEntryLead(entry) {
    */
   if (entry?.meta?.clock) return String(entry.meta.clock).trim();
   return String(entry?.reference || "").trim();
+}
+
+/*
+ * ── A week, or a day ──────────────────────────────────────────────────────────────────────────
+ *
+ * The calendar's other two periods, as the same cells the month is made of - so a day is drawn,
+ * opened and booked on exactly as it is in the month. A week runs Monday to Sunday, as the month's
+ * rows do.
+ */
+
+export const SCHEDULE_PERIODS = [
+  { value: "month", label: "Month" },
+  { value: "week", label: "Week" },
+  { value: "day", label: "Day" },
+];
+
+const dayAt = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+/** The Monday of the week holding `date`. */
+export function weekStartOf(date) {
+  const day = dayAt(date);
+  day.setDate(day.getDate() - ((day.getDay() + 6) % 7));
+  return day;
+}
+
+/** The cells of a period: the month's weeks, the week's seven days, or the one day. */
+export function periodCells(period, anchor) {
+  if (period === "week") {
+    const monday = weekStartOf(anchor);
+    return Array.from({ length: 7 }, (unused, index) => {
+      const date = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + index);
+      return { date, key: dayKey(date), outside: false };
+    });
+  }
+  if (period === "day") {
+    const date = dayAt(anchor);
+    return [{ date, key: dayKey(date), outside: false }];
+  }
+  return monthGrid(new Date(anchor.getFullYear(), anchor.getMonth(), 1));
+}
+
+/** One step back (-1) or on (+1): a month, a week or a day. */
+export function stepPeriod(period, anchor, direction) {
+  if (period === "week") return new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + (7 * direction));
+  if (period === "day") return new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + direction);
+  return new Date(anchor.getFullYear(), anchor.getMonth() + direction, 1);
+}
+
+/** The heading over a period: "October 2026", "12 - 18 Oct 2026", "Wednesday, 14 October 2026". */
+export function periodLabel(period, anchor) {
+  if (period === "week") {
+    const monday = weekStartOf(anchor);
+    const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
+    const short = { day: "numeric", month: "short" };
+    return `${new Intl.DateTimeFormat("en-GB", short).format(monday)} - ${new Intl.DateTimeFormat("en-GB", { ...short, year: "numeric" }).format(sunday)}`;
+  }
+  if (period === "day") return new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(anchor);
+  return new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(anchor);
+}
+
+/**
+ * A month day's shoots as one chip - "Shoots · 6" - in place of a chip per shoot, the shoots kept on
+ * it (`meta.shoots`) for the pop-up it opens: the projects, then a project's shoots, then a shoot's
+ * form. Placed where the first shoot was, so the day keeps its order. Week and Day keep each shoot.
+ */
+export function monthShootCounts(entries = []) {
+  const shoots = entries.filter((entry) => entry?.kind === "shoot");
+  if (!shoots.length) return entries;
+  const day = shoots[0].day || "";
+  const counted = { id: `shoots:${day}`, kind: "shootCount", title: `Shoots · ${shoots.length}`, reference: "", day, location: "", meta: { shoots } };
+  const first = entries.indexOf(shoots[0]);
+  return [...entries.slice(0, first).filter((entry) => entry?.kind !== "shoot"), counted, ...entries.slice(first).filter((entry) => entry?.kind !== "shoot")];
+}
+
+/**
+ * A day's shoots by project, for the pop-up's first list: each project with its name, event ID and
+ * shoots in the order they happen, projects in the order their first shoot does.
+ */
+export function shootsByProject(shoots = []) {
+  const projects = new Map();
+  for (const shoot of shoots) {
+    const key = String(shoot?.subject || shoot?.meta?.projectName || shoot?.id);
+    if (!projects.has(key)) projects.set(key, { key, eventId: String(shoot?.subject || ""), name: String(shoot?.meta?.projectName || shoot?.subject || "Project"), shoots: [] });
+    projects.get(key).shoots.push(shoot);
+  }
+  return [...projects.values()];
 }

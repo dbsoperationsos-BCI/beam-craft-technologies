@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Button from "@/components/shared/Button";
 import TextField from "@/components/shared/TextField";
+import useFormErrors from "@/components/shared/useFormErrors";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import Dialog from "@/components/ui/Dialog";
 
@@ -24,6 +25,7 @@ export default function EventActionDialog({ mode, event, onClose, onConfirm }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [name, setName] = useState(`${event?.name || "Event"} (copy)`);
+  const fields = useFormErrors();
 
   async function run(payload) {
     setBusy(true); setError("");
@@ -40,16 +42,20 @@ export default function EventActionDialog({ mode, event, onClose, onConfirm }) {
     const trimmed = name.trim();
     return <Dialog
       title="Duplicate event"
-      description={`A copy of ${event?.name} with its sub-events and settings. Guests, photos and faces are not copied.`}
+      description={`A copy of ${event?.name} with its settings. Guests, photos and faces are not copied.`}
       busy={busy}
       onClose={onClose}
-      onSubmit={(submitEvent) => { submitEvent.preventDefault(); if (trimmed) void run({ name: trimmed }); }}
+      onSubmit={(submitEvent) => {
+        submitEvent.preventDefault();
+        if (!fields.check({ name: trimmed ? "" : "Enter a name for the copy." })) return;
+        void run({ name: trimmed });
+      }}
       footer={<>
         <Button className="max-sm:flex-1" type="button" onClick={onClose} disabled={busy}>Cancel</Button>
-        <Button className="max-sm:flex-1" type="submit" variant="primary" disabled={busy || !trimmed}>{busy ? "Duplicating..." : "Duplicate"}</Button>
+        <Button className="max-sm:flex-1" type="submit" variant="primary" disabled={busy}>{busy ? "Duplicating..." : "Duplicate"}</Button>
       </>}
     >
-      <TextField label="Name of the copy" required value={name} onChange={(changeEvent) => setName(changeEvent.target.value)} maxLength={191} autoFocus />
+      <TextField label="Name of the copy" helperText="The name the copied event is saved under." required value={name} onChange={(changeEvent) => { setName(changeEvent.target.value); fields.clear("name"); }} error={fields.errors.name} maxLength={191} autoFocus />
       {error && <p role="alert" className="mt-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
     </Dialog>;
   }

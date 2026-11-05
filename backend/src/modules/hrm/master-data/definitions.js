@@ -1,4 +1,5 @@
 const { optionNames } = require("../../../services/optionLists");
+const { BRANCH_NAME_COPIES, VERTICAL_NAME_COPIES } = require("../../../services/nameCopies");
 const { BRAND_CODES } = require("../../sales/quotation-brands/defaults");
 const { z } = require("zod");
 
@@ -22,6 +23,9 @@ const optionalText = z.string().trim().max(2000).optional().nullable();
  */
 const codeFromName = (name) => String(name || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 50);
 
+/** A name that is stored inside a comma-joined column (`match: "csv"`), so may not hold a comma itself. */
+const noComma = (schema) => schema.refine((value) => !String(value || "").includes(","), "A name here cannot contain a comma.");
+
 const baseSchema = {
   // Optional, minted from `name` by the controller when it is absent. `name` is required on every
   // create schema below, so there is always something to mint it from.
@@ -40,7 +44,6 @@ const baseSchema = {
  * empty read falls back to.
  */
 const BANK_ACCOUNT_TYPES = ["Savings", "Current", "Overdraft", "Cash Credit"];
-const bankAccountTypeNames = () => optionNames("bankAccountType", BANK_ACCOUNT_TYPES);
 
 /*
  * Where a list's values actually live, so a delete can refuse to strand them and a rename can carry
@@ -60,7 +63,21 @@ const bankAccountTypeNames = () => optionNames("bankAccountType", BANK_ACCOUNT_T
  * where a bank account or an employment type is referenced, and inventing an empty answer would
  * read as "safe to delete" rather than "not checked".
  */
-const usedOnEmployee = (field, match = "exact") => ({ model: "employee", field, match, label: "employee" });
+/*
+ * `idField` is the reference the employee row keeps beside the text (`services/employeeReferences.js`),
+ * so a rename rewrites the text by the reference rather than by matching the old spelling - the same
+ * way a branch rename does. The three comma-separated lists have no single reference column; their
+ * text is still rewritten entry by entry, and their junction rows need nothing, being ids already.
+ */
+const EMPLOYEE_REFERENCE_FOR = {
+  designation: "designationId", workType: "workTypeId", gender: "genderId", bloodGroup: "bloodGroupId",
+  maritalStatus: "maritalStatusId", emergencyContactRelationship: "emergencyContactRelationshipId",
+  workBaseLocation: "workBaseLocationId", currentWorkLocation: "currentWorkLocationId", vertical: "verticalId",
+};
+const usedOnEmployee = (field, match = "exact") => ({
+  model: "employee", field, match, label: "employee",
+  ...(EMPLOYEE_REFERENCE_FOR[field] ? { idField: EMPLOYEE_REFERENCE_FOR[field], orText: true } : {}),
+});
 // `where` narrows the rows a use is counted on - here to the leads still on the board. See
 // `usage.js`, which spreads it into every count and rename.
 const usedOnLead = (field) => ({ model: "salesCrmLead", field, match: "exact", label: "lead", where: { deletedAt: null } });
@@ -89,38 +106,30 @@ const definitions = {
   // and is kept as a read-only alias in routes.js for a caller not yet updated.
   branches: {
     label: "Branch", model: "branch", orderBy: { name: "asc" },
+    // The nine business tables that write the branch's name out as text beside `branch_id`, and the
+    // employee's two location columns. Declared once, in `services/nameCopies.js`, because the same
+    // list is what Settings -> Branches rewrites when a branch is renamed there.
+    usedBy: BRANCH_NAME_COPIES,
     createSchema: z.object({ ...baseSchema, address: optionalText }),
     updateSchema: z.object({ ...baseSchema, address: optionalText }).partial(),
   },
   // Several to a record, comma separated, so a use of one is not a use of another that contains it.
   skills: { label: "Skill", model: "skill", orderBy: { name: "asc" }, usedBy: [usedOnEmployee("skills", "csv")] },
-  // Accounts' own list. It outgrew the plain code/name shape — paying into an account needs the
-  // holder, the number and the IFSC — but the routes, paging and soft delete are the same, so it
-  // stays here with a schema of its own rather than becoming a second controller.
-  //
-  // The formats match the ones the employee and onboarding forms already enforce for bank details,
-  // so the same account cannot pass one screen and fail another. Every field is asked for on
-  // create; update is partial, so an account recorded before these columns existed still saves.
-  "bank-accounts": {
-    label: "Bank account", model: "bankAccount", orderBy: { name: "asc" }, tracksActor: true,
-    createSchema: z.object({
-      ...baseSchema,
-      accountHolderName: z.string().trim().min(2, "Enter the account holder's name").max(191),
-      accountNumber: z.string().trim().regex(/^\d{9,18}$/, "Account number must be 9 to 18 digits"),
-      ifscCode: z.string().trim().toUpperCase().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "IFSC must be four letters, then 0, then six characters"),
-      // Checked against the list rather than a set compiled in, which is what makes every parse of
-      // this schema a `safeParseAsync`; see the master-data controller.
-      accountType: z.string().trim().min(1, "Choose the account type").refine(
-        async (value) => (await bankAccountTypeNames()).includes(value),
-        { message: "Choose the account type" },
-      ),
-    }),
-    // Stated rather than left to the default below, which partials the *base* fields only: an edit
-    // sending nothing but a holder and a type would have had both stripped and been rejected as
-    // empty. A definition with a create schema of its own needs an update schema of its own.
-    get updateSchema() { return this.createSchema.partial(); },
-  },
-  verticals: { label: "Vertical", model: "vertical", orderBy: { name: "asc" }, usedBy: [usedOnEmployee("vertical")] },
+  /*
+   * **`bank-accounts` was here and is gone.** The studio's accounts are kept in one place now -
+   * Settings -> Organization -> Branches, on the branch each one belongs to - because a second list
+   * beside it was the same accounts typed twice, by different hands, with nothing to say which was
+   * right. The screen that edited this list went with it, and the three money screens that offered
+   * it - "received into", on a cash entry, a payment request and a project's advance - read the
+   * branch register through `services/branchBankAccounts.js` instead.
+   *
+   * The `bank_account` table itself is **left alone**, rows and all. Those rows name no branch, so
+   * nothing can work out where each one belongs, and dropping them to tidy the schema up would throw
+   * away the only record of what the studio had entered. Nothing reads them.
+   */
+  // Every column holding the vertical's *name* - the employee's, the lead's, the saved group name's
+  // and the sales configuration rows - not only the employee's. See `services/nameCopies.js`.
+  verticals: { label: "Vertical", model: "vertical", orderBy: { name: "asc" }, usedBy: VERTICAL_NAME_COPIES },
   languages: { label: "Language", model: "language", orderBy: { name: "asc" }, usedBy: [usedOnEmployee("languagesKnown", "csv")] },
   "work-types": { label: "Work type", model: "workType", orderBy: { name: "asc" }, usedBy: [usedOnEmployee("workType")] },
   /*
@@ -198,13 +207,11 @@ const definitions = {
    * pinned to the bottom, cannot be removed, and is what the remaining percentage settles against.
    * That was the literal string compared against in three places.
    *
-   * `storedInPayload` rather than a `usedBy`: a schedule is kept inside the project's own payload
-   * rather than in a column of its own, so there is no field to count uses in. Said out loud so a
-   * list with no delete guard is a decision somebody made rather than one nobody noticed.
+   * A project's saved schedule (`project_payment_schedule`) keeps the category's id and a copy of
+   * its name, so a rename rewrites the copies and a category in use cannot be deleted.
    */
   "payment-schedule-categories": {
     label: "Payment schedule category", model: "paymentScheduleCategory", orderBy: { sortOrder: "asc" },
-    storedInPayload: "the project's payment schedule",
     /*
      * The one row a schedule cannot do without. `settles_balance` is what pins a row to the bottom
      * and closes the schedule; with no row carrying it the schedule never closes and keeps
@@ -212,6 +219,7 @@ const definitions = {
      * it need not be called "Final Settlement" - but it may not remove the last one.
      */
     requiredFlag: { field: "settlesBalance", reason: "closes a payment schedule" },
+    usedBy: [{ model: "projectPaymentSchedule", field: "category", match: "exact", label: "scheduled payment", idField: "categoryId", where: { deletedAt: null } }],
     createSchema: z.object({ ...baseSchema, settlesBalance: z.boolean().optional(), repeatable: z.boolean().optional(), sortOrder: z.number().int().min(0).max(9999).optional() }),
     updateSchema: z.object({ ...baseSchema, settlesBalance: z.boolean().optional(), repeatable: z.boolean().optional(), sortOrder: z.number().int().min(0).max(9999).optional() }).partial(),
   },
@@ -294,9 +302,13 @@ const definitions = {
   // to the form, so the studio could not add the trade it had started hiring for.
   "vendor-types": {
     label: "Vendor type", model: "vendorType", orderBy: { sortOrder: "asc" },
-    usedBy: [{ model: "vendor", field: "vendorType", match: "exact", label: "vendor" }],
-    createSchema: z.object({ ...baseSchema, sortOrder: z.number().int().min(0).max(9999).optional() }),
-    updateSchema: z.object({ ...baseSchema, sortOrder: z.number().int().min(0).max(9999).optional() }).partial(),
+    // Several per vendor, joined by ", " - read entry by entry, so renaming "Editor" rewrites it
+    // inside "Photographer, Editor" and deleting it counts that vendor as a use.
+    usedBy: [{ model: "vendor", field: "vendorType", match: "csv", label: "vendor" }],
+    // No comma in a type's name: the vendor column is split on commas, so "Lights, Sound" would be
+    // read back as two types and could never be matched, counted or renamed as one.
+    createSchema: z.object({ ...baseSchema, name: noComma(text), sortOrder: z.number().int().min(0).max(9999).optional() }),
+    updateSchema: z.object({ ...baseSchema, name: noComma(text), sortOrder: z.number().int().min(0).max(9999).optional() }).partial(),
   },
 
   /* ───────────────── Accounts ─────────────────

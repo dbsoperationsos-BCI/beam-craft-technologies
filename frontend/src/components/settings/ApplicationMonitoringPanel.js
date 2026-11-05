@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Button from "@/components/shared/Button";
+import HelpTip from "@/components/shared/HelpTip";
 import TextField from "@/components/shared/TextField";
+import useFormErrors from "@/components/shared/useFormErrors";
 import { getMonitoringSettings, saveMonitoringSettings } from "@/services/usage/usage.service";
 
 /**
@@ -30,6 +32,7 @@ export default function ApplicationMonitoringPanel({ unsavedRef }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const fields = useFormErrors();
 
   const load = useCallback(async () => {
     try {
@@ -70,12 +73,17 @@ export default function ApplicationMonitoringPanel({ unsavedRef }) {
   }, [changed, unsavedRef]);
 
   async function save() {
-    const value = Number(String(minutes).trim());
-    // Checked here as well as on the server, so a typo is answered immediately rather than after a
-    // round trip. The server is still the authority; this is only the quicker of the two.
-    if (!Number.isInteger(value) || value < bounds.min || value > bounds.max) {
+    const typed = String(minutes).trim();
+    const value = Number(typed);
+    // Checked here as well as on the server, so a typo is answered under the box immediately rather
+    // than after a round trip. The server is still the authority; this is only the quicker of the two.
+    const range = `Enter a whole number of minutes between ${bounds.min} and ${bounds.max}.`;
+    const timeoutProblem = !typed
+      ? "Enter the usage timeout."
+      : !Number.isInteger(value) || value < bounds.min || value > bounds.max ? range : "";
+    if (!fields.check({ usageTimeoutMinutes: timeoutProblem })) {
       setNotice("");
-      setError(`Usage timeout must be a whole number of minutes between ${bounds.min} and ${bounds.max}.`);
+      setError("");
       return;
     }
     setSaving(true);
@@ -87,6 +95,7 @@ export default function ApplicationMonitoringPanel({ unsavedRef }) {
       setSavedMinutes(String(response?.data?.usageTimeoutMinutes ?? value));
       setNotice("Saved. Every signed-in browser picks this up within a minute.");
     } catch (requestError) {
+      if (fields.fromServer(requestError)) return;
       setError(requestError.message || "Unable to save application monitoring settings.");
     } finally {
       setSaving(false);
@@ -97,13 +106,6 @@ export default function ApplicationMonitoringPanel({ unsavedRef }) {
 
   return (
     <div className="max-w-xl space-y-4">
-      {/* One line. What the number means is in the field's own label and its hint; the rest was
-          explaining the feature to somebody who had already found the setting for it. */}
-      <p className="text-sm text-slate-600">
-        How long somebody may go without touching anything before the application stops counting
-        them as using it.
-      </p>
-
       {canEdit ? (
         <>
           {/*
@@ -119,16 +121,18 @@ export default function ApplicationMonitoringPanel({ unsavedRef }) {
             max={bounds.max}
             step={1}
             value={minutes}
-            onChange={(event) => setMinutes(event.target.value)}
+            onChange={(event) => { fields.clear("usageTimeoutMinutes"); setMinutes(event.target.value); }}
+            error={fields.errors.usageTimeoutMinutes}
             className="max-w-[16rem]"
+            helperText={`How long somebody may go without touching anything before they stop counting as using the application. Between ${bounds.min} and ${bounds.max} minutes; three if it has never been set.`}
           />
-          <p className="text-xs text-slate-500">
-            Between {bounds.min} and {bounds.max} minutes. Three if it has never been set.
-          </p>
         </>
       ) : (
         <dl>
-          <dt className="text-xs font-semibold text-slate-500">Usage Timeout</dt>
+          <dt className="flex items-center text-xs font-semibold text-slate-500">
+            Usage Timeout
+            <HelpTip text="How long somebody may go without touching anything before they stop counting as using the application." />
+          </dt>
           <dd className="text-sm text-slate-800">
             {minutes} {Number(minutes) === 1 ? "minute" : "minutes"}
           </dd>
@@ -139,16 +143,8 @@ export default function ApplicationMonitoringPanel({ unsavedRef }) {
       {notice && <p className="text-sm text-emerald-700">{notice}</p>}
 
       {canEdit && (
-        /*
-         * Dead while the box is empty. There is nothing to save then - clearing the field is how
-         * somebody starts typing a new number, not a way of asking for no timeout at all - and a
-         * button that is pressable only to answer "this is required" is a worse way of saying so
-         * than one that is plainly not ready yet.
-         *
-         * Emptiness only. A number that is out of bounds keeps the button live and is answered by
-         * `save`, which names the range: that is a typo worth explaining, not a half-finished edit.
-         */
-        <Button type="button" variant="primary" onClick={() => void save()} disabled={saving || !String(minutes).trim()}>
+        // Live while the box is empty or out of range: `save` says what is wrong under the box.
+        <Button type="button" variant="primary" onClick={() => void save()} disabled={saving}>
           {saving ? "Saving..." : "Save changes"}
         </Button>
       )}

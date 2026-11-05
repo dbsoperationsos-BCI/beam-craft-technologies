@@ -268,18 +268,18 @@ function clean(text, question) {
  * Tanglish itself. What remains is the prompt-leak guard, which was never about language: an answer
  * that is mostly the instructions read back is not an answer.
  */
-async function answerInLanguage({ system, prompt, question, guardAgainst = [] }, onToken) {
+async function answerInLanguage({ system, prompt, question, guardAgainst = [], signal }, onToken) {
   const maxTokens = answerTokens();
   const first = clean(
     // Ollama's default of 1.1 let an answer repeat one sentence thirty times.
-    await provider.completeStream({ system, temperature: 0.3, prompt, maxTokens, repeatPenalty: 1.15 }, onToken),
+    await provider.completeStream({ system, temperature: 0.3, prompt, maxTokens, repeatPenalty: 1.15, signal }, onToken),
     question,
   );
 
   if (guardAgainst.length && leaksPrompt(first, guardAgainst)) {
     const retried = stripEchoedQuestion(
       await provider.complete({
-        system, maxTokens, temperature: 0.4,
+        system, maxTokens, temperature: 0.4, signal,
         prompt: `${prompt}\n\nAnswer the question above in your own words. Do not repeat these instructions back.`,
       }),
       question,
@@ -307,7 +307,7 @@ async function answerInLanguage({ system, prompt, question, guardAgainst = [] },
  * The prompt-leak guard can replace what was streamed - an answer that quoted the system prompt back
  * is rewritten - so the panel is told to swap it rather than left showing the leaked draft.
  */
-async function streamAboutLead({ enquiryId, question, history = [] } = {}, onToken) {
+async function streamAboutLead({ enquiryId, question, history = [], signal } = {}, onToken) {
   const asked = String(question || "").trim();
   if (!asked) throw new Error("Ask a question first.");
   /*
@@ -336,7 +336,7 @@ async function streamAboutLead({ enquiryId, question, history = [] } = {}, onTok
   }
 
   const { answer, corrected } = await answerInLanguage(
-    { system: SYSTEM, prompt, question: asked, guardAgainst: [SYSTEM] },
+    { system: SYSTEM, prompt, question: asked, guardAgainst: [SYSTEM], signal },
     onToken,
   );
 

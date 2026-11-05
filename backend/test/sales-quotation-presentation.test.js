@@ -167,23 +167,24 @@ test("the presentation reads the shared words from the settings row and a brand 
 });
 
 /*
- * ── The four switches ─────────────────────────────────────────────────────────────────────────
+ * ── The eight switches ────────────────────────────────────────────────────────────────────────
  *
  * The studio can leave the notes card, the trademark card, Journey & Legacy or Our Infrastructure
- * off the client's copy. Only a stored `false` hides one, so a settings row nobody has saved -
- * and every version raised before the switches existed - prints all four exactly as before.
+ * off the client's copy, and the Pricing & Total card, its GST line, its payment link or its
+ * validity line too. Only a stored `false` hides one, so a settings row nobody has saved - and
+ * every version raised before the switches existed - prints all of them exactly as before.
  */
 const { SECTION_KEYS, DEFAULT_PDF_SECTIONS, mergePdfSections, pdfSectionsFor } = require("../src/modules/sales/quotation-brands/defaults");
 
 test("a section is on unless it was explicitly switched off", () => {
-  assert.deepEqual(SECTION_KEYS, ["notes", "trademark", "journey", "infrastructure"]);
+  assert.deepEqual(SECTION_KEYS, ["notes", "trademark", "journey", "infrastructure", "pricing", "gst", "payment", "validity"]);
   assert.deepEqual(mergePdfSections(null), DEFAULT_PDF_SECTIONS);
   assert.deepEqual(mergePdfSections({}), DEFAULT_PDF_SECTIONS);
   assert.deepEqual(mergePdfSections("garbage"), DEFAULT_PDF_SECTIONS);
   assert.equal(mergePdfSections({ journey: false }).journey, false);
   assert.equal(mergePdfSections({ journey: false }).notes, true);
   // Unknown keys are dropped and nothing but false is off.
-  assert.deepEqual(pdfSectionsFor({ notes: false, nonsense: false }), { notes: false, trademark: true, journey: true, infrastructure: true });
+  assert.deepEqual(pdfSectionsFor({ notes: false, nonsense: false }), { notes: false, trademark: true, journey: true, infrastructure: true, pricing: true, gst: true, payment: true, validity: true });
 });
 
 test("the switches ride on the presentation, so a version keeps the ones it was raised under", () => {
@@ -220,7 +221,10 @@ test("the quotation links to its terms rather than printing them", () => {
 
   const route = fs.readFileSync(path.resolve(__dirname, "../../frontend/src/app/q/[token]/terms/page.js"), "utf8");
   assert.match(route, /PublicQuotationTermsPage/);
-  // The faces are on the layout, so both pages are set in them.
+  // The faces are on the layout, so both pages are set in them - declared once in the module the
+  // layout reads, shared with the studio's Preview.
   const layout = fs.readFileSync(path.resolve(__dirname, "../../frontend/src/app/q/[token]/layout.js"), "utf8");
-  assert.match(layout, /--q-font-display/);
+  assert.match(layout, /className=\{quotationFontVariables\}/);
+  const fonts = fs.readFileSync(path.resolve(__dirname, "../../frontend/src/app/q/quotationFonts.js"), "utf8");
+  assert.match(fonts, /--q-font-display/);
 });

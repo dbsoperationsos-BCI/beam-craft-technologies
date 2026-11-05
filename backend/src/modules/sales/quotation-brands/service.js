@@ -14,6 +14,7 @@ const {
   combinePdfAssets,
   GENERAL_PDF_CONTENT_KEYS,
   BRAND_PDF_CONTENT_KEYS,
+  PRICING_PDF_CONTENT_KEYS,
   GENERAL_ASSET_KEYS,
   mergePdfSections,
   clientDownloadAllowed,
@@ -168,6 +169,27 @@ async function readBrand(code) {
  * re-enabled - while the generator reads only what may be picked. Either way every table is read
  * once and the linked definitions once more, by id list.
  */
+/**
+ * What a reader is offered from a brand's shoot rows: their names, or - for a brand with no rows
+ * of its own - what the constant held before this became a table, so a database that has not run
+ * the seed behaves exactly as the application did before. One rule, read by `brandConfiguration`
+ * for the generator and by `brandShoots` for the lead, so the two can never be offered different
+ * lists.
+ */
+const shootNames = (code, rows) => (rows.length ? rows.map((row) => row.name) : shootsForBrand(code));
+
+/**
+ * The names alone, for a reader that wants nothing else a brand offers - CRM → Add Lead and the
+ * lead popup, whose Event Details rows name a shoot of the lead's own vertical. Null for a code
+ * that is not a brand.
+ */
+async function brandShoots(code) {
+  const brand = await readBrand(code);
+  if (!brand) return null;
+  const rows = await prisma.salesQuotationBrandShoot.findMany({ where: { brandCode: code, isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] });
+  return shootNames(code, rows);
+}
+
 async function brandConfiguration(code, { includeInactive = false } = {}) {
   const brand = await readBrand(code);
   if (!brand) return null;
@@ -205,11 +227,10 @@ async function brandConfiguration(code, { includeInactive = false } = {}) {
      * Field Settings started maintaining them - the only ones the generator's Add Shoot offers a
      * quotation raised under this brand.
      *
-     * `shootsForBrand` is the fallback rather than the answer. It is what the constant held before
-     * this became a table, and it stands in for a brand with no rows of its own so a database that
-     * has not run the seed behaves exactly as the application did before.
+     * `shootNames` above says what is offered for a brand with no rows of its own, and `brandShoots`
+     * answers the lead from the same rule.
      */
-    shoots: shoots.length ? shoots.map((row) => row.name) : shootsForBrand(code),
+    shoots: shootNames(code, shoots),
     /*
      * The same shoots as rows, for the one screen that edits them.
      *
@@ -287,6 +308,9 @@ async function presentationFor(code, { payload = {}, quotation = {} } = {}) {
    * as though somebody had picked them.
    */
   const pdfOverrides = {
+    // The Pricing & Total card's words set on General, which a brand's own heading or validity
+    // line - laid over them next - still answers for (`PRICING_PDF_CONTENT_KEYS`).
+    ...(pdfContentOverrides(settings?.pdfContent || null, PRICING_PDF_CONTENT_KEYS) || {}),
     ...(pdfContentOverrides(brand?.pdfOverrides || null, BRAND_PDF_CONTENT_KEYS) || {}),
     ...(pdfContentOverrides(settings?.pdfContent || null, GENERAL_PDF_CONTENT_KEYS) || {}),
   };
@@ -407,6 +431,120 @@ async function allowsClientDownload(row) {
 }
 
 /**
+ * What the client is shown to pay the branch: the columns Settings → Organization → Branches holds
+ * for it, and nothing else off the row. Read for one purpose - `paymentDetailsOf` - and kept apart
+ * from `branchSelect` above so the public payment page can never be handed a phone, an email, a
+ * GSTIN or an id that widening the presentation select would have leaked to it.
+ */
+const paymentBranchSelect = {
+  id: true, name: true, isActive: true,
+  upiIds: true, qrCodeUrl: true,
+  /*
+   * Every account the branch is paid into, in its own order. Four columns on the branch until
+   * 20261007090000, which is why this is a list now - and nothing off the row but the four fields a
+   * transfer needs: not the id, which the client has no use for, and not `position`, which is the
+   * order it is already read in.
+   */
+  bankAccounts: {
+    select: { accountHolderName: true, bankName: true, accountNumber: true, ifscCode: true },
+    orderBy: { position: "asc" },
+  },
+};
+
+const text = (value) => String(value ?? "").trim();
+
+/**
+ * The branch's payment details in the only shape the public page is given - or null.
+ *
+ * Every value is a trimmed string, empty where the branch holds nothing, so the page hides the row
+ * rather than printing a label over a blank. `upiIds` is the list the branch holds, in its own
+ * order and without its blanks, empty where it takes no UPI payment - a list rather than one
+ * handle because a branch is commonly paid into more than one, and the client is shown all of
+ * them. Null unless the branch holds something a client can actually pay into - an account number,
+ * a UPI ID or a QR. A holder's name or a bank's name on its own is a label over nothing, and a
+ * quotation from such a branch offers no payment page rather than a card that names an account it
+ * cannot give. No id, no phone, no email, no registration: a client paying the studio needs the
+ * account, the UPI IDs and the QR, and only those.
+ */
+function paymentDetailsOf(branch) {
+  if (!branch) return null;
+  const details = {
+    branchName: text(branch.name),
+    /*
+     * The accounts, in the branch's own order, each one whole or not at all.
+     *
+     * A list because a branch is commonly paid into more than one - it was a single account here
+     * until 20261007090000. An account with no number is dropped rather than printed: the register
+     * asks for all four fields of every account it holds, but a row copied in by that migration from
+     * a branch that held only a number arrives with blanks, and a card the client cannot pay into is
+     * worse than no card, because they would try.
+     */
+    accounts: (Array.isArray(branch.bankAccounts) ? branch.bankAccounts : [])
+      .map((account) => ({
+        accountHolderName: text(account.accountHolderName),
+        bankNameAndBranch: text(account.bankName),
+        accountNumber: text(account.accountNumber),
+        ifsc: text(account.ifscCode),
+      }))
+      .filter((account) => account.accountNumber),
+    // NULL on a branch written before the column, a list on every one since; both mean the same.
+    upiIds: (Array.isArray(branch.upiIds) ? branch.upiIds : []).map(text).filter(Boolean),
+    paymentQrUrl: text(branch.qrCodeUrl),
+  };
+  return details.accounts.length || details.upiIds.length || details.paymentQrUrl ? details : null;
+}
+
+/**
+ * The branch a quotation is paid to, or null - and null is the answer to any doubt.
+ *
+ * Stricter than `matchBranch`, on purpose. The presentation may take "Erode" to mean the branch in
+ * Erode, because the worst a wrong guess prints there is the other branch's phone number; here a
+ * wrong guess sends a client's transfer to the other branch's account. So: the resolved
+ * `branchId` first (the row's own, or the one its snapshot froze for a row from before the
+ * reference was written), and a branch that id names but that has since been closed answers
+ * nothing - the assignment was explicit, and nothing else is tried in its place. Only where the
+ * id names no row at all is the text the quotation holds read, and then only as the branch's
+ * exact name: no city, no prefix, and two branches answering to the same name is no answer.
+ * Never the head office, never the first branch, never anybody's own.
+ */
+async function branchForPayment(row, client = prisma) {
+  const payload = row?.payload || {};
+  const id = Number(row?.branchId || payload.brandSnapshot?.presentation?.branch?.id || 0);
+  if (Number.isInteger(id) && id > 0) {
+    const branch = await client.branch.findUnique({ where: { id }, select: paymentBranchSelect });
+    if (branch) return branch.isActive ? branch : null;
+  }
+  const names = [row?.sourceBranch, payload.sourceBranch, payload.assignedBranch, payload.nearestBranch].map(fold).filter(Boolean);
+  if (!names.length) return null;
+  const branches = await client.branch.findMany({ where: { isActive: true }, select: paymentBranchSelect });
+  for (const name of names) {
+    const exact = branches.filter((branch) => fold(branch.name) === name);
+    if (exact.length) return exact.length === 1 ? exact[0] : null;
+  }
+  return null;
+}
+
+/**
+ * How the client holding this quotation's link pays for it: the Assigned Branch's details, live.
+ *
+ * Read off the branch register as it stands *now*, like `allowsClientDownload` and unlike the rest
+ * of what the page prints. The words and pictures were sent and must stay as sent; where the money
+ * goes is the studio's standing fact about the branch, and an account changed after the quotation
+ * went out has to reach the client still paying it. Nothing is snapshotted onto the version.
+ *
+ * Null for a branch the register cannot place (see `branchForPayment`), for one with nothing to be
+ * paid into, and for a register that cannot be read - a quotation page must open whatever the
+ * payment page can say. `client` is the Prisma client, replaceable by a test.
+ */
+async function paymentDetailsForQuotation(row, client = prisma) {
+  try {
+    return paymentDetailsOf(await branchForPayment(row, client));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The brand a payload was filled in for: the brand column if the client sent one, the vertical
  * the generator has always stored otherwise, and Dum Dum when neither says anything.
  */
@@ -414,9 +552,12 @@ function brandCodeOfPayload(payload) {
   return brandCodeFor(payload?.quotationBrand) || brandCodeFor(payload?.vertical) || DEFAULT_BRAND_CODE;
 }
 
-/** The GST rate a version is raised under: what the generator priced with, else the brand's, else the studio's. */
+/**
+ * The GST rate a version is raised under: what the generator priced with, else the brand's, else
+ * the studio's - and null where none of them sets one, rather than an assumed 18%.
+ */
 function gstPercentFor(payload, brand, settings) {
-  const candidates = [payload?.rates?.gstPercent, payload?.gstPercent, brand?.gstPercent, settings?.gstPercent, 18];
+  const candidates = [payload?.rates?.gstPercent, payload?.gstPercent, brand?.gstPercent, settings?.gstPercent];
   for (const candidate of candidates) {
     // Null and blank are "not set", and must not read as zero - a brand that has not said its
     // rate is not a brand that charges no GST.
@@ -424,7 +565,7 @@ function gstPercentFor(payload, brand, settings) {
     const value = Number(candidate);
     if (Number.isFinite(value) && value >= 0) return value;
   }
-  return 18;
+  return null;
 }
 
 /**
@@ -508,17 +649,19 @@ async function generalConfiguration() {
     // `state` is what fills the collage's State field the moment a branch is picked.
     prisma.branch.findMany({ where: { isActive: true }, select: { name: true, state: true }, orderBy: { name: "asc" } }).catch(() => []),
   ]);
-  const pdfOverrides = pdfContentOverrides(settings?.pdfContent || null, GENERAL_PDF_CONTENT_KEYS) || {};
+  // The shared words, and the Pricing & Total card's - both kept on this one row.
+  const keys = [...GENERAL_PDF_CONTENT_KEYS, ...PRICING_PDF_CONTENT_KEYS];
+  const pdfOverrides = pdfContentOverrides(settings?.pdfContent || null, keys) || {};
   const merged = mergePdfContent(pdfOverrides);
   const assets = mergePdfAssets(settings?.pdfAssets);
   return {
     pdfOverrides,
-    pdfContent: Object.fromEntries(GENERAL_PDF_CONTENT_KEYS.map((key) => [key, merged[key]])),
+    pdfContent: Object.fromEntries(keys.map((key) => [key, merged[key]])),
     pdfAssets: Object.fromEntries(GENERAL_ASSET_KEYS.map((key) => [key, assets[key]])),
     pdfSections: mergePdfSections(settings?.pdfSections),
-    pdfDefaults: Object.fromEntries(GENERAL_PDF_CONTENT_KEYS.map((key) => [key, DEFAULT_PDF_CONTENT[key]])),
+    pdfDefaults: Object.fromEntries(keys.map((key) => [key, DEFAULT_PDF_CONTENT[key]])),
     journeyDefaults: DEFAULT_JOURNEY,
-    generalKeys: GENERAL_PDF_CONTENT_KEYS,
+    generalKeys: keys,
     branches: branches.map((row) => ({ name: row.name, state: row.state || "" })),
   };
 }
@@ -620,6 +763,7 @@ async function deleteTerm(code, id) {
 const reorderTerms = (code, ids) => reorder(prisma.salesQuotationBrandTerm, { brandCode: code }, ids);
 
 module.exports = {
+  brandShoots,
   listBrands,
   readBrand,
   brandConfiguration,
@@ -629,6 +773,8 @@ module.exports = {
   presentationFor,
   presentationForQuotation,
   allowsClientDownload,
+  paymentDetailsOf,
+  paymentDetailsForQuotation,
   assertNewSelectionsOffered,
   updateBrand,
   generalConfiguration,

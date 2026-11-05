@@ -52,6 +52,9 @@ test("a branch-scoped user can search employees, and gets the ones in their bran
   const result = await employees.searchEmployees({ search: `TES-${STAMP}`, limit: 50, branchIds: [F.br.id] });
   assert.deepEqual(names(result), ["by-current", "by-id", "by-text", "moved", "posted"]);
   assert.equal(result.total, 5, "the count is narrowed the same way as the page");
+  // Word Chunk Search: the name's word before the id still finds the one, still inside the branch.
+  const reversed = await employees.searchEmployees({ search: `scope TES-${STAMP}-by-id`, limit: 50, branchIds: [F.br.id] });
+  assert.deepEqual(names(reversed), ["by-id"]);
 });
 
 test("a branch-scoped user can read the headcount, counted in their branches only", async () => {

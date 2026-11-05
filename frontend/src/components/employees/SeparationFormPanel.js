@@ -1,8 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { createSeparation, getSeparations, updateSeparation } from "@/services/hrm/separations.service";
+import { createSeparation, getPendingWork, getSeparations, updateSeparation } from "@/services/hrm/separations.service";
+import { getOffboardingInvites } from "@/services/hrm/offboarding-invites.service";
+import { servingNoticeMessage } from "@/lib/employmentStatus.mjs";
+import HandOverDialog from "@/components/employees/HandOverDialog";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
+import useFormErrors from "@/components/shared/useFormErrors";
 import {
   separationFormSections,
   separationInitialValues,
@@ -39,6 +43,34 @@ function toForm(separation) {
   };
 }
 
+/*
+ * The employee's own offboarding form, as this panel's starting answers: a resignation, with the
+ * reason, comments, dates and letter the form carries and the notice HR set on it. Used only when
+ * nothing is recorded yet, so a separation already on file is never overwritten by a form.
+ *
+ * The newest form that is still live or answered - Submitted first, since that is the one with the
+ * employee's answers; a cancelled, rejected or expired one says nothing about this exit.
+ */
+const FORM_STATUSES = ["Submitted", "Approved", "Verified", "Sent"];
+export function offboardingFormFor(invites, employeeId) {
+  const mine = (invites || []).filter((invite) => String(invite.employeeId) === String(employeeId) && FORM_STATUSES.includes(invite.status));
+  return mine.find((invite) => invite.status === "Submitted") || mine[0] || null;
+}
+export function formFromOffboardingForm(invite) {
+  if (!invite) return separationInitialValues;
+  return {
+    ...separationInitialValues,
+    separationType: "Resignation",
+    separationReason: invite.reason || "",
+    detailedReason: invite.detailedReason || "",
+    resignationDate: toDateInput(invite.resignationDate),
+    resignationLetter: invite.letterFileName && invite.letterUrl ? [{ name: invite.letterFileName, url: invite.letterUrl }] : [],
+    proposedLastWorkingDate: toDateInput(invite.proposedLastWorkingDate),
+    noticePeriodRequired: toNumberInput(invite.noticePeriodDays),
+    hrRemarks: invite.hrNote || "",
+  };
+}
+
 /**
  * Offboards an employee by recording how they left. The separation type decides both what the
  * form asks for and the status the employee is moved to, which the description spells out so the
@@ -53,7 +85,12 @@ export default function SeparationFormPanel({ employee, onClose, onSaved }) {
    */
   const [loading, setLoading] = useState(employee.type !== "invite");
   const [saving, setSaving] = useState(false);
+  // The leaver's pending work and the form's payload, while HR chooses who takes it over.
+  const [handOver, setHandOver] = useState(null);
+  const [handOverSaving, setHandOverSaving] = useState(false);
+  const [handOverError, setHandOverError] = useState("");
   const [error, setError] = useState("");
+  const fields = useFormErrors();
 
   /*
    * An invite row has no employee record behind it, so it has no offboarding to load and no id to
@@ -67,41 +104,52 @@ export default function SeparationFormPanel({ employee, onClose, onSaved }) {
     let live = true;
     if (inviteId) return () => { live = false; };
     getSeparations(employee.id)
-      .then((result) => {
+      .then(async (result) => {
         if (!live) return;
         const existing = (result.data || [])[0] || null;
         setSeparation(existing);
-        setForm(toForm(existing));
+        if (existing) { setForm(toForm(existing)); return; }
+        // Nothing recorded yet: start from their offboarding form, where they have one. A reader
+        // who cannot see the forms simply starts on a blank panel, as before.
+        const invites = await getOffboardingInvites().then((response) => response?.data || []).catch(() => []);
+        if (live) setForm(formFromOffboardingForm(offboardingFormFor(invites, employee.id)));
       })
       .catch((requestError) => { if (live) setError(errorMessage(requestError, "Unable to load this employee's offboarding.")); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   }, [employee.id, inviteId]);
 
-  const update = useCallback((field, value) => setForm((current) => ({ ...current, [field]: value })), []);
+  const { clear } = fields;
+  const update = useCallback((field, value) => {
+    setForm((current) => ({ ...current, [field]: value }));
+    clear(field);
+  }, [clear]);
 
-  function validate() {
-    if (!form.separationType) return "Choose a separation type.";
-    if (!form.separationReason) return "Choose a separation reason.";
-    if (!form.proposedLastWorkingDate) return "Enter the proposed last working date.";
-    if (typesWithEmployeeSubmission.includes(form.separationType) && !form.resignationDate) return "Enter the resignation date.";
-    if (form.resignationDate && new Date(form.proposedLastWorkingDate) < new Date(form.resignationDate)) {
-      return "The proposed last working date cannot fall before the resignation date.";
-    }
-    if (Number(form.noticePeriodWaived) > 0 && !form.waiverReason.trim()) return "Give a reason for waiving the notice period.";
-    if (form.earlyReleaseRequested && !form.earlyReleaseReason.trim()) return "Give a reason for the early release request.";
-    return "";
-  }
+  // Each problem goes under its own box; the panel's banner says only how many.
+  const separationProblems = () => ({
+    separationType: form.separationType ? "" : "Choose a separation type.",
+    separationReason: form.separationReason ? "" : "Choose a separation reason.",
+    proposedLastWorkingDate: !form.proposedLastWorkingDate
+      ? "Enter the proposed last working date."
+      : form.resignationDate && new Date(form.proposedLastWorkingDate) < new Date(form.resignationDate)
+        ? "The proposed last working date cannot fall before the resignation date."
+        : "",
+    resignationDate: typesWithEmployeeSubmission.includes(form.separationType) && !form.resignationDate ? "Enter the resignation date." : "",
+    waiverReason: Number(form.noticePeriodWaived) > 0 && !form.waiverReason.trim() ? "Give a reason for waiving the notice period." : "",
+    earlyReleaseReason: form.earlyReleaseRequested && !form.earlyReleaseReason.trim() ? "Give a reason for the early release request." : "",
+  });
+
+  // Saved with notice still to serve, the server leaves the status alone until the day after the
+  // last working day - so the message says that, not "marked Relieved".
+  const savedMessage = (saved) => (saved?.data && !saved.data.relievedAt
+    ? servingNoticeMessage(employee.employeeName, form.proposedLastWorkingDate)
+    : `${employee.employeeName} marked ${statusForSeparationType(form.separationType)}.`);
 
   async function submit(event) {
     event.preventDefault();
     setError("");
 
-    const problem = validate();
-    if (problem) {
-      setError(problem);
-      return;
-    }
+    if (!fields.check(separationProblems())) return;
 
     setSaving(true);
     try {
@@ -121,21 +169,51 @@ export default function SeparationFormPanel({ employee, onClose, onSaved }) {
         earlyReleaseReason: form.earlyReleaseReason.trim() || null,
         hrRemarks: form.hrRemarks.trim() || null,
       };
-      if (separation) await updateSeparation(separation.id, payload);
+      let saved;
+      if (separation) saved = await updateSeparation(separation.id, payload);
       // The endpoint takes one subject or the other: an invite becomes an employee record inside the
       // transaction that offboards it, so the row lands in InActive rather than leaving the list.
-      else await createSeparation(inviteId ? { ...payload, inviteId } : { ...payload, employeeId: employee.id });
-      onSaved(`${employee.employeeName} marked ${statusForSeparationType(form.separationType)}.`);
+      else if (inviteId) saved = await createSeparation({ ...payload, inviteId });
+      else {
+        // Work still under their name is handed on first: the pop-up names it and who takes it.
+        const pending = (await getPendingWork(employee.id))?.data;
+        if (pending?.total) {
+          setHandOver({ pending, payload });
+          return;
+        }
+        saved = await createSeparation({ ...payload, employeeId: employee.id });
+      }
+      onSaved(savedMessage(saved));
     } catch (requestError) {
-      setError(errorMessage(requestError, "Unable to save this offboarding."));
+      if (!fields.fromServer(requestError)) setError(errorMessage(requestError, "Unable to save this offboarding."));
     } finally {
       setSaving(false);
     }
   }
 
+  async function confirmHandOver(handOverToEmployeeId) {
+    setHandOverSaving(true); setHandOverError("");
+    try {
+      const saved = await createSeparation({ ...handOver.payload, employeeId: employee.id, handOverToEmployeeId });
+      onSaved(`${savedMessage(saved)} Their pending work was reassigned.`);
+    } catch (requestError) {
+      setHandOverError(errorMessage(requestError, "Unable to save this offboarding."));
+    } finally {
+      setHandOverSaving(false);
+    }
+  }
+
   const resultingStatus = statusForSeparationType(form.separationType);
 
-  return <SchemaFormPanel
+  return <>{handOver && <HandOverDialog
+    employee={employee}
+    pending={handOver.pending}
+    saving={handOverSaving}
+    error={handOverError}
+    onConfirm={confirmHandOver}
+    onClose={() => { setHandOver(null); setHandOverError(""); }}
+  />}
+  <SchemaFormPanel
     title={separation ? "Edit Offboarding" : "Offboarding"}
     description={`${employee.employeeName}${employee.employeeId ? ` · ${employee.employeeId}` : ""}${resultingStatus ? ` — will be marked ${resultingStatus}` : ""}`}
     sections={separationFormSections}
@@ -145,11 +223,12 @@ export default function SeparationFormPanel({ employee, onClose, onSaved }) {
     closeAriaLabel="Close offboarding form"
     onClose={onClose}
     onSubmit={submit}
-    error={error}
+    error={error || fields.summary}
+    errors={fields.errors}
     saving={saving}
     loading={loading}
     loadingLabel="Loading offboarding..."
     submitLabel={separation ? "Update Offboarding" : "Complete Offboarding"}
     savingLabel="Saving..."
-  />;
+  /></>;
 }

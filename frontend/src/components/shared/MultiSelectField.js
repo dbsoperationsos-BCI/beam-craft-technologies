@@ -1,12 +1,15 @@
 "use client";
 
+import HelpTip from "./HelpTip";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import ChevronIcon from "@/components/ui/ChevronIcon";
+import EmployeeAvatar from "@/components/shared/EmployeeAvatar";
 import { normalizeOptions } from "@/lib/dropdownOptions.mjs";
 import { placeDropdownMenu } from "@/lib/dropdownMenu.mjs";
 import useCloseWhenTriggerHidden from "./useCloseWhenTriggerHidden";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 /**
  * A dropdown that takes several answers at once, for the questions where one choice is not enough.
@@ -43,9 +46,61 @@ export default function MultiSelectField({
   readOnly = false,
   searchable = false,
   className = "",
+  // For a filter on a module header, where the placeholder names it and a label above would make the
+  // header two rows tall: the label stays for screen readers and is not drawn.
+  hideLabel = false,
+  /*
+   * `size="sm"` for a filter in a module header, where this stands beside `Dropdown mode="switch"`
+   * and the header's buttons.
+   *
+   * A **fixed** `h-9` rather than the form's floor-and-grow: 36px whether it holds nothing, one
+   * branch or five, exactly the switch beside it, so the header bar is one height before the filter
+   * is used and after. The chips are 20px inside that and never wrap - the row they sit in scrolls
+   * sideways - so nothing in here can push the box past it.
+   *
+   * What actually broke the header was not this: the row's own CSS sizes every `button[aria-label]`
+   * in it to 36px square, which caught each chip's × and made the chip taller than the field. That
+   * is fixed where it is caused - `data-chip-remove` on the × and a `:not()` in `globals.css` - and
+   * this size is what makes the control level with its neighbours rather than merely contained.
+   */
+  size = "md",
+  /*
+   * The field is **as wide as its chips**: they stay on one line at their own width, nothing is
+   * truncated, and the box grows sideways to hold them. The caller gives it room to grow into and a
+   * ceiling to stop at (its own `className`, and a container that is not a fixed width).
+   *
+   * The default is the opposite and is right nearly everywhere: the field is the width its column
+   * or its form row gives it, and its chips scroll sideways inside that. It is wrong where the
+   * answers themselves are what the reader is there to see and there is room beside them - the
+   * Production Schedule's Assist holds five people at the end of a row with nothing to its right,
+   * and reading "emp:27068", "EXT-Sathish ..." in a 176px slot answers nothing.
+   */
+  fitChips = false,
+  // Open from the start, for a picker mounted only once it is asked for (the Production Schedule's
+  // Assist); `onClose` is told when the tick list closes, so such a picker can save what was ticked.
+  defaultOpen = false,
+  /*
+   * How wide the **menu** may open, whatever the field's own width - as `Dropdown`'s prop of the
+   * same name does.
+   *
+   * For a field that is deliberately narrow: the Production Schedule's Assist sits in a column one
+   * name wide, and a menu matching it cut every employee's name in half. The list opens at a width
+   * worth reading while the column, and the sheet's alignment with it, stay as they are.
+   */
+  menuMinWidth = 0,
+  // The other half of it: the menu never opens wider than this, whatever the field's own width. For
+  // a field that grows with its answers (`fitChips`) and a list that should not grow with it.
+  menuMaxWidth = 0,
+  onClose,
 }) {
   const inert = disabled || readOnly;
-  const [open, setOpen] = useState(false);
+  // Dense is a fixed height, which only holds while the chips stay on one line. Wrapping them is a
+  // box that grows, so the height goes back to being a floor.
+  // Dense is a fixed height, which holds whatever the chips do: fitting them makes the box wider,
+  // never taller.
+  const dense = size === "sm";
+  const compact = size === "sm";
+  const [open, setOpen] = useState(defaultOpen);
   const [query, setQuery] = useState("");
   const [position, setPosition] = useState(null);
   const wrapperRef = useRef(null);
@@ -60,11 +115,13 @@ export default function MultiSelectField({
       rect,
       viewportWidth: window.innerWidth,
       viewportHeight: window.innerHeight,
+      minWidth: menuMinWidth,
+      maxWidth: menuMaxWidth,
     });
     setPosition(style);
-  }, []);
+  }, [menuMaxWidth, menuMinWidth]);
 
-  const close = useCallback(() => { setOpen(false); setQuery(""); }, []);
+  const close = useCallback(() => { setOpen(false); setQuery(""); onClose?.(); }, [onClose]);
   // Portalled, so scrolling the pane moves the field but not the menu; closing is the honest answer.
   useCloseWhenTriggerHidden(open, triggerRef, close);
 
@@ -95,10 +152,12 @@ export default function MultiSelectField({
   // "[object Object]" and React saw a list of duplicate keys.
   const items = normalizeOptions(options);
   const labelFor = (value) => items.find((item) => item.value === value)?.label ?? String(value);
+  // A person's face, when the option is one - `{ name, photoUrl, seed }`, as `Dropdown` takes it.
+  const avatarFor = (value) => items.find((item) => item.value === value)?.avatar;
   // Narrowed for reading only: what is already ticked stays ticked whether or not the search still
   // shows it, so typing can never quietly drop an answer already given.
   const term = query.trim().toLocaleLowerCase();
-  const shown = term ? items.filter((item) => String(item.label).toLocaleLowerCase().includes(term)) : items;
+  const shown = term ? items.filter((item) => matchesWordChunks(item.label, term)) : items;
 
   function toggle(value) {
     const next = values.includes(value) ? values.filter((entry) => entry !== value) : [...values, value];
@@ -118,37 +177,57 @@ export default function MultiSelectField({
   const allShownChosen = shownValues.length > 0 && shownValues.every((value) => values.includes(value));
   const selectAllShown = () => onChange?.([...values, ...shownValues.filter((value) => !values.includes(value))]);
 
-  return <div ref={wrapperRef} className={`block text-[11px] font-semibold text-slate-600 sm:text-xs ${className}`}>
-    <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</span>
-    <div className="relative mt-1.5">
+  /*
+   * `min-w-0` down the chain: in a grid cell or a flex row an element is as wide as its content by
+   * default, and the chips laid out in one line are that content - so ten names pushed the field past
+   * its column instead of scrolling inside it. Held to the column, the chip row below scrolls.
+   */
+  // `relative` holds a hidden label (`sr-only`) inside the field, as Dropdown's does.
+  return <div ref={wrapperRef} className={`relative block min-w-0 max-w-full text-[11px] font-semibold text-slate-600 sm:text-xs ${className}`}>
+    <span className={hideLabel ? "sr-only" : undefined}>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}<HelpTip text={helperText} /></span>
+    <div className={`relative min-w-0 ${hideLabel ? "" : "mt-1.5"}`}>
       {/* The chosen answers sit inside the control rather than being counted above it, so the
           selection reads as itself. A div rather than a button, because each chip carries its own
           remove control and a button cannot contain buttons. */}
       <div
         ref={triggerRef}
+        aria-invalid={error ? true : undefined}
         onClick={() => { if (!inert) setOpen(true); }}
         // `focus-within`, not `focus`: this is a div holding the chips and their remove buttons, so
         // the focus is always on something inside it.
-        className={`flex min-h-9 w-full items-center gap-1.5 rounded-lg border bg-white px-2 py-1.5 text-left text-xs font-normal text-slate-700 transition focus-within:ring-2 sm:text-sm ${error ? "border-red-400 focus-within:border-red-500 focus-within:ring-red-100" : "border-slate-300 focus-within:border-blue-500 focus-within:ring-blue-100"} ${readOnly ? "cursor-default bg-slate-100" : disabled ? "cursor-default bg-slate-50" : "cursor-pointer"}`}
+        className={`flex w-full min-w-0 items-center gap-1.5 rounded-lg border bg-white px-2 ${dense ? "h-9 py-0" : compact ? "min-h-9 py-1" : "min-h-9 py-1.5"} text-left text-xs font-normal text-slate-700 transition focus-within:ring-2 sm:text-sm ${error ? "border-red-400 focus-within:border-red-500 focus-within:ring-red-100" : "border-slate-300 focus-within:border-blue-500 focus-within:ring-blue-100"} ${readOnly ? "cursor-default bg-slate-100" : disabled ? "cursor-default bg-slate-50" : "cursor-pointer"}`}
       >
         {/* Scrolls sideways with no bar showing: the control is one field tall, and a scrollbar drawn
             inside it covers the very chips it is there to reach. The chips scroll by drag, wheel or
             trackpad, and the list below is the reliable way to see everything chosen. */}
-        <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {/* `min-w-0` lets the row be squeezed and its chips scroll; fitting them instead means the
+            row keeps its natural width, which is what makes the box grow to hold it. The scroll
+            stays either way, for the ceiling the caller caps the growth at. */}
+        <div className={`flex flex-1 items-center gap-1.5 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${fitChips ? "" : "min-w-0"}`}>
         {values.length === 0 && <span className="shrink-0 px-1 text-slate-400">{placeholder}</span>}
         {/* A rounded rectangle rather than a pill, and roomy enough to read at a glance: these are
             the answers themselves, not annotations on them. The label is slate-700, the same as the
             option rows below it and the rest of the form's text - a chip is the answer repeated
             back, so it should not read darker than the words it was chosen from. The blue tint is
             the chip, not the word. */}
-        {values.map((value) => <span key={value} className={`inline-flex max-w-full shrink-0 items-center gap-1.5 rounded bg-blue-50 py-1 pl-2.5 text-xs font-medium text-slate-700 ${inert ? "pr-2.5" : "pr-1.5"}`}>
-          <span className="truncate">{labelFor(value)}</span>
+        {values.map((value) => <span key={value} className={`inline-flex max-w-full shrink-0 items-center gap-1.5 rounded bg-blue-50 ${compact ? "py-0.5" : "py-1"} ${avatarFor(value) ? "pl-1" : "pl-2.5"} text-xs font-medium text-slate-700 ${inert ? "pr-2.5" : "pr-1.5"}`}>
+          {avatarFor(value) && <EmployeeAvatar {...avatarFor(value)} size="2xs" decorative />}
+          <span className={fitChips ? "whitespace-nowrap" : "truncate"}>{labelFor(value)}</span>
           {/* Gone rather than greyed when the field cannot be written to: a × offers to take the
               answer away, and a role being read back has no such offer to make. Faded and inert it
               still reads as a control that ought to work, which is a worse answer than no control. */}
           {!inert && <button
             type="button"
             aria-label={`Remove ${labelFor(value)}`}
+            /*
+             * It is part of a chip, not a control standing in the row on its own.
+             *
+             * A module header sizes every `button[aria-label]` in its action row to 36px square
+             * (`globals.css`), which is right for an icon button beside Add Meet and catastrophic
+             * here: this × became 36px at 1rem, so the chip grew taller than the field holding it
+             * and spilled out of the box. The attribute is how that rule knows to leave it alone.
+             */
+            data-chip-remove="true"
             onClick={(event) => { event.stopPropagation(); toggle(value); }}
             className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-sm leading-none text-slate-600 hover:bg-blue-200 hover:text-slate-900"
           >
@@ -218,16 +297,15 @@ export default function MultiSelectField({
           ? <p className="px-3 py-2 text-xs text-slate-500 sm:text-sm">Nothing matches “{query.trim()}”.</p>
           : shown.map((item) => {
             const selected = values.includes(item.value);
-            return <label key={item.value} role="option" aria-selected={selected} className="flex cursor-pointer items-start gap-2 px-3 py-2 text-xs font-normal text-slate-700 hover:bg-blue-50 sm:text-sm">
-              <input type="checkbox" checked={selected} onChange={() => toggle(item.value)} className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600" />
+            return <label key={item.value} role="option" aria-selected={selected} className={`flex cursor-pointer ${item.avatar ? "items-center" : "items-start"} gap-2 px-3 py-2 text-xs font-normal text-slate-700 hover:bg-blue-50 sm:text-sm`}>
+              <input type="checkbox" checked={selected} onChange={() => toggle(item.value)} className={`${item.avatar ? "" : "mt-0.5 "}h-4 w-4 shrink-0 accent-blue-600`} />
+              {item.avatar && <EmployeeAvatar {...item.avatar} size="xs" decorative />}
               <span className="min-w-0">{item.label}</span>
             </label>;
           })}
       </div>,
       document.body,
     )}
-    {error
-      ? <p role="alert" className="mt-1.5 font-normal text-red-600">{error}</p>
-      : helperText && <p className="mt-1.5 font-normal text-slate-500">{helperText}</p>}
+    {error && <p role="alert" className="mt-1.5 font-normal text-red-600">{error}</p>}
   </div>;
 }

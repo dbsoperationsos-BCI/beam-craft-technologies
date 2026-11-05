@@ -10,9 +10,9 @@ import { reopenedExpiry, resendFormMessage } from "../src/lib/interviewFormResen
  *
  * The record panel used to offer **Send Screening Form** whatever the candidate had done - so the
  * one row that had already answered was offered the one thing nobody wants: a fresh link, raised
- * from nothing, which reads to a candidate as a form that swallowed what they typed. A submitted
- * form now offers **Resend Form** in its place, which returns their own submission on their own
- * link with every answer still in it.
+ * from nothing, which reads to a candidate as a form that swallowed what they typed. Choosing
+ * **Form Submission Pending** now offers **Resend** in its place, which returns their own
+ * submission on their own link with every answer still in it.
  *
  * Two halves are worth pinning: the button that appears, and the message HR hands over - because
  * the message is copied *before* anything is sent, and a message that says something the link then
@@ -20,30 +20,29 @@ import { reopenedExpiry, resendFormMessage } from "../src/lib/interviewFormResen
  */
 
 const read = (...parts) => fs.readFileSync(path.join(process.cwd(), "src", ...parts), "utf8");
-const PANEL = read("components", "hrm", "InterviewCandidateFormPanel.js");
+const PANEL = read("components", "hrm", "InterviewCandidatePopup.js");
+/* The record form itself - the validation and the payload shaping the popup saves through. */
+const RECORD_FORM = read("components", "hrm", "candidateRecordForm.js");
 const PAGE = read("components", "hrm", "InterviewPage.js");
 const DIALOG = read("components", "hrm", "ResendApplicationFormDialog.js");
 
 /* --------------------------------------------------------------- which button the record offers */
 
-test("a candidate who has answered is offered Resend Form in place of Send Screening Form", () => {
+test("a candidate who has answered is offered Resend in place of Send, through the same pill", () => {
   /*
    * Never both. They answer opposite questions about the same person - one asks for an application,
    * the other hands back the one already given - so the second **replaces** the first rather than
-   * joining it, and the footer draws whichever `formAction` names.
+   * joining it. This used to be a dedicated footer button reading `formSubmitted`; it is now the
+   * **Form Submission Pending** pill in `STATUS_ACTS`, which reads the identical flag to pick the
+   * identical handler - see `interview-candidate-popup.test.mjs` for the pill itself, and
+   * `interview-review.test.mjs` for the footer button it replaced.
    */
-  assert.match(PANEL, /const canResendForm = canWrite && formSubmitted && Boolean\(onResendApplicationForm\);/);
-  assert.match(PANEL, /const canSendForm = canWrite && !canResendForm && Boolean\(onSendApplicationForm\);/);
-  /*
-   * Called **Resend** rather than Resend Form while the panel is reviewing a submission: four
-   * buttons share one row there, and inside a review the word "form" is the only thing on screen, so
-   * the shorter name says the same thing. The act and the handler are the one act either way.
-   */
-  assert.match(PANEL, /const formAction = canResendForm\s*\n\s*\? \{ label: review \? "Resend" : "Resend Form", onClick: saveThenResend \}\s*\n\s*: canSendForm \? \{ label: "Send Screening Form", onClick: saveThenSend \} : null;/);
-  // One button in the footer, drawn from that one answer - not two conditionals that could both fire.
-  assert.match(PANEL, /\{formAction && <Button [^>]*onClick=\{formAction\.onClick\}[^>]*>\{formAction\.label\}<\/Button>\}/);
-  assert.equal(PANEL.split('label: "Send Screening Form"').length - 1, 1, "Send Screening Form is drawn from more than one place");
-  assert.equal(PANEL.split('onClick: saveThenResend').length - 1, 1, "the resend is drawn from more than one place");
+  assert.match(PANEL, /\[FORM_PENDING_STATUS\]: \{ handler: \(props\) => \(props\.formSubmitted \? props\.onResendApplicationForm : props\.onSendApplicationForm\) \}/);
+  // Whether it fires at all still comes down to whether the pill is a real transition: picking it
+  // while already on that exact stage is a no-op, same as any other pill - see `chooseStatus`. A
+  // candidate who has answered is past that stage by then (Form Submitted, or further on), so
+  // picking Form Submission Pending again is a genuine move, and the resend handler is what it calls.
+  assert.match(PANEL, /if \(!canWrite \|\| next === values\.status\) return;/);
 });
 
 test("the record is saved before the form goes back, so HR's own corrections survive it", () => {
@@ -52,15 +51,24 @@ test("the record is saved before the form goes back, so HR's own corrections sur
    * they can see is wrong here, and *then* asks the candidate for the rest. Without the save, the
    * next thing that happens - the panel closing behind the confirmation - loses them.
    */
-  assert.match(PANEL, /async function saveThenResend\(event\) \{[\s\S]*?const found = validate\(\);[\s\S]*?onResendApplicationForm\?\.\(await save\(\)\);/);
   /*
-   * And no email check, unlike sending a fresh form. This one goes to the address the **invite**
-   * carries - the address the candidate proved to open the form in the first place - so a record
-   * whose email column is empty is not a reason to refuse it.
+   * HR reads a submission, corrects what they can see is wrong here, and *then* asks the candidate for
+   * the rest. Without the save, the next thing that happens - the popup closing behind the
+   * confirmation - loses the corrections. `forward` is the one path all of that goes through, so the
+   * rule is held once rather than in a function per button.
    */
-  const body = /async function saveThenResend\(event\) \{([\s\S]*?)\n  \}/.exec(PANEL)?.[1] || "";
-  assert.ok(body, "saveThenResend could not be read");
-  assert.doesNotMatch(body, /An email address is needed/);
+  assert.match(PANEL, /function forward\(handler\) \{[\s\S]*?const saved = await persist\(\);[\s\S]*?if \(saved\) handler\?\.\(saved\);/);
+  // And it opens nothing when the save was refused: a link raised against details the server would
+  // not take is a link carrying details nobody has.
+  assert.match(PANEL, /const found = validateCandidate\(values\);[\s\S]*?if \(Object\.keys\(found\)\.length\) return null;/);
+  /*
+   * And no email check on the way through, unlike sending a fresh form. A resend goes to the address
+   * the **invite** carries - the address the candidate proved to open the form in the first place - so
+   * a record whose email column is empty is not a reason to refuse it. The form validates the shape of
+   * an email that is there and never its presence.
+   */
+  assert.match(RECORD_FORM, /if \(values\.email && /);
+  assert.equal(/An email address is needed/.test(PANEL), false);
 });
 
 test("whether they have answered is read off the form, not off the stage", () => {

@@ -53,6 +53,16 @@ export function formatTime(value) {
 /** The date input's value from an ISO string, so the wizard edits "2026-09-22" not a timestamp. */
 export const toDateInput = (value) => (value ? String(value).slice(0, 10) : "");
 
+/**
+ * Where the viewer lands after the photo at `index` is removed from a list that now holds
+ * `remaining` photos: the one that slid into its place (the next), the previous when the removed
+ * one was last, and -1 - close - when nothing is left. Never a stale or missing index.
+ */
+export function viewerIndexAfterRemoval(index, remaining) {
+  if (!(remaining > 0)) return -1;
+  return Math.max(0, Math.min(index, remaining - 1));
+}
+
 /** The percent a processing summary reads as. */
 export const processingPercent = (processing) => (processing && processing.total ? Math.round(((processing.completed + processing.failed + processing.skipped) / processing.total) * 100) : 0);
 
@@ -77,7 +87,7 @@ export const EVENT_FILTERS = [["all", "All"], ["active", "Active"], ["upcoming",
 export const EVENT_SORTS = [["newest", "Newest"], ["oldest", "Oldest"], ["eventDate", "Event date"], ["name", "Name"]];
 
 /** The wizard's steps, in order. */
-export const WIZARD_STEPS = [["details", "Event Details"], ["subEvents", "Sub Events"], ["settings", "Event Settings"], ["guests", "Guest Configuration"], ["ai", "Media / AI Settings"], ["review", "Review"]];
+export const WIZARD_STEPS = [["details", "Event Details"], ["settings", "Event Settings"], ["guests", "Guest Configuration"], ["ai", "Media / AI Settings"], ["review", "Review"]];
 
 /** Which required fields of step one are still empty. */
 export function detailsProblems(details) {

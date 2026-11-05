@@ -1,7 +1,9 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useMemo, useState } from "react";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
+import useFormErrors from "@/components/shared/useFormErrors";
 import { createTask, updateTask, uploadTaskAttachment } from "@/services/hrm/tasks.service";
 import { TaskFilePicker } from "@/components/hrm/TaskAttachments";
 import {
@@ -63,7 +65,9 @@ export default function TaskFormPanel({ users = [], taskTypes = TASK_TYPES, task
    * whatever had been typed since.
    */
   const [values, setValues] = useState(() => (task ? taskFormValues(task) : emptyTaskValues()));
-  const [errors, setErrors] = useState({});
+  const fields = useFormErrors();
+  // What is wrong with the save rather than with a field: the server's refusal, a file not attached.
+  const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   // Held as picked, and uploaded once the task has an id. See the note above the component.
   const [files, setFiles] = useState([]);
@@ -75,7 +79,7 @@ export default function TaskFormPanel({ users = [], taskTypes = TASK_TYPES, task
    */
   const context = useMemo(() => ({
     options: {
-      users: users.map((user) => ({ value: user.id, label: user.name })),
+      users: users.map((user) => ({ value: user.id, label: user.name, avatar: avatarOf(user) })),
       taskTypes,
       // Which of them ask what the work was, as the server answered it - the form asks for exactly
       // what the server would refuse the task without.
@@ -98,7 +102,7 @@ export default function TaskFormPanel({ users = [], taskTypes = TASK_TYPES, task
     setValues((current) => ({ ...current, [name]: value }));
     // The message goes the moment the field it was about is touched, rather than waiting for the
     // next save to tell somebody they have already fixed it.
-    setErrors((current) => (current[name] ? { ...current, [name]: "" } : current));
+    fields.clear(name);
   }
 
   /** What the server would refuse, asked here first so the answer lands on the field itself. */
@@ -121,9 +125,8 @@ export default function TaskFormPanel({ users = [], taskTypes = TASK_TYPES, task
 
   async function submit(event) {
     event.preventDefault();
-    const found = validate();
-    setErrors(found);
-    if (Object.keys(found).length) return;
+    setError("");
+    if (!fields.check(validate())) return;
 
     setSaving(true);
     try {
@@ -183,7 +186,7 @@ export default function TaskFormPanel({ users = [], taskTypes = TASK_TYPES, task
       if (failed.length) {
         // The task is real and the panel stays open saying so, rather than closing on a success
         // notice that would be the last anybody heard of the files that did not make it.
-        setErrors({ form: `${message} These files could not be attached: ${failed.join(", ")}.` });
+        setError(`${message} These files could not be attached: ${failed.join(", ")}.`);
         setFiles([]);
         return;
       }
@@ -191,7 +194,7 @@ export default function TaskFormPanel({ users = [], taskTypes = TASK_TYPES, task
     } catch (error) {
       // The server's own message where it has one — it is the specific reason, and a generic
       // fallback here would hide "that login is not active" behind "unable to create that task".
-      setErrors({ form: error?.data?.message || error?.message || "Unable to create that task." });
+      if (!fields.fromServer(error)) setError(error?.data?.message || error?.message || "Unable to create that task.");
     } finally {
       setSaving(false);
     }
@@ -211,7 +214,7 @@ export default function TaskFormPanel({ users = [], taskTypes = TASK_TYPES, task
         files={files}
         onChange={setFiles}
         disabled={saving}
-        onError={(message) => setErrors((current) => ({ ...current, form: message }))}
+        onError={setError}
       />,
     },
   ], [files, saving]);
@@ -226,7 +229,7 @@ export default function TaskFormPanel({ users = [], taskTypes = TASK_TYPES, task
     sections={sections}
     values={values}
     onChange={change}
-    errors={errors}
+    errors={fields.errors}
     context={context}
     saving={saving}
     submitLabel={editing ? "Save Changes" : "Assign Task"}
@@ -235,6 +238,6 @@ export default function TaskFormPanel({ users = [], taskTypes = TASK_TYPES, task
     closeAriaLabel="Close task form"
     onClose={onClose}
     onSubmit={submit}
-    error={errors.form}
+    error={error || fields.summary}
   />;
 }

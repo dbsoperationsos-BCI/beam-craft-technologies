@@ -2,10 +2,9 @@ const { z } = require("zod");
 const { randomUUID } = require("crypto");
 const prisma = require("../../../config/db");
 const { syncGoogleSheetLinkToCrm, prepareGoogleSheetCrmImport } = require("../crm-leads/googleSheetsService");
-const { deleteCrmLeadsFromSheet } = require("../crm-leads/crmLeadService");
 const { getConnectionForUser, getSpreadsheetTabsForUser } = require("../google-oauth/service");
 const { ensureRulesTableExists, listRulesForLink, replaceRulesForLink, deleteRulesForLink, validateRules } = require("./rulesStore");
-const { salesEmployees } = require("../../../services/employeeOptionLists");
+const { salesEmployees, listPhotoUrl } = require("../../../services/employeeOptionLists");
 
 const linkSchema = z.object({
   systemTableName: z.string().trim().min(1).max(191),
@@ -621,18 +620,6 @@ async function update(req, res) {
  * failure is reported as a count of zero and logged rather than thrown - the sync has stopped
  * either way, which is the part the user asked for first.
  */
-async function removeLeadsForLink(link) {
-  try {
-    return await deleteCrmLeadsFromSheet({
-      spreadsheetId: link?.spreadsheetId || extractSpreadsheetId(link?.sheetUrl) || "",
-      gid: extractGidFromUrl(link?.sheetUrl) ?? "",
-      targetTab: link?.targetedTab || "",
-    });
-  } catch (error) {
-    console.error("Google Sheet link deleted, but its CRM leads could not be removed:", error.message);
-    return 0;
-  }
-}
 
 async function remove(req, res) {
   const { id } = req.params;
@@ -656,7 +643,18 @@ async function remove(req, res) {
     `,
       id,
     );
-    const deletedLeads = await removeLeadsForLink(existing[0]);
+    /*
+     * ── The leads stay ────────────────────────────────────────────────────────────────────────
+     *
+     * Unlinking used to soft-delete every lead the sheet had imported. That hid leads which had been
+     * worked for weeks - quoted, converted, carrying a CRD document - and it did so without the
+     * refusal that `purgeLeads` applies to exactly those leads when somebody deletes them from the
+     * board, because a soft delete never reaches a foreign key.
+     *
+     * A link is a **sync**. Stopping it is not a reason to take the board apart. The link is still
+     * soft-deleted, so the poller stops reading that sheet, and `sales_google_sheet_row` still
+     * remembers which rows it imported, so re-linking does not import them all again.
+     */
     const updated = await prisma.$queryRawUnsafe(
       `
       SELECT
@@ -682,7 +680,7 @@ async function remove(req, res) {
     `,
       id,
     );
-    return res.json({ data: mapRow(updated?.[0]), deletedLeads });
+    return res.json({ data: mapRow(updated?.[0]), });
   } catch (error) {
     if (error?.code === "P2021") {
       try {
@@ -705,7 +703,18 @@ async function remove(req, res) {
         `,
           id,
         );
-        const deletedLeads = await removeLeadsForLink(existing[0]);
+        /*
+     * ── The leads stay ────────────────────────────────────────────────────────────────────────
+     *
+     * Unlinking used to soft-delete every lead the sheet had imported. That hid leads which had been
+     * worked for weeks - quoted, converted, carrying a CRD document - and it did so without the
+     * refusal that `purgeLeads` applies to exactly those leads when somebody deletes them from the
+     * board, because a soft delete never reaches a foreign key.
+     *
+     * A link is a **sync**. Stopping it is not a reason to take the board apart. The link is still
+     * soft-deleted, so the poller stops reading that sheet, and `sales_google_sheet_row` still
+     * remembers which rows it imported, so re-linking does not import them all again.
+     */
         const updated = await prisma.$queryRawUnsafe(
           `
           SELECT
@@ -731,7 +740,7 @@ async function remove(req, res) {
         `,
           id,
         );
-        return res.json({ data: mapRow(updated?.[0]), deletedLeads });
+        return res.json({ data: mapRow(updated?.[0]), });
       } catch (retryError) {
         console.error("Unable to remove Google Sheet link after table bootstrap:", retryError);
       }
@@ -890,8 +899,8 @@ async function preview(req, res) {
  */
 async function assignableEmployees(req, res) {
   try {
-    const data = await salesEmployees({ select: { id: true, employeeId: true, employeeName: true, designation: true } });
-    return res.json({ data });
+    const data = await salesEmployees({ select: { id: true, employeeId: true, employeeName: true, designation: true, profilePhotoUrl: true } });
+    return res.json({ data: data.map((row) => ({ ...row, profilePhotoUrl: listPhotoUrl(row.profilePhotoUrl) })) });
   } catch (error) {
     console.error("Unable to load the employees a sheet rule may assign to:", error);
     return res.status(500).json({ message: "Unable to load the employee list." });

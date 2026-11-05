@@ -27,6 +27,8 @@ const workspaceTabsSchema = z
     photoSelection: z.boolean(),
     photoCulling: z.boolean(),
     signatureAlbum: z.boolean(),
+    // Optional so an older form that never sent it still validates; absent reads as off.
+    aiEditing: z.boolean().optional(),
   })
   .nullish();
 
@@ -34,17 +36,21 @@ const workspaceTabsSchema = z
 // always, and — when the form sends them — the client details and the workspace-tab choice.
 // Absent fields leave the stored values alone, so a rename on its own keeps working. What is
 // sent must still be whole: a manual project cannot lose its client or every tab.
+// Edit Project's Linked Modules: a tick per module the form let the viewer change - true to link,
+// false to unlink; a module left out stays exactly as it is (`moduleLinks.apply`).
+const linksSchema = z.object({ photos: z.boolean().optional(), culling: z.boolean().optional(), editing: z.boolean().optional(), album: z.boolean().optional() }).strict();
 const editProjectSchema = z
   .object({
     projectName: z.string().trim().min(1).max(500),
     clientName: clientNameSchema,
     clientMainNumber: clientMainNumberSchema,
     workspaceTabs: workspaceTabsSchema,
+    links: linksSchema.optional(),
   })
   .superRefine((value, ctx) => {
     if (value.clientName === null) ctx.addIssue({ code: "custom", path: ["clientName"], message: "A manually named project needs the client's name." });
     if (value.clientMainNumber === null) ctx.addIssue({ code: "custom", path: ["clientMainNumber"], message: "A manually named project needs the client's WhatsApp number." });
-    if (value.workspaceTabs && !value.workspaceTabs.photoSelection && !value.workspaceTabs.photoCulling && !value.workspaceTabs.signatureAlbum)
+    if (value.workspaceTabs && !value.workspaceTabs.photoSelection && !value.workspaceTabs.photoCulling && !value.workspaceTabs.signatureAlbum && !value.workspaceTabs.aiEditing)
       ctx.addIssue({ code: "custom", path: ["workspaceTabs"], message: "Choose at least one workspace tab." });
   });
 
@@ -69,7 +75,7 @@ const createProjectSchema = z
     if (value.salesProjectId) return;
     if (!value.clientName) ctx.addIssue({ code: "custom", path: ["clientName"], message: "A manually named project needs the client's name." });
     if (!value.clientMainNumber) ctx.addIssue({ code: "custom", path: ["clientMainNumber"], message: "A manually named project needs the client's WhatsApp number." });
-    if (value.workspaceTabs && !value.workspaceTabs.photoSelection && !value.workspaceTabs.photoCulling && !value.workspaceTabs.signatureAlbum)
+    if (value.workspaceTabs && !value.workspaceTabs.photoSelection && !value.workspaceTabs.photoCulling && !value.workspaceTabs.signatureAlbum && !value.workspaceTabs.aiEditing)
       ctx.addIssue({ code: "custom", path: ["workspaceTabs"], message: "Choose at least one workspace tab." });
   });
 // The day the client's link stops working, as the calendar field sends it — "2026-08-15". Absent

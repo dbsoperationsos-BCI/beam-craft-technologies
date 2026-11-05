@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Dropdown from "@/components/shared/Dropdown";
+import HelpTip from "@/components/shared/HelpTip";
 import CloseIcon from "@/components/ui/CloseIcon";
 import { SearchablePicker } from "@/components/project-management/ProjectServiceCreationSection";
 import { deliverableAnswerOn } from "@/lib/deliverableAnswers.mjs";
@@ -64,6 +65,7 @@ export default function QuotationCalculatorLines({
       <section className="rounded-xl border border-slate-200 bg-white p-3 sm:p-4">
         <SearchablePicker
           label="Choose Services"
+          helperText="Search and pick a service to add it to this price."
           placeholder="Search or browse services"
           options={serviceOptions}
           disabledIds={chosenLineIds}
@@ -114,6 +116,7 @@ export default function QuotationCalculatorLines({
         {/* One entry per brand and variant, as the generator lists them, less what the quote holds. */}
         <SearchablePicker
           label="Choose Deliverables"
+          helperText="Search and pick a deliverable, like an album or video, to add to this price."
           placeholder="Search or browse deliverables"
           options={deliverableChoices}
           disabledIds={heldDeliverableKeys}
@@ -202,7 +205,7 @@ function RemoveButton({ label, onClick }) {
 function CountInput({ value, onChange, itemLabel }) {
   return (
     <label className="mt-1.5 flex items-center gap-2 text-[11px] font-semibold text-slate-500 sm:text-xs">
-      <span>No. of Count</span>
+      <span>No. of Count<HelpTip text="How many photos each piece holds; the quantity is priced times this." /></span>
       <input
         type="text"
         inputMode="numeric"

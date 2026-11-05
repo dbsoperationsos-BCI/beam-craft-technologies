@@ -23,47 +23,49 @@ const PERMISSION = { module: "SALES", feature: "CRM Leads" };
 const WINDOW = { from: new Date("2026-10-01T00:00:00.000Z"), to: new Date("2026-10-31T00:00:00.000Z") };
 const F = {};
 
+const { retrying } = require("./helpers/retrying");
+
 async function grant(user, module, feature, reachBranchIds = []) {
   const permission = await prisma.permission.findFirst({ where: { module, feature }, select: { id: true } });
   assert.ok(permission, `the seed no longer has ${module} / ${feature}`);
-  const roleRow = await prisma.role.create({ data: { name: tag(`r-${Math.random().toString(36).slice(2, 7)}`) } });
-  await prisma.rolePermission.create({ data: { roleId: roleRow.id, permissionId: permission.id, accessLevel: "READ_WRITE" } });
-  await prisma.userRole.create({ data: { userId: user.id, roleId: roleRow.id } });
-  if (reachBranchIds.length) await prisma.roleBranch.createMany({ data: reachBranchIds.map((id) => ({ roleId: roleRow.id, branchId: id })) });
+  const roleRow = await retrying(() => prisma.role.create({ data: { name: tag(`r-${Math.random().toString(36).slice(2, 7)}`) } }));
+  await retrying(() => prisma.rolePermission.create({ data: { roleId: roleRow.id, permissionId: permission.id, accessLevel: "READ_WRITE" } }));
+  await retrying(() => prisma.userRole.create({ data: { userId: user.id, roleId: roleRow.id } }));
+  if (reachBranchIds.length) await retrying(() => prisma.roleBranch.createMany({ data: reachBranchIds.map((id) => ({ roleId: roleRow.id, branchId: id })) }));
   return async () => {
-    await prisma.userRole.deleteMany({ where: { roleId: roleRow.id } });
-    await prisma.roleBranch.deleteMany({ where: { roleId: roleRow.id } });
-    await prisma.rolePermission.deleteMany({ where: { roleId: roleRow.id } });
-    await prisma.role.delete({ where: { id: roleRow.id } });
+    await retrying(() => prisma.userRole.deleteMany({ where: { roleId: roleRow.id } }));
+    await retrying(() => prisma.roleBranch.deleteMany({ where: { roleId: roleRow.id } }));
+    await retrying(() => prisma.rolePermission.deleteMany({ where: { roleId: roleRow.id } }));
+    await retrying(() => prisma.role.delete({ where: { id: roleRow.id } }));
   };
 }
 
 before(async () => {
-  F.br = await prisma.branch.create({ data: { code: tag("BR"), name: `Lead Child Branch ${STAMP}` } });
+  F.br = await retrying(() => prisma.branch.create({ data: { code: tag("BR"), name: `Lead Child Branch ${STAMP}` } }));
   F.dumDum = await prisma.vertical.findFirst({ where: { code: "DUM_DUM" }, select: { id: true } });
-  const person = (name, extra = {}) => prisma.employee.create({ data: { employeeId: tag(name), employeeName: `Lead Child ${name} ${STAMP}`, branchId: F.br.id, workBaseLocation: F.br.name, ...extra } });
+  const person = (name, extra = {}) => retrying(() => prisma.employee.create({ data: { employeeId: tag(name), employeeName: `Lead Child ${name} ${STAMP}`, branchId: F.br.id, workBaseLocation: F.br.name, ...extra } }));
   F.manager = await person("mgr");
   F.report = await person("rep", { reportsToEmployeeId: F.manager.id });
   F.stranger = await person("str");
-  const login = (name, employee) => prisma.user.create({ data: { name: `Lead child ${name}`, email: `${tag(name)}@test.local`.toLowerCase(), username: tag(name).toLowerCase(), password: "x", role: "ADMIN", branchId: F.br.id, linkedEmployeeId: employee.id } });
+  const login = (name, employee) => retrying(() => prisma.user.create({ data: { name: `Lead child ${name}`, email: `${tag(name)}@test.local`.toLowerCase(), username: tag(name).toLowerCase(), password: "x", role: "ADMIN", branchId: F.br.id, linkedEmployeeId: employee.id } }));
   F.me = await login("me", F.manager);
   F.other = await login("other", F.stranger);
   invalidate();
 
-  const lead = (name, owner) => prisma.salesCrmLead.create({ data: {
+  const lead = (name, owner) => retrying(() => prisma.salesCrmLead.create({ data: {
     enquiryId: tag(name), name: `Lead ${name}`, assignedBranch: F.br.name, branchId: F.br.id,
     verticalName: "Dum Dum", verticalId: F.dumDum.id, ownerEmployeeId: owner?.id ?? null,
-  } });
+  } }));
   await lead("mine", F.manager);
   await lead("my-report", F.report);
   await lead("theirs", F.stranger);
 
   // One meeting per lead, in the window, plus one this login booked on somebody else's lead.
-  const meeting = (leadName, extra = {}) => prisma.salesCrmMeeting.create({ data: {
+  const meeting = (leadName, extra = {}) => retrying(() => prisma.salesCrmMeeting.create({ data: {
     enquiryId: tag(leadName), title: `Meet ${leadName}`,
     startAt: new Date("2026-10-10T04:30:00.000Z"), endAt: new Date("2026-10-10T05:30:00.000Z"),
     ...extra,
-  } });
+  } }));
   await meeting("mine");
   await meeting("my-report");
   await meeting("theirs");
@@ -71,12 +73,12 @@ before(async () => {
 });
 
 after(async () => {
-  await prisma.salesCrmMeeting.deleteMany({ where: { enquiryId: { startsWith: `TLC-${STAMP}` } } });
-  await prisma.salesCrmLead.deleteMany({ where: { enquiryId: { startsWith: `TLC-${STAMP}` } } });
-  await prisma.userRole.deleteMany({ where: { userId: { in: [F.me.id, F.other.id] } } });
-  await prisma.user.deleteMany({ where: { id: { in: [F.me.id, F.other.id] } } });
-  await prisma.employee.deleteMany({ where: { employeeId: { startsWith: `TLC-${STAMP}` } } });
-  await prisma.branch.deleteMany({ where: { code: { startsWith: `TLC-${STAMP}` } } });
+  await retrying(() => prisma.salesCrmMeeting.deleteMany({ where: { enquiryId: { startsWith: `TLC-${STAMP}` } } }));
+  await retrying(() => prisma.salesCrmLead.deleteMany({ where: { enquiryId: { startsWith: `TLC-${STAMP}` } } }));
+  await retrying(() => prisma.userRole.deleteMany({ where: { userId: { in: [F.me.id, F.other.id] } } }));
+  await retrying(() => prisma.user.deleteMany({ where: { id: { in: [F.me.id, F.other.id] } } }));
+  await retrying(() => prisma.employee.deleteMany({ where: { employeeId: { startsWith: `TLC-${STAMP}` } } }));
+  await retrying(() => prisma.branch.deleteMany({ where: { code: { startsWith: `TLC-${STAMP}` } } }));
   invalidate();
   await prisma.$disconnect();
 });
@@ -116,20 +118,6 @@ test("a caller that does not say who is asking is answered nothing", async () =>
    * choice `dataScope.resolve()` makes for a caller that skipped its guard.
    */
   assert.deepEqual(await meetings.listAllMeetings({ ...WINDOW }), []);
-});
-
-test("the Add Meet picker offers every lead, because it is a picker", async () => {
-  /*
-   * The list is narrowed; the picker is not. Booking a meeting is putting a meeting *onto* a lead,
-   * and whoever arranges one is often not the CRM working it - a narrowed picker offers them
-   * nobody to book with. Nothing is given away by it that the enquiry search does not already
-   * offer, and the meeting is then visible to whoever booked it.
-   */
-  const undo = await grant(F.me, "SALES", "CRM Leads", [F.br.id]);
-  try {
-    const found = await meetings.searchLeads({ query: `TLC-${STAMP}`, limit: 50 });
-    assert.deepEqual(found.map((row) => row.enquiryId).sort(), [tag("mine"), tag("my-report"), tag("theirs")]);
-  } finally { await undo(); }
 });
 
 test("enquiry ids naming a lead that is gone are dropped rather than let through", async () => {

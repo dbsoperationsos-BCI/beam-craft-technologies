@@ -1,5 +1,6 @@
 const prisma = require("../../../config/db");
 const { publishThreadChange } = require("./events");
+const { mediaDetails } = require("./mediaOnDemand");
 
 /**
  * One row per WhatsApp message exchanged with a CRM lead.
@@ -457,7 +458,7 @@ async function listMessages(enquiryId, chatJid, limit = 200) {
   if (!id || !jid) return [];
   const size = Math.min(Math.max(Number(limit) || 200, 1), 500);
   const rows = await prisma.$queryRawUnsafe(
-    `SELECT \`id\`, \`enquiryId\`, \`chatJid\`, \`waMessageId\`, \`direction\`, \`body\`, \`mediaType\`, \`mediaName\`, \`status\`, \`reaction\`, \`pinnedAt\`, \`revokedAt\`, \`editedAt\`, \`quotedBody\`, \`quotedAuthor\`, \`sentAt\`
+    `SELECT \`id\`, \`enquiryId\`, \`chatJid\`, \`waMessageId\`, \`direction\`, \`body\`, \`mediaType\`, \`mediaName\`, \`status\`, \`reaction\`, \`pinnedAt\`, \`revokedAt\`, \`editedAt\`, \`quotedBody\`, \`quotedAuthor\`, \`sentAt\`, \`rawMessage\`
        FROM \`SalesCrmWhatsAppMessage\`
       WHERE \`enquiryId\` = ? AND \`chatJid\` = ? AND \`deletedAt\` IS NULL
       ORDER BY \`sentAt\` ASC, \`createdAt\` ASC
@@ -465,7 +466,25 @@ async function listMessages(enquiryId, chatJid, limit = 200) {
     id,
     jid,
   );
-  return rows;
+  return rows.map(withMediaDetails);
+}
+
+/**
+ * A row as the panel gets it: what the file is called, how big it is and its small preview, read
+ * from the message WhatsApp delivered - and that message itself dropped, because it holds the key
+ * that decrypts the file and has no business leaving the server.
+ */
+function withMediaDetails({ rawMessage, ...row }) {
+  if (!row.mediaType) return row;
+  const details = mediaDetails(rawMessage, row.mediaType);
+  return {
+    ...row,
+    mediaName: row.mediaName || details.fileName || "",
+    mediaSize: details.size,
+    mediaThumbnail: details.thumbnail,
+    mediaMime: details.contentType,
+    mediaAvailable: Boolean(rawMessage),
+  };
 }
 
 /**
@@ -494,19 +513,19 @@ async function updateMessageStatus(waMessageId, status) {
   announce(await enquiryIdFor({ waMessageId: id }), "status");
 }
 
-// The stored file behind one message, for the endpoint that serves it back.
 /**
  * One message, with everything the media endpoint needs to answer for it.
  *
  * `userId` is what says whose session received the file, and the endpoint refuses to serve one
  * that is not the caller's - leaving it out of the select made that check compare against
- * `undefined` and refuse every attachment, whoever asked. `rawMessage` is what a re-fetch needs
- * to ask WhatsApp for a file again; without it the fallback could never do anything either.
+ * `undefined` and refuse every attachment, whoever asked. `rawMessage` is the file's address and
+ * key on WhatsApp, which is the only way to fetch it; `revokedAt` and `deletedAt` say the message
+ * has been taken back, and its file with it.
  */
 async function getMessage(id) {
   await ensureTable();
   const rows = await prisma.$queryRawUnsafe(
-    "SELECT `id`, `enquiryId`, `userId`, `mediaPath`, `mediaName`, `mediaType`, `rawMessage` FROM `SalesCrmWhatsAppMessage` WHERE `id` = ? LIMIT 1",
+    "SELECT `id`, `enquiryId`, `userId`, `mediaName`, `mediaType`, `rawMessage`, `revokedAt`, `deletedAt` FROM `SalesCrmWhatsAppMessage` WHERE `id` = ? LIMIT 1",
     String(id || "").trim(),
   );
   return rows?.[0] || null;
@@ -599,49 +618,11 @@ async function markRevoked({ id = "", waMessageId = "" }) {
   const enquiryId = await enquiryIdFor({ id, waMessageId });
   await prisma.$executeRawUnsafe(
     `UPDATE \`SalesCrmWhatsAppMessage\`
-        SET \`revokedAt\` = CURRENT_TIMESTAMP(3), \`body\` = NULL, \`mediaPath\` = NULL, \`mediaName\` = NULL, \`reaction\` = NULL
+        SET \`revokedAt\` = CURRENT_TIMESTAMP(3), \`body\` = NULL, \`mediaPath\` = NULL, \`mediaName\` = NULL, \`rawMessage\` = NULL, \`reaction\` = NULL
       WHERE \`${column}\` = ?`,
     value,
   );
   announce(enquiryId, "revoke");
-}
-
-// Where a re-fetched file was written, so the next read comes off disk again.
-async function setMediaPath(id, mediaPath) {
-  await ensureTable();
-  await prisma.$executeRawUnsafe(
-    "UPDATE `SalesCrmWhatsAppMessage` SET `mediaPath` = ? WHERE `id` = ?",
-    String(mediaPath || "") || null,
-    String(id || "").trim(),
-  );
-  // The bubble is already on screen; this is the file arriving underneath it. See
-  // `recordSocketMessage`, which stores the message first and fetches the file afterwards.
-  announce(await enquiryIdFor({ id }), "media");
-}
-
-/**
- * The file that came with an incoming message, attached once it has been fetched.
- *
- * Addressed by WhatsApp's own message id because that is all the download has to go on: the row was
- * written before the file was asked for (see `recordSocketMessage`), so this is the only identifier
- * both halves share.
- *
- * Both columns together - the path is where the bytes went and the name is what the client called
- * it, and a thread showing one without the other is a file nobody can name. `announce` is what puts
- * it on screen under the bubble that is already there.
- */
-async function setIncomingMedia(waMessageId, { mediaPath = "", mediaName = "" } = {}) {
-  const id = String(waMessageId || "").trim();
-  const path = String(mediaPath || "").trim();
-  if (!id || !path) return;
-  await ensureTable();
-  await prisma.$executeRawUnsafe(
-    "UPDATE `SalesCrmWhatsAppMessage` SET `mediaPath` = ?, `mediaName` = ? WHERE `waMessageId` = ?",
-    path,
-    String(mediaName || "").trim() || null,
-    id,
-  );
-  announce(await enquiryIdFor({ waMessageId: id }), "media");
 }
 
 // An edited message keeps its place in the conversation; only what it says changes.
@@ -675,6 +656,4 @@ module.exports = {
   markDeleted,
   markRevoked,
   updateBody,
-  setMediaPath,
-  setIncomingMedia,
 };

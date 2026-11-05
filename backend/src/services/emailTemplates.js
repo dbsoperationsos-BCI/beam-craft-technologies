@@ -308,6 +308,122 @@ ${paragraph(`Regards,<br><strong style="color:${COLOR.heading};">${PRODUCT}</str
   };
 }
 
+/**
+ * The offboarding form, sent to somebody who is leaving.
+ *
+ * Deliberately a quieter letter than the onboarding invite: nobody needs "welcome" wording on their
+ * way out, and the one thing it has to be clear about is what the form decides - the day their
+ * notice starts, and so their last working day. The notice period is stated because it is what HR
+ * asked for when the form was raised, and reading it in the email is how somebody notices it is
+ * wrong before filling anything in.
+ */
+function offboardingInviteEmail({ employeeName, offboardingUrl, expiresAt, noticePeriodDays }) {
+  const expiryText = formatExpiry(expiresAt);
+  const days = Number(noticePeriodDays) || 0;
+  const noticeLine = days === 1 ? "1 day of notice" : `${days} days of notice`;
+
+  const body = `
+<p style="margin:0; font-family:${FONT}; font-size:14px; font-weight:600; letter-spacing:0.06em; text-transform:uppercase; color:${COLOR.accent};">Offboarding form</p>
+<h1 class="dbs-heading" style="margin:8px 0 0; font-family:${FONT}; font-size:24px; line-height:32px; font-weight:700; color:${COLOR.heading};">Hi ${escapeHtml(employeeName)},</h1>
+${paragraph(`Our HR team has raised your offboarding at ${BRAND}. The form below is where you tell us when your notice begins.`)}
+${paragraph(`You are to serve <strong style="color:${COLOR.heading};">${escapeHtml(noticeLine)}</strong>, and the form works out your expected last working day from the date you give it.`)}
+${button(offboardingUrl, "Fill in your offboarding form")}
+${paragraph(`If the button does not work, copy this link into your browser:<br><a href="${escapeHtml(offboardingUrl)}" style="color:${COLOR.accent}; text-decoration:underline; word-break:break-all;">${escapeHtml(offboardingUrl)}</a>`, 20)}
+${notice(`This link expires on <strong>${escapeHtml(expiryText)}</strong>. After that it stops working and our HR team will have to send you a new one.`)}
+${paragraph("Nothing changes until HR has read what you send: they confirm the dates with you, and your last working day is set from that.", 28)}
+${paragraph(`The link is personal to you, so please do not forward it. If you were not expecting this, speak to HR before filling anything in.`, 28)}
+${paragraph(`Regards,<br><strong style="color:${COLOR.heading};">${PRODUCT}</strong><br>${BRAND}`, 28)}`;
+
+  const text = [
+    `Hi ${employeeName},`,
+    "",
+    `Our HR team has raised your offboarding at ${BRAND}. The form below is where you tell us when your notice begins.`,
+    "",
+    `You are to serve ${noticeLine}, and the form works out your expected last working day from the date you give it.`,
+    "",
+    "Fill in your offboarding form:",
+    offboardingUrl,
+    "",
+    `This link expires on ${expiryText}. After that it stops working and our HR team will have to send you a new one.`,
+    "",
+    "Nothing changes until HR has read what you send: they confirm the dates with you, and your last working day is set from that.",
+    "",
+    "The link is personal to you, so please do not forward it. If you were not expecting this, speak to HR before filling anything in.",
+    "",
+    "Regards,",
+    PRODUCT,
+    BRAND,
+    "",
+    "This is an automated message — please do not reply to it.",
+  ].join("\n");
+
+  return {
+    subject: `${BRAND} - Your Offboarding Form`,
+    text,
+    html: layout({
+      title: "Your offboarding form",
+      preheader: `Tell us when your notice begins. This link expires on ${expiryText}.`,
+      body,
+    }),
+  };
+}
+
+/**
+ * The offboarding form handed back for a correction.
+ *
+ * Its own template rather than the invite above sent twice, because what it has to say is different:
+ * the form is not new, nothing they filled in is lost, and the one thing worth reading is HR's
+ * remark saying what to look at. The counterpart of `onboardingSendBackEmail` below, and deliberately
+ * the same shape - somebody asked to come back to a form should meet the same email either end of
+ * their employment.
+ */
+function offboardingSendBackEmail({ employeeName, offboardingUrl, expiresAt, remark }) {
+  const expiryText = formatExpiry(expiresAt);
+
+  const body = `
+<p style="margin:0; font-family:${FONT}; font-size:14px; font-weight:600; letter-spacing:0.06em; text-transform:uppercase; color:${COLOR.accent};">Offboarding form</p>
+<h1 class="dbs-heading" style="margin:8px 0 0; font-family:${FONT}; font-size:24px; line-height:32px; font-weight:700; color:${COLOR.heading};">Hi ${escapeHtml(employeeName)},</h1>
+${paragraph(`Our HR team has sent your offboarding form back for a correction. Everything you filled in is still on it - open the same link, change what needs changing, and send it again.`)}
+${notice(`<strong>What HR has asked you to look at:</strong><br>${escapeHtml(remark || "").replace(/\n/g, "<br>")}`)}
+${button(offboardingUrl, "Open your offboarding form")}
+${paragraph(`If the button does not work, copy this link into your browser:<br><a href="${escapeHtml(offboardingUrl)}" style="color:${COLOR.accent}; text-decoration:underline; word-break:break-all;">${escapeHtml(offboardingUrl)}</a>`, 20)}
+${paragraph(`The link is open until <strong style="color:${COLOR.heading};">${escapeHtml(expiryText)}</strong>.`, 24)}
+${paragraph("Nothing about your employment has changed, and your resignation has not been refused - HR simply needs the form corrected before they confirm your dates.", 28)}
+${paragraph(`Regards,<br><strong style="color:${COLOR.heading};">${PRODUCT}</strong><br>${BRAND}`, 28)}`;
+
+  const text = [
+    `Hi ${employeeName},`,
+    "",
+    "Our HR team has sent your offboarding form back for a correction. Everything you filled in is still on it - open the same link, change what needs changing, and send it again.",
+    "",
+    "What HR has asked you to look at:",
+    remark || "",
+    "",
+    "Open your offboarding form:",
+    offboardingUrl,
+    "",
+    `The link is open until ${expiryText}.`,
+    "",
+    "Nothing about your employment has changed, and your resignation has not been refused - HR simply needs the form corrected before they confirm your dates.",
+    "",
+    "Regards,",
+    PRODUCT,
+    BRAND,
+    "",
+    "This is an automated message - please do not reply to it.",
+  ].join("\n");
+
+  return {
+    subject: `${BRAND} - Your Offboarding Form Needs A Correction`,
+    text,
+    html: layout({
+      title: "Your offboarding form needs a correction",
+      preheader: `HR has sent your form back. The link is open until ${expiryText}.`,
+      body,
+    }),
+  };
+}
+
 /** What an applicant is asked to have to hand, which is far shorter than what a new employee is. */
 const APPLICATION_CHECKLIST = [
   "Your up-to-date résumé, as a PDF or Word file",
@@ -670,4 +786,4 @@ ${paragraph(`Regards,<br><strong style="color:${COLOR.heading};">${SENDER}</stro
   };
 }
 
-module.exports = { clientOnboardingInviteEmail, onboardingInviteEmail, onboardingSendBackEmail, interviewApplicationEmail, interviewApplicationResendEmail, employeeCredentialsEmail, passwordResetEmail, escapeHtml, formatExpiry };
+module.exports = { clientOnboardingInviteEmail, onboardingInviteEmail, onboardingSendBackEmail, interviewApplicationEmail, interviewApplicationResendEmail, employeeCredentialsEmail, passwordResetEmail, escapeHtml, formatExpiry, offboardingInviteEmail, offboardingSendBackEmail };

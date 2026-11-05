@@ -52,14 +52,14 @@ export default function EditEventDialog({ eventId, event, onClose, onSaved }) {
     </>}
   >
     <div className="grid gap-3 sm:grid-cols-2">
-      <TextField label="Event name" required value={form.name} onChange={(e) => set("name")(e.target.value)} error={errors.name} maxLength={191} className="sm:col-span-2" />
-      <TextField label="Event type" required value={form.eventType} onChange={(e) => set("eventType")(e.target.value)} error={errors.eventType} suggestions={EVENT_TYPES.includes(form.eventType) || !form.eventType ? EVENT_TYPES : [form.eventType, ...EVENT_TYPES]} maxLength={60} />
-      <TextField label="Timezone" value={form.timezone} onChange={(e) => set("timezone")(e.target.value)} placeholder="Asia/Kolkata" maxLength={64} />
-      <DateField label="Starts" required value={form.startDate} onChange={set("startDate")} error={errors.startDate} />
-      <DateField label="Ends" value={form.endDate} onChange={set("endDate")} error={errors.endDate} minDate={form.startDate} />
-      <TextField label="Location" value={form.location} onChange={(e) => set("location")(e.target.value)} maxLength={255} className="sm:col-span-2" />
-      <TextAreaField label="Description" value={form.description} onChange={(e) => set("description")(e.target.value)} rows={3} maxLength={4000} className="sm:col-span-2" />
-      <ImageUploadField label="Cover photo" value={cover === undefined ? event.coverUrl || null : cover} onChange={(dataUrl) => setCover(dataUrl || null)} className="sm:col-span-2" compress={{ maxDimension: 1600 }} />
+      <TextField label="Event name" helperText="The name guests see at the top of the event page." required value={form.name} onChange={(e) => set("name")(e.target.value)} error={errors.name} maxLength={191} className="sm:col-span-2" />
+      <TextField label="Event type" helperText="The kind of event; pick a suggestion or type your own." required value={form.eventType} onChange={(e) => set("eventType")(e.target.value)} error={errors.eventType} suggestions={EVENT_TYPES.includes(form.eventType) || !form.eventType ? EVENT_TYPES : [form.eventType, ...EVENT_TYPES]} maxLength={60} />
+      <TextField label="Timezone" helperText="Time zone for the event's dates and times, like Asia/Kolkata." value={form.timezone} onChange={(e) => set("timezone")(e.target.value)} placeholder="Asia/Kolkata" maxLength={64} />
+      <DateField label="Starts" helperText="The first day of the event." required value={form.startDate} onChange={set("startDate")} error={errors.startDate} />
+      <DateField label="Ends" helperText="The last day of the event; leave empty for a one-day event." value={form.endDate} onChange={set("endDate")} error={errors.endDate} minDate={form.startDate} />
+      <TextField label="Location" helperText="The venue and city where the event takes place." value={form.location} onChange={(e) => set("location")(e.target.value)} maxLength={255} className="sm:col-span-2" />
+      <TextAreaField label="Description" helperText="Shown to guests under the event name." value={form.description} onChange={(e) => set("description")(e.target.value)} rows={3} maxLength={4000} className="sm:col-span-2" />
+      <ImageUploadField label="Cover photo" helperText="The banner photo shown at the top of the guest page." value={cover === undefined ? event.coverUrl || null : cover} onChange={(dataUrl) => setCover(dataUrl || null)} className="sm:col-span-2" compress={{ maxDimension: 1600 }} />
     </div>
     {errors.form && <p role="alert" className="mt-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{errors.form}</p>}
   </Dialog>;

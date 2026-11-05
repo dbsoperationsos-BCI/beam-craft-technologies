@@ -105,6 +105,13 @@ function fakeFolderRepository() {
     findFolderByShoot: async (projectShootId) => active().find((item) => item.projectShootId === projectShootId) || null,
     syncProjectShootFolders: async () => {},
     listUploadFilesForPurge: async (projectId, folderIds) => { state.purgeReads.push([...folderIds].sort()); return state.uploads.filter((item) => folderIds.includes(item.folderId)); },
+    // A key is "used elsewhere" when any photo row outside these folders - `state.elsewhere` stands in
+    // for other projects' rows - carries it.
+    keysUsedElsewhere: async (projectId, folderIds, keys) => {
+      const outside = [...state.uploads.filter((item) => !folderIds.includes(item.folderId)), ...(state.elsewhere || [])];
+      const used = new Set(outside.flatMap((item) => [item.thumbnailKey, item.previewKey]));
+      return new Set(keys.filter((key) => used.has(key)));
+    },
     deletionImpact: async (projectId, folderIds) => {
       const inside = state.uploads.filter((item) => folderIds.includes(item.folderId));
       return { photoCount: inside.length, submittedSelectionCount: inside.filter((item) => item.submitted).length };
@@ -147,6 +154,24 @@ test("folder delete cleans exactly the subtree's derivatives and leaves siblings
   // The sibling folder and its photo survive untouched.
   assert.deepEqual(repo.state.folders.map((item) => item.id), ["folder-4"]);
   assert.deepEqual(repo.state.uploads.map((item) => item.previewKey), ["k/keep"]);
+});
+
+// An R2 object another photo row still uses - in another folder or another project - is never taken
+// by a folder's delete; only the objects that were this folder's alone go.
+test("a folder's delete leaves alone every R2 object another photo still uses", async () => {
+  const repo = fakeFolderRepository();
+  repo.state.folders.push(folderRow({ id: "folder-4", parentId: null, name: "Keep" }));
+  repo.state.uploads = [
+    upload({ folderId: "folder-1", previewKey: "k/own", thumbnailKey: "k/own-thumb" }),
+    upload({ folderId: "folder-1", previewKey: "k/shared-sibling" }),
+    upload({ folderId: "folder-1", previewKey: "k/shared-other-project" }),
+    upload({ folderId: "folder-4", previewKey: "k/shared-sibling" }),
+  ];
+  repo.state.elsewhere = [upload({ projectId: "project-2", folderId: "x", previewKey: "k/shared-other-project" })];
+  const cleanup = fakeCleanup();
+  await createFolderService(repo, { cleanup }).remove("project-1", "folder-1");
+  const purged = cleanup.purges[0].flatMap((item) => [item.previewKey, item.thumbnailKey]).filter(Boolean).sort();
+  assert.deepEqual(purged, ["k/own", "k/own-thumb"]);
 });
 
 test("an empty folder deletes without a single storage call worth failing on", async () => {

@@ -1,8 +1,12 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useEffect, useMemo, useState } from "react";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
-import { createExtraQuotation, getExtraQuotationOptions, updateExtraQuotation } from "@/services/sales/extra-quotations.service";
+import useFormErrors from "@/components/shared/useFormErrors";
+import useRemoteOptions from "@/components/shared/useRemoteOptions";
+import { createExtraQuotation, getExtraQuotationOptions, searchExtraQuotationProjects, searchExtraQuotationShoots, updateExtraQuotation } from "@/services/sales/extra-quotations.service";
+import { OTHER_SERVICE, serviceAndDeliverableOptions } from "@/lib/extraQuotationOptions.mjs";
 
 /**
  * Raising an extra: work agreed on top of what a project was sold for.
@@ -17,21 +21,34 @@ import { createExtraQuotation, getExtraQuotationOptions, updateExtraQuotation } 
  */
 
 const today = () => new Date().toISOString().slice(0, 10);
-/**
- * The choice that means "not on the studio's list".
- *
- * A sentinel rather than a real service name, so it can never collide with one the studio adds
- * later — and it is never what gets saved: the typed name is sent in its place, because a row
- * reading "Others" tells a manager approving it nothing at all.
- */
-const OTHER_SERVICE = "__other__";
 
 const initialValues = { projectId: "", shootId: "", service: "", serviceOther: "", amount: "", remarks: "", addedById: "", addedAt: "", proof: [] };
 
-/** The shoots of the project being quoted against — never another project's. */
-const shootsOf = (context, projectId) => (context?.lookups?.shoots || [])
-  .filter((shoot) => shoot.projectId === projectId)
-  .map((shoot) => ({ value: shoot.id, label: `${shoot.shootId} ${shoot.shoot}`.trim() }));
+const shootLabel = (shoot) => `${shoot.shootId} ${shoot.shoot}`.trim();
+const projectLabel = (project) => `${project.eventId}${project.name ? ` — ${project.name}` : ""}`;
+
+/**
+ * The shoots of the project being quoted against — never another project's.
+ *
+ * Searched on the server where the screen offers one (`context.remote`), so the list is not the page
+ * `options` opened on: that was the most recent 200 shoots for the whole studio, which the picker
+ * then filtered down to this project's, so a project whose shoots were all older than the newest 200
+ * offered none at all. The server narrows by `projectId` instead, which is the same rule.
+ */
+const shootsOf = (context, projectId) => {
+  const opened = (context?.lookups?.shoots || []).filter((shoot) => shoot.projectId === projectId);
+  const remote = context?.remote?.shoots;
+  if (!remote) return opened.map((shoot) => ({ value: shoot.id, label: shootLabel(shoot) }));
+  return remote.optionsFor(opened, [context?.values?.shootId], shootLabel);
+};
+
+/** The projects an extra can be raised against: a page to open on, and the rest by typing. */
+const projectsOf = (context) => {
+  const opened = context?.projectRows || [];
+  const remote = context?.remote?.projects;
+  if (!remote) return (context?.options?.projects || []);
+  return remote.optionsFor(opened, [context?.values?.projectId], projectLabel);
+};
 
 const sections = [
   {
@@ -46,9 +63,15 @@ const sections = [
         // Absent when the panel was opened from a project: it is already answered, and a picker
         // offering to change it would be offering to file the extra somewhere else.
         when: (values, context) => !context?.fixedProject,
-        options: "projects",
+        options: (values, context) => projectsOf({ ...context, values }),
         clears: ["shootId"],
-        props: (values, context) => ({ searchable: true, disabled: !(context?.options?.projects || []).length, placeholder: "Which project is this for" }),
+        props: (values, context) => ({
+          searchable: true,
+          // Never disabled while it can be searched: typing is how the rest is reached.
+          disabled: !(context?.options?.projects || []).length && !context?.remote?.projects,
+          placeholder: "Which project is this for",
+          ...(context?.remote?.projects ? context.remote.projects.props : {}),
+        }),
       },
       { name: "projectFixed", type: "custom", colSpan: 2, when: (values, context) => Boolean(context?.fixedProject) },
       // Who the extra belongs to and when it was agreed — asked rather than assumed, because a
@@ -69,29 +92,37 @@ const sections = [
         label: "Shoot",
         type: "select",
         // Optional: an extra agreed for the project as a whole belongs to no one shoot.
-        options: (values, context) => shootsOf(context, values.projectId),
+        options: (values, context) => shootsOf({ ...context, values }, values.projectId),
         props: (values, context) => {
-          const count = shootsOf(context, values.projectId).length;
-          return { searchable: true, disabled: !values.projectId || !count, placeholder: !values.projectId ? "Choose the project first" : count ? "Which shoot is this for" : "This project has no shoots yet" };
+          const count = shootsOf({ ...context, values }, values.projectId).length;
+          const remote = context?.remote?.shoots;
+          return {
+            searchable: true,
+            // The project still has to be chosen first - the shoots are its own - but an empty page
+            // no longer disables the box, since typing is what fetches the rest.
+            disabled: !values.projectId || (!count && !remote),
+            placeholder: !values.projectId ? "Choose the project first" : (count || remote) ? "Which shoot is this for" : "This project has no shoots yet",
+            ...(remote ? remote.props : {}),
+          };
         },
       },
       {
         name: "service",
-        label: "Service",
+        label: "Service / Deliverable",
         type: "select",
         required: true,
         options: "services",
-        props: { searchable: true, placeholder: "Which service is being added" },
+        props: { searchable: true, placeholder: "Which service or deliverable is being added" },
       },
       {
         name: "serviceOther",
-        label: "Which service",
+        label: "Which service or deliverable",
         required: true,
         // Only when the list could not name it. `when` is the schema form's own conditional, so the
         // field is absent rather than disabled when it does not apply — and its answer is dropped
         // on submit if the service is changed back to one from the list.
         when: (values) => values.service === OTHER_SERVICE,
-        props: { placeholder: "Name the service being added", maxLength: 150 },
+        props: { placeholder: "Name the service or deliverable being added", maxLength: 150 },
       },
       { name: "amount", label: "Amount", required: true, props: { type: "number", min: 0, step: "0.01", inputMode: "decimal", placeholder: "0.00" } },
       { name: "remarks", label: "Remarks", type: "textarea", colSpan: 2, props: { rows: 3, placeholder: "What was agreed, and with whom." } },
@@ -131,6 +162,7 @@ export default function ExtraQuotationFormPanel({ project = null, extra = null, 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const fields = useFormErrors();
 
   useEffect(() => {
     let live = true;
@@ -149,7 +181,7 @@ export default function ExtraQuotationFormPanel({ project = null, extra = null, 
            * simply not loaded yet. Without this the picker would open on nothing and a save would
            * quietly replace the typed service with whatever was chosen instead.
            */
-          if (editing && storedService && !(data.services || []).includes(storedService)) {
+          if (editing && storedService && ![...(data.services || []), ...(data.deliverables || [])].includes(storedService)) {
             setForm((current) => ({ ...current, service: OTHER_SERVICE, serviceOther: storedService }));
           }
         })
@@ -159,7 +191,10 @@ export default function ExtraQuotationFormPanel({ project = null, extra = null, 
     return () => { live = false; window.clearTimeout(timer); };
   }, [editing, storedService]);
 
-  const update = (name, value) => setForm((current) => ({ ...current, [name]: value }));
+  const update = (name, value) => {
+    fields.clear(name);
+    setForm((current) => ({ ...current, [name]: value }));
+  };
 
   /*
    * The project this form is settled on, whichever way it was opened: handed in when raising from a
@@ -171,13 +206,26 @@ export default function ExtraQuotationFormPanel({ project = null, extra = null, 
     () => project || (editing ? { id: extra.projectId, eventId: extra.projectCode, name: extra.projectName } : null),
     [editing, extra, project],
   );
+  /*
+   * Both pickers are searched on the server; `options` carries a page for them to open on. The shoot
+   * search is narrowed to the project chosen, which is the form's own rule - an extra belongs to one
+   * project's shoot - rather than a cap.
+   */
+  const remoteProjects = useRemoteOptions(searchExtraQuotationProjects, { read: (data) => data.projects });
+  const remoteShoots = useRemoteOptions(searchExtraQuotationShoots, {
+    read: (data) => data.shoots,
+    args: { projectId: fixedProject?.id || "" },
+  });
+
   const context = useMemo(() => ({
     fixedProject,
+    // The project rows as they come back, for the hook to label one a later search drops.
+    projectRows: options.projects || [],
+    remote: { projects: remoteProjects, shoots: remoteShoots },
     options: {
       projects: (options.projects || []).map((item) => ({ value: item.id, label: `${item.eventId}${item.name ? ` — ${item.name}` : ""}` })),
-      // Last, after the studio's own list, so it reads as the way out rather than a service.
-      services: [...(options.services || []).map((name) => ({ value: name, label: name })), { value: OTHER_SERVICE, label: "Others" }],
-      employees: (options.employees || []).map((person) => ({ value: String(person.id), label: `${person.employeeName}${person.employeeId ? ` · ${person.employeeId}` : ""}` })),
+      services: serviceAndDeliverableOptions(options.services, options.deliverables),
+      employees: (options.employees || []).map((person) => ({ value: String(person.id), label: `${person.employeeName}${person.employeeId ? ` · ${person.employeeId}` : ""}`, avatar: avatarOf(person) })),
     },
     // The shoot list is narrowed to the project chosen, so the records themselves are kept rather
     // than a ready-made option list.
@@ -191,17 +239,21 @@ export default function ExtraQuotationFormPanel({ project = null, extra = null, 
         <span className="text-[11px] text-slate-500 sm:text-xs">{editing ? "An extra stays on the project it was raised against." : "The project this was opened from."}</span>
       </div>,
     },
-  }), [editing, fixedProject, options]);
+  }), [editing, fixedProject, options, remoteProjects, remoteShoots]);
 
   async function submit(event) {
     event.preventDefault();
-    if (!form.projectId) return setError("Choose the project this extra is for.");
-    if (!form.service) return setError("Choose the service being added.");
+    setError("");
     const service = form.service === OTHER_SERVICE ? form.serviceOther.trim() : form.service;
-    if (!service) return setError("Name the service being added.");
-    if (!(Number(form.amount) > 0)) return setError("Enter an amount greater than zero.");
-    if (!form.addedById) return setError("Choose the employee who added this extra.");
-    if (!form.addedAt) return setError("Enter the date this extra was added.");
+    // Each problem under its own box; the panel's top line says only how many.
+    if (!fields.check({
+      projectId: form.projectId ? "" : "Choose the project this extra is for.",
+      service: form.service ? "" : "Choose the service or deliverable being added.",
+      serviceOther: form.service === OTHER_SERVICE && !service ? "Name the service or deliverable being added." : "",
+      amount: Number(form.amount) > 0 ? "" : "Enter an amount greater than zero.",
+      addedById: form.addedById ? "" : "Choose the employee who added this extra.",
+      addedAt: form.addedAt ? "" : "Enter the date this extra was added.",
+    })) return;
 
     setSaving(true);
     setError("");
@@ -221,6 +273,7 @@ export default function ExtraQuotationFormPanel({ project = null, extra = null, 
       const code = result?.data?.requestCode || "The extra";
       onCreated?.(result?.data, editing ? `${code} updated.` : `${code} raised. It is waiting for the project manager's approval.`);
     } catch (requestError) {
+      if (fields.fromServer(requestError)) return;
       setError(requestError.data?.message || requestError.message || `Unable to ${editing ? "update" : "raise"} this extra quotation.`);
     } finally {
       setSaving(false);
@@ -235,12 +288,13 @@ export default function ExtraQuotationFormPanel({ project = null, extra = null, 
     sections={sections}
     values={form}
     onChange={update}
+    errors={fields.errors}
     context={context}
     sidebarAriaLabel="Extra quotation sections"
     closeAriaLabel="Close extra quotation form"
     onClose={onClose}
     onSubmit={submit}
-    error={error}
+    error={error || fields.summary}
     saving={saving}
     loading={loading}
     loadingLabel="Loading the pickers..."

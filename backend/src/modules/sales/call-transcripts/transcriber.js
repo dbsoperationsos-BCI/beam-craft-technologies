@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const ffmpegPath = require("ffmpeg-static");
+const { isWindowsAppAlias } = require("../../../services/windowsAppAlias");
 
 /**
  * Turning a recording into timestamped text, on this server and at no per-minute cost.
@@ -86,6 +87,8 @@ function pythonBin() {
   let firstThatRuns = null;
   for (const candidate of PYTHON_CANDIDATES) {
     if (candidate.includes(path.sep) && !fsSync.existsSync(candidate)) continue;
+    // Spawning a Windows Store alias makes Node abort on the next spawn; see services/windowsAppAlias.
+    if (isWindowsAppAlias(candidate)) continue;
     const runs = spawnSync(candidate, ["--version"], { timeout: 10_000 }).status === 0;
     if (!runs) continue;
     if (!firstThatRuns) firstThatRuns = candidate;

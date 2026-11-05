@@ -42,11 +42,16 @@ function normalizeHeader(value) {
  * `parse` is for the handful of shapes a spreadsheet cell cannot hold directly: a list of skills in
  * one cell, a yes/no that means a boolean. Everything else arrives as the trimmed string and is
  * left to the schema to coerce, which is what keeps this from having opinions of its own.
+ *
+ * `aliases` are the headings the column used to carry (`headingsOf`). It has to be declared here or
+ * the parse below strips it off the definition and the old heading silently stops being read - the
+ * exact failure the aliases exist to prevent.
  */
 const columnSchema = z.object({
   field: z.string().min(1),
   label: z.string().min(1),
   required: z.boolean().optional(),
+  aliases: z.array(z.string().min(1)).optional(),
   parse: z.function().optional(),
 });
 
@@ -60,6 +65,17 @@ const asList = (value) => String(value ?? "").split(/[;,]/).map((part) => part.t
  * record - which is not the same as sending it empty. A schema with a default, or a field the
  * module fills in itself, must not be overwritten with "" just because the file was silent about it.
  */
+/**
+ * Every heading a column answers to: the one the template prints, and the ones it used to.
+ *
+ * A column renamed is a column the studio's saved spreadsheets no longer carry. Headings are matched
+ * by name, so without this a rename turns last month's file into one with an unknown column and a
+ * field silently left empty - the import succeeds and the data is simply not there, which is the
+ * worst of the three possible outcomes. `aliases` keeps the old spelling working; the template and
+ * every message still say the current name.
+ */
+const headingsOf = (column) => [column.label, ...(column.aliases || [])].map(normalizeHeader).filter(Boolean);
+
 function mapHeaders(columns, headerRow = []) {
   const seen = new Map();
   headerRow.forEach((heading, index) => {
@@ -71,7 +87,8 @@ function mapHeaders(columns, headerRow = []) {
   const mapped = [];
   const missing = [];
   for (const column of columns) {
-    const index = seen.get(normalizeHeader(column.label));
+    // The current name first, so a file carrying both the old and the new heading reads the new one.
+    const index = headingsOf(column).map((heading) => seen.get(heading)).find((at) => at !== undefined);
     if (index === undefined) {
       if (column.required) missing.push(column.label);
       continue;
@@ -80,7 +97,7 @@ function mapHeaders(columns, headerRow = []) {
   }
   // Headings the file carries that no column claims. Not an error - a studio's own spreadsheet
   // carries notes columns - but worth saying, because a misspelled heading looks like a lost column.
-  const claimed = new Set(columns.map((column) => normalizeHeader(column.label)));
+  const claimed = new Set(columns.flatMap(headingsOf));
   const unknown = headerRow.filter((heading) => normalizeHeader(heading) && !claimed.has(normalizeHeader(heading)));
   return { mapped, missing, unknown };
 }
@@ -118,6 +135,40 @@ function firstIssue(error, labels) {
   return missing ? `${label} is required.` : `${label}: ${issue.message}`;
 }
 
+/*
+ * ── Importing a row the file got wrong ────────────────────────────────────────────────────────
+ *
+ * `lenient` is the dialog's "Import rows with errors": a cell the schema refuses is **dropped** and
+ * the row imported without it, rather than the row being thrown away for one bad cell. An old sheet
+ * carries a decade of typing - a date written as a place, a number with a letter in it - and the
+ * studio would rather have the row with that cell empty than not have the row.
+ *
+ * Each pass drops the cells the schema itself named and parses again, so only the cells actually
+ * refused are emptied and the rest of the row arrives as the file wrote it. It parses again because a
+ * rule across fields can only speak once the cell it tripped over is gone. A field the schema
+ * **requires** cannot be dropped - there is no record without it - so the row is still refused, and
+ * said to be. `dropped` names the columns emptied, per row, so nothing is lost silently.
+ */
+const MAX_DROPS = 40;
+
+async function parseLeniently(schema, record, labels) {
+  const dropped = [];
+  let data = { ...record };
+  for (let attempt = 0; attempt <= MAX_DROPS; attempt += 1) {
+    const parsed = await schema.safeParseAsync(data);
+    if (parsed.success) return { success: true, data: parsed.data, dropped };
+    const fields = [...new Set(parsed.error.issues.map((issue) => (Array.isArray(issue.path) && issue.path.length ? issue.path[0] : "")))]
+      // A field already absent is one the schema requires: dropping it again would loop for ever.
+      .filter((field) => field && data[field] !== undefined);
+    if (!fields.length) return { success: false, error: parsed.error, dropped };
+    for (const field of fields) {
+      delete data[field];
+      dropped.push(labels.get(field) || field);
+    }
+  }
+  return { success: false, error: new Error("too many cells could not be read"), dropped };
+}
+
 // Rows per pass. Large enough that a thousand-row file is a handful of passes, small enough that a
 // failure part-way through has not held a transaction open across the whole file.
 const IMPORT_SLICE = 200;
@@ -132,7 +183,7 @@ const IMPORT_SLICE = 200;
  * A row that throws is counted and described rather than ending the run - a file is usually right
  * apart from a few rows, and refusing all of it means finding them by bisection.
  */
-async function importTableRows({ headers = [], rows = [], columns = [], schema, create, startRow = 2 } = {}) {
+async function importTableRows({ headers = [], rows = [], columns = [], schema, create, startRow = 2, lenient = false } = {}) {
   const definitions = z.array(columnSchema).parse(columns);
   const { mapped, missing, unknown } = mapHeaders(definitions, headers);
 
@@ -149,7 +200,7 @@ async function importTableRows({ headers = [], rows = [], columns = [], schema, 
 
   // Field -> the heading the studio reads, so a refusal names the column rather than the field.
   const labels = new Map(definitions.map((column) => [column.field, column.label]));
-  const result = { received: rows.length, imported: 0, skipped: 0, errors: [], unknownColumns: unknown };
+  const result = { received: rows.length, imported: 0, skipped: 0, errors: [], unknownColumns: unknown, emptied: [] };
 
   for (let offset = 0; offset < rows.length; offset += IMPORT_SLICE) {
     for (const [position, row] of rows.slice(offset, offset + IMPORT_SLICE).entries()) {
@@ -163,17 +214,21 @@ async function importTableRows({ headers = [], rows = [], columns = [], schema, 
       // Async, because a schema may ask the database - the cash-entry one checks the payment mode
       // against the studio's own list. A synchronous parse of such a schema does not fail the row,
       // it throws, outside the per-row catch below, and every import answered 500 on its first row.
-      const parsed = await schema.safeParseAsync(rowToRecord(mapped, row));
+      const record = rowToRecord(mapped, row);
+      const parsed = lenient
+        ? await parseLeniently(schema, record, labels)
+        : await schema.safeParseAsync(record);
       if (!parsed.success) {
         result.skipped += 1;
         // Capped: a file whose every row fails would otherwise return a response as long as itself.
         if (result.errors.length < 50) result.errors.push({ row: rowNumber, message: firstIssue(parsed.error, labels) });
         continue;
       }
-
       try {
         await create(parsed.data, rowNumber);
         result.imported += 1;
+        // Said once the row is actually in, rather than beside a row that then failed to save.
+        if (parsed.dropped?.length && result.emptied.length < 50) result.emptied.push({ row: rowNumber, columns: parsed.dropped });
       } catch (error) {
         result.skipped += 1;
         if (result.errors.length < 50) result.errors.push({ row: rowNumber, message: error?.message || "This row could not be saved." });

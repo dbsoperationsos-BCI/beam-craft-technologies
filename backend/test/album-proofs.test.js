@@ -859,6 +859,40 @@ test("the PIN gate: wrong PIN refused, brute force rate limited, expiry and revo
   await assert.rejects(clientService.meta("B".repeat(43)), (error) => error.status === 404);
 });
 
+test("Reset PIN ends the sessions the old PIN opened; a session from before the marker still works", async () => {
+  const { album, clientService, credentials, token } = await clientFixture();
+  const session = await clientService.verifyPin(token, credentials.pin, "1.2.3.4");
+  const header = `Bearer ${session.sessionToken}`;
+  assert.equal((await clientService.requireCurrentSession(token, header)).proofToken, token);
+  // A token signed the old way - no PIN marker - is a client already in the proof before this shipped.
+  const live = await clientService.resolve(token);
+  const legacy = `Bearer ${proofSecurity.signSession(token, live.publication.id, album.id)}`;
+  await clientService.resetPin(album.id, user);
+  await assert.rejects(clientService.requireCurrentSession(token, header), (error) => error.status === 401 && /enter the PIN again/.test(error.message));
+  assert.equal((await clientService.requireCurrentSession(token, legacy)).proofToken, token);
+  // A session naming another publication than the one the link now resolves to is refused too.
+  const other = `Bearer ${proofSecurity.signSession(token, "another-publication", album.id)}`;
+  await assert.rejects(clientService.requireCurrentSession(token, other), (error) => error.status === 401);
+});
+
+test("the PIN attempt meter is keyed on the caller's address behind the proxy, not the proxy's", async () => {
+  const controller = require("../src/modules/image-selection/album-proofs/public.controller");
+  const original = proofSecurity.registerPinAttempt;
+  const previous = process.env.TRUST_PROXY_HEADER;
+  let address = null;
+  proofSecurity.registerPinAttempt = (_hash, seen) => { address = seen; const error = new Error("stop"); error.status = 429; throw error; };
+  process.env.TRUST_PROXY_HEADER = "true";
+  try {
+    const res = { status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+    await controller.verifyPin({ params: { token: "A".repeat(43) }, body: { pin: "1234" }, ip: "127.0.0.1", headers: { "x-forwarded-for": "203.0.113.9" } }, res);
+    assert.equal(res.statusCode, 429);
+    assert.equal(address, "203.0.113.9");
+  } finally {
+    proofSecurity.registerPinAttempt = original;
+    if (previous === undefined) delete process.env.TRUST_PROXY_HEADER; else process.env.TRUST_PROXY_HEADER = previous;
+  }
+});
+
 test("client corrections: add, edit and delete freely before submission — never after", async () => {
   const { repo, clientService, token } = await clientFixture();
   const proof = await clientService.proof(token);

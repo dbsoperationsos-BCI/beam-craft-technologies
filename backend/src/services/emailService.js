@@ -1,4 +1,4 @@
-const { clientOnboardingInviteEmail, employeeCredentialsEmail, onboardingInviteEmail, onboardingSendBackEmail, interviewApplicationEmail, interviewApplicationResendEmail, passwordResetEmail } = require("./emailTemplates");
+const { clientOnboardingInviteEmail, employeeCredentialsEmail, onboardingInviteEmail, onboardingSendBackEmail, offboardingInviteEmail, offboardingSendBackEmail, interviewApplicationEmail, interviewApplicationResendEmail, passwordResetEmail } = require("./emailTemplates");
 const { pool } = require("./smtpPool");
 const { createSettingsService } = require("../modules/image-selection/settings/service");
 
@@ -67,6 +67,17 @@ async function sendOnboardingInviteEmail({ candidateName, email, onboardingUrl, 
 }
 
 /**
+ * The form somebody leaving fills in: when their notice begins, and why they are going.
+ *
+ * Sent to the address the studio actually reaches them on - their own `emailId`, not the login
+ * address, which stops working the day they are relieved.
+ */
+async function sendOffboardingInviteEmail({ employeeName, email, offboardingUrl, expiresAt, noticePeriodDays }) {
+  const { subject, text, html } = offboardingInviteEmail({ employeeName, offboardingUrl, expiresAt, noticePeriodDays });
+  return deliver({ to: email, subject, text, html });
+}
+
+/**
  * Sent Back: the candidate already submitted once, HR read it and asked for changes. Deliberately
  * a different template from the invite above rather than the same mail resent — "complete your
  * onboarding" a second time reads as the form having lost what they typed, when what actually
@@ -109,10 +120,22 @@ async function sendPasswordResetEmail({ name, email, resetUrl, expiresAt }) {
   return deliver({ to: email, subject, text, html });
 }
 
+/**
+ * The offboarding form handed back for a correction, on the same link it was sent on.
+ *
+ * Beside `sendOffboardingInviteEmail` and shaped like `sendOnboardingSendBackEmail`: one template,
+ * one address - the employee's own, never their login - and the caller decides what a refusal means.
+ * Here it means only that they have not been told; the form is already open again.
+ */
+async function sendOffboardingSendBackEmail({ employeeName, email, offboardingUrl, expiresAt, remark }) {
+  const { subject, text, html } = offboardingSendBackEmail({ employeeName, offboardingUrl, expiresAt, remark });
+  return sendMail({ to: email, subject, text, html });
+}
+
 /** Beam Craft's invite to a client company (Client Details -> Create Onboarding Invite -> Send Invite). */
 async function sendClientOnboardingInviteEmail({ contactName, email, onboardingUrl, expiresAt }) {
   const { subject, text, html } = clientOnboardingInviteEmail({ contactName, onboardingUrl, expiresAt });
   return deliver({ to: email, subject, text, html });
 }
 
-module.exports = { sendClientOnboardingInviteEmail, sendEmployeeCredentialsEmail, sendOnboardingInviteEmail, sendOnboardingSendBackEmail, sendInterviewApplicationEmail, sendInterviewApplicationResendEmail, sendPasswordResetEmail };
+module.exports = { sendClientOnboardingInviteEmail, sendEmployeeCredentialsEmail, sendOffboardingSendBackEmail, sendOnboardingInviteEmail, sendOffboardingInviteEmail, sendOnboardingSendBackEmail, sendInterviewApplicationEmail, sendInterviewApplicationResendEmail, sendPasswordResetEmail };

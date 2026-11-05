@@ -1,4 +1,5 @@
 import { isVisible, visibleFields } from "./schemaVisibility.mjs";
+import { markedFieldsMessage } from "../../lib/formErrors.mjs";
 
 /**
  * ── Which required fields a form has not been given, and where each one is ───────────────────
@@ -69,7 +70,11 @@ export default function requiredProblems(sections, leadFields, values, context) 
   let foundOne = false;
 
   for (const [field, sectionId] of fieldsWithSection(sections, leadFields, values, context)) {
-    if (!field.required || !JUDGEABLE(field)) continue;
+    // Resolved the way the panel draws it: a `required` that depends on the answers (or on the record
+    // the form is about) must be asked the same question here, or the check would refuse a field the
+    // panel never marked.
+    const required = typeof field.required === "function" ? field.required(values, context) : field.required;
+    if (!required || !JUDGEABLE(field)) continue;
     if (!isBlank(values?.[field.name])) continue;
 
     marks[field.name] = "Required";
@@ -84,9 +89,11 @@ export default function requiredProblems(sections, leadFields, values, context) 
   return { marks, firstSectionId, labels, hasProblems: labels.length > 0 };
 }
 
-/** "Complete required fields: A, B, C..." - the sentence the app already used for this. */
+/**
+ * "Check the 3 fields marked in red." - the line above a refused form, the app's one convention
+ * (`lib/formErrors.mjs`). Each field already says "Required" under itself, so naming them again
+ * at the top only made the reader match names to boxes.
+ */
 export function describeMissing(labels) {
-  if (!labels.length) return "";
-  const shown = labels.slice(0, 3).join(", ");
-  return `Complete required fields: ${shown}${labels.length > 3 ? "..." : ""}`;
+  return markedFieldsMessage(labels.length);
 }

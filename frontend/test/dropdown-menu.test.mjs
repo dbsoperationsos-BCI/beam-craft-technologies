@@ -150,7 +150,7 @@ test("a menu is exactly as wide as the control it hangs from", () => {
 
 test("a switch trigger is sized by its own options, not by a fixed floor", () => {
   const dropdown = fs.readFileSync(new URL("../src/components/shared/Dropdown.js", import.meta.url), "utf8");
-  const switchClass = dropdown.slice(dropdown.indexOf("    : `flex min-h-9"), dropdown.indexOf("  /*\n   * What the closed trigger reads"));
+  const switchClass = dropdown.slice(dropdown.indexOf("    : `flex w-full items-center rounded-lg bg-white font-medium"), dropdown.indexOf("  /*\n   * What the closed trigger reads"));
 
   assert.match(switchClass, /w-full/, "a switch that does not fill its box resizes as you choose from it");
   assert.doesNotMatch(switchClass, /min-w-\d/, "a fixed floor leaves spare width behind the chevron of every shorter switch");

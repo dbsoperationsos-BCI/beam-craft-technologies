@@ -60,7 +60,7 @@ test("the readiness check never throws, whatever is configured", () => {
   delete process.env.PYTHON_BIN;
 });
 
-test("a missing package is reported with the interpreter and the install command", () => {
+test("a missing package is reported with the interpreter and the install command", (t) => {
   /*
    * The message somebody actually has to act on. "faster-whisper is not installed" sends them to
    * install a package that is usually already installed - for a different interpreter.
@@ -70,7 +70,11 @@ test("a missing package is reported with the interpreter and the install command
   assert.strictEqual(probe.status, 0, "sanity");
 
   // `-S` skips site-packages, so the import fails on an interpreter that otherwise has the package.
-  const out = spawnSync("python3", ["-S", script, "--audio", "/dev/null"], { encoding: "utf8", timeout: 30_000 });
+  // Windows installs Python 3 as `python`; the server, and macOS, as `python3`.
+  const python = process.platform === "win32" ? "python" : "python3";
+  const out = spawnSync(python, ["-S", script, "--audio", "/dev/null"], { encoding: "utf8", timeout: 30_000 });
+  // No Python at all - absent, or Windows' Microsoft Store alias (exit 9009), which runs nothing.
+  if (out.error?.code === "ENOENT" || out.status === 9009) return t.skip(`${python} is not installed`);
   const line = (out.stdout || "").trim().split("\n").pop();
   const parsed = JSON.parse(line);
   assert.strictEqual(parsed.error, "FASTER_WHISPER_MISSING");

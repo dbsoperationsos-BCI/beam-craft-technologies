@@ -83,11 +83,22 @@ async function split(eventId, personId, faceIds, user) {
 /** Naming a person as a guest: their photos become that guest's photos, at CONFIRMED. */
 async function linkGuest(eventId, personId, guestId, user) {
   await loadEvent(eventId); const person = await personIn(eventId, personId);
+  let guest = null;
   if (guestId) {
-    const guest = await prisma.aiEventGuest.findFirst({ where: { id: guestId, eventId }, select: { id: true, name: true } });
+    guest = await prisma.aiEventGuest.findFirst({ where: { id: guestId, eventId }, select: { id: true, name: true } });
     if (!guest) throw httpError(404, "Guest not found.");
+  }
+  // The guest this person was linked to loses the photos the link gave them - only those: a match a
+  // selfie or the face pipeline found stays, and so does a rejection (a rejected match stays rejected).
+  if (person.guestId && person.guestId !== guestId) {
+    await prisma.aiEventFaceMatch.deleteMany({ where: { eventId, personId, guestId: person.guestId, source: "PERSON_LINK", status: { not: "REJECTED" } } });
+    await matching.recountGuest(person.guestId);
+  }
+  if (guest) {
     await prisma.aiEventPerson.update({ where: { id: personId }, data: { guestId, label: person.label || guest.name } });
     await matching.relinkPersonToGuest(eventId, personId, guestId, await aiFor(eventId));
+    // The confirmed photos the link gave are news for the guest's summary (processing/runs.js; never throws).
+    require("../processing/runs").touch(eventId);
     await activity.record(eventId, activity.EVENTS.PERSON_LINKED, activity.staffActor(user), `${person.label || personId} → ${guest.name}`);
   } else {
     await prisma.aiEventPerson.update({ where: { id: personId }, data: { guestId: null } });

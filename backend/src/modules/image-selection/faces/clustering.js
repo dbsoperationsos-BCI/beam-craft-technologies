@@ -74,22 +74,27 @@ async function assignAndPersist(projectId, imageId, faces, { threshold }) {
 /**
  * Face counts and covers from the mappings a person actually holds, after a photo's mappings were
  * cleared or its row deleted. A person left with no photo is removed - the People row would
- * otherwise offer a circle that filters to nothing. The centroid is left as it stands: no per-face
- * vector is kept in Phase 1, and a mean over one fewer face is not worth a second engine run.
+ * otherwise offer a circle that filters to nothing - UNLESS the photographer gave them a role: a
+ * photo being re-described (its preview made again, a workstation re-posting its faces) empties
+ * its person for a moment, and a role the photographer set must outlive that moment, so a roled
+ * person keeps the row and the centroid, is hidden by the zero count, and is matched again when
+ * the face comes back. The centroid is left as it stands: no per-face vector is kept in Phase 1,
+ * and a mean over one fewer face is not worth a second engine run. `client` is injectable for
+ * the tests.
  */
-async function recount(projectId, personIds) {
+async function recount(projectId, personIds, client = prisma) {
   for (const personId of new Set(personIds.filter(Boolean))) {
-    const mappings = await prisma.imageSelectionFaceMapping.findMany({ where: { projectId, personId }, select: { imageId: true, box: true, quality: true } });
-    if (!mappings.length) { await prisma.imageSelectionFacePerson.deleteMany({ where: { id: personId, projectId } }); continue; }
-    const person = await prisma.imageSelectionFacePerson.findFirst({ where: { id: personId, projectId }, select: { coverImageId: true } });
+    const mappings = await client.imageSelectionFaceMapping.findMany({ where: { projectId, personId }, select: { imageId: true, box: true, quality: true } });
+    if (!mappings.length) { await client.imageSelectionFacePerson.deleteMany({ where: { id: personId, projectId, role: null } }); continue; }
+    const person = await client.imageSelectionFacePerson.findFirst({ where: { id: personId, projectId }, select: { coverImageId: true } });
     if (!person) continue;
     const coverStands = person.coverImageId && mappings.some((mapping) => mapping.imageId === person.coverImageId);
     const best = mappings.reduce((top, mapping) => (!top || mapping.quality > top.quality ? mapping : top), null);
-    await prisma.imageSelectionFacePerson.update({ where: { id: personId }, data: { faceCount: mappings.length, ...(coverStands ? {} : { coverImageId: best.imageId, coverBox: best.box, coverQuality: best.quality }) } });
+    await client.imageSelectionFacePerson.update({ where: { id: personId }, data: { faceCount: mappings.length, ...(coverStands ? {} : { coverImageId: best.imageId, coverBox: best.box, coverQuality: best.quality }) } });
   }
 }
 
-/** People whose photos have all been deleted since - the database cascades their mappings away, and this takes the person. */
-const sweepEmptyPeople = (projectId) => prisma.imageSelectionFacePerson.deleteMany({ where: { projectId, mappings: { none: {} } } });
+/** People whose photos have all been deleted since - the database cascades their mappings away, and this takes the person; one with a role is kept (see recount). */
+const sweepEmptyPeople = (projectId, client = prisma) => client.imageSelectionFacePerson.deleteMany({ where: { projectId, mappings: { none: {} }, role: null } });
 
 module.exports = { decide, assignAndPersist, recount, sweepEmptyPeople };

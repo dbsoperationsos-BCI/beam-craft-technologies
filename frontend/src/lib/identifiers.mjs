@@ -106,6 +106,8 @@ export const SCHEMES = {
   EMPLOYEE_REFERRAL: { tag: "REF", parts: [], width: 6, label: "Referral ID" },
   VENDOR: { tag: "VNMGMT", parts: [], width: 6, label: "Vendor ID" },
   CLIENT_STORAGE: { tag: "STOMGMT", parts: [], width: 6, label: "Storage ID" },
+  // Neither a vertical nor a branch: confidential to HR, studio-wide. Five digits, not six.
+  SPEAK_UP: { tag: "SPK", parts: [], width: 5, label: "Speak-up ID" },
 };
 
 /** The codes a scheme's identifier carries, in order, read through the aliases above. */

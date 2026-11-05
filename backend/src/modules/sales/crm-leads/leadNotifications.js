@@ -1,5 +1,6 @@
 const prisma = require("../../../config/db");
 const notifications = require("../../../services/notifications");
+const { lookups: referenceLookups } = require("../../../services/referenceMatchers");
 
 /*
  * ── Telling somebody a lead is theirs ─────────────────────────────────────────────────────────
@@ -10,16 +11,17 @@ const notifications = require("../../../services/notifications");
  * on whether they happened to look - which for a lead handed over at five o'clock means the next
  * morning, and for a busy board means never.
  *
- * ── Matched by name, and that is the CRM's own compromise ──
+ * ── Resolved through the employee, the way every other reader of a CRM name is ──
  *
- * `sales_crm_lead` records who is working a lead as a **name** in its `crm` column, not as a user id.
- * Every other reader of that fact makes the same match - the Reports module wherever it groups by a
- * person, and the bell's own follow-up source in ../../notifications/sources.js - so this one does
- * too rather than inventing a second rule. It is stated here rather than hidden: two logins under
- * one name would both be told, and a name on a lead that belongs to no login is told nobody.
- *
- * Matching is done in the database, trimmed and case-folded, because the name on a lead is text a
- * person typed or a sheet supplied and "Priya S" and "priya s " are the same salesperson.
+ * `sales_crm_lead` records who is working a lead as text in its `crm` column - a name, a login
+ * username or an employee id, whatever the form, the sheet or the file supplied - and every reader
+ * of that text resolves it with `referenceMatchers`, the one rule the board, the backfill and every
+ * write path share. So does this: the text names an **employee**, and the notice goes to the active
+ * login linked to them. Matching `user.name` directly, as this first did, was a second rule, and it
+ * showed: a lead assigned by username told nobody, and a login renamed on one screen and not the
+ * other was told about the wrong person's leads. The login's own display name is kept only as the
+ * fallback for a name the matcher cannot place, so a Super Admin with no employee record can still
+ * be told.
  *
  * ── Never allowed to break the write it reports on ──
  *
@@ -39,31 +41,56 @@ const notifications = require("../../../services/notifications");
 async function userIdForCrmName(name) {
   const wanted = String(name || "").trim();
   if (!wanted) return null;
-  const [row] = await prisma.$queryRawUnsafe(
-    "SELECT `id` FROM `user` WHERE LOWER(TRIM(`name`)) = LOWER(TRIM(?)) AND `status` = 'ACTIVE' ORDER BY `id` ASC LIMIT 1",
-    wanted,
-  );
-  return row ? Number(row.id) : null;
+  return (await userIdsForCrmNames([wanted])).get(wanted) ?? null;
 }
 
-/** The same lookup for several names at once, as a `name -> user id` map. One query, not N. */
+/**
+ * The same lookup for several names at once, as a `name -> user id` map.
+ *
+ * Resolved the way every other reader of a CRM name resolves it: the text is matched to an
+ * **employee** by `referenceMatchers` - employee id, login username or full name, the one rule the
+ * board, the backfill and every write path share - and the notice goes to the active login linked
+ * to that employee. Matching `user.name` directly, as this did, was a second rule: it found
+ * nobody for a lead assigned by employee id or username, and found the wrong somebody when a login
+ * had been renamed on one screen and not the other. A name the matcher cannot place falls back to
+ * the login's own name, so a Super Admin with no employee record can still be told.
+ */
 async function userIdsForCrmNames(names = []) {
   const wanted = [...new Set(names.map((name) => String(name || "").trim()).filter(Boolean))];
   if (!wanted.length) return new Map();
   try {
-    const rows = await prisma.$queryRawUnsafe(
-      "SELECT `id`, `name` FROM `user` WHERE `status` = 'ACTIVE'"
-      + ` AND LOWER(TRIM(\`name\`)) IN (${wanted.map(() => "LOWER(TRIM(?))").join(", ")})`,
-      ...wanted,
-    );
-    const byFolded = new Map();
-    for (const row of rows) {
-      const key = String(row.name || "").trim().toLowerCase();
-      // First id wins, so two logins sharing a name resolve the same way here and in the singular
-      // lookup above rather than depending on which the database happened to return first.
-      if (!byFolded.has(key)) byFolded.set(key, Number(row.id));
+    const refs = await referenceLookups();
+    const employeeFor = new Map(wanted.map((name) => [name, refs.employeeId(name)]));
+    const employeeIds = [...new Set([...employeeFor.values()].filter(Boolean))];
+    const linked = employeeIds.length
+      ? await prisma.user.findMany({ where: { linkedEmployeeId: { in: employeeIds }, status: "ACTIVE" }, select: { id: true, linkedEmployeeId: true }, orderBy: { id: "asc" } })
+      : [];
+    const loginOfEmployee = new Map();
+    for (const row of linked) if (!loginOfEmployee.has(row.linkedEmployeeId)) loginOfEmployee.set(row.linkedEmployeeId, row.id);
+
+    const resolved = new Map();
+    const unplaced = [];
+    for (const name of wanted) {
+      const userId = loginOfEmployee.get(employeeFor.get(name)) ?? null;
+      if (userId) resolved.set(name, userId);
+      else unplaced.push(name);
     }
-    return new Map(wanted.map((name) => [name, byFolded.get(name.trim().toLowerCase()) ?? null]));
+    if (unplaced.length) {
+      const rows = await prisma.$queryRawUnsafe(
+        "SELECT `id`, `name` FROM `user` WHERE `status` = 'ACTIVE'"
+        + ` AND LOWER(TRIM(\`name\`)) IN (${unplaced.map(() => "LOWER(TRIM(?))").join(", ")})`,
+        ...unplaced,
+      );
+      const byFolded = new Map();
+      for (const row of rows) {
+        const key = String(row.name || "").trim().toLowerCase();
+        // First id wins, so two logins sharing a name always resolve the same way rather than
+        // depending on which the database happened to return first.
+        if (!byFolded.has(key)) byFolded.set(key, Number(row.id));
+      }
+      for (const name of unplaced) resolved.set(name, byFolded.get(name.toLowerCase()) ?? null);
+    }
+    return resolved;
   } catch (error) {
     console.warn("Unable to resolve CRM names to logins:", error?.message || error);
     return new Map();

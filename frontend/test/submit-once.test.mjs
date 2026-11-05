@@ -83,7 +83,7 @@ test("the lead popup cannot skip two leads on one double-click", () => {
   assert.match(CRM, /const \{ busy: updatingLead, run: runUpdateLead \} = useSubmitOnce\(\);/);
   // Refused at the top of `attemptSave`, before the phone-clash dialog or the note commit can run
   // a second time.
-  assert.match(CRM, /function attemptSave\(closeAfter, advanceAfter, forcedStatus\) \{[\s\S]{0,700}?if \(updatingLead\) return;/);
+  assert.match(CRM, /function attemptSave\(closeAfter, advanceAfter, forcedStatus, moveConfirmed = false\) \{[\s\S]{0,700}?if \(updatingLead\) return;/);
   assert.match(CRM, /void runUpdateLead\(\(\) => saveWithCommittedNote\(/);
   // All three buttons stand down, including CNA, which is the one that fires fastest in practice.
   assert.equal(CRM.split("busy={updatingLead}").length - 1, 3, "every button that saves the popup must stand down");

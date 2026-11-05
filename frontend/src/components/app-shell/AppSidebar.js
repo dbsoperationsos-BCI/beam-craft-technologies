@@ -1,12 +1,21 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
+import FileDownloadOutlined from "@mui/icons-material/FileDownloadOutlined";
 import Search from "@mui/icons-material/Search";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { layers } from "@/constants/layers";
 import useSidebarLayout from "@/components/preferences/useSidebarLayout";
+import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
+import IconButton from "@/components/shared/IconButton";
+import DesktopAppDownloadDialog from "./DesktopAppDownloadDialog";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
+
+/** How closely an entry claims the page: the length of its `href` or `activePath` that holds it, else -1. */
+const claimLength = (item, pathname) => Math.max(-1, ...[item.href, item.activePath]
+  .filter((path) => path && (pathname === path || pathname.startsWith(`${path}/`)))
+  .map((path) => path.length));
 
 export default function AppSidebar({ open, onClose }) {
   const pathname = usePathname();
@@ -39,7 +48,7 @@ export default function AppSidebar({ open, onClose }) {
   const search = query.trim().toLowerCase();
   const searchedGroups = useMemo(() => {
     if (!search) return visibleGroups;
-    const matches = (text) => text.toLowerCase().includes(search);
+    const matches = (text) => matchesWordChunks(text, search);
     return visibleGroups
       .map((group) => {
         // A group whose own title matches keeps every screen in it — the reader asked for the
@@ -83,7 +92,45 @@ export default function AppSidebar({ open, onClose }) {
     onClose();
   }, [onClose]);
 
+  /*
+   * The desktop download dialog opens over the page, not inside the drawer: the drawer is a
+   * transformed panel, which would pin a fixed dialog to itself. The drawer closes as it opens.
+   */
+  const [desktopDownloadOpen, setDesktopDownloadOpen] = useState(false);
+  // Its "download started" / "could not download" goes to the app's snackbar, held here so the
+  // message stays up if the dialog is closed while it shows.
+  const { notice, showSuccess, showError, clearNotice } = useNotice();
+  const openDesktopDownload = () => {
+    closeDrawer();
+    setDesktopDownloadOpen(true);
+  };
+
   const panelRef = useRef(null);
+  /*
+   * Opening the drawer puts the cursor in its search box, so somebody can type a screen's name
+   * straight after the hamburger. Only where the pointer is a mouse or trackpad: on a touch screen
+   * focusing it would raise the on-screen keyboard over half the nav every time it opened, so there
+   * the box is tapped as before. `preventScroll`, because the drawer is still sliding in - focusing
+   * an element mid-transform must not scroll the shell to it. Closed, the box lets go of the cursor,
+   * so keys typed afterwards never land in a field slid off the screen, and is emptied - however it
+   * was closed, the hamburger included, which reaches `onClose` without passing `closeDrawer`.
+   * Emptied as the render notices the close (React's "adjusting state when a prop changes"), not in
+   * the effect, which would render the drawer twice.
+   */
+  const searchRef = useRef(null);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
+    if (!open) setQuery("");
+  }
+  useEffect(() => {
+    const input = searchRef.current;
+    if (!open) {
+      if (input && document.activeElement === input) input.blur();
+      return;
+    }
+    if (window.matchMedia?.("(pointer: fine)").matches) input?.focus({ preventScroll: true });
+  }, [open]);
   /*
    * A press anywhere outside the drawer closes it — the topbar included.
    *
@@ -169,7 +216,7 @@ export default function AppSidebar({ open, onClose }) {
         <label className="relative block">
           <span className="sr-only">Search navigation</span>
           <Search style={{ fontSize: 16 }} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} type="search" placeholder="Search..." className="h-9 w-full rounded-md border border-slate-300 bg-white pl-8 pr-2 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+          <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} type="search" placeholder="Search..." className="h-9 w-full rounded-md border border-slate-300 bg-white pl-8 pr-2 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
         </label>
       </div>
       <nav className="flex-1 overflow-y-auto px-2 py-1.5" aria-label="Primary navigation">{search && searchedGroups.length === 0 && <p className="px-2.5 py-2 text-sm text-slate-500">No screens match “{query.trim()}”.</p>}{searchedGroups.map((group) => {
@@ -196,13 +243,22 @@ export default function AppSidebar({ open, onClose }) {
          * six pixels of height for six more screens on the page is the right way round here.
          */
         return <section key={group.title} className="mb-1">
-          <button type="button" onClick={() => toggleGroup(group.id)} aria-expanded={isExpanded} className="flex w-full items-center justify-between px-2 py-1 text-left text-xs font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-900">
-            <span>{group.title}</span>
-            {/* `›` points right where it is written, so the closed state turns it a quarter turn
-                down and the open state a quarter turn up - the same pair every other disclosure
-                uses, drawn with the character this rail already had. */}
-            <span className={`text-sm transition-transform ${isExpanded ? "-rotate-90" : "rotate-90"}`}>›</span>
-          </button>
+          {/* The heading row holds the disclosure and, for Visual Curation, the desktop download
+              beside it - two controls side by side, never one inside the other. */}
+          <div className="flex items-center gap-0.5">
+            <button type="button" onClick={() => toggleGroup(group.id)} aria-expanded={isExpanded} className="flex min-w-0 flex-1 items-center justify-between px-2 py-1 text-left text-xs font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-900">
+              <span className="flex items-center gap-1.5">
+                {group.title}
+              </span>
+              {/* `›` points right where it is written, so the closed state turns it a quarter turn
+                  down and the open state a quarter turn up - the same pair every other disclosure
+                  uses, drawn with the character this rail already had. */}
+              <span className={`text-sm transition-transform ${isExpanded ? "-rotate-90" : "rotate-90"}`}>›</span>
+            </button>
+            {group.id === "visual-curation" && <IconButton size="xs" label="Download Visual Curation Desktop App" title="Download Visual Curation Desktop App" onClick={openDesktopDownload} className="text-slate-500 hover:text-slate-900">
+              <FileDownloadOutlined style={{ fontSize: 16 }} />
+            </IconButton>}
+          </div>
           {isExpanded && <div className="mt-0.5 border-l border-slate-200 pl-2">{group.items.map((item) => {
             const children = item.children || [];
             /*
@@ -220,14 +276,20 @@ export default function AppSidebar({ open, onClose }) {
              * It is what an entry claims rather than where it lands, and the two are not always the
              * same route: Image Selection opens on its dashboard but owns the Projects page under
              * it as well. Tested for equality only, that entry sat unlit on half of its own module.
-             * The `/` is what keeps one claim out of another's: no entry's path is a prefix of a
-             * different entry's segment, and this is what holds that true if one ever is.
+             * The `/` is what keeps one claim out of another's segment.
+             *
+             * One entry's claim can still hold another's: Photo Selling lives under the AI Feature's
+             * `/visual-curation/ai`, Album Proofing under Image Selection's `/image-selection`. The
+             * entry whose claim matches the open page most closely is the one lit, so a page is never
+             * shown as being in two places.
              */
-            const claimed = pathname === item.activePath || (item.activePath ? pathname.startsWith(`${item.activePath}/`) : false);
-            const itemActive = !childActive && (claimed || pathname === item.href || pathname.startsWith(`${item.href}/`));
+            const longest = Math.max(...group.items.map((entry) => claimLength(entry, pathname)));
+            const itemActive = !childActive && longest >= 0 && claimLength(item, pathname) === longest;
             return <div key={item.label}>
               {item.href
-                ? <Link href={item.href} onClick={closeDrawer} className={`block rounded-md px-2.5 py-1 text-sm hover:bg-slate-50 ${itemActive ? "font-medium text-blue-600" : "text-slate-700"}`}>{item.label}</Link>
+                ? <Link href={item.href} onClick={closeDrawer} className={`flex items-center justify-between gap-2 rounded-md px-2.5 py-1 text-sm hover:bg-slate-50 ${itemActive ? "font-medium text-blue-600" : "text-slate-700"}`}>
+                  <span className="min-w-0 truncate">{item.label}</span>
+                </Link>
                 : <span aria-disabled="true" className="block cursor-not-allowed rounded-md px-2.5 py-1 text-sm text-slate-400">{item.label}</span>}
               {children.length > 0 && <div className="ml-2 border-l border-slate-100 pl-2">
                 {children.map((child) => <Link key={child.label} href={child.href} onClick={closeDrawer} className={`block rounded-md px-2.5 py-1 text-sm hover:bg-slate-50 ${pathname === child.href || pathname.startsWith(`${child.href}/`) ? "font-medium text-blue-600" : "text-slate-600"}`}>{child.label}</Link>)}
@@ -239,5 +301,7 @@ export default function AppSidebar({ open, onClose }) {
       {/* The release used to be named here too; it now lives under Release Information in the user menu. */}
       <div className="border-t border-slate-200 px-3 py-2 text-xs text-slate-400">Operations workspace</div>
     </aside>
+    {desktopDownloadOpen && <DesktopAppDownloadDialog onClose={() => setDesktopDownloadOpen(false)} onStarted={showSuccess} onFailed={showError} />}
+    <FloatingNotice notice={notice} onClose={clearNotice} />
   </>;
 }

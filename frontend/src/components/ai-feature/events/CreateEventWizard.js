@@ -1,23 +1,25 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import SettingsGroupForm from "@/components/ai-feature/shared/SettingsGroupForm";
 import Button from "@/components/shared/Button";
 import Loader from "@/components/shared/Loader";
+import useFormErrors from "@/components/shared/useFormErrors";
 import useUnsavedGuard from "@/components/shared/useUnsavedGuard";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import Dialog from "@/components/ui/Dialog";
 import { WIZARD_STEPS, detailsProblems } from "@/lib/aiFeature.mjs";
+import { PROBLEM_STEPS, eventFormProblems, hasProblems } from "@/lib/aiEventDefaults.mjs";
+import { markedFieldsMessage } from "@/lib/formErrors.mjs";
 import { createAiEvent, getAiEventDefaults, updateAiEvent } from "@/services/ai-feature/ai-feature.service";
 import DetailsStep, { detailsFrom, detailsPayload, eventTypeOf } from "./wizard/DetailsStep";
 import ReviewStep from "./wizard/ReviewStep";
-import StepRail from "./wizard/StepRail";
-import SubEventsStep, { subEventsPayload } from "./wizard/SubEventsStep";
+import StepRail from "@/components/shared/StepRail";
 
 /**
- * Create Event, in six steps, and Edit Event, which is the first of them with Save in place of
- * Next: sub-events and settings are changed inside the event's own workspace once it exists, so
- * the wizard never rewrites them behind that screen's back.
+ * Create Event, in five steps, and Edit Event, which is the first of them with Save in place of
+ * Next: settings are changed inside the event's own workspace once it exists, so the wizard never
+ * rewrites them behind that screen's back.
  *
  * The settings steps start from Event Default Settings - the studio's template - and what is
  * changed here becomes this event's own copy. `onCreated(event, { created })` is called with the
@@ -49,7 +51,6 @@ export default function CreateEventWizard({ onClose, onCreated, event = null }) 
   const [defaults, setDefaults] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [details, setDetails] = useState(null);
-  const [subEvents, setSubEvents] = useState([]);
   const [settings, setSettings] = useState(null);
   const [step, setStep] = useState(0);
   const [furthest, setFurthest] = useState(0);
@@ -57,6 +58,9 @@ export default function CreateEventWizard({ onClose, onCreated, event = null }) 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [dirty, setDirty] = useState(false);
+  // The settings rules a refused Create named: each is said under its own control by the settings
+  // form; this brings the first into view, and the line below counts what is still left.
+  const settingsFields = useFormErrors();
   const { guard, confirmProps } = useUnsavedGuard(dirty && !saving, { title: "Discard this event?", message: "What has been filled in so far will be lost.", confirmLabel: "Discard", cancelLabel: "Keep editing" });
 
   // The template the settings steps start from, and the type list and timezone step one offers.
@@ -78,7 +82,6 @@ export default function CreateEventWizard({ onClose, onCreated, event = null }) 
 
   const eventTypes = defaults?.general?.eventTypes || [];
   const stepId = steps[step]?.[0];
-  const dateBounds = useMemo(() => ({ min: details?.startDate || "", max: details?.endDate || details?.startDate || "" }), [details?.startDate, details?.endDate]);
 
   // The type is two fields in the form and one in the refusals, so either one clears `eventType`.
   const problemKey = (name) => (name === "typeChoice" || name === "customType" ? "eventType" : name);
@@ -87,7 +90,6 @@ export default function CreateEventWizard({ onClose, onCreated, event = null }) 
     setDetails((current) => ({ ...current, [name]: value }));
     setProblems((current) => (current[problemKey(name)] ? { ...current, [problemKey(name)]: undefined } : current));
   };
-  const changeSubEvents = (rows) => { setDirty(true); setSubEvents(rows); };
   const changeSetting = (group, key, value) => { setDirty(true); setSettings((current) => ({ ...current, [group]: { ...current[group], [key]: value } })); };
 
   /** Step one's refusals, if any, shown on the fields and blocking the way forward. */
@@ -105,11 +107,22 @@ export default function CreateEventWizard({ onClose, onCreated, event = null }) 
 
   async function submit() {
     if (detailsRefused()) { setStep(0); return; }
+    // The settings rules the server would refuse on, asked first so Create lands on the step at
+    // fault with the reason, rather than answering "Invalid event." from the review.
+    const found = eventFormProblems(settings);
+    if (!editing && hasProblems(found)) {
+      const section = Object.keys(found).find((key) => Object.keys(found[key]).length);
+      const index = steps.findIndex(([id]) => id === PROBLEM_STEPS[section]);
+      setError("");
+      settingsFields.check(Object.assign({}, ...Object.values(found)));
+      if (index >= 0) setStep(index);
+      return;
+    }
     setSaving(true); setError("");
     try {
       const saved = editing
         ? (await updateAiEvent(event.id, detailsPayload(details)))?.data
-        : (await createAiEvent({ ...detailsPayload(details), subEvents: subEventsPayload(subEvents), settings: settingsPayload(settings) }))?.data;
+        : (await createAiEvent({ ...detailsPayload(details), settings: settingsPayload(settings) }))?.data;
       setDirty(false);
       onCreated(saved, { created: !editing });
     } catch (caught) {
@@ -121,11 +134,14 @@ export default function CreateEventWizard({ onClose, onCreated, event = null }) 
   const close = () => guard(onClose);
   const last = step === steps.length - 1;
   const ready = Boolean(details && settings);
+  const settingsSummary = settingsFields.count && settings
+    ? markedFieldsMessage(Object.values(eventFormProblems(settings)).reduce((sum, section) => sum + Object.keys(section || {}).length, 0))
+    : "";
 
   return <>
     <Dialog
       title={editing ? "Edit Event" : "Create Event"}
-      description={editing ? "Sub-events and settings are changed inside the event." : undefined}
+      description={editing ? "Settings are changed inside the event." : undefined}
       size="form"
       height="tall"
       busy={saving}
@@ -144,17 +160,16 @@ export default function CreateEventWizard({ onClose, onCreated, event = null }) 
         : !ready
           ? <Loader label="Loading event defaults..." />
           : <div className="flex flex-col gap-4 md:flex-row md:gap-6">
-            {steps.length > 1 && <StepRail steps={steps} current={step} furthest={furthest} onSelect={goTo} problems={Object.keys(problems).length ? { details: true } : {}} />}
+            {steps.length > 1 && <StepRail steps={steps} current={step} furthest={furthest} onSelect={goTo} ariaLabel="Wizard steps" problems={Object.keys(problems).length ? { details: true } : {}} />}
             <div className="min-w-0 flex-1">
               <h3 className="mb-3 text-sm font-semibold text-slate-800 md:hidden">{steps[step][1]}</h3>
               {stepId === "details" && <DetailsStep details={details} onChange={changeDetail} problems={problems} eventTypes={eventTypes} existingCoverUrl={event?.coverUrl} />}
-              {stepId === "subEvents" && <SubEventsStep rows={subEvents} onChange={changeSubEvents} dateBounds={dateBounds} />}
               {(stepId === "settings" || stepId === "guests" || stepId === "ai") && <div className="space-y-4">
                 <p className="rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">These start from Event Default Settings. What is changed here applies to this event only; the defaults stay as they are.</p>
-                <SettingsGroupForm values={settings} onChange={changeSetting} groups={STEP_GROUPS[stepId]} />
+                <SettingsGroupForm values={settings} onChange={changeSetting} groups={STEP_GROUPS[stepId]} watermarkDefaultId={defaults?.gallery?.watermarkPresetId || null} />
               </div>}
-              {stepId === "review" && <ReviewStep details={details} subEvents={subEvents} settings={settings} existingCoverUrl={event?.coverUrl} />}
-              {error && <p role="alert" className="mt-4 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
+              {stepId === "review" && <ReviewStep details={details} settings={settings} existingCoverUrl={event?.coverUrl} watermarkDefaultId={defaults?.gallery?.watermarkPresetId || null} />}
+              {(error || settingsSummary) && <p role="alert" className="mt-4 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{error || settingsSummary}</p>}
             </div>
           </div>}
     </Dialog>

@@ -5,7 +5,7 @@ const { validate, route } = require("../shared/http");
 const { eventParamsSchema } = require("../events/validation");
 const { serializeActivity } = require("../shared/serializers");
 
-const listQuery = z.object({ limit: z.coerce.number().int().min(1).max(200).optional().default(50), before: z.string().trim().optional() });
+const listQuery = z.object({ limit: z.coerce.number().int().min(1).max(200).optional().default(50), before: z.string().trim().refine((value) => !Number.isNaN(new Date(value).getTime()), "Not a date.").optional() });
 
 const listActivity = route("load activity", async (req, res) => {
   const p = validate(eventParamsSchema, req.params, res); const q = validate(listQuery, req.query, res);

@@ -1,5 +1,5 @@
 const express = require("express");
-const { createRateLimiter, clientIp } = require("../../../middleware/rateLimit");
+const { createPublicLinkLimiter } = require("../../../middleware/rateLimit");
 const { getPublicInvite, verifyPublicInvite, submitPublicInvite } = require("./invites");
 
 /**
@@ -8,14 +8,9 @@ const { getPublicInvite, verifyPublicInvite, submitPublicInvite } = require("./i
  */
 const router = express.Router();
 
-// Short codes as well as tokens resolve here, so the code space must not be enumerable: one real
-// candidate filling the form fits in a fraction of this allowance; a scanner does not.
-router.use(createRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  max: 60,
-  keys: (req) => [`interview-apply:${clientIp(req)}`],
-  message: (minutes) => `Too many requests. Please try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
-}));
+// Short codes as well as tokens resolve here, so the code space must not be enumerable. Only a
+// miss is counted, so opening many real links in a row is never refused; a scanner is.
+router.use(createPublicLinkLimiter("interview-apply"));
 
 // Never cached: a 410 is cacheable by default, and an invite's state changes under a link that
 // is meant to be opened more than once.

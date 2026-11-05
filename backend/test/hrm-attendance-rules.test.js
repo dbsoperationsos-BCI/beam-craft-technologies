@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   attendanceDayStatus,
+  dayShares,
   dayKindFor,
   calendarDay,
   eachDateInRange,
@@ -13,6 +14,7 @@ const {
   permissionCoversArrival,
   permissionMinutes,
   permissionTimesProblem,
+  REQUEST_STATUSES,
   requestDisplayStatus,
   targetMinutesForRange,
   workedMinutes,
@@ -39,7 +41,7 @@ const settings = {
   maxPermissionMinutes: 180,
 };
 
-const at = (date, time) => new Date(`${date}T${time}:00`);
+const at = (date, time) => new Date(`${date}T${time}:00+05:30`);
 
 test("the on-time cutoff is the shift start plus its grace", () => {
   assert.equal(onTimeCutoffMinutes(settings), 9 * 60 + 45);
@@ -181,7 +183,7 @@ test("a range walks its days inclusively and refuses a backwards one", () => {
 
 test("a local date is the day on the wall, not the day in UTC", () => {
   // Late evening local time is already tomorrow in UTC; `toISOString().slice(0, 10)` would say so.
-  assert.equal(localIsoDate(new Date(2026, 8, 8, 23, 30)), "2026-09-08");
+  assert.equal(localIsoDate(new Date("2026-09-08T23:30:00+05:30")), "2026-09-08");
 });
 
 test("a day survives the round trip through a @db.Date column", () => {
@@ -216,18 +218,53 @@ test("worked minutes are floored at zero and unknown while a session is open", (
 // "Upcoming" is a reading of an approved request, not a stored status.
 // ---------------------------------------------------------------------------
 
+test("the six statuses each read as themselves, and an old cancelled row still reads", () => {
+  /*
+   * Six, since a request gained the three the raiser's own verbs set: sent back to be fixed,
+   * reverted out of the queues, and deleted - which deletes nothing and is why it needs a status at
+   * all. `CANCELLED` is not among them and is never migrated: rows cancelled under the old flow keep
+   * saying so, because that is what happened to them.
+   */
+  assert.deepEqual(REQUEST_STATUSES, ["PENDING", "SENT_BACK", "APPROVED", "REJECTED", "REVERTED", "DELETED"]);
+  const at = (status) => requestDisplayStatus({ status, fromDate: "2026-01-01" }, new Date(2026, 5, 1));
+  assert.equal(at("PENDING"), "Pending");
+  assert.equal(at("SENT_BACK"), "Send Back");
+  assert.equal(at("REJECTED"), "Rejected");
+  assert.equal(at("REVERTED"), "Reverted");
+  assert.equal(at("DELETED"), "Deleted");
+  assert.equal(at("CANCELLED"), "Cancelled");
+  // A status nobody has heard of still reads as something rather than as nothing.
+  assert.equal(at("WHATEVER"), "Pending");
+});
+
 test("an approved leave reads as Upcoming until its start date arrives", () => {
   const request = { status: "APPROVED", fromDate: "2026-09-10", toDate: "2026-09-12" };
-  assert.equal(requestDisplayStatus(request, new Date(2026, 8, 8)), "Upcoming");
+  assert.equal(requestDisplayStatus(request, new Date("2026-09-08T00:00:00+05:30")), "Upcoming");
   // On the morning it starts, and every day after, it is simply approved.
-  assert.equal(requestDisplayStatus(request, new Date(2026, 8, 10)), "Approved");
-  assert.equal(requestDisplayStatus(request, new Date(2026, 8, 14)), "Approved");
+  assert.equal(requestDisplayStatus(request, new Date("2026-09-10T00:00:00+05:30")), "Approved");
+  assert.equal(requestDisplayStatus(request, new Date("2026-09-14T00:00:00+05:30")), "Approved");
 });
 
 test("nothing but an approved request is ever Upcoming", () => {
   const future = { fromDate: "2026-09-10", toDate: "2026-09-12" };
-  const now = new Date(2026, 8, 8);
+  const now = new Date("2026-09-08T00:00:00+05:30");
   assert.equal(requestDisplayStatus({ ...future, status: "PENDING" }, now), "Pending");
   assert.equal(requestDisplayStatus({ ...future, status: "REJECTED" }, now), "Rejected");
   assert.equal(requestDisplayStatus({ ...future, status: "CANCELLED" }, now), "Cancelled");
+});
+
+test("the server refuses an On duty / travel that starts on a day already gone, and only that kind", () => {
+  const source = require("node:fs").readFileSync(require.resolve("../src/modules/hrm/attendance/controller.js"), "utf8");
+  assert.match(source, /if \(input\.type === "ON_DUTY" && calendarDay\(input\.fromDate\) < calendarDay\(new Date\(\)\)\) \{\s*throw badRequest\("On duty \/ travel cannot start on a day that has already passed\."\);/);
+});
+
+test("a Half day counts as half a day present and half a day absent; other days count whole", () => {
+  assert.deepEqual(dayShares("Half day"), { present: 0.5, absent: 0.5 });
+  for (const status of ["On time", "Present", "Late", "Permitted", "Early exit", "Not logged out"]) {
+    assert.deepEqual(dayShares(status), { present: 1, absent: 0 }, status);
+  }
+  assert.deepEqual(dayShares("Absent"), { present: 0, absent: 1 });
+  for (const status of ["On leave", "Holiday", "Weekly off", "Yet to log in"]) {
+    assert.deepEqual(dayShares(status), { present: 0, absent: 0 }, status);
+  }
 });

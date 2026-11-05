@@ -118,8 +118,7 @@ test("column definitions do not depend on the rows, so appending cannot rebuild 
   // Comments stripped: the note explaining why the lookup went is allowed to name it.
   const cellsCode = CELLS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   assert.doesNotMatch(cellsCode, /rows\.indexOf\(row\)/, "the serial column searches the rows again, which is quadratic on export");
-  assert.match(CELLS, /export function buildTableColumns\(\{ fields, startIndex = 0/, "buildTableColumns takes the rows again, so columns depend on data");
-  assert.match(CELLS, /exportValue: \(_row, index\) => startIndex \+ index \+ 1/, "the serial column no longer takes its position from the exporter");
+  assert.match(CELLS, /export function buildTableColumns\(\{ fields, statusStyles/, "buildTableColumns takes the rows again, so columns depend on data");
 
   // And the exporter hands it over.
   const EXPORT = read("lib", "tableExport.js");
@@ -226,4 +225,24 @@ test("the footer still counts every row held, not the handful being drawn", () =
   // the register.
   assert.match(TABLE, /onVisibleRowsChange\?\.\(\{ total: recordCount, showing: renderedRows\.length \}\)/,
     "the reported count follows the window rather than the rows the table holds");
+});
+
+test("the board's columns are measured against the server's counts, not only the pages read", () => {
+  /*
+   * The board holds a hundred candidates at a time, so a column counting its cards read "40" for a
+   * stage holding 212 - and only the footer said otherwise. Each column now says "40 of 212" from the
+   * tab counts, which count the whole register and so stand down while a column filter narrows it.
+   */
+  const BOARD = read("components", "data-table", "KanbanBoard.js");
+  assert.match(PAGE, /return filtering \? null : serverCounts;/, "the board is handed counts that ignore its filters");
+  assert.match(PAGE, /totals=\{boardTotals\}/, "the board is not given the server's counts");
+  assert.match(BOARD, /result\[OTHER_COLUMN\.value\] = Object\.entries\(totals\)\.reduce\(\(sum, \[value, count\]\) => \(named\.has\(value\) \? sum : sum \+/,
+    "Other is not counted as every status no column names");
+  assert.match(BOARD, /of=\{narrowed \|\| searching \? columnRows\.length : total !== null && total > columnRows\.length \? total : null\}/,
+    "a partly read column no longer says how many it holds in all");
+});
+
+test("a card whose imported status is not on the list says so, and which word it holds", () => {
+  // Such a candidate lands in Other, which by itself does not say what the sheet called them.
+  assert.match(PAGE, /candidate\.statusKnown === false \? `Status not recognised: \$\{String\(candidate\.status \|\| ""\)\.trim\(\) \|\| "blank"\}` : ""/);
 });

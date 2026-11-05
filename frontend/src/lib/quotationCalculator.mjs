@@ -18,6 +18,7 @@
 
 import { deliverableVariantOptions } from "./deliverableBrands.mjs";
 import { deliverableUnits } from "./quotationBrand.mjs";
+import { MAX_DISCOUNT_PERCENT, calculateDiscount } from "./quotationDiscount.mjs";
 import { autoDeliverableNamesForServices, blockedDeliverableNamesForServices, findDeliverableDefinitionByName } from "../components/project-management/serviceDeliverableRules.js";
 
 export const toAmount = (value) => {
@@ -191,13 +192,14 @@ export function linesCost({ services = [], deliverables = [], serviceQuantities 
 
 /**
  * The calculator's figures: the lines, the cost before discount (base package + extras + lines),
- * the discount held to 0..100, and the total.
+ * the discount held to 0..`MAX_DISCOUNT_PERCENT` (the quotation's own cap), and the total. The discount is `calculateDiscount`'s - the generator's
+ * own - left to the paisa, since the calculator rounds its total there rather than to the rupee.
  */
 export function calculatorTotals({ services, deliverables, serviceQuantities, deliverableQuantities, deliverableCounts, basePackagePrice, extras, discountPercent }) {
   const lines = linesCost({ services, deliverables, serviceQuantities, deliverableQuantities, deliverableCounts });
   const serviceCost = toAmount(basePackagePrice) + toAmount(extras) + lines;
-  const discount = Math.min(100, Math.max(0, toAmount(discountPercent)));
-  const totalCost = Math.round((serviceCost - (serviceCost * discount) / 100) * 100) / 100;
+  const { discountPercentage: discount, discountAmount } = calculateDiscount({ discountValue: Math.min(MAX_DISCOUNT_PERCENT, toAmount(discountPercent)), discountableSubtotal: serviceCost, wholeRupees: false });
+  const totalCost = Math.round((serviceCost - discountAmount) * 100) / 100;
   return { lines, serviceCost, discount, totalCost };
 }
 

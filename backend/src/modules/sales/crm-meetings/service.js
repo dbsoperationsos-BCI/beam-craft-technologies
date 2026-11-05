@@ -1,5 +1,5 @@
 const prisma = require("../../../config/db");
-const { toMeeting } = require("../crm-leads/meetingService");
+const { parseAttendees, toMeeting } = require("../crm-leads/meetingService");
 const { readableEnquiryIds } = require("../../../services/leadScope");
 
 /**
@@ -9,8 +9,9 @@ const { readableEnquiryIds } = require("../../../services/leadScope");
  * way - open the lead, open its meetings. That answers "what is booked for this lead" but
  * never "what is booked this week", which is the question the Meetings page exists for.
  *
- * Read only. Scheduling and cancelling still go through the lead's own endpoints in
- * crm-leads/meetingService, which own the Google Calendar side; nothing here writes.
+ * A lead's meetings are scheduled and cancelled through the lead's own endpoints. A meeting with no
+ * lead - booked from the Calendar's Add Meet - is scheduled and cancelled here (`controller.js`),
+ * through the same crm-leads/meetingService that owns the Google Calendar side.
  */
 
 // The lead a meeting was booked against, so a row can name the client without a second call.
@@ -19,7 +20,7 @@ async function leadsByEnquiryId(enquiryIds) {
   if (!enquiryIds.length) return new Map();
   const leads = await prisma.salesCrmLead.findMany({
     where: { enquiryId: { in: enquiryIds }, deletedAt: null },
-    select: { enquiryId: true, name: true, phone: true, verticalName: true, status: true, crm: true },
+    select: { enquiryId: true, name: true, phone: true, verticalName: true, status: true, crm: true, branchId: true, branch: { select: { name: true } } },
   });
   return new Map(leads.map((lead) => [lead.enquiryId, lead]));
 }
@@ -60,55 +61,41 @@ async function listAllMeetings({ from, to, includeCancelled = true, reader = nul
    * meeting is kept when its lead is readable, or when this person booked it - booking a meeting
    * puts your name on it, and losing sight of what you put in the diary is never right.
    */
-  const readable = await readableEnquiryIds(rows.map((row) => row.enquiryId), reader);
+  const readable = await readableEnquiryIds(rows.map((row) => row.enquiryId).filter(Boolean), reader);
   const mine = Number(reader.userId);
-  const visible = rows.filter((row) => readable.has(row.enquiryId) || row.createdByUserId === mine);
-  const leads = await leadsByEnquiryId([...new Set(visible.map((row) => row.enquiryId))]);
+  /*
+   * A meeting with no lead has nobody's lead to be read through, so it is seen by the people on it:
+   * whoever booked it, and a guest whose sign-in email is on its list. A Super Admin sees them all -
+   * the studio's decision, and IAM's own rule that a Super Admin holds everything; there is no lead
+   * permission to ask instead, because these meetings have no lead to scope.
+   */
+  const viewer = rows.some((row) => !row.enquiryId)
+    ? await prisma.user.findUnique({ where: { id: mine }, select: { email: true, role: true } })
+    : null;
+  const viewerEmail = String(viewer?.email || "").trim().toLowerCase();
+  const onIt = (row) => row.createdByUserId === mine || viewer?.role === "SUPER_ADMIN"
+    || (Boolean(viewerEmail) && parseAttendees(row.attendees).some((email) => email.toLowerCase() === viewerEmail));
+  const visible = rows.filter((row) => (row.enquiryId ? readable.has(row.enquiryId) : onIt(row)) || row.createdByUserId === mine);
+  // Only the meetings that name a lead: `null` in an `in` list is refused by Prisma.
+  const leads = await leadsByEnquiryId([...new Set(visible.map((row) => row.enquiryId).filter(Boolean))]);
 
   return visible.map((row) => {
     const lead = leads.get(row.enquiryId);
     return {
       ...toMeeting(row),
+      // Booked by the person reading - who alone may cancel a meeting with no lead.
+      mine: row.createdByUserId === mine,
       // A lead deleted after its meeting was booked leaves the meeting behind. It still shows,
       // named by its enquiry id, rather than disappearing from the calendar without warning.
       lead: lead
-        ? { enquiryId: lead.enquiryId, name: lead.name || "", phone: lead.phone || "", vertical: lead.verticalName || "", status: lead.status || "", crm: lead.crm || "" }
+        ? {
+          enquiryId: lead.enquiryId, name: lead.name || "", phone: lead.phone || "", vertical: lead.verticalName || "", status: lead.status || "", crm: lead.crm || "",
+          // The lead's branch, which the Calendar's list filters a meeting by.
+          branchId: lead.branchId ?? null, branchName: lead.branch?.name || "",
+        }
         : null,
     };
   });
 }
 
-/**
- * Leads matching a typed search, for the Add Meet picker.
- *
- * The CRM holds tens of thousands of leads, so the picker cannot simply be handed the list -
- * searching happens here and only the handful that match travel. Name and enquiry id are both
- * matched because a salesperson booking a meeting has one or the other to hand, and the label
- * carries both so two clients of the same name can be told apart.
- *
- * Read only, and capped: an empty search returns the most recent leads rather than everything.
- */
-async function searchLeads({ query = "", limit = 20 } = {}) {
-  const trimmed = String(query || "").trim();
-  const take = Math.min(Math.max(Number(limit) || 20, 1), 50);
-
-  /*
-   * Every lead, not only the reader's own. This is a picker: it exists to book a meeting *onto* a
-   * lead, and the person arranging a meeting is often not the CRM working it. The Meetings list is
-   * what the rule narrows - and a meeting booked here is then visible to whoever booked it, so
-   * arranging one never hides it from the person who arranged it.
-   */
-  const rows = await prisma.salesCrmLead.findMany({
-    where: {
-      deletedAt: null,
-      ...(trimmed ? { OR: [{ name: { contains: trimmed } }, { enquiryId: { contains: trimmed } }] } : {}),
-    },
-    select: { enquiryId: true, name: true, verticalName: true },
-    orderBy: { createdAt: "desc" },
-    take,
-  });
-
-  return rows.map((row) => ({ enquiryId: row.enquiryId, name: row.name || "", vertical: row.verticalName || "" }));
-}
-
-module.exports = { listAllMeetings, searchLeads };
+module.exports = { listAllMeetings };

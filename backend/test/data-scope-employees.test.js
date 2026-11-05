@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const prisma = require("../src/config/db");
 const dataScope = require("../src/services/dataScope.service");
 const { EMPLOYEE_SCOPE_COLUMNS } = require("../src/modules/hrm/employees/controller");
+const { retrying } = require("./helpers/retrying");
 
 /*
  * The Employee Repository on the resolver.
@@ -33,12 +34,12 @@ const F = {};
 
 /** Runs `body` with a role granting Employee Management (and optionally Branch Administration). */
 async function withGrant(user, { branchIds = [], administersBranches = false } = {}, body) {
-  const role = await prisma.role.create({ data: { name: tag(`r-${Math.random().toString(36).slice(2, 6)}`) } });
+  const role = await retrying(() => prisma.role.create({ data: { name: tag(`r-${Math.random().toString(36).slice(2, 6)}`) } }));
   const grants = [{ roleId: role.id, permissionId: F.employeePermission.id, accessLevel: "READ" }];
   if (administersBranches) grants.push({ roleId: role.id, permissionId: F.branchAdminPermission.id, accessLevel: "READ" });
-  await prisma.rolePermission.createMany({ data: grants });
-  await prisma.userRole.create({ data: { userId: user.id, roleId: role.id } });
-  if (branchIds.length) await prisma.roleBranch.createMany({ data: branchIds.map((id) => ({ roleId: role.id, branchId: id })) });
+  await retrying(() => prisma.rolePermission.createMany({ data: grants }));
+  await retrying(() => prisma.userRole.create({ data: { userId: user.id, roleId: role.id } }));
+  if (branchIds.length) await retrying(() => prisma.roleBranch.createMany({ data: branchIds.map((id) => ({ roleId: role.id, branchId: id })) }));
   try {
     return await body(await dataScope.resolve({ userId: user.id, module: "HRM", feature: "Employee Management", columns: EMPLOYEE_SCOPE_COLUMNS }));
   } finally {
@@ -64,9 +65,9 @@ before(async () => {
   assert.ok(F.employeePermission, "the seed no longer has HRM / Employee Management");
   assert.ok(F.branchAdminPermission, "the seed no longer has ADMIN / Branch Administration");
 
-  F.br = await prisma.branch.create({ data: { code: tag("BR"), name: `Emp Scope Branch ${STAMP}` } });
-  F.other = await prisma.branch.create({ data: { code: tag("OTHER"), name: `Emp Scope Other ${STAMP}` } });
-  const make = (name, data) => prisma.employee.create({ data: { employeeId: tag(name), employeeName: `Emp Scope ${name} ${STAMP}`, ...data } });
+  F.br = await retrying(() => prisma.branch.create({ data: { code: tag("BR"), name: `Emp Scope Branch ${STAMP}` } }));
+  F.other = await retrying(() => prisma.branch.create({ data: { code: tag("OTHER"), name: `Emp Scope Other ${STAMP}` } }));
+  const make = (name, data) => retrying(() => prisma.employee.create({ data: { employeeId: tag(name), employeeName: `Emp Scope ${name} ${STAMP}`, ...data } }));
 
   // The reader, based in the other branch: their own row must reach them wherever they sit.
   F.me = await make("me", { branchId: F.other.id, workBaseLocation: F.other.name });
@@ -85,8 +86,8 @@ before(async () => {
   await prisma.employee.update({ where: { id: F.report.id }, data: { reportsToEmployeeId: F.me.id } });
   await prisma.employee.update({ where: { id: F.deepReport.id }, data: { reportsToEmployeeId: F.report.id } });
 
-  F.user = await prisma.user.create({ data: { name: "Emp scope me", email: `${tag("me")}@test.local`.toLowerCase(), username: tag("me").toLowerCase(), password: "x", role: "EMPLOYEE", branchId: null, linkedEmployeeId: F.me.id } });
-  F.superAdmin = await prisma.user.create({ data: { name: "Emp scope super", email: `${tag("sa")}@test.local`.toLowerCase(), username: tag("sa").toLowerCase(), password: "x", role: "SUPER_ADMIN" } });
+  F.user = await retrying(() => prisma.user.create({ data: { name: "Emp scope me", email: `${tag("me")}@test.local`.toLowerCase(), username: tag("me").toLowerCase(), password: "x", role: "EMPLOYEE", branchId: null, linkedEmployeeId: F.me.id } }));
+  F.superAdmin = await retrying(() => prisma.user.create({ data: { name: "Emp scope super", email: `${tag("sa")}@test.local`.toLowerCase(), username: tag("sa").toLowerCase(), password: "x", role: "SUPER_ADMIN" } }));
 });
 
 after(async () => {

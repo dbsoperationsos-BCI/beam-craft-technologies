@@ -1,10 +1,21 @@
 "use client";
 
 import { createPortal } from "react-dom";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import useCloseWhenTriggerHidden from "./useCloseWhenTriggerHidden";
+import useListKeyboard from "./useListKeyboard";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
+
+/*
+ * How many options a list needs before it is worth searching rather than reading.
+ *
+ * Five, because that is about where a column stops being a glance - Yes/No, Active/Inactive and a
+ * three-way status are read faster than a search box can be typed into, and a list of services or
+ * branches is not. Named here so the two filter controls cannot drift apart on it.
+ */
+const SEARCH_FROM = 5;
 
 /**
  * A column filter that takes **several** answers at once.
@@ -29,20 +40,13 @@ import useEscapeKey from "@/components/shared/useEscapeKey";
 export default function FilterMultiSelect({ ariaLabel, loading = false, onChange, onOpen, options = [], placeholder = "Filter", values = [] }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  /*
-   * Opening and closing, with the search cleared as it goes.
-   *
-   * Done here rather than in an effect on `open`: writing state from an effect is the pattern this
-   * codebase keeps out of components, and the search has one lifetime - this menu being open - so
-   * the gesture that ends it is the honest place to end the search too.
-   */
-  const setMenu = (next) => {
-    setOpen(next);
-    if (!next) setQuery("");
-  };
+  const listId = useId();
   const [menuStyle, setMenuStyle] = useState(null);
   const wrapperRef = useRef(null);
   const menuRef = useRef(null);
+  const listRef = useRef(null);
+  const triggerRef = useRef(null);
+  const searchRef = useRef(null);
   /*
    * Through a ref, so a caller may pass a fresh arrow every render - which every caller does -
    * without the effect below re-firing and asking the server again on each keystroke. The same
@@ -51,11 +55,6 @@ export default function FilterMultiSelect({ ariaLabel, loading = false, onChange
    */
   const onOpenRef = useRef(onOpen);
   useEffect(() => { onOpenRef.current = onOpen; }, [onOpen]);
-
-  // Portalled, so scrolling the pane moves the field but not the popover; closing is the honest
-  // answer, and reopening is one click.
-  useCloseWhenTriggerHidden(open, wrapperRef, () => setMenu(false));
-  useEscapeKey(() => setMenu(false), open);
 
   const chosen = Array.isArray(values) ? values : [];
   /*
@@ -74,7 +73,44 @@ export default function FilterMultiSelect({ ariaLabel, loading = false, onChange
     .map((option) => (typeof option === "string" ? { value: option, label: option } : option))
     .filter((option) => String(option?.value ?? "").trim() !== "");
   const typed = query.trim().toLowerCase();
-  const shown = typed ? normalized.filter((option) => String(option.label).toLowerCase().includes(typed)) : normalized;
+  // The tables' word-chunk search: an option holding any typed word is listed.
+  const shown = typed ? normalized.filter((option) => matchesWordChunks(option.label, typed)) : normalized;
+  // The arrow keys, Home and End, and keeping the highlight in view - one rule, shared with
+  // `FilterCombobox`, counted against the options actually on screen.
+  const { activeIndex, setActiveIndex, walk } = useListKeyboard({ count: shown.length, listRef });
+  // Whether the list is long enough to be worth searching, which decides both whether the box is
+  // drawn and whether there is anything for the focus below to move to.
+  const searchable = normalized.length >= SEARCH_FROM;
+
+  /*
+   * Opening and closing, with the search and the walk cleared as it goes.
+   *
+   * **Every** close goes through here, which is the point: the mousedown outside, the trigger
+   * scrolling out of view, Escape and the chevron are four different gestures, and a highlight left
+   * behind by one of them came back on the next open - pointing at a row the reader never walked to
+   * and, where the options had been refetched meanwhile, at a different value entirely. Its
+   * single-answer twin had exactly that bug for the want of this.
+   *
+   * Done here rather than in an effect on `open`: writing state from an effect is the pattern this
+   * codebase keeps out of components, and the search has one lifetime - this menu being open - so
+   * the gesture that ends it is the honest place to end it.
+   */
+  // Stable, so the mousedown listener below can name it as a dependency and still be attached once
+  // per opening rather than on every render.
+  const setMenu = useCallback((next) => {
+    setOpen(next);
+    if (!next) {
+      setQuery("");
+      setActiveIndex(-1);
+    }
+  }, [setActiveIndex]);
+
+  // Portalled, so scrolling the pane moves the field but not the popover; closing is the honest
+  // answer, and reopening is one click.
+  useCloseWhenTriggerHidden(open, wrapperRef, () => setMenu(false));
+  // Escape closes it and puts focus back where it came from, so the next Tab carries on along the
+  // filter row rather than starting again from the top of the document.
+  useEscapeKey(() => { setMenu(false); triggerRef.current?.focus(); }, open);
 
   // An empty list is **no filter**, not a filter matching nothing - so it is handed back as
   // undefined, which is what the table reads as "this column is not filtered".
@@ -83,6 +119,49 @@ export default function FilterMultiSelect({ ariaLabel, loading = false, onChange
   const toggle = (value) => {
     commit(chosen.includes(value) ? chosen.filter((entry) => entry !== value) : [...chosen, value]);
   };
+
+  /*
+   * ── Working it without a mouse ────────────────────────────────────────────────────────────────
+   *
+   * The walk itself - Down, Up, Home, End, and keeping the highlight in view - is `useListKeyboard`,
+   * shared with `FilterCombobox`. What is left here is what only this control can answer.
+   *
+   * Down on a closed menu opens it, because that is what the key means on every other listbox and a
+   * reader who has tabbed to the filter should not have to find the mouse to open it.
+   *
+   * Enter **ticks** rather than closing, which is the one place this parts company with an ordinary
+   * dropdown: this control takes several answers, so closing on the first would make the second one
+   * cost another journey through the menu. The menu is left by Escape, by Tab or by clicking away,
+   * all three of which already worked. Escape is the one listener the whole application shares.
+   *
+   * ── One handler, and why it has to be choosy ──
+   *
+   * It is hung on the field alone, and that is enough even though the search box sits in a menu
+   * portalled to `document.body`: a React portal propagates its events up the **React** tree rather
+   * than the document one, so a key pressed in the menu reaches the field it visually belongs to
+   * without being a descendant of it. A second handler on the menu therefore ran every keystroke
+   * twice, and one ArrowDown moved the highlight by two.
+   *
+   * The same reach is why Enter is taken only from the search box and the trigger. Select all,
+   * Clear and the option rows are buttons inside that portal, so their Enter arrives here too - and
+   * taking it would tick the highlighted row and swallow the button the reader had tabbed to.
+   */
+  function handleKeyDown(event) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (!open) { event.preventDefault(); setMenu(true); return; }
+    }
+    if (!open || walk(event)) return;
+    if (event.key !== "Enter") return;
+    // A button in the menu answers its own Enter; this one is only for the two controls that have
+    // no other meaning for the key.
+    if (event.target !== searchRef.current && event.target !== triggerRef.current) return;
+    // And only where a row is actually highlighted. Enter over a list nobody has walked would
+    // otherwise tick whichever option happened to be first, which is not a choice anybody made.
+    const option = shown[activeIndex];
+    if (!option) return;
+    event.preventDefault();
+    toggle(option.value);
+  }
 
   /*
    * Select all takes **what is on screen**; Clear takes **everything**.
@@ -107,6 +186,33 @@ export default function FilterMultiSelect({ ariaLabel, loading = false, onChange
     if (open) onOpenRef.current?.();
   }, [open]);
 
+  /*
+   * The search box takes focus, so opening a filter and typing is one gesture rather than a click
+   * on the trigger and a second one into the box.
+   *
+   * An effect rather than `autoFocus`, because the box does not always exist when the menu opens: a
+   * column whose values are fetched - the leads board's, the interview register's - opens with no
+   * options and no search box, and mounts one when the answer lands. `autoFocus` runs on mount, so
+   * that is hundreds of milliseconds later, and it would snatch focus back from wherever the reader
+   * had moved on to in the meantime.
+   *
+   * So it is keyed on the box **existing** rather than on the menu being open, and takes focus only
+   * where nobody else has claimed it: the trigger still holds it from the click that opened the
+   * menu, or nothing does. A reader who has tabbed into the menu or away from it is left alone.
+   *
+   * `menuMounted` rather than `open` because the portal is drawn a render late - it waits for
+   * `track()` below to measure where the field is, so on the render that opens the menu there is no
+   * input to focus yet, and an effect keyed on `open` alone fires once, finds nothing, and never
+   * runs again.
+   */
+  const menuMounted = open && Boolean(menuStyle);
+  useEffect(() => {
+    if (!menuMounted || !searchable) return;
+    const held = document.activeElement;
+    if (held && held !== document.body && held !== triggerRef.current) return;
+    searchRef.current?.focus();
+  }, [menuMounted, searchable]);
+
   useEffect(() => {
     if (!open) return undefined;
     const close = (event) => {
@@ -116,7 +222,7 @@ export default function FilterMultiSelect({ ariaLabel, loading = false, onChange
     };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  }, [open, setMenu]);
 
   /*
    * The menu is portalled, so it has to be told where the field is on every frame it is open - the
@@ -134,10 +240,33 @@ export default function FilterMultiSelect({ ariaLabel, loading = false, onChange
         const below = window.innerHeight - rect.bottom - padding;
         const above = rect.top - padding;
         const openAbove = below < 200 && above > below;
+        /*
+         * Held inside the window, on both edges.
+         *
+         * `left` used to be the field's own, which is right while the field is fully on screen and
+         * wrong the moment it is not: the filter row scrolls sideways with the table, so a column
+         * half off the left edge gave the menu a negative `left`, and a column wider than a phone
+         * gave it a `minWidth` wider than the screen - a menu overflowing both edges at once, with
+         * no way to scroll to either. `min-width` also beats `max-width` in CSS, so capping the
+         * width alone could not fix it.
+         *
+         * Three steps, in this order, because each needs the one before it. The menu is at least as
+         * wide as the field but never wider than the room there is; it is then slid back inside if
+         * that puts it over an edge; and only then is it capped at the room to the right of where
+         * it actually landed - capping it before the slide left it free to grow past the edge again,
+         * which is what a single long option did.
+         *
+         * A field comfortably on screen is unaffected: none of the three binds, and the menu opens
+         * flush with it exactly as it always has.
+         */
+        const room = window.innerWidth - padding * 2;
+        const width = Math.min(Math.max(rect.width, 180), room);
+        const left = Math.min(Math.max(rect.left, padding), window.innerWidth - padding - width);
         const next = {
           position: "fixed",
-          left: rect.left,
-          minWidth: Math.max(rect.width, 180),
+          left,
+          minWidth: width,
+          maxWidth: window.innerWidth - padding - left,
           top: openAbove ? "auto" : rect.bottom + 4,
           bottom: openAbove ? window.innerHeight - rect.top + 4 : "auto",
           maxHeight: Math.max(160, Math.min(300, openAbove ? above : below)),
@@ -159,20 +288,40 @@ export default function FilterMultiSelect({ ariaLabel, loading = false, onChange
   const menu = open && menuStyle && typeof document !== "undefined" ? createPortal(
     <div
       ref={menuRef}
-      role="listbox"
-      aria-multiselectable="true"
-      aria-label={ariaLabel}
+      /*
+       * A plain container, deliberately. The `listbox` is the scroller at the bottom of it, because
+       * a listbox may hold nothing but options and this box also holds the search field and the
+       * Select all / Clear row - and an `<input role="combobox">` nested inside a listbox is a
+       * shape screen readers are entitled to skip. `aria-controls` on the search box names that
+       * scroller, and `aria-activedescendant` names a row inside it.
+       */
       style={menuStyle}
       className="z-[9999] flex flex-col overflow-hidden rounded-lg border border-slate-200 bg-white text-sm shadow-[0_12px_28px_rgba(15,23,42,0.16)]"
     >
-      {/* A search box only where the list is long enough to hunt through. Below that it is one more
-          thing between the reader and four values they can already see. */}
-      {normalized.length > 8 && <div className="border-b border-slate-100 p-1.5">
+      {/*
+        * A search box from `SEARCH_FROM` options up. Below that it is one more thing between the
+        * reader and a handful of values already in front of them - a box to type into above Yes and
+        * No is furniture, and the two rows are quicker to read than the word is to type.
+        *
+        * It takes focus as the menu opens - see the effect above, which is careful about when -
+        * so opening a filter and typing is one gesture rather than two clicks.
+        */}
+      {searchable && <div className="border-b border-slate-100 p-1.5">
         <input
+          ref={searchRef}
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            // The list is rebuilt under it, so an index kept from the old one would point at a
+            // different value. Searching starts the walk again.
+            setActiveIndex(-1);
+          }}
           placeholder="Search"
           aria-label={`Search ${ariaLabel || "values"}`}
+          role="combobox"
+          aria-expanded="true"
+          aria-controls={listId}
+          aria-activedescendant={activeIndex >= 0 && shown[activeIndex] ? `${listId}-${activeIndex}` : undefined}
           className="w-full min-w-0 rounded border border-slate-200 px-2 py-1 text-xs font-normal text-slate-600 outline-none placeholder:text-slate-300 focus:border-blue-400"
         />
       </div>}
@@ -200,20 +349,42 @@ export default function FilterMultiSelect({ ariaLabel, loading = false, onChange
         </button>}
       </div>}
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1">
+      <div
+        ref={listRef}
+        id={listId}
+        role="listbox"
+        aria-multiselectable="true"
+        aria-label={ariaLabel}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1"
+      >
         {shown.length === 0
           // "Still asking" and "nothing to offer" are different answers, and a menu saying the
           // second while the first is true reads as a column with no values in it.
           ? <p className="px-3 py-2 text-slate-500">{loading ? "Loading..." : "No matches."}</p>
-          : shown.map((option) => {
+          : shown.map((option, index) => {
             const picked = chosen.includes(option.value);
+            const active = index === activeIndex;
+            /*
+             * One background class, chosen here rather than written as two that override each
+             * other: which of two Tailwind classes wins is decided by their order in the generated
+             * stylesheet and not by their order in the attribute, so `bg-blue-50 bg-blue-100` is a
+             * coin toss. The highlight is a step darker than the state underneath it, so a ticked
+             * row being walked past still reads as ticked.
+             */
+            const background = active
+              ? (picked ? "bg-blue-100" : "bg-slate-100")
+              : (picked ? "bg-blue-50" : "hover:bg-slate-50");
             return <button
               key={option.value}
+              id={`${listId}-${index}`}
               type="button"
               role="option"
               aria-selected={picked}
+              // The pointer and the keyboard agree about which row is live, so moving the mouse
+              // across the list does not leave a highlight behind somewhere else.
+              onMouseEnter={() => setActiveIndex(index)}
               onClick={() => toggle(option.value)}
-              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left ${picked ? "bg-blue-50 text-blue-900" : "text-slate-700 hover:bg-slate-50"}`}
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left ${background} ${picked ? "text-blue-900" : "text-slate-700"}`}
             >
               {/* A drawn box rather than a real checkbox: the row is the control, and a nested
                   input would take the click the row is already handling. */}
@@ -236,9 +407,13 @@ export default function FilterMultiSelect({ ariaLabel, loading = false, onChange
    */
   return <div
     ref={wrapperRef}
+    // Where every key is heard: the trigger on a short list, and the portalled search box on a long
+    // one, which reaches here through the React tree.
+    onKeyDown={handleKeyDown}
     className={`relative flex min-h-7 w-full items-center rounded border bg-white ${open ? "border-blue-500 ring-2 ring-blue-100" : "border-slate-200"}`}
   >
     <button
+      ref={triggerRef}
       type="button"
       onClick={() => setMenu(!open)}
       aria-label={ariaLabel}

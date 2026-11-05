@@ -99,3 +99,29 @@ test("a long question that matched nothing does not inherit", () => {
   assert.strictEqual(result.intent, INTENT.GENERAL);
   assert.ok(!/follow-up/.test(result.reason));
 });
+
+test("a run of short follow-ups keeps the topic of the question that set it", () => {
+  const history = [
+    { role: "user", content: "Any pending leave requests?" }, { role: "assistant", content: "Six." },
+    { role: "user", content: "which of them is the oldest?" }, { role: "assistant", content: "Karthik's." },
+  ];
+  const result = classify("who has the most pending?", history);
+  assert.equal(result.intent, INTENT.DATA);
+  assert.equal(result.aboutRequests, true);
+});
+
+test("a longer question that matched nothing ends the topic - the walk back stops there", () => {
+  const history = [
+    { role: "user", content: "Any pending leave requests?" }, { role: "assistant", content: "Six." },
+    { role: "user", content: "tell me something nice about the weather in the hills this season" }, { role: "assistant", content: "..." },
+  ];
+  assert.notEqual(classify("and another?", history).intent, INTENT.DATA);
+});
+
+test("the walk back gives up after three questions - a long run of vague turns does not reach an old topic", () => {
+  const vague = (content) => [{ role: "user", content }, { role: "assistant", content: "..." }];
+  const history = [...vague("Any pending leave requests?"), ...vague("and then?"), ...vague("ok and?"), ...vague("hmm, why?")];
+  assert.notEqual(classify("and that one?", history).aboutRequests, true);
+  // Within three, it is still the same topic.
+  assert.equal(classify("and that one?", history.slice(0, 6)).aboutRequests, true);
+});

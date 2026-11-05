@@ -11,6 +11,9 @@
  * nothing a caller sends is ever concatenated into the statement.
  */
 
+const { studioDayStart, studioDayEnd } = require("../../../services/studioDay");
+const { likeLiteral, wordChunks } = require("../../../services/wordChunks");
+
 const CALL_TYPES = ["Incoming", "Outgoing", "Missed", "Rejected"];
 const CALL_METHODS = ["PhoneCall", "WhatsAppCall"];
 const VERTICALS = ["Dum Dum", "Qua Qua", "Corp"];
@@ -48,13 +51,17 @@ function isoDate(value) {
  * report whose range ended today therefore excluded everything recorded today, and since a report
  * opens on today, both Usage columns read 0m however long the application had been in use. One
  * rule, in one place, is what stops that being written a fourth time.
+ *
+ * The day is the studio's - Asia/Kolkata, midnight to midnight - and the bound is the UTC instant
+ * that moment is, because that is what the columns hold. Bounded on the bare day, "23 Sept" ran
+ * from 05:30 on the 23rd to 05:29 on the 24th in the studio's clock. See `services/studioDay.js`.
  */
 function dayStart(day) {
-  return day ? `${day} 00:00:00` : "";
+  return studioDayStart(day);
 }
 
 function dayEnd(day) {
-  return day ? `${day} 23:59:59` : "";
+  return studioDayEnd(day);
 }
 
 function oneOf(value, allowed) {
@@ -153,11 +160,34 @@ function buildWhere(filters = {}, scope = null) {
     const numbers = Array.isArray(filters.employeeNumbers)
       ? [...new Set(filters.employeeNumbers.map((value) => String(value || "").trim()).filter(Boolean))]
       : [];
+    /*
+     * The ids the chosen names resolve to, which is what a call actually carries.
+     *
+     * `matched_employee_id` is the answer the webhook worked out when the call was delivered -
+     * Callyzer's Employee Code against the repository's code, then the handset's label - so this
+     * tests the same thing the reports group by. Without it the filter compared the repository's
+     * spelling against the handset's, and a person whose phone is labelled anything else at all
+     * answered "no calls" however many they had made.
+     *
+     * Added by `resolveEmployeeFilter`, under this reader's scope, and stripped from whatever
+     * arrived on the query string - a field the server owns is written only by the server.
+     */
+    const ids = Array.isArray(filters.employeeIds)
+      ? [...new Set(filters.employeeIds.map((value) => Number(value)).filter(Number.isInteger))]
+      : [];
     const chosen = clean.employee.map(() => "?").join(", ");
-    const tests = [`\`c\`.\`employee_number\` IN (${chosen})`, `\`c\`.\`employee_name\` IN (${chosen})`];
+    const tests = [];
+    if (ids.length) tests.push(`\`c\`.\`matched_employee_id\` IN (${ids.map(() => "?").join(", ")})`);
+    /*
+     * And the label, still, for the handsets the match could not place: those carry no id, so the
+     * name Callyzer gave them is the only thing to filter them by - and it is the name the report
+     * shows for them, so the filter agrees with what is on screen either way.
+     */
+    tests.push(`\`c\`.\`employee_number\` IN (${chosen})`, `\`c\`.\`employee_name\` IN (${chosen})`);
     if (numbers.length) tests.push(`\`c\`.\`employee_number\` IN (${numbers.map(() => "?").join(", ")})`);
     clauses.push(`(${tests.join(" OR ")})`);
-    params.push(...clean.employee, ...clean.employee, ...numbers);
+    // Bound in the order the tests were pushed, which is the order MySQL reads the placeholders.
+    params.push(...ids, ...clean.employee, ...clean.employee, ...numbers);
   }
 
   if (clean.vertical) {
@@ -185,10 +215,12 @@ function buildWhere(filters = {}, scope = null) {
     if (band.max !== null) { clauses.push("`c`.`duration_seconds` <= ?"); params.push(band.max); }
   }
 
-  if (clean.search) {
+  // Word Chunk Search: every word typed, any order, each in any of the three columns.
+  for (const chunk of wordChunks(clean.search)) {
     clauses.push("(`c`.`client_name` LIKE ? OR `c`.`client_number` LIKE ? OR `l`.`name` LIKE ?)");
     // Bound, not concatenated: the wildcards are part of the value, not part of the statement.
-    const like = `%${clean.search}%`;
+    // `likeLiteral`: a typed `%`, `_` or `\` is matched as itself, never as a wildcard.
+    const like = `%${likeLiteral(chunk)}%`;
     params.push(like, like, like);
   }
 

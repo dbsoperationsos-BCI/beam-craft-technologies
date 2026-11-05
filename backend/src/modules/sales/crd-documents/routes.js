@@ -1,6 +1,8 @@
 const express = require("express");
+const { requireTemplateOn } = require("../../../services/messageTemplateSwitches");
 const { protect } = require("../../../middleware/authMiddleware");
-const { availableEnquiryIds, create, createLink, createResponseLink, list, response } = require("./controller");
+const { availableEnquiryIds, create, createLink, createResponseLink, linkGroup, list, response, sendLinkToGroup } = require("./controller");
+const { limits: whatsappLimits } = require("../whatsapp-chat/security");
 const { requireModule } = require("../../../middleware/permissionMiddleware");
 
 const router = express.Router();
@@ -21,5 +23,9 @@ router.post("/:documentId/response-link", createResponseLink);
 // writes against the same SALES / CRD Documents permission the router already guards.
 router.post("/", create);
 router.post("/:projectId/link", createLink);
+// CRD Link Ready's Send WhatsApp: which group it would use (named before sending), then the send
+// into it - paced like every WhatsApp send.
+router.get("/:projectId/whatsapp-group", whatsappLimits.read, linkGroup);
+router.post("/:projectId/whatsapp-group", requireTemplateOn("CRD_DOCUMENT_LINK"), whatsappLimits.send, sendLinkToGroup);
 
 module.exports = router;

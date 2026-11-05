@@ -1,6 +1,7 @@
 const prisma = require("../../../config/db");
+const { likeLiteral, wordChunks } = require("../../../services/wordChunks");
 const { isoDaySqlFor } = require("./leadDates");
-const { CRM_LEAD_SQL_COLUMNS, DB_COLUMN } = require("./crmLeadService");
+const { CRM_LEAD_SQL_COLUMNS, DB_COLUMN, leadColumnSql, PROJECT_DELETED_SQL, PROJECT_DELETED_STATUS } = require("./crmLeadService");
 const {
   isOccasionVertical,
   anyOccasionWindowSql,
@@ -258,6 +259,11 @@ function statusDisplaySql(board, today) {
   return `
   CASE
     /*
+     * Every project of the enquiry is in Resource Management → Recycling Bin: read before anything
+     * else, and nothing stored. Restore and the lead reads its own status again (PROJECT_DELETED_SQL).
+     */
+    WHEN ${PROJECT_DELETED_SQL} THEN '${PROJECT_DELETED_STATUS}'
+    /*
      * Assigned to nobody, which is read before anything the lead's own status says.
      *
      * A lead nobody has been given is not being worked, whatever the status against it reads - and
@@ -510,10 +516,8 @@ function viewClause(view, today, params, board = "") {
    * the rows reading Unassigned, the same way Yet to connect lists exactly the rows reading that -
    * and since Unassigned wins over the lead's own status, the two tabs are a clean split.
    *
-   * The **pending** tabs are deliberately not split this way. They are cut by the status a lead
-   * actually holds rather than by the label its column prints - an occasion lead has always shown
-   * its occasion's status there - so an unassigned lead at Followup still appears under the call it
-   * owes. Hiding an owed call because nobody has been put on the lead would lose the work twice
+   * The **pending** tabs are deliberately not split this way. They are cut by the follow-up date
+   * alone, so an unassigned lead with a call booked still appears under the call it owes. Hiding an owed call because nobody has been put on the lead would lose the work twice
    * over. This tab says who owns it; those say what is due.
    */
   if (view === "unassigned") return UNASSIGNED_SQL;
@@ -527,77 +531,45 @@ function viewClause(view, today, params, board = "") {
   /*
    * ── The three pending tabs are cut by the Next Followup Date ─────────────────────────────────
    *
-   * A "pending followup" is a **call that is owed**, so the date that decides these three is the
-   * lead's Next Followup Date - not the day the enquiry came in. All three ask the same thing of the
-   * status, **Followup**, and differ only in the date: Today Pending is the calls owed today,
-   * Yesterday Pending the calls owed yesterday, and Overall Pending everything owed yesterday or
-   * earlier.
+   * A lead is on a pending tab when its Next Followup Date falls on that tab's day, **whatever its
+   * status but Converted**: a call booked is a call owed, whatever the lead reads. They used to ask for status
+   * Followup as well, which hid every booked call on a lead at any other status. Today Pending is
+   * the calls booked for today, Yesterday Pending those booked for yesterday, and Overall Pending
+   * everything booked for today or earlier.
    *
-   * They were briefly cut by the Enquiry Date instead, so that the date a reader could see in the
-   * table was the date the tab was cut by. That reads well and answers the wrong question: a lead
-   * that enquired in July with a call booked for yesterday is work owed yesterday, and cutting by the
-   * enquiry date filed it under July and left the call in no dated tab. The tab is a worklist, and a
-   * worklist is dated by when the work is due.
+   * Dated by the follow-up, not the enquiry: a lead that enquired in July with a call booked for
+   * yesterday is work owed yesterday. **Overall deliberately overlaps the other two** - it is the
+   * whole outstanding book, today included - so the strip's counts do not add up to the board.
    *
-   * **Overall deliberately overlaps the other two.** It is "today and everything older", so a call
-   * owed today appears in both Today and Overall, and one owed yesterday in both Yesterday and
-   * Overall - each of the dated tabs is its day on its own, and Overall is the whole outstanding
-   * book. That is why the three do not partition and why the counts on the strip do not add up to
-   * the board.
+   * A lead with no readable follow-up date is on none of the three. Overall used to take those in,
+   * but only while it also asked for Followup; with the status gone that would be every undated
+   * lead on the board. Invalid and Rejected clear the date when they are set, and so does Converted
+   * on Dum Dum and Corp, so they leave on their own (`endsTheConversation` in crmLeadService.js).
    *
-   * Overall bounded at *yesterday* and deliberately left today out, on the reading that the tab was
-   * the work somebody was behind on and a call booked for today is not yet late. The studio reads it
-   * as the total still owed rather than the total overdue, and a call owed today is owed: left out,
-   * the one number meant to answer "how much is outstanding" was short by a whole day's work, every
-   * day, and only agreed with the board after the day had passed.
+   * **Converted is never on them, on any vertical.** Dum Dum and Corp clear a converted lead's date
+   * anyway; a Converted Qua Qua lead may keep one (the client comes back for the next shoot), and it
+   * is still not a follow-up the board should chase. Plain Converted only - "Converted & Followup"
+   * is a client still being worked, and stays. `COALESCE` because `status_key` is NULL on a lead with
+   * no status, and `NULL <> 'converted'` is not true - it would drop every one of them.
    *
-   * `statusKey` rather than the raw column, so a Qua Qua lead inside an occasion window is counted at
-   * the status that occasion is being worked at - the same rule every other tab here reads. And
-   * `followUpDay` rather than the text column: it is the stored, indexed fold of the same date, so
-   * these three are a lookup rather than a parse per row.
+   * `followUpDay` rather than the text column: it is the stored, indexed fold of the same date (and
+   * a Qua Qua lead inside an occasion is read at that occasion's date), so these are a lookup.
    */
-  /*
-   * Today Pending Followups is the follow-up calls owed today.
-   *
-   * **Cut by Followup, the same as the other two.** It read Yet to connect instead, on the reasoning
-   * that the tab was the calls still to be *made* today and a lead already at Followup had been
-   * spoken to. That made the three pending tabs two different questions wearing one name: Today
-   * asked "who has nobody rung", Yesterday and Overall asked "what follow-up is owed", and a lead at
-   * Followup with a call booked for today appeared in none of them - owed a call today, listed
-   * nowhere, then turning up in Yesterday Pending the next morning as though it had been missed.
-   *
-   * So the three are now one question asked at three dates: a follow-up is owed, and the date says
-   * whether it is due today, was due yesterday, or is older than that. The untouched queue is still
-   * a tab of its own - Yet to connect - which is where "nobody has rung this" is read.
-   */
+  const notConverted = `REPLACE(REPLACE(COALESCE(${statusKey}, ''), ' ', ''), '-', '') <> 'converted'`;
   if (view === "pending") {
     params.push(today);
-    return `(${followUpDay} = ? AND REPLACE(${statusKey},'-','') = 'followup')`;
+    return `(${followUpDay} = ? AND ${notConverted})`;
   }
   if (view === "yesterdayPending") {
     // Yesterday is derived from the day the client considers today, so the tab agrees with
     // the others rather than with the server's own clock in a different timezone.
     params.push(previousDay(today));
-    return `(${followUpDay} = ? AND REPLACE(${statusKey},'-','') = 'followup')`;
+    return `(${followUpDay} = ? AND ${notConverted})`;
   }
   if (view === "overallPending") {
-    /*
-     * Every call still owed: due today, or owed on any day before it.
-     *
-     * `<=` today, not `<`. This bounded at yesterday and left today's calls out, on the reading that
-     * the tab was the work somebody was behind on. It is read as the total still owed, so a call
-     * booked for today belongs in it - leaving it out made the one number meant to answer "how much
-     * is outstanding" short by a whole day's work, every day, and it only agreed with the board once
-     * the day had passed.
-     *
-     * `IS NULL` is the half that keeps the tab honest. `follow_up_day` is NULL when the follow-up
-     * date was never filled in *and* when what was typed cannot be read as a date, and either way the
-     * lead is owed a call on a day the board cannot name. Those belong with the late work rather than
-     * in no tab at all - which is where they would sit, chased by nobody, if this only compared days.
-     */
+    // `<=` today, not `<`: the tab is the total still owed, and a call booked for today is owed.
     params.push(today);
-    return `(REPLACE(${statusKey},'-','') = 'followup'
-      AND (${followUpDay} <= ? OR ${followUpDay} IS NULL))`;
+    return `(${followUpDay} <= ? AND ${notConverted})`;
   }
   /*
    * Qua Qua's two date-driven tabs, both read off "Date of Birth (or) EDOD" - the one field that
@@ -622,12 +594,13 @@ function viewClause(view, today, params, board = "") {
   if (view === "converted") {
     // Both spellings of the combined status count as converted: the label was renamed from
     // "Followup & Converted", and rows written before that still hold the old order.
-    return `REPLACE(REPLACE(${statusKey}, ' ', ''), '-', '') IN ('converted', 'followup&converted', 'converted&followup')`;
+    // Not a lead whose every project is in the Recycling Bin: it reads "Project deleted", not Converted.
+    return `REPLACE(REPLACE(${statusKey}, ' ', ''), '-', '') IN ('converted', 'followup&converted', 'converted&followup') AND NOT ${PROJECT_DELETED_SQL}`;
   }
   if (view === "rejected") {
     // The leads that have been turned down. One spelling, matched the way `statusDisplaySql` folds
     // it onto the label, so the tab holds exactly the rows whose Status column reads Rejected.
-    return `${statusKey} = 'rejected'`;
+    return `${statusKey} = 'rejected' AND NOT ${PROJECT_DELETED_SQL}`;
   }
   return null;
 }
@@ -699,7 +672,7 @@ const viewCarriesDateRange = (view) => !DATED_VIEWS.has(String(view || ""));
  * Two shapes, and the shape is the question.
  *
  * A **string** is what somebody typed into the box above a column, and it narrows by matching text:
- * `LIKE ?`, as it always has.
+ * Word Chunk Search - one `LIKE ?` per word typed, all of them required, in any order.
  *
  * A **list** is what they ticked in a column that offers one, and it is an exact `IN`. Exact because
  * the list is built from `columnValues` - the values this board actually holds - so "Bala" chosen
@@ -710,8 +683,23 @@ const viewCarriesDateRange = (view) => !DATED_VIEWS.has(String(view || ""));
  * length is the caller's to choose and the placeholder list is ours to bound.
  */
 const MAX_FILTER_VALUES = 200;
+/**
+ * A board column's own search box (`CrmKanbanBoard`): every word typed must be found in the lead's
+ * name, number or Enquiry ID - any of the three - so "naidu 98" finds Naidu whose number has 98.
+ * Sent as the `_search` filter key, which no column is named.
+ */
+const SEARCH_FILTER = "_search";
+const SEARCH_COLUMNS = ["name", "contact", "enquiryId"];
 function columnFilterClauses({ filters = {}, board, today }, clauses, params) {
   for (const [columnId, rawValue] of Object.entries(filters)) {
+    if (columnId === SEARCH_FILTER) {
+      const fields = SEARCH_COLUMNS.map((id) => columnSql(id, { board, today })).filter(Boolean);
+      for (const chunk of wordChunks(typeof rawValue === "string" ? rawValue : "")) {
+        clauses.push(`(${fields.map((field) => `${field} LIKE ?`).join(" OR ")})`);
+        params.push(...fields.map(() => `%${likeLiteral(chunk)}%`));
+      }
+      continue;
+    }
     const sql = columnSql(columnId, { board, today });
     if (!sql) continue;
 
@@ -725,10 +713,11 @@ function columnFilterClauses({ filters = {}, board, today }, clauses, params) {
       continue;
     }
 
-    const value = String(rawValue || "").trim();
-    if (!value) continue;
-    clauses.push(`${sql} LIKE ?`);
-    params.push(`%${value}%`);
+    for (const chunk of wordChunks(rawValue)) {
+      clauses.push(`${sql} LIKE ?`);
+      // The chunk as typed: `%`, `_` and `\` matched as themselves, never as wildcards.
+      params.push(`%${likeLiteral(chunk)}%`);
+    }
   }
 }
 
@@ -867,6 +856,23 @@ function occasionSelectColumns(board, today) {
   ];
 }
 
+/*
+ * What a board column's leads are worth, summed over the same rows its count is - the WHERE, the
+ * scope and "only mine" are the count's own.
+ *
+ * Estimated: each lead's Estimated Value. The column is free text, so a value counts only once its
+ * commas and spaces are gone and it reads as a plain number; anything else ("TBD") adds nothing.
+ *
+ * Converted: each lead's **last** conversion - the Initial Converted Value of its newest live project
+ * (a lead booked twice counts once, at its latest booking), the figure its Converted History shows.
+ */
+const VALUE_TOTALS_SQL = `
+  SUM(CASE WHEN REPLACE(REPLACE(\`estimated_value\`, ',', ''), ' ', '') REGEXP '^[0-9]+([.][0-9]+)?$'
+    THEN CAST(REPLACE(REPLACE(\`estimated_value\`, ',', ''), ' ', '') AS DECIMAL(16, 2)) ELSE 0 END) AS estimatedValue,
+  SUM((SELECT \`p\`.\`initial_converted_value\` FROM \`sales_project\` AS \`p\`
+    WHERE \`p\`.\`enquiry_id\` = \`sales_crm_lead\`.\`enquiry_id\` AND \`p\`.\`deleted_at\` IS NULL
+    ORDER BY \`p\`.\`created_at\` DESC LIMIT 1)) AS convertedValue`;
+
 async function listCrmLeadsPage({
   board = "Dum Dum",
   view = "all",
@@ -887,11 +893,20 @@ async function listCrmLeadsPage({
   // The header's date range, as two inclusive `YYYY-MM-DD` keys; see `dateRangeClauses`.
   dateFrom = "",
   dateTo = "",
+  // The board's column totals - see `VALUE_TOTALS_SQL`. Asked only by a board column's first page.
+  withValues = false,
 }) {
   const { where, params } = buildWhere({ board, view, filters, today, scope, mine, dateFrom, dateTo });
 
   const orderSql = columnSql(sortColumn, { board, today }) || "`enquiry_id`";
   const direction = String(sortDirection).toLowerCase() === "asc" ? "ASC" : "DESC";
+  /*
+   * The enquiry id breaks every tie. Pages are cut with LIMIT / OFFSET, and leads that share the sort
+   * column - a status, a date - come back in whatever order the database likes on each query, so
+   * page 2 repeated leads from page 1 and never showed others (32 of 224 on the Status sort). One
+   * fixed order means every lead is on exactly one page.
+   */
+  const order = orderSql === "`enquiry_id`" ? `\`enquiry_id\` ${direction}` : `${orderSql} ${direction}, \`enquiry_id\` ${direction}`;
   const size = Math.min(Math.max(Number(limit) || 100, 1), 500);
   const start = Math.max(Number(offset) || 0, 0);
 
@@ -909,10 +924,13 @@ async function listCrmLeadsPage({
    * backfill, so sending it is all the screen needs to show the right branch, whatever the text
    * says. One integer per row.
    */
-  const columns = ["enquiryId", ...CRM_LEAD_SQL_COLUMNS, "createdAt", "branchId"].map((column) => `\`${DB_COLUMN[column]}\` AS \`${column}\``);
+  // The branch, CRM and vertical come through their references with the text as fallback, the way
+  // every other read of a lead does (`RESOLVED_LEAD_SQL` in crmLeadService).
+  const columns = ["enquiryId", ...CRM_LEAD_SQL_COLUMNS, "createdAt", "branchId"].map(leadColumnSql);
   columns.push(...occasionSelectColumns(board, today));
+  columns.push(`${PROJECT_DELETED_SQL} AS \`projectDeleted\``);
   const rows = await prisma.$queryRawUnsafe(
-    `SELECT ${columns.join(", ")} FROM \`sales_crm_lead\` WHERE ${where} ORDER BY ${orderSql} ${direction} LIMIT ${size} OFFSET ${start}`,
+    `SELECT ${columns.join(", ")} FROM \`sales_crm_lead\` WHERE ${where} ORDER BY ${order} LIMIT ${size} OFFSET ${start}`,
     ...params,
   );
 
@@ -927,12 +945,16 @@ async function listCrmLeadsPage({
    */
   if (!withTotal) return { rows, total: null };
 
-  const [{ total }] = await prisma.$queryRawUnsafe(
-    `SELECT COUNT(*) AS total FROM \`sales_crm_lead\` WHERE ${where}`,
+  const [{ total, estimatedValue, convertedValue }] = await prisma.$queryRawUnsafe(
+    `SELECT COUNT(*) AS total${withValues ? `, ${VALUE_TOTALS_SQL}` : ""} FROM \`sales_crm_lead\` WHERE ${where}`,
     ...params,
   );
 
-  return { rows, total: Number(total || 0) };
+  return {
+    rows,
+    total: Number(total || 0),
+    ...(withValues ? { values: { estimated: Number(estimatedValue || 0), converted: Number(convertedValue || 0) } } : {}),
+  };
 }
 
 // Every id the current board, tab and filters match - not just the page on screen. This is

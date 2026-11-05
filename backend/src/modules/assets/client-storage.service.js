@@ -101,9 +101,29 @@ async function removeProjectClientStorage(client, projectId, options = {}) {
     data: {
       isDeleted: true,
       deletedReason: PROJECT_DELETED_REASON,
-      deletedAt: new Date(),
+      // The project's own deletion time where the caller has it, so Restore can find exactly these.
+      deletedAt: options.deletedAt || new Date(),
       ...(userId ? { updatedBy: userId } : {}),
     },
+  });
+  return count;
+}
+
+/**
+ * Puts back the storage records a project's delete took off the register - Recycling Bin → Restore.
+ *
+ * Only the records that delete removed: the project's reason on them, and removed at or after the
+ * project's `deletedAt`. A disc somebody removed by hand, with a reason of their own, stays removed;
+ * so does one removed with this reason at an earlier delete (that delete's restore already put it
+ * back, or it was removed by hand since). `gte` rather than an exact match because a project deleted
+ * before the bin existed stamped its records a moment after its own `deletedAt`.
+ */
+async function restoreProjectClientStorage(client, projectId, options = {}) {
+  const userId = Number(options.userId) || null;
+  if (!options.deletedAt) return 0;
+  const { count } = await client.clientStorage.updateMany({
+    where: { projectId, isDeleted: true, deletedReason: PROJECT_DELETED_REASON, deletedAt: { gte: options.deletedAt } },
+    data: { isDeleted: false, deletedReason: null, deletedAt: null, ...(userId ? { updatedBy: userId } : {}) },
   });
   return count;
 }
@@ -136,4 +156,4 @@ async function clientStorageAccessWhere({ userId, permissions }) {
   return { OR: [scope.where, { project }, { shoot: { project } }] };
 }
 
-module.exports = { nextStorageId, ensureProjectClientStorage, removeProjectClientStorage, clientStorageAccessWhere, CLIENT_STORAGE_SCOPE_COLUMNS, PROJECT_DELETED_REASON };
+module.exports = { nextStorageId, ensureProjectClientStorage, removeProjectClientStorage, restoreProjectClientStorage, clientStorageAccessWhere, CLIENT_STORAGE_SCOPE_COLUMNS, PROJECT_DELETED_REASON };

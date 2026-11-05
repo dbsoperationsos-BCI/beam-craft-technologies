@@ -2,11 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import UploadDock from "@/components/image-selection/UploadDock";
+import AiMediaUploadPill from "@/components/ai-feature/media-upload/components/AiMediaUploadPill";
 import { SelectionActionsProvider } from "@/components/data-table/TableSelectionActions";
+import { ImageViewerProvider } from "@/components/shared/ImageViewer";
 import { DOCK_WIDTH_CLASS, isNebulaDocked, onNebulaDockChange } from "@/lib/ai/nebulaPanel";
 import AppSidebar from "./AppSidebar";
 import AppTopbar from "./AppTopbar";
+import WhatsAppGroupFailuresBanner from "./WhatsAppGroupFailuresBanner";
 import useUsageHeartbeat from "./useUsageHeartbeat";
+import useRememberLastPage from "@/components/preferences/useRememberLastPage";
 import WhatsappRequiredGate from "@/components/sales/WhatsappRequiredGate";
 
 export default function AppShell({ children, theme }) {
@@ -42,6 +46,8 @@ export default function AppShell({ children, theme }) {
    * `@/lib/usageHeartbeat`.
    */
   useUsageHeartbeat("app");
+  // The screen a dropdown family (User Management, Pre Production) was left on, for its sidebar row.
+  useRememberLastPage();
 
   return (
     /*
@@ -50,8 +56,20 @@ export default function AppShell({ children, theme }) {
      * neither of the two has to know about the other. See `TableSelectionActions`.
      */
     <SelectionActionsProvider>
+    {/* The one image viewer every picture in the application opens into (`shared/ImageViewer`). */}
+    <ImageViewerProvider>
     <div className="app-shell flex h-dvh max-w-full flex-col overflow-x-hidden bg-slate-100 text-slate-900">
       <AppTopbar theme={theme} sidebarOpen={sidebarOpen} onMenuClick={toggleSidebar} />
+      {/*
+        * WhatsApp messages that could not find their group, under the bar on every page.
+        *
+        * Here rather than on a settings screen because a studio that has not sent a client their
+        * shoot message does not find that out by opening a panel. A flex item above the row below,
+        * so it pushes the page down instead of covering it, and `shrink-0` so the page gives up the
+        * room rather than the bar. It draws nothing at all - and asks the server nothing - for
+        * somebody without `SETTINGS / WhatsApp Activity Log`, which is most of the studio.
+        */}
+      <WhatsAppGroupFailuresBanner />
       {/*
         * The row the drawer and the page share, and the reason the drawer sits *below* the bar.
         *
@@ -77,6 +95,8 @@ export default function AppShell({ children, theme }) {
         </main>
       </div>
       <UploadDock />
+      {/* AI Feature media uploads, minimised: separate from Image Selection's dock on purpose. */}
+      <AiMediaUploadPill />
       {/*
         * WhatsApp, before anything else.
         *
@@ -98,6 +118,7 @@ export default function AppShell({ children, theme }) {
         implementation. It sits below every modal on purpose; see the note in the component.
       */}
     </div>
+    </ImageViewerProvider>
     </SelectionActionsProvider>
   );
 }

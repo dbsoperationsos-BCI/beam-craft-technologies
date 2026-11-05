@@ -25,9 +25,9 @@ test("a brand's screen carries the three tabs, and each draws its own", () => {
 test("the pictures are PDF Image's and no longer PDF Content's, on the same editor", () => {
   const image = between("function PdfImageTab", "function PdfContentTab");
   const content = between("function PdfContentTab", "export function QuotationGeneralSettingsPanel");
-  assert.match(image, /sectionTitle\("Pictures"\)/);
+  assert.match(image, /sectionTitle\("Pictures", `The photographs this brand's quotation opens and closes on/);
   assert.match(image, /<CoverSetsEditor/);
-  assert.doesNotMatch(content, /sectionTitle\("Pictures"\)|<CoverSetsEditor|coverSets/);
+  assert.doesNotMatch(content, /sectionTitle\("Pictures",|<CoverSetsEditor|coverSets/);
   // The sets are read from, and written back to, the same stored `pdfAssets.coverSets` as before.
   assert.match(image, /coverSets: \(config\.pdfAssets\?\.coverSets \|\| \[\]\)\.map/);
   assert.match(image, /updateQuotationBrand\(code, \{ pdfAssets: \{ coverSets: cleanCoverSets\(values\.coverSets\) \} \}\)/);

@@ -21,20 +21,6 @@ import { derivedVertical } from "./whatsappGroupNameUtils.js";
  * Deliberately a short, closed list of things that are not names: a new branch does not belong here,
  * it belongs in the register, and `sourceBranchForCrmBranch` finds it there without an edit.
  */
-const CRM_BRANCH_TO_SOURCE_BRANCH = {
-  erode: "Erode TN",
-  tiruppur: "Tiruppur TN",
-  tpr: "Tiruppur TN",
-  coimbatore: "Coimbatore TN",
-  cbe: "Coimbatore TN",
-  bangalore: "Bangalore KA",
-  blr: "Bangalore KA",
-  hyderabad: "Hyderabad TL",
-  hyd: "Hyderabad TL",
-  vizag: "Visakhapatnam AP",
-  visakhapatnam: "Visakhapatnam AP",
-  vskp: "Visakhapatnam AP",
-};
 
 // The CRM's three system tables, which are also the generator's group types. A project stores
 // the same fact twice - as a group type here and as WED / QQ / CORP in `vertical` - so both are
@@ -63,10 +49,17 @@ export const CRM_GROUP_TYPES = ["Dum Dum", "Qua Qua", "Corp"];
  * That is also why this does not hold a list of branches of its own. It never needs to know what
  * the studio's branches are; it only needs to stop mistranslating the ones it is handed.
  */
+/**
+ * The branch text a lead or a quotation carries, handed to the project form as it is.
+ *
+ * This used to translate the studio's short forms ("cbe", "vizag") through a map of six branch
+ * names typed into the browser - so a branch renamed in Settings went on being translated to its
+ * old name, and the form's dropdown then refused the value. The translation now happens in the form
+ * itself, against the register it has just loaded (`resolveBranchName` in lib/branchName.js), which
+ * is the only place that knows what the branches are called today. Nothing here may guess.
+ */
 export function sourceBranchForCrmBranch(branch) {
-  const text = String(branch || "").trim();
-  if (!text) return "";
-  return CRM_BRANCH_TO_SOURCE_BRANCH[text.toLowerCase()] || text;
+  return String(branch || "").trim();
 }
 
 /**
@@ -113,6 +106,9 @@ export function createProjectPayload(project) {
     // otherwise the server falls back to "Converted", as it always has for New Project and imports.
     ...(project.crmLeadStatus ? { crmLeadStatus: project.crmLeadStatus } : {}),
     shoots: Array.isArray(project.shoots) ? project.shoots.map(({ clientKey, shootId, id, ...shoot }) => shoot) : [],
+    // Create Project → Client Credentials: the client's sign-in, made with the project. Only when
+    // one was asked for; the booking's own permission is what the server asks for, here as there.
+    ...(project.clientLogin ? { clientLogin: project.clientLogin } : {}),
   };
 }
 

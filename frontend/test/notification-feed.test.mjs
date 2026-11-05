@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
-import { sourceNotices, storedNotifications } from "../src/lib/notificationFeed.mjs";
+import { pruneDismissed, sourceNotices, storedNotifications, withoutDismissed } from "../src/lib/notificationFeed.mjs";
 
 /*
  * Reading the bell's reply.
@@ -49,4 +50,38 @@ test("anything that is not a list of rows reads as none, rather than throwing on
     assert.deepEqual(storedNotifications(response), []);
     assert.deepEqual(sourceNotices(response), []);
   }
+});
+
+test("a notice marked as read leaves the bell, and only that one", () => {
+  const notices = [notice("f1"), notice("f2"), notice(3)];
+  assert.deepEqual(withoutDismissed(notices, ["f2"]).map((row) => row.id), ["f1", 3]);
+  // Ids are compared as text, since storage hands back strings for a meeting's numeric id.
+  assert.deepEqual(withoutDismissed(notices, ["3"]).map((row) => row.id), ["f1", "f2"]);
+  assert.deepEqual(withoutDismissed(notices, undefined).map((row) => row.id), ["f1", "f2", 3]);
+});
+
+test("the dismissed list only remembers what the bell is still being sent", () => {
+  // A follow-up that has been made is no longer in the reply, so hiding it is nothing to remember.
+  assert.deepEqual(pruneDismissed(["f1", "gone", "3"], [notice("f1"), notice(3)]), ["f1", "3"]);
+  assert.deepEqual(pruneDismissed(["f1"], []), []);
+});
+
+test("no notice on the bell has a Mark as read button - opening its page is what clears it", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  for (const file of [
+    ["components", "app-shell", "useStoredNotifications.js"],
+    ["components", "app-shell", "useSourceNotices.js"],
+    ["components", "sales", "useMeetingNotices.js"],
+  ]) {
+    const source = fs.readFileSync(path.join(process.cwd(), "src", ...file), "utf8");
+    assert.doesNotMatch(source, /action:\s*\{\s*label:\s*"Mark as read"/, `${file.at(-1)} still offers Mark as read`);
+    // Opening still reads it, so it does leave the bell once its page has been looked at.
+    assert.match(source, /onSelect: \(\) => (open\(notification\)|\{ dismiss\(entry\.id, notices\);|\{ onMarkRead\(\);)/, `${file.at(-1)} no longer clears on open`);
+  }
+});
+
+test("the bell's two readers share one notifications request rather than asking twice", () => {
+  const service = fs.readFileSync(new URL("../src/services/notifications.service.js", import.meta.url), "utf8");
+  assert.match(service, /if \(!pending\) pending = apiRequest\("\/api\/notifications"\)\.finally\(\(\) => \{ pending = null; \}\);/);
 });

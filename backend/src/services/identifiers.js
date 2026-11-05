@@ -163,9 +163,16 @@ const SCHEMES = {
   // (vi) Image Selection. One studio-wide run of numbers: a gallery belongs to the client, and the
   // project behind it already says which branch and vertical it came from.
   IMAGE_SELECTION: { tag: "VCIS", parts: [], width: 6, model: "imageSelectionProject", field: "projectCode" },
+  // (vi-a) AI Culling, AI Editing and Signature Album projects: a run each, studio-wide like Image
+  // Selection's, on their own records (`visual_curation_module_project`).
+  VC_AI_CULLING: { tag: "VCAC", parts: [], width: 6, model: "visualCurationModuleProject", field: "projectCode" },
+  VC_AI_EDITING: { tag: "VCAE", parts: [], width: 6, model: "visualCurationModuleProject", field: "projectCode" },
+  VC_SIGNATURE_ALBUM: { tag: "VCSA", parts: [], width: 6, model: "visualCurationModuleProject", field: "projectCode" },
   // (vii) and (viii) Accounts. Money Spent and Money Received, counted apart.
   CASH_SPENT: { tag: "MS", parts: ["vertical", "branch"], width: 6, model: "cashEntry", field: "entryId" },
   CASH_RECEIVED: { tag: "MR", parts: ["vertical", "branch"], width: 6, model: "cashEntry", field: "entryId" },
+  // A branch transfer, numbered in the books of the branch the money left. No project, so no vertical.
+  CASH_TRANSFER: { tag: "MT", parts: ["branch"], width: 6, model: "cashEntry", field: "entryId" },
   // (ix) Asset Management. An asset sits at a branch and serves every vertical there.
   ASSET: { tag: "ASMGMT", parts: ["branch"], width: 6, model: "asset", field: "assetCode" },
   /*
@@ -175,9 +182,29 @@ const SCHEMES = {
    * register is read in.
    */
   EMPLOYEE_REFERRAL: { tag: "REF", parts: [], width: 6, model: "employeeReferral", field: "referralId" },
+  /*
+   * (ix-b) Speak-up. Neither a vertical nor a branch: a complaint belongs to HR studio-wide, not to
+   * a board or an office. Five digits, not six - `DBS-SPK-00001` - the width the studio asked for.
+   */
+  SPEAK_UP: { tag: "SPK", parts: [], width: 5, model: "speakUp", field: "speakUpId" },
   // (x) Vendor Management, and (xi) Client Storage. Neither belongs to a branch or a vertical.
   VENDOR: { tag: "VNMGMT", parts: [], width: 6, model: "assetVendor", field: "vendorId" },
   CLIENT_STORAGE: { tag: "STOMGMT", parts: [], width: 6, model: "clientStorage", field: "storageId" },
+  /*
+   * (xii) Payroll Recovery. Studio-wide, and written the way HR already numbers them - `RECO-ID-0001` -
+   * rather than with the studio's `DBS-` mark (`brand: false`), four digits wide.
+   */
+  PAYROLL_RECOVERY: { tag: "RECO-ID", brand: false, parts: [], width: 4, model: "payrollRecovery", field: "recoveryId" },
+  // (xiii) Payroll Advance Salary, numbered the way recoveries are - `ADV-ID-0001`.
+  PAYROLL_ADVANCE: { tag: "ADV-ID", brand: false, parts: [], width: 4, model: "payrollAdvance", field: "advanceId" },
+  /*
+   * (ix-c) Offboarding invite - `DBS-OFB-00001`, the code HR quotes an exit by. Studio-wide like the
+   * speak-up above it: leaving belongs to HR, not to a branch or a vertical, and five digits is the
+   * width the studio reads these at.
+   */
+  OFFBOARDING_INVITE: { tag: "OFB", parts: [], width: 5, model: "employeeOffboardingInvite", field: "offboardingId" },
+  // (xiv) Payroll Policy Breach, numbered the way recoveries are - `PB-ID-0001`.
+  PAYROLL_POLICY_BREACH: { tag: "PB-ID", brand: false, parts: [], width: 4, model: "payrollPolicyBreach", field: "policyBreachId" },
 };
 
 /*
@@ -231,7 +258,7 @@ function formatIdentifier(scheme, context, value) {
   const definition = SCHEMES[scheme];
   if (!definition) throw new Error(`Unknown identifier scheme: ${scheme}`);
   const number = definition.width ? String(value).padStart(definition.width, "0") : String(value);
-  return ["DBS", definition.tag, ...schemeParts(scheme, context), number].filter(Boolean).join("-");
+  return [definition.brand === false ? null : "DBS", definition.tag, ...schemeParts(scheme, context), number].filter(Boolean).join("-");
 }
 
 /**
@@ -332,15 +359,14 @@ function parseIdentifier(scheme, value) {
   const definition = SCHEMES[scheme];
   if (!definition) throw new Error(`Unknown identifier scheme: ${scheme}`);
   const parts = String(value ?? "").trim().split("-");
-  // "DBS", the tag where the scheme has one, one segment per part, and the number.
-  const expected = 1 + (definition.tag ? 1 : 0) + definition.parts.length + 1;
+  // "DBS" (unless the scheme carries no mark, `brand: false`), the tag where the scheme has one -
+  // itself hyphenated for `RECO-ID` - one segment per part, and the number. The mirror of
+  // `formatIdentifier`, so whatever it writes reads back.
+  const prefix = [...(definition.brand === false ? [] : ["DBS"]), ...(definition.tag ? definition.tag.split("-") : [])];
+  const expected = prefix.length + definition.parts.length + 1;
   if (parts.length !== expected) return null;
-  if (parts[0] !== "DBS") return null;
-  let index = 1;
-  if (definition.tag) {
-    if (parts[index] !== definition.tag) return null;
-    index += 1;
-  }
+  if (prefix.some((segment, position) => parts[position] !== segment)) return null;
+  let index = prefix.length;
   const context = {};
   for (const part of definition.parts) {
     const codes = (part === "vertical" ? VERTICALS : BRANCHES).map((entry) => entry.code);

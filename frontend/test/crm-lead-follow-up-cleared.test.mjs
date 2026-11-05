@@ -30,6 +30,8 @@ function declaration(opening, closing) {
 
 const source = [
   declaration('const STATUSES_WITHOUT_FOLLOW_UP = [', '];'),
+  declaration('const isQuaQuaVertical =', ';'),
+  declaration('function dropsNextFollowUp(', '\n}'),
   declaration('function isOccasionLead(', '\n}'),
   declaration('function occasionEcho(', '\n}'),
   declaration('function followUpClearedBy(', '\n}'),
@@ -61,8 +63,19 @@ test("an occasion lead's own copies go too, or the tabs would still count it", (
   });
 });
 
+test("plain Converted drops the next call on Dum Dum and Corp, and keeps it on Qua Qua", () => {
+  // A wedding or corporate client who has booked is done being chased; a blank vertical is Dum Dum.
+  for (const vertical of ["Dum Dum", "Corp", "", undefined]) {
+    assert.deepEqual(followUpClearedBy({ ...ordinary, vertical }, "leadStatus", "Converted"), { nextFollowUpDate: "", nextFollowUpTime: "" }, String(vertical));
+  }
+  // A Qua Qua client comes back for the next shoot, so its follow-up stays where it was.
+  for (const vertical of ["Qua Qua", "quaqua", " QUA QUA "]) {
+    assert.deepEqual(followUpClearedBy({ ...ordinary, vertical }, "leadStatus", "Converted"), {}, vertical);
+  }
+});
+
 test("every other status leaves the follow-up exactly where it was", () => {
-  for (const status of ["Interested", "Followup", "CNA", "Converted", "Converted & Followup", ""]) {
+  for (const status of ["Interested", "Followup", "CNA", "Converted & Followup", ""]) {
     assert.deepEqual(followUpClearedBy(occasion, "leadStatus", status), {}, status || "an empty status");
   }
 });
@@ -96,13 +109,16 @@ test("the status is matched as typed, and never loosely", () => {
 test("the popup hides the two fields on the same list that clears them", () => {
   assert.match(
     PAGE,
-    /\{STATUSES_WITHOUT_FOLLOW_UP\.includes\(String\(displayLead\.leadStatus \|\| ""\)\.trim\(\)\) \? \(/,
+    /\) : STATUSES_WITHOUT_FOLLOW_UP\.includes\(String\(displayLead\.leadStatus \|\| ""\)\.trim\(\)\) \? \(/,
     "the lead popup is asking a rejected lead for a follow-up date again",
   );
-  // And both draft paths clear it - the popup's, and the info panel's beside the table.
+  // A converted Dum Dum or Corp lead shows its last follow-up and books no next one.
+  assert.match(PAGE, /\{String\(displayLead\.leadStatus \|\| ""\)\.trim\(\) === "Converted" && dropsNextFollowUp\(displayLead\.leadStatus, displayLead\.vertical\) \? \(/, "the popup asks a converted lead for a next follow-up again");
+  // And both draft paths clear it - the popup's, and the info panel's beside the table - and so
+  // does converting, which writes the lead without going through either.
   assert.equal(
     PAGE.match(/\.\.\.followUpClearedBy\(/g)?.length,
-    2,
-    "both of the popup's draft handlers must clear the follow-up",
+    3,
+    "both of the popup's draft handlers and the convert write must clear the follow-up",
   );
 });

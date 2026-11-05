@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const prisma = require("../src/config/db");
+const { retrying } = require("./helpers/retrying");
 const dataScope = require("../src/services/dataScope.service");
 const { invalidate } = require("../src/services/referenceMatchers");
 const { projectAccessWhere, REGISTER_READERS } = require("../src/services/projectScope");
@@ -24,6 +25,8 @@ const crd = require("../src/modules/sales/crd-documents/service");
 const STAMP = String(Date.now()).slice(-6);
 const tag = (name) => `TDP-${STAMP}-${name}`;
 const F = {};
+// A project is keyed to its lead (20260924150000), so every enquiry a fixture names gets one.
+const leadFor = (enquiryId) => retrying(() => prisma.salesCrmLead.upsert({ where: { enquiryId }, create: { enquiryId, name: enquiryId }, update: {} }));
 
 async function grant(user, module, feature, reachBranchIds = []) {
   const permission = await prisma.permission.findFirst({ where: { module, feature }, select: { id: true } });
@@ -51,13 +54,16 @@ before(async () => {
   F.report = await prisma.employee.create({ data: { employeeId: tag("report"), employeeName: `Project Scope Report ${STAMP}`, reportsToEmployeeId: F.manager.id } });
   F.stranger = await prisma.employee.create({ data: { employeeId: tag("stranger"), employeeName: `Project Scope Stranger ${STAMP}` } });
   F.me = await prisma.user.create({ data: { name: "Project scope me", email: `${tag("me")}@test.local`.toLowerCase(), username: tag("me").toLowerCase(), password: "x", role: "ADMIN", branchId: F.br1.id, linkedEmployeeId: F.manager.id } });
+  // A real login for the creator column: `created_by_user_id` is a foreign key, so an invented id
+  // would be refused at the insert rather than read as "somebody else made this".
+  F.nobody = await prisma.user.create({ data: { name: "Project scope nobody", email: `${tag("nobody")}@test.local`.toLowerCase(), username: tag("nobody").toLowerCase(), password: "x", role: "ADMIN", branchId: F.br1.id } });
   invalidate();
   // Every reference in step with its text, so the row-replay invariant holds while these exist.
-  const project = (name, branch, people) => prisma.salesProject.create({ data: {
+  const project = async (name, branch, people) => { await leadFor(tag(`enq-${name}`)); return retrying(() => prisma.salesProject.create({ data: {
     enquiryId: tag(`enq-${name}`), eventId: tag(name), whatsappGroupName: `WED ${name}`, clientMainNumber: "+919876543210",
     sourceBranch: branch.name, branchId: branch.id, vertical: "WED", verticalId: F.dumDum.id,
-    deliverables: "[]", initialConvertedValue: 0, crmName: "Test", createdByUserId: F.me.id + 1000000, ...people,
-  } });
+    deliverables: "[]", initialConvertedValue: 0, crmName: "Test", createdByUserId: F.nobody.id, ...people,
+  } })); };
   await project("mine-crm", F.br1, { crmEmployeeId: F.manager.id });
   await project("mine-creative", F.br1, { creativeManagerEmployeeId: F.manager.id, crmEmployeeId: F.stranger.id });
   await project("mine-elsewhere", F.br2, { projectManagerEmployeeId: F.manager.id });
@@ -83,6 +89,7 @@ after(async () => {
   await prisma.salesProjectCrdDocument.deleteMany({ where: { publicToken: { in: [tag("cm").slice(-16), tag("cs").slice(-16)] } } });
   await prisma.salesQuotation.deleteMany({ where: { quotationNumber: { startsWith: `TDP-${STAMP}` } } });
   await prisma.salesProject.deleteMany({ where: { eventId: { startsWith: `TDP-${STAMP}` } } });
+  await prisma.salesCrmLead.deleteMany({ where: { enquiryId: { startsWith: `TDP-${STAMP}` } } });
   await prisma.userRole.deleteMany({ where: { userId: F.me.id } });
   await prisma.user.delete({ where: { id: F.me.id } });
   await prisma.employee.deleteMany({ where: { employeeId: { startsWith: `TDP-${STAMP}` } } });
@@ -150,6 +157,10 @@ test("the assistant's project reads count through the same rule", async () => {
     const seen = found.map((row) => row.eventId.replace(`TDP-${STAMP}-`, "")).sort();
     assert.ok(seen.includes("mine-crm") && seen.includes("mine-elsewhere"), `saw ${seen.join(", ")}`);
     assert.ok(!seen.includes("stranger-there"), "a stranger's project in a branch I do not reach");
+    // Word Chunk Search: two words in reverse order find the same project, still inside the access rule.
+    const reversed = (await readService.searchProjects({ search: `crm TDP-${STAMP}-mine`, limit: 50, access })).map((row) => row.eventId);
+    assert.ok(reversed.includes(`TDP-${STAMP}-mine-crm`), `reversed search saw ${reversed.join(", ")}`);
+    assert.ok(!(await readService.searchProjects({ search: `crm TDP-${STAMP}-stranger`, limit: 50, access })).length, "the search widened the access rule");
     const summary = await readService.projectSummary({ access });
     assert.ok(summary.total >= seen.length, `summary counted ${summary.total}`);
   } finally { await undo(); }
@@ -166,6 +177,33 @@ test("quotations follow the same rule: mine and my team's, not a colleague's in 
     assert.deepEqual(await quotations(resolved), ["q1", "q3"]);
     const q3 = await prisma.salesQuotation.findFirst({ where: { quotationNumber: tag("q3") } });
     assert.equal(resolved.allows(q3), true, "my report's quotation, in a branch I do not reach");
+  } finally { await undo(); }
+});
+
+test("the bulk delete takes a ticked quotation's whole chain, and only one the caller may change", async () => {
+  const { deleteQuotationChainRecord } = require("../src/modules/sales/projects/controller");
+  const version = (chain, n, owner, branch) => ({
+    quotationNumber: tag(chain), quotationId: tag(`${chain}-0${n}`), version: n, publicToken: tag(`${chain}${n}`).slice(-16),
+    payload: {}, sourceBranch: branch.name, branchId: branch.id, followedBy: owner.employeeName, ownerEmployeeId: owner.id,
+  });
+  await prisma.salesQuotation.createMany({ data: [
+    version("c1", 1, F.manager, F.br1), version("c1", 2, F.manager, F.br1), version("c1", 3, F.manager, F.br1),
+    version("c2", 1, F.stranger, F.br1),
+  ] });
+  const live = async (chain) => prisma.salesQuotation.count({ where: { quotationNumber: tag(chain), deletedAt: null } });
+  const idOf = async (quotationId) => (await prisma.salesQuotation.findUnique({ where: { quotationId: tag(quotationId) } })).id;
+  const req = { user: { id: F.me.id }, permission: { module: "SALES", feature: "Quotation Management" } };
+  const undo = await grant(F.me, "SALES", "Quotation Management");
+  try {
+    // An older version does not stand for the chain: the reader never saw the versions after it.
+    await assert.rejects(deleteQuotationChainRecord(req, await idOf("c1-02")));
+    assert.equal(await live("c1"), 3);
+    // A colleague's quotation in my branch is refused, exactly as the single delete refuses it.
+    await assert.rejects(deleteQuotationChainRecord(req, await idOf("c2-01")));
+    assert.equal(await live("c2"), 1);
+    // The register row - the current version - takes every version with it, so the chain is gone.
+    await deleteQuotationChainRecord(req, await idOf("c1-03"));
+    assert.equal(await live("c1"), 0);
   } finally { await undo(); }
 });
 
@@ -235,8 +273,18 @@ test("every project and quotation endpoint is held to the rule", () => {
    * it only once would mean either a delete that skips `mayDeleteProject` - anybody who can open
    * the Projects screen removing projects they do not manage - or a role check standing in for the
    * scope, which is the trap in CLAUDE.md Rule 4.
+   *
+   * The sixteenth is `sendClientLoginWhatsApp` (`POST /projects/:id/client-login/whatsapp`): a
+   * client's login is sent only to a project this caller can reach, and one they cannot is a 404.
+   * The seventeenth and eighteenth are Edit Sale Details' Client Credentials - `getClientLogin`
+   * and `createClientLogin` (`GET`/`POST /projects/:id/client-login`), the second at write level.
+   * The nineteenth is `bulkUpdateProjectStatus` (`POST /projects/bulk-status`), which takes only the
+   * ticked projects the caller may write.
    */
-  assert.equal(inline + hoisted, 15, "every record endpoint reads the project through the rule");
+  // Twenty with `sendBackProject`: Send Back is only for a project in the sender's reach. Twenty-one
+  // with `reorderProjectShoots`: a Shoot List's dragged order is saved only on a project in reach.
+  // Twenty-two with `returnToProjects`: Update to Project returns only a sent-back project in reach.
+  assert.equal(inline + hoisted, 22, "every record endpoint reads the project through the rule");
   // Every `access` a record endpoint applies is one it actually resolved from the rule, so this
   // cannot be satisfied by an `AND: [access]` over some other object that happens to be in scope.
   assert.ok(hoisted <= (controller.match(/const access = await projectAccessWhere\(/g) || []).length,
@@ -256,14 +304,28 @@ test("every project and quotation endpoint is held to the rule", () => {
    * the tick boxes, so it takes the id as an argument rather than reading it off the URL - a
    * selection sends them in the body. The scope is asked either way, which is the thing being held
    * to here: without it an id typed into a bulk body would reach a quotation the caller may not see.
+   * The bulk delete now takes the whole chain through `deleteQuotationChainRecord`, the sixth. The
+   * seventh is `draftForWrite`, which Save Draft and Generate on a draft both reach the draft through.
+   * The ninth and tenth are Finalize and Unfinalize: a quotation the caller cannot see is a 404.
    */
-  assert.equal((controller.match(/await scopedQuotation\(req, (req\.params\.id|id)\)/g) || []).length, 5, "version, duplicate, renew, delete and the PDF each reach the quotation through the scope");
+  assert.equal((controller.match(/await scopedQuotation\(req, (req\.params\.id|id)\)/g) || []).length, 10, "version, duplicate, renew, delete, chain delete, the PDF, a draft's two saves, the share list, finalize and unfinalize each reach the quotation through the scope");
   assert.match(controller, /const quotation = await quotationById\(req\.params\.id\);/, "reading one version is the picker's companion read and is not narrowed");
-  assert.match(controller, /const quotations = enquiryId \? rows : await narrowQuotations\(rows, req\);/, "the register is narrowed and the enquiry picker is not");
+  // `own` beside the rows is the narrower question the register also answers: reached on this
+  // person's own names rather than through a share, which is who may set who it is shared with.
+  assert.match(controller, /const narrowed = enquiryId \? \{ rows, own: \(\) => true \} : await narrowQuotations\(rows, req\);/, "the register is narrowed and the enquiry picker is not");
   assert.match(controller, /branchId: refs\.branchId\(projectData\.sourceBranch\)/);
   assert.match(controller, /ownerEmployeeId: refs\.employeeId\(columns\.followedBy\)/);
   const tools = fs.readFileSync(path.join(__dirname, "..", "src", "services", "ai", "tools", "project.js"), "utf8");
   assert.doesNotMatch(tools, /branchIds/, "the assistant's project tools must not narrow by reachable branches on their own");
   const crdController = fs.readFileSync(path.join(__dirname, "..", "src", "modules", "sales", "crd-documents", "controller.js"), "utf8");
-  assert.equal((crdController.match(/access: await accessFor\(req\)/g) || []).length, 6, "all six CRD endpoints resolve the access rule");
+  /*
+   * Counted on the call rather than on `access: await accessFor(req)`, which was the spelling every one
+   * of them used until the list grew a second question to ask - it resolves the scope and the reader's
+   * "My Documents" narrowing together, so its `accessFor(req)` sits inside a `Promise.all`. The rule being
+   * held to is that each endpoint asks the scope, not how the line reads. The seventh and eighth are CRD
+   * Link Ready's - naming the project's WhatsApp group (`linkGroup`) and sending into it
+   * (`sendLinkToGroup`) - each only for a project this caller reaches.
+   */
+  assert.equal((crdController.match(/accessFor\(req\)/g) || []).length, 8, "all eight CRD endpoints resolve the access rule");
+  assert.match(crdController, /const \[access, mine, managesAnyone\] = await Promise\.all\(\[accessFor\(req\), /, "the list resolves the scope alongside the switch");
 });

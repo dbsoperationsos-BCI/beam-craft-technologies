@@ -94,6 +94,45 @@ const INTENT = { DATA: "DATA", KNOWLEDGE: "KNOWLEDGE", GENERAL: "GENERAL" };
  * distinction is what makes follow-up inheritance safe: only a question with no signal of its own
  * should borrow the previous turn's.
  */
+/*
+ * Who is in, out or away - a question about records whatever its shape ("is Arun present today?").
+ *
+ * Words need their context: a bare "present" is "present the pipeline", and "came in today" is how
+ * the CRM asks about new leads. So "present" counts beside a person ("is Arun present"), a day
+ * ("present today") or a count ("how many ... present"). The one list - `tools/attendance.js`
+ * gathers attendance on the same test.
+ */
+const ATTENDANCE_WORDS = new RegExp([
+  "\\battendance\\b",
+  "\\b(absent|on leave|half[- ]day|work(ing)? from home|wfh)\\b",
+  // "The last five working days records of Mukesh": a working day is the attendance calendar's word.
+  "\\bworking days?\\b",
+  "\\b(present|late|checked in|logged in|in (the )?office|at work)\\s+(today|yesterday|now|right now|this morning)\\b",
+  "\\b(is|are|was|were)\\b[^?.!]{0,40}\\b(present|checked in|logged in|in (the )?office|at work)\\b",
+  "\\b(how many|who|which)\\b[^?.!]{0,60}\\b(present|checked in|logged in|in (the )?office|at work)\\b",
+].join("|"), "i");
+
+/*
+ * HRM requests - leave, permission, on duty, comp off, a correction - and the queue of them waiting
+ * on somebody. "Is there any raise request in the HRM still pending" named no record the rules
+ * above knew, went to the model as general knowledge and was refused as outside the CRM.
+ *
+ * "Request" alone is too common a word - a client requests a date - so it counts beside a request's
+ * kind, HRM, an approval, or the words the Requests screen itself uses. The one list -
+ * `tools/requests.js` gathers requests on the same test.
+ */
+const REQUEST_WORDS = new RegExp([
+  "\\b(leave|permission|on[- ]?duty|comp[- ]?off|correction|outside[- ]location|incorrect[- ]login|hrm|attendance)\\s+(requests?|applications?)\\b",
+  "\\braise[ds]?\\b[^?.!]{0,20}\\brequests?\\b",
+  "\\brequests?\\b[^?.!]{0,40}\\b(hrm|leave|approv\\w*)\\b",
+  "\\b(hrm|leave)\\b[^?.!]{0,40}\\brequests?\\b",
+  "\\b(waiting (for|on) (me|my approval)|awaiting my approval|for me to approve|my approvals?|pending approvals?)\\b",
+  "\\b(pending|approved|rejected|cancelled|canceled) (leaves?|permissions? requests?)\\b",
+].join("|"), "i");
+
+// "How do I raise a leave request" asks how, not what is there.
+const ASKS_HOW_TO = /\b(how (do|can|should|to)|steps to|process (to|for))\b/i;
+
 function classifyAlone(asked) {
   // Knowledge first: "what is our refund policy" also matches the advice pattern on "what is".
   if (ASKS_KNOWLEDGE.test(asked)) {
@@ -108,6 +147,20 @@ function classifyAlone(asked) {
    */
   if (ASKS_FOR_STATE.test(asked)) {
     return { intent: INTENT.DATA, needsTools: true, needsKnowledge: false, decided: true, reason: "asks for the current state of the business" };
+  }
+
+  /*
+   * Attendance is always a lookup. "How many of them are present today" names no record and asked
+   * no figure the rules above knew, so it went to the model with nothing - and the model said both
+   * were present, from no data at all.
+   */
+  if (ATTENDANCE_WORDS.test(asked)) {
+    return { intent: INTENT.DATA, needsTools: true, needsKnowledge: false, decided: true, aboutAttendance: true, reason: "asks who is in, out or away" };
+  }
+
+  // Requests are a lookup too, unless the question asks how to raise one.
+  if (REQUEST_WORDS.test(asked) && !ASKS_HOW_TO.test(asked)) {
+    return { intent: INTENT.DATA, needsTools: true, needsKnowledge: false, decided: true, aboutRequests: true, reason: "asks about HRM requests" };
   }
 
   const wantsQuantity = ASKS_QUANTITY.test(asked) || PLAINLY_DATA.test(asked);
@@ -144,6 +197,8 @@ function classifyAlone(asked) {
  * that still matched no rule is more likely to be a new topic than a continuation.
  */
 const FOLLOW_UP_WORDS = 8;
+// How many questions back a run of short follow-ups may reach for the question that set the topic.
+const FOLLOW_UP_DEPTH = 3;
 
 /**
  * What this question needs.
@@ -168,19 +223,24 @@ function classify(question, history = []) {
     return settled;
   }
 
-  const words = asked.split(/\s+/).filter(Boolean).length;
-  if (words <= FOLLOW_UP_WORDS && history.length) {
-    const previous = [...history].reverse().find((turn) => turn.role === "user");
-    if (previous && String(previous.content || "").trim()) {
+  const wordsIn = (text) => String(text || "").split(/\s+/).filter(Boolean).length;
+  if (wordsIn(asked) <= FOLLOW_UP_WORDS && history.length) {
+    /*
+     * The question that set the topic: the latest one that decided something, reached back through
+     * short follow-ups only. "Any pending leave requests?" -> "which is the oldest?" -> "who has the
+     * most pending?" is one topic; the third looked one turn back, found the second (which says
+     * nothing alone) and was refused as off-topic. A longer question that matched nothing is a new
+     * topic, so the walk stops there - and two vague turns with nothing decided behind them still
+     * compound into nothing.
+     */
+    const earlier = history.filter((turn) => turn.role === "user" && String(turn.content || "").trim()).reverse();
+    for (const previous of earlier.slice(0, FOLLOW_UP_DEPTH)) {
       const inherited = classifyAlone(String(previous.content));
-      /*
-       * Only a previous question that itself decided something is worth inheriting. Two vague turns
-       * in a row should not compound into a confident answer about nothing.
-       */
       if (inherited.decided) {
         const { decided, ...settled } = inherited;
         return { ...settled, reason: "follow-up, inherited from the previous question" };
       }
+      if (wordsIn(previous.content) > FOLLOW_UP_WORDS) break;
     }
   }
 
@@ -188,4 +248,4 @@ function classify(question, history = []) {
   return settled;
 }
 
-module.exports = { classify, classifyAlone, INTENT, FOLLOW_UP_WORDS };
+module.exports = { classify, classifyAlone, INTENT, FOLLOW_UP_WORDS, FOLLOW_UP_DEPTH, ATTENDANCE_WORDS, REQUEST_WORDS };

@@ -204,9 +204,12 @@ test("a sync keeps the first few reasons a row did not import, capped", () => {
   assert.ok(run, "runGoogleSheetLinkSync has been renamed; this pin no longer reads it");
   assert.match(run, /rowProblems/, "the sync no longer keeps why a row did not import");
   assert.match(run, /rowProblems\.length >= ROW_PROBLEM_LIMIT/, "the stored reasons are no longer capped");
-  // Both kinds of declined row, or the commoner one - a row the studio's own data made invalid -
-  // would report a count with no reason beside it.
-  assert.match(run, /noteProblem\(row\.rowNumber, \(row\.issues \|\| \[\]\)\[0\]\?\.reason\)/, "invalid rows no longer say why");
+  /*
+   * A row is no longer declined for an unreadable cell - the cell is emptied and the lead is kept -
+   * so what has to be named is the **column**: "row 12 - eventPlannedDate: Invalid date value" is
+   * what sends somebody to the cell that needs correcting.
+   */
+  assert.match(run, /noteProblem\(row\.rowNumber, `\$\{issue\.field\}: \$\{issue\.reason\}`\)/, "an emptied cell no longer says which column it was");
   assert.match(run, /noteProblem\(row\.rowNumber, reason\)/, "rows that failed to write no longer say why");
 });
 

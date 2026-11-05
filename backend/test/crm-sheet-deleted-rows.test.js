@@ -89,8 +89,15 @@ test("a row is only remembered once its lead is actually written", () => {
 });
 
 test("held-back rows are counted in the summary, not dropped quietly", () => {
-  // A pass that declines nine rows and says it touched nothing is a pass nobody can explain.
-  assert.match(SERVICE, /skipped: skippedExisting \+ skippedDuplicate \+ skippedInvalid \+ skippedDeleted/);
+  /*
+   * A pass that declines nine rows and says it touched nothing is a pass nobody can explain.
+   *
+   * `skippedInvalid` is no longer among them, and that is the point of its absence: a row is never
+   * refused for what one of its cells holds. The unreadable cell is emptied and the lead is kept,
+   * counted as `clearedFields` and named by column in `rowProblems`.
+   */
+  assert.match(SERVICE, /skipped: skippedExisting \+ skippedDuplicate \+ skippedDeleted/);
+  assert.match(SERVICE, /clearedFields,/, "the emptied cells are not reported at all");
   assert.match(SERVICE, /^\s*skippedDeleted,$/m, "the summary does not report the held-back rows on their own");
   assert.match(SERVICE, /alreadyImportedRows: deletedCount/, "the preview does not report them either");
 });

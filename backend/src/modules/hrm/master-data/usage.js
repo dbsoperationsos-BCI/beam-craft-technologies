@@ -1,4 +1,5 @@
 const prisma = require("../../../config/db");
+const { rewriteNameCopies, splitCsv, same } = require("../../../services/nameCopies");
 
 /**
  * Whether a value on one of the studio's lists is being used by a record, and by how many.
@@ -28,10 +29,6 @@ const prisma = require("../../../config/db");
 /** A record still counts when it is archived - it goes on displaying the value it holds. */
 const ARCHIVABLE = new Set(["employee"]);
 
-/** The entries of a comma-separated column, without the blanks a trailing comma leaves. */
-const splitCsv = (value) => String(value || "").split(",").map((part) => part.trim()).filter(Boolean);
-
-const same = (a, b) => String(a || "").trim().toLocaleLowerCase() === String(b || "").trim().toLocaleLowerCase();
 
 /**
  * Every record using this value, per place it can be used.
@@ -106,33 +103,16 @@ function refusalMessage(definition, name, usage) {
  * Runs inside the caller's transaction so the row and the records it names move together: a rename
  * that updated half the employees and then failed would be the drift it exists to prevent.
  */
-async function renameUsage(tx, definition, previousName, nextName) {
+async function renameUsage(tx, definition, previousName, nextName, { id = null } = {}) {
   const from = String(previousName || "").trim();
-  const to = String(nextName || "").trim();
-  if (!from || !to || same(from, to) || !definition.usedBy?.length) return 0;
-
-  let changed = 0;
-  for (const use of definition.usedBy) {
-    const model = tx[use.model];
-    if (!model) continue;
-    if (use.match === "csv") {
-      const rows = await model.findMany({
-        where: { [use.field]: { contains: from }, ...(use.where || {}) },
-        select: { id: true, [use.field]: true },
-      });
-      for (const row of rows) {
-        const entries = splitCsv(row[use.field]);
-        if (!entries.some((entry) => same(entry, from))) continue;
-        const rewritten = entries.map((entry) => (same(entry, from) ? to : entry)).join(", ");
-        await model.update({ where: { id: row.id }, data: { [use.field]: rewritten } });
-        changed += 1;
-      }
-      continue;
-    }
-    const result = await model.updateMany({ where: { [use.field]: from, ...(use.where || {}) }, data: { [use.field]: to } });
-    changed += result.count;
-  }
-  return changed;
+  if (!from || !definition.usedBy?.length) return 0;
+  /*
+   * The rewrite itself lives in `services/nameCopies.js`, shared with the branch, vertical, employee
+   * and login renames that happen outside Field Settings: one rule for how a stored name follows the
+   * row it was copied from. `id` is the renamed row, for the uses that keep a reference beside the
+   * text (`idField`) and are rewritten by it rather than by matching the old spelling.
+   */
+  return rewriteNameCopies(tx, definition.usedBy, { id, from, to: nextName });
 }
 
 module.exports = { countUsage, describeUsage, refusalMessage, renameUsage };

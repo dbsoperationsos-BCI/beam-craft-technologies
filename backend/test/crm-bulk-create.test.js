@@ -32,7 +32,7 @@ test("every record is minted the Enquiry ID it does not bring", () => {
    * weddings - and a range is reserved per counter, so a batch spanning three verticals cannot be
    * one range. `reserveLeadIdRange` behind `nextLeadId` is what makes each of these atomic.
    */
-  assert.match(BULK, /records\.push\(\{ \.\.\.record, lead: \{ \.\.\.record\.lead, id \} \}\);/);
+  assert.match(BULK, /records\.push\(\{ \.\.\.record, lead: \{ \.\.\.record\.lead, id, source: LEAD_SOURCES\.MANUAL \} \}\);/);
   assert.match(BULK, /await createCrmLeads\(records\);/, "the batch is written from the records that were handed in, before the ids were added");
 });
 

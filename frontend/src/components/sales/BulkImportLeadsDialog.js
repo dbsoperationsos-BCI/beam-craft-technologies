@@ -270,7 +270,7 @@ export default function BulkImportLeadsDialog({ defaultVertical = "Dum Dum", crm
         dialog, so the same measure left a box stretched across half the screen around three radios,
         with the emptiness reading as somewhere a fourth option had failed to load.
       */}
-      <RadioGroupField label="Vertical" value={vertical} onChange={changeVertical} options={BULK_IMPORT_VERTICALS} className="w-fit" />
+      <RadioGroupField label="Vertical" helperText="Every client in this batch is saved on this vertical." value={vertical} onChange={changeVertical} options={BULK_IMPORT_VERTICALS} className="w-fit" />
 
       {/* Add Lead's own Client Details card, on its own measures - the rounded white panel and the
           heading rule across the top - so the two dialogs read as one form asked twice. */}
@@ -443,21 +443,32 @@ function BulkImportRow({ position, row, fields, crmOptions, branchOptions, showE
  * a required field that could not be answered, so no batch could be saved. A default that stands in
  * for a list somebody else is fetching is a way for the thread to be cut and nothing to say so.
  */
+// The ⓘ line on each column, by the field's key in `crmBulkImport.mjs`.
+const BULK_FIELD_HELP = {
+  name: "The client's name, as the lead is listed on the board.",
+  phone: "The client's number, used to call and to spot repeat enquiries.",
+  assignedBranch: "The branch that will handle this lead.",
+  crm: "The salesperson who will follow up this lead.",
+  nextFollowUpDate: "The day this lead shows on Pending Followups.",
+  dateOfBirthOrEdod: "The baby's birth date or the mother's expected due date.",
+  remarks: "Anything worth knowing about the enquiry, saved on the lead.",
+};
+
 function BulkImportField({ field, value, crmOptions, branchOptions, error = "", onChange }) {
 
   if (field.type === "phone") {
-    return <PhoneField label={field.label} field={field.key} required={field.required} error={error} value={value} onChange={(_field, next) => onChange(next)} />;
+    return <PhoneField label={field.label} helperText={BULK_FIELD_HELP[field.key]} field={field.key} required={field.required} error={error} value={value} onChange={(_field, next) => onChange(next)} />;
   }
   if (field.type === "branch") {
-    return <Dropdown mode="input" searchable ariaLabel={field.label} label={field.label} required={field.required} error={error} value={value} onChange={onChange} options={branchOptions} />;
+    return <Dropdown mode="input" searchable ariaLabel={field.label} label={field.label} helperText={BULK_FIELD_HELP[field.key]} required={field.required} error={error} value={value} onChange={onChange} options={branchOptions} />;
   }
   if (field.type === "crm") {
     // The Sales roster, as the board reads it — fetched rather than written down, so somebody who
     // joined this week can be assigned a lead the day they arrive.
-    return <Dropdown mode="input" searchable ariaLabel={field.label} label={field.label} required={field.required} error={error} placeholder={crmOptions.length ? "Select" : "No CRMs available"} value={value} onChange={onChange} options={crmOptions} disabled={crmOptions.length === 0} />;
+    return <Dropdown mode="input" searchable ariaLabel={field.label} label={field.label} helperText={BULK_FIELD_HELP[field.key]} required={field.required} error={error} placeholder={crmOptions.length ? "Select" : "No CRMs available"} value={value} onChange={onChange} options={crmOptions} disabled={crmOptions.length === 0} />;
   }
   if (field.type === "date") {
-    return <DateField label={field.label} required={field.required} error={error} value={value} onChange={onChange} />;
+    return <DateField label={field.label} helperText={BULK_FIELD_HELP[field.key]} required={field.required} error={error} value={value} onChange={onChange} />;
   }
   if (field.type === "textarea") {
     /*
@@ -470,7 +481,7 @@ function BulkImportField({ field, value, crmOptions, branchOptions, error = "", 
      * textarea rather than becoming a text box — a description is a sentence, it takes newlines and
      * it drags open — but it starts level with the fields it shares a line with.
      */
-    return <TextAreaField label={field.label} required={field.required} error={error} rows={1} value={value} onChange={(event) => onChange(event.target.value)} inputClassName="!min-h-9 py-1.5" />;
+    return <TextAreaField label={field.label} helperText={BULK_FIELD_HELP[field.key]} required={field.required} error={error} rows={1} value={value} onChange={(event) => onChange(event.target.value)} inputClassName="!min-h-9 py-1.5" />;
   }
-  return <TextField label={field.label} required={field.required} error={error} value={value} onChange={(event) => onChange(event.target.value)} />;
+  return <TextField label={field.label} helperText={BULK_FIELD_HELP[field.key]} required={field.required} error={error} value={value} onChange={(event) => onChange(event.target.value)} />;
 }

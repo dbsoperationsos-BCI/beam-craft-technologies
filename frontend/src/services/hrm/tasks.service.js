@@ -34,6 +34,11 @@ export function getAllTasks(status) {
 }
 
 /** One task with its full activity history. */
+/** The Dashboard: the reader's own tasks as figures over a range (`month`, `week`, `3m`, `6m`, `lifetime`). */
+export function getTaskDashboard({ range } = {}) {
+  return apiRequest(`/api/hrm/tasks/dashboard${range ? `?range=${encodeURIComponent(range)}` : ""}`);
+}
+
 export function getTask(id) {
   return apiRequest(`/api/hrm/tasks/${id}`);
 }
@@ -60,8 +65,23 @@ export function startTask(id) {
   return apiRequest(`/api/hrm/tasks/${id}/start`, { method: "POST" });
 }
 
+/** A feedback issue answered by its holder: `outcome` is "Issues sorted" or "Rejected" (which needs `remarks`). */
+export function resolveFeedbackTask(id, outcome, remarks = "") {
+  return apiRequest(`/api/hrm/tasks/${id}/feedback-outcome`, { method: "POST", body: JSON.stringify({ outcome, remarks }) });
+}
+
 export function completeTask(id) {
   return apiRequest(`/api/hrm/tasks/${id}/complete`, { method: "POST" });
+}
+
+/** Mark as Completed, by whoever assigned the task - only once it is finished and sent back. */
+export function approveTask(id) {
+  return apiRequest(`/api/hrm/tasks/${id}/approve`, { method: "POST" });
+}
+
+/** Revoking: whoever assigned the task takes it back, optionally reassigning it to someone. */
+export function revokeTask(id, reason, assignedToUserId = null) {
+  return apiRequest(`/api/hrm/tasks/${id}/revoke`, { method: "POST", body: JSON.stringify({ reason, assignedToUserId }) });
 }
 
 /**

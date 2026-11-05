@@ -1,7 +1,7 @@
 const express = require("express");
 const { protect } = require("../../../middleware/authMiddleware");
 const { health, chatStream, analyzeLead, analyzeCall, summarize, chat, crmChat, crmChatStream } = require("./controller");
-const { requireModule } = require("../../../middleware/permissionMiddleware");
+const { checkPermission } = require("../../../middleware/permissionMiddleware");
 
 const router = express.Router();
 // The same JWT as the rest of the CRM. These read a lead's whole history - remarks, calls,
@@ -13,14 +13,13 @@ router.use(protect);
 router.get("/health", health);
 
 /*
- * Everything below reads CRM data, so it answers to the same permission as the CRM itself.
- *
- * This router had only `protect` - any signed-in user, including one with no CRM access at all,
- * could read a lead's remarks, calls and WhatsApp through it, or ask for a summary of the whole
- * pipeline. The panel is hidden from them on the client, but a hidden button is not a permission
- * check.
+ * Everything below reads CRM data, so it answers to the same permission as the CRM itself - at
+ * READ, because Nebula only answers: nothing here writes. The routes are POSTs only because the
+ * question travels in the body, so `requireModule` (which reads a POST as a write) would have
+ * asked READ_WRITE of somebody who may only look. Which leads, within that, is decided per request
+ * by the board's own data scope (`controller.js`).
  */
-router.use(requireModule("SALES", "CRM Leads"));
+router.use(checkPermission("SALES", "CRM Leads", "READ"));
 router.post("/analyze-lead", analyzeLead);
 router.post("/analyze-call", analyzeCall);
 router.post("/summarize", summarize);

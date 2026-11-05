@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import manifest from "../src/app/manifest.js";
+// The manifest reads the studio's branding from the API. Pointed at an address nothing answers on,
+// it falls back to the bundled name and icons, which is what the installability rules below check.
+process.env.NEXT_PUBLIC_API_URL = "http://127.0.0.1:9";
+const { default: manifest } = await import("../src/app/manifest.js");
+const { appIconUrl, studioAppName } = await import("../src/lib/serverStudioBranding.js");
 
 /*
  * Whether this application can still be installed to a home screen.
@@ -36,8 +40,8 @@ function pngSize(file) {
   return { width: header.readUInt32BE(16), height: header.readUInt32BE(20) };
 }
 
-test("the manifest meets Chrome's installability criteria", () => {
-  const m = manifest();
+test("the manifest meets Chrome's installability criteria", async () => {
+  const m = await manifest();
 
   // One of the two is enough for the criteria; both are set so the install dialog and the label
   // under the icon each get the length they have room for.
@@ -62,8 +66,8 @@ test("the manifest meets Chrome's installability criteria", () => {
   assert.ok(m.start_url.startsWith(m.scope), "start_url must sit inside scope");
 });
 
-test("the icons Chrome requires exist, at the sizes they claim", () => {
-  const m = manifest();
+test("the icons Chrome requires exist, at the sizes they claim", async () => {
+  const m = await manifest();
   const any = m.icons.filter((icon) => icon.purpose === "any");
 
   /*
@@ -84,8 +88,8 @@ test("the icons Chrome requires exist, at the sizes they claim", () => {
   }
 });
 
-test("Android is given a maskable pair of its own", () => {
-  const maskable = manifest().icons.filter((icon) => icon.purpose === "maskable");
+test("Android is given a maskable pair of its own", async () => {
+  const maskable = (await manifest()).icons.filter((icon) => icon.purpose === "maskable");
   /*
    * Not decoration. A launcher cuts its own shape - circle, squircle, rounded square - out of
    * whatever it is handed and keeps the central 80%, so the `any` file, whose mark runs the full
@@ -122,4 +126,19 @@ test("the theme colour is on the viewport export, where Next 16 reads it", () =>
     /themeColor/,
     "themeColor inside metadata is silently dropped by Next 16",
   );
+});
+
+test("the installed app takes the studio's name and favicon, and ours when they are not set", () => {
+  // No favicon: the bundled PNG of the same name, which the tests above check exists.
+  assert.equal(appIconUrl(null, "icon-192"), "/icons/icon-192.png");
+  assert.equal(appIconUrl({ faviconUrl: "  " }, "maskable-512"), "/icons/maskable-512.png");
+  // A favicon: drawn by the API, with its fingerprint in the address so a new upload is refetched.
+  const first = appIconUrl({ faviconUrl: "https://cdn.example/a.png" }, "icon-512");
+  const second = appIconUrl({ faviconUrl: "https://cdn.example/b.png" }, "icon-512");
+  assert.match(first, /\/api\/public\/app-icon\/icon-512\.png\?v=/);
+  assert.notEqual(first, second);
+  // The studio's name when it has one, nothing (so the bundled name is used) when it is blank.
+  assert.equal(studioAppName({ studioName: " Dont Blink Studio " }), "Dont Blink Studio");
+  assert.equal(studioAppName({ studioName: "" }), null);
+  assert.equal(studioAppName(null), null);
 });

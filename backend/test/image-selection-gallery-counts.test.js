@@ -56,3 +56,15 @@ test("totals the whole gallery and each selection item across folders", () => {
   assert.deepEqual(summary.overall, { total: 5, selected: 4 });
   assert.deepEqual(summary.selectionCounts, { frames: 2, retouches: 3 });
 });
+
+// The client gallery's cards show each folder's first few photos. Read off the rows being counted,
+// in their order, capped at five - and only when asked, so the studio's summary is unchanged.
+test("previews are each folder's first five photos, only when asked for", () => {
+  const folders = [{ id: "a", parentId: null, name: "card 1" }, { id: "b", parentId: null, name: "card 2" }];
+  const images = [1, 2, 3, 4, 5, 6].map((n) => ({ id: `p${n}`, folderId: "a", selected: false, thumbnailKey: `k${n}`, photoSelections: [] }));
+  const withPreviews = summarizeFolders(folders, images, { previews: true });
+  assert.deepEqual(withPreviews.folders[0].previews, [1, 2, 3, 4, 5].map((n) => ({ id: `p${n}`, thumbnailKey: `k${n}` })));
+  assert.deepEqual(withPreviews.folders[1].previews, [], "an empty folder has an empty strip");
+  assert.equal(withPreviews.folders[0].total, 6, "the count is untouched");
+  assert.equal("previews" in summarizeFolders(folders, images).folders[0], false, "the studio's summary carries none");
+});

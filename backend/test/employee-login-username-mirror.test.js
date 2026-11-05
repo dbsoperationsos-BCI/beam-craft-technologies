@@ -49,7 +49,8 @@ test("nothing else writes Employee.loginUsername", () => {
 
 test("the owner matcher reads loginUsername off the employee row, not a second query to User", () => {
   const load = MATCHERS.slice(MATCHERS.indexOf("async function load()"), MATCHERS.indexOf("module.exports"));
-  assert.match(load, /prisma\.employee\.findMany\(\{ select: \{ id: true, employeeId: true, employeeName: true, loginUsername: true \} \}\)/, "load() no longer selects loginUsername, or is back to joining User for it");
+  // `aliases` beside it since 20260924140000: the names the person gave up, read off the same row.
+  assert.match(load, /prisma\.employee\.findMany\(\{ select: \{ id: true, employeeId: true, employeeName: true, loginUsername: true, aliases: true \} \}\)/, "load() no longer selects loginUsername, or is back to joining User for it");
   assert.doesNotMatch(load, /prisma\.user\.findMany/, "load() is joining to User again, which the column on Employee exists to avoid");
 });
 

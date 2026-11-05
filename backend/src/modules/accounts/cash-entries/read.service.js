@@ -1,4 +1,6 @@
 const prisma = require("../../../config/db");
+const { everyChunk } = require("../../../services/wordChunks");
+const { liveProjectWhere } = require("../../../services/projectScope");
 
 /**
  * Reading cash entries, for callers that are not an HTTP handler.
@@ -48,11 +50,11 @@ function scopeWhere(scope) {
 /** Entries matching a search, in the safe shape. */
 async function searchEntries({ search, entryType, category, limit, scope } = {}) {
   const where = { deletedAt: null, ...scopeWhere(scope) };
+  // Not an entry against a project in the Recycling Bin.
+  where.AND.push(liveProjectWhere({ shoot: "shoot" }));
 
-  const term = String(search || "").trim();
-  if (term) {
-    where.OR = [{ clientName: { contains: term } }, { entryId: { contains: term } }];
-  }
+  // Word Chunk Search: every word typed, any order - beside the scope, never replacing it.
+  where.AND.push(...everyChunk(search, (chunk) => ({ OR: [{ clientName: { contains: chunk } }, { entryId: { contains: chunk } }] })));
   const type = String(entryType || "").trim();
   if (type) where.entryType = type;
   const inCategory = String(category || "").trim();
@@ -82,6 +84,7 @@ async function searchEntries({ search, entryType, category, limit, scope } = {})
  */
 async function getCashSummary({ scope } = {}) {
   const where = { deletedAt: null, ...scopeWhere(scope) };
+  where.AND.push(liveProjectWhere({ shoot: "shoot" }));
   const [byType, byCategory, total] = await Promise.all([
     prisma.cashEntry.groupBy({ by: ["entryType"], where, _sum: { amount: true }, _count: { _all: true } }),
     prisma.cashEntry.groupBy({ by: ["category"], where, _sum: { amount: true }, _count: { _all: true } }),
@@ -99,4 +102,4 @@ async function getCashSummary({ scope } = {}) {
   return { entries: total, byType: shape(byType, "entryType"), byCategory: shape(byCategory, "category") };
 }
 
-module.exports = { searchEntries, getCashSummary, SAFE_FIELDS, MAX_ROWS };
+module.exports = { searchEntries, getCashSummary, scopeWhere, SAFE_FIELDS, MAX_ROWS };

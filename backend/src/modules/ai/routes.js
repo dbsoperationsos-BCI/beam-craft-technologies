@@ -1,7 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const { protect } = require("../../middleware/authMiddleware");
-const { health, chat, chatStream, voice, confirm, tools, conversations, removeConversation } = require("./controller");
+const { health, chat, chatStream, voice, tools, conversations, removeConversation } = require("./controller");
 
 /*
  * Held in memory and handed straight to ffmpeg - a dictated question is seconds long and never
@@ -33,8 +33,6 @@ router.post("/chat", chat);
 router.post("/chat/stream", chatStream);
 // Speech to text, through the studio's own whisper rather than a browser service.
 router.post("/voice", upload.single("audio"), voice);
-// Carries out a change the assistant proposed, against the token issued for it.
-router.post("/confirm", confirm);
 // Threads, always scoped to the caller and the module they name.
 router.get("/conversations", conversations);
 router.delete("/conversations/:id", removeConversation);

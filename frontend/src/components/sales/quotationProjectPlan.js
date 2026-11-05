@@ -25,6 +25,8 @@
  * re-pointing is actually checked.
  */
 
+import { deliverableIdentityKey, deliverableRowVariant } from "../../lib/deliverableBrands.mjs";
+
 /*
  * Where a plan came from, which shows up in nothing but the client-side row keys.
  *
@@ -63,10 +65,19 @@ function serviceRow(quoted, shootKey, prefix) {
   };
 }
 
-/** The copied deliverable fields a project allocation accepts. */
+/*
+ * The copied deliverable fields a project allocation accepts - and the variant the line was sold
+ * as, so "Painting - textra - 12x6 - 2" on the quotation is that on the project too rather than
+ * arriving as "Painting". A quoted line keeps its variant as `deliverableBrandName` beside the
+ * variant's id; a project line as `brandName`; `deliverableRowVariant` reads either, so a duplicated
+ * project carries its variants the same way. The variant is part of the row's key, because two
+ * variants of one deliverable on one shoot are two lines.
+ */
 function deliverableRow(quoted, shootKey, prefix) {
+  const variant = deliverableRowVariant(quoted);
+  const variantKey = variant ? `-${deliverableIdentityKey("", variant).replace(/[^a-z0-9]+/g, "-")}` : "";
   return {
-    id: `${prefix}-deliverable-${shootKey}-${quoted.deliverableDefinitionId || quoted.id}`,
+    id: `${prefix}-deliverable-${shootKey}-${quoted.deliverableDefinitionId || quoted.id}${variantKey}`,
     shootId: shootKey,
     deliverableDefinitionId: projectDefinitionId(quoted.deliverableDefinitionId),
     deliverableName: quoted.deliverableName || "",
@@ -75,6 +86,12 @@ function deliverableRow(quoted, shootKey, prefix) {
     sizeOptionValueId: quoted.sizeOptionValueId || "",
     size: quoted.size || "",
     remarks: quoted.remarks || "",
+    ...(variant ? {
+      deliverableVariantId: quoted.deliverableVariantId || "",
+      brandName: variant.brandName,
+      frameInches: variant.frameInches,
+      videoLength: variant.videoLength,
+    } : {}),
   };
 }
 
@@ -103,7 +120,7 @@ export function shootSignature(shoot) {
  * editing it behaves identically.
  */
 const SHOOT_FIELDS = [
-  "dateCreated", "shoot", "shootPlace", "shootType", "shootTypes", "isMainEvent", "district", "state",
+  "dateCreated", "shoot", "shootPlace", "shootLocations", "shootType", "shootTypes", "isMainEvent", "district", "state",
   "eventStartTime", "eventEndTime", "sessionTiming", "sessionTimings", "sessionDurationHours",
   "sessionDurationMinutes", "foodTakenCareBy", "accommodation", "travel", "preference",
 ];

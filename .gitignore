@@ -54,3 +54,13 @@ prisma/dev.db
 .venv/
 venv/
 **/.venv/
+**/.venv-face/
+# The culling ranker's training environment (backend/ml/culling, phase 3+)
+**/.venv-ml/
+
+# Local git worktrees for isolated feature work (superpowers:using-git-worktrees)
+/.worktrees/
+
+# Python bytecode the face engine writes beside its script
+__pycache__/
+*.pyc

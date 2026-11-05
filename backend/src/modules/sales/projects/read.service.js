@@ -1,4 +1,6 @@
 const prisma = require("../../../config/db");
+const { verticalName } = require("../../../services/salesVertical");
+const { everyChunk } = require("../../../services/wordChunks");
 
 /**
  * Read-only project queries, callable from outside an Express handler.
@@ -57,21 +59,39 @@ function accessWhere(access) {
  */
 async function projectSummary({ access } = {}) {
   const where = { ...LIVE, ...accessWhere(access) };
-  const [total, byStatus, byVertical, byBranch, unassigned] = await Promise.all([
+  const [total, byStatus, byVertical, byBranch, unassigned, byManagerRows] = await Promise.all([
     prisma.salesProject.count({ where }),
     prisma.salesProject.groupBy({ by: ["projectStatus"], where, _count: { _all: true } }),
     prisma.salesProject.groupBy({ by: ["vertical"], where, _count: { _all: true } }),
     prisma.salesProject.groupBy({ by: ["sourceBranch"], where, _count: { _all: true } }),
     // A project with nobody running it is the single most actionable thing on these screens.
     prisma.salesProject.count({ where: { ...where, OR: [{ projectManager: null }, { projectManager: "" }] } }),
+    // Who runs what, by the linked employee - the text beside it is only a copy of the name.
+    prisma.salesProject.groupBy({ by: ["projectManagerEmployeeId", "projectManager", "projectStatus"], where, _count: { _all: true } }),
   ]);
+  const managerIds = [...new Set(byManagerRows.map((row) => row.projectManagerEmployeeId).filter(Boolean))];
+  const managerNames = new Map((managerIds.length
+    ? await prisma.employee.findMany({ where: { id: { in: managerIds } }, select: { id: true, employeeName: true } })
+    : []).map((employee) => [employee.id, employee.employeeName]));
+  const byManagerMap = new Map();
+  for (const row of byManagerRows) {
+    // The linked employee's name; the copied text only where nothing is linked.
+    const name = (row.projectManagerEmployeeId && managerNames.get(row.projectManagerEmployeeId)) || String(row.projectManager || "").trim();
+    if (!name) continue;
+    const entry = byManagerMap.get(name) || { manager: name, count: 0, byStatus: [] };
+    entry.count += row._count._all;
+    entry.byStatus.push({ status: row.projectStatus || "Not set", count: row._count._all });
+    byManagerMap.set(name, entry);
+  }
 
   return {
     total,
     unassigned,
     byStatus: byStatus.map((row) => ({ status: row.projectStatus || "Not set", count: row._count._all })),
-    byVertical: byVertical.map((row) => ({ vertical: row.vertical || "Not set", count: row._count._all })),
+    // Named, never the stored code: "WED" is for the WhatsApp group name only.
+    byVertical: byVertical.map((row) => ({ vertical: verticalName(row.vertical) || row.vertical || "Not set", count: row._count._all })),
     byBranch: byBranch.map((row) => ({ branch: row.sourceBranch || "Not set", count: row._count._all })),
+    byManager: [...byManagerMap.values()].sort((a, b) => b.count - a.count || a.manager.localeCompare(b.manager)),
   };
 }
 
@@ -83,24 +103,22 @@ async function projectSummary({ access } = {}) {
  */
 async function searchProjects({ search, status, vertical, limit = 20, access } = {}) {
   const take = Math.min(Math.max(Number(limit) || 20, 1), 50);
-  const term = String(search || "").trim();
+  // Word Chunk Search: every word typed, any order - beside the access clause, never replacing it.
+  const chunks = everyChunk(search, (chunk) => ({
+    OR: [
+      { eventId: { contains: chunk } },
+      { enquiryId: { contains: chunk } },
+      { whatsappGroupName: { contains: chunk } },
+      { projectManager: { contains: chunk } },
+    ],
+  }));
 
   return prisma.salesProject.findMany({
     where: {
       ...LIVE,
-      ...accessWhere(access),
+      AND: [...accessWhere(access).AND, ...chunks],
       ...(status ? { projectStatus: status } : {}),
       ...(vertical ? { vertical } : {}),
-      ...(term
-        ? {
-            OR: [
-              { eventId: { contains: term } },
-              { enquiryId: { contains: term } },
-              { whatsappGroupName: { contains: term } },
-              { projectManager: { contains: term } },
-            ],
-          }
-        : {}),
     },
     select: SAFE_FIELDS,
     orderBy: { createdAt: "desc" },

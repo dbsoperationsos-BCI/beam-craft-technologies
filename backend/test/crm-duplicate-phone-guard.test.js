@@ -21,6 +21,7 @@ const src = (...parts) => fs.readFileSync(path.join(__dirname, "..", "src", "mod
 const CONTROLLER = src("controller.js");
 const CSV = src("csvImportService.js");
 const SHEET = src("googleSheetsService.js");
+const SERVICE = src("crmLeadService.js");
 
 test("Bulk Entry asks the same question the Add Lead form does", () => {
   const fn = CONTROLLER.slice(CONTROLLER.indexOf("async function createBulk("));
@@ -111,8 +112,25 @@ test("the sheet recognises a lead typed in by hand whichever number column it we
 
   const classify = SHEET.slice(SHEET.indexOf("function classifyAgainstExisting("));
   const cbody = classify.slice(0, classify.indexOf("\nasync function prepareGoogleSheetCrmImport("));
-  assert.match(cbody, /const contactNumber = normalizePhone\(lead\.contactNumber\)/, "an arriving row's second number is no longer read");
+  assert.match(cbody, /const contactNumber = phoneKey\(lead\.vertical, lead\.contactNumber\)/, "an arriving row's second number is no longer read");
   assert.match(cbody, /indexes\.byPhone\.get\(contactNumber\)/, "an arriving row's second number is never looked up");
-  // And it counts as having been seen, or two rows of one sheet carrying it are both imported.
-  assert.match(cbody, /const duplicateKey = sourceId \|\| phone \|\| contactNumber/, "the in-sheet duplicate key ignores the second number");
+  /*
+   * And it counts as having been seen, or two rows of one sheet carrying it are both imported.
+   *
+   * The key is the **phone**, falling back to the second number for a row that carries only that -
+   * not the old `sourceId || phone || contactNumber || email || shootId` chain. Matching on a source
+   * id first read one real enquiry whose row id had changed as two, and matching on email read two
+   * real enquiries sharing an office address as one. The number is the only thing that decides.
+   */
+  assert.match(cbody, /const duplicateKey = phone;/, "the duplicate key is no longer the phone alone");
+  assert.match(cbody, /const anyNumber = phone \|\| contactNumber;/, "a row carrying only its second number is not checked at all");
+  assert.match(cbody, /const batchKey = duplicateKey \|\| contactNumber;/, "the in-sheet duplicate key ignores the second number");
+});
+
+test("the duplicates answer names who each enquiry is assigned to, through the owner", () => {
+  // The owner's current name, the `crm` copy only where none is linked - the rule the board reads by.
+  const sharing = SERVICE.slice(SERVICE.indexOf("async function listLeadsSharingPhone"), SERVICE.indexOf("async function findVerticalDuplicate"));
+  assert.match(sharing, /\$\{leadColumnSql\("crm"\)\}/);
+  const duplicates = CONTROLLER.slice(CONTROLLER.indexOf("async function duplicates"), CONTROLLER.indexOf("async function getOne"));
+  assert.match(duplicates, /assignedTo: row\.crm \|\| ""/);
 });

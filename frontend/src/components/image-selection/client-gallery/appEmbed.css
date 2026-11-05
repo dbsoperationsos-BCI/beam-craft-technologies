@@ -1,0 +1,175 @@
+/*
+ * The client gallery inside the client's app (`#embed=app`, PublicGallery sets
+ * `html[data-embed="app"]`). The app already shows its own header and mark, so the gallery's are
+ * dropped; the rest takes the app's look - Poppins, gold for the studio's blue, soft cards - and
+ * moves: cards and photos rise in, cards lift under the pointer, the drawer slides. Nothing here
+ * applies to the gallery link opened on its own.
+ */
+@import url("https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap");
+
+html[data-embed="app"] {
+  --gal-gold: #a87528;
+  --gal-gold-deep: #8f6322;
+  --gal-tint: #fdf9f3;
+  --gal-line: #e8e0d6;
+  --gal-ink: #1f2b28;
+  --gal-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html[data-embed="app"] body,
+html[data-embed="app"] button,
+html[data-embed="app"] input {
+  font-family: "Poppins", system-ui, sans-serif;
+}
+
+/* The app has the header and the mark: the gallery's logo goes, and a bar left holding only the
+   menu button sits flush and quiet. */
+html[data-embed="app"] [data-gallery-logo] {
+  display: none !important;
+}
+html[data-embed="app"] div:has(> [data-gallery-logo]):not(:has(button)) {
+  display: none !important;
+}
+html[data-embed="app"] main > div > div.lg\:hidden:has(> button) {
+  border-bottom-color: transparent;
+  padding-top: 6px;
+  padding-bottom: 0;
+}
+
+/* The heading: the couple's names, at a size that suits a screen inside an app. */
+html[data-embed="app"] main header h1 {
+  font-size: clamp(1.75rem, 4vw, 2.75rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--gal-ink);
+}
+
+/* The studio's blue becomes the app's gold. */
+html[data-embed="app"] .bg-blue-600,
+html[data-embed="app"] .bg-blue-500 {
+  background-color: var(--gal-gold) !important;
+}
+html[data-embed="app"] .hover\:bg-blue-700:hover,
+html[data-embed="app"] .bg-blue-700 {
+  background-color: var(--gal-gold-deep) !important;
+}
+html[data-embed="app"] .text-blue-600,
+html[data-embed="app"] .text-blue-700,
+html[data-embed="app"] .text-blue-500 {
+  color: var(--gal-gold) !important;
+}
+html[data-embed="app"] .bg-blue-50 {
+  background-color: var(--gal-tint) !important;
+}
+html[data-embed="app"] .border-blue-600,
+html[data-embed="app"] .border-blue-500 {
+  border-color: var(--gal-gold) !important;
+}
+html[data-embed="app"] .ring-blue-500,
+html[data-embed="app"] .focus-visible\:ring-blue-500:focus-visible {
+  --tw-ring-color: var(--gal-gold) !important;
+}
+html[data-embed="app"] button.bg-blue-600,
+html[data-embed="app"] button.bg-blue-500 {
+  border-radius: 999px !important;
+  font-weight: 600;
+}
+
+/* Soft cards with the app's warm line. */
+html[data-embed="app"] main article {
+  border-color: var(--gal-line) !important;
+  border-radius: 20px !important;
+  box-shadow: 0 1px 2px rgba(31, 43, 40, 0.04), 0 6px 18px rgba(31, 43, 40, 0.05) !important;
+}
+html[data-embed="app"] aside {
+  border-color: var(--gal-line) !important;
+}
+
+@keyframes gal-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes gal-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes gal-slide {
+  from { transform: translateX(-100%); }
+  to { transform: none; }
+}
+@keyframes gal-pop {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* The page arrives: the heading, then each card a beat after the last. */
+  html[data-embed="app"] main header { animation: gal-rise 0.5s var(--gal-ease) backwards; }
+  html[data-embed="app"] main article { animation: gal-rise 0.5s var(--gal-ease) backwards; }
+  html[data-embed="app"] main article:nth-child(2) { animation-delay: 70ms; }
+  html[data-embed="app"] main article:nth-child(3) { animation-delay: 140ms; }
+  html[data-embed="app"] main article:nth-child(4) { animation-delay: 210ms; }
+  html[data-embed="app"] main article:nth-child(n + 5) { animation-delay: 280ms; }
+
+  /* Cards lift under the pointer and press in under a finger. */
+  html[data-embed="app"] main article {
+    transition: transform 0.25s var(--gal-ease), box-shadow 0.25s var(--gal-ease);
+  }
+  html[data-embed="app"] main article:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 2px 4px rgba(31, 43, 40, 0.05), 0 14px 32px rgba(31, 43, 40, 0.1) !important;
+  }
+  html[data-embed="app"] main article:active { transform: scale(0.99); }
+
+  /* Every photo fades in as it arrives, instead of popping. */
+  html[data-embed="app"] main img { animation: gal-fade 0.45s ease-out backwards; }
+
+  /* Buttons and the selection rows answer the touch. */
+  html[data-embed="app"] button {
+    transition: background-color 0.2s ease, color 0.2s ease, transform 0.12s ease, box-shadow 0.2s ease;
+  }
+  html[data-embed="app"] button:active:not(:disabled) { transform: scale(0.97); }
+
+  /* The phone's menu slides in over a fading shade; dialogs and the photo viewer open softly. */
+  html[data-embed="app"] [role="dialog"] > button[aria-label="Close menu"] { animation: gal-fade 0.25s ease-out; }
+  html[data-embed="app"] [role="dialog"] > aside { animation: gal-slide 0.32s var(--gal-ease); }
+  html[data-embed="app"] [role="dialog"]:not(:has(> aside)) { animation: gal-pop 0.24s var(--gal-ease); }
+
+  /* The footer with Review & Submit settles up from the bottom. */
+  html[data-embed="app"] footer { animation: gal-rise 0.45s var(--gal-ease) 0.15s backwards; }
+}
+
+/* The phone's menu of shoots: a header row of its own - its name on the left, a round close button
+   on the right - so the close button never sits on top of the first shoot's badge. */
+html[data-embed="app"] [role="dialog"] > aside {
+  padding-top: 64px;
+  border-radius: 0 24px 24px 0;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.22);
+}
+html[data-embed="app"] [role="dialog"] > aside::before {
+  content: "Your selections";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--gal-ink);
+  border-bottom: 1px solid var(--gal-line);
+}
+html[data-embed="app"] [role="dialog"] > aside > button[aria-label="Close menu"] {
+  top: 12px;
+  right: 14px;
+  width: 40px;
+  height: 40px;
+  background: var(--gal-tint);
+  color: var(--gal-gold);
+  z-index: 1;
+}
+html[data-embed="app"] [role="dialog"] > aside nav {
+  padding-top: 12px;
+}

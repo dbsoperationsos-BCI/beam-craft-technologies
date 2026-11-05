@@ -81,11 +81,13 @@ test("both ways into the board open the tab, rather than writing a status", () =
   // The lead popup's pills, through the gate that checks the required fields first: converting
   // writes the lead now, so it cannot be pressed on a half-filled form.
   assert.match(PAGE, /onChange=\{\(value\) => \(opensProjectFor\(value\)\n\s*\? attemptConvert\(value\)/);
-  assert.match(PAGE, /function attemptConvert\(status\) \{\n\s*if \(missingRequired\.length\) \{/);
+  assert.match(PAGE, /function attemptConvert\(status\) \{/);
   // The info panel's pills beside the table, which had only ever known about plain Converted.
   assert.match(PAGE, /if \(opensProjectFor\(value\)\) \{\n\s*clearInfoStatusDraft\(\);\n\s*setConvertLead\(\{ lead: selectedLead, status: value \}\);/);
   // And neither one still tests the bare string, which is what left Converted & Followup behind.
-  assert.doesNotMatch(PAGE, /value === "Converted"/, "a convert path is matching the bare status again");
+  // (Plain Converted is still named on its own where it means that status alone - the date stamped
+  // when a form moves to it - which is not a way into the board.)
+  assert.doesNotMatch(PAGE, /opensProjectFor\(value\)[^\n]*value === "Converted"|value === "Converted"[^\n]*opensProjectFor/, "a convert path is matching the bare status again");
 });
 
 /*
@@ -143,9 +145,9 @@ test("the list the server checks against holds the status the CRM can send", () 
  */
 test("converting asks for the required fields before it will even confirm", () => {
   const body = PAGE.slice(PAGE.indexOf("function attemptConvert(status)"), PAGE.indexOf("function attemptSave("));
-  assert.match(body, /if \(missingRequired\.length\) \{\s*\n\s*setShowRequiredErrors\(true\);\s*\n\s*return;/);
+  // Asked of the status being written, so Converted & Followup is held to its next follow-up date.
   // The same marking the Update buttons use, so the boxes are shown rather than named in a message.
-  assert.match(body, /setShowRequiredErrors\(false\);\s*\n\s*onConvert\?\.\(status\);/);
+  assert.match(body, /if \(!requiredMarks\.check\(leadFieldProblems\(leadAsSaved\(displayLead, status\), \{ vertical, popup: true \}\)\)\) return;\s*\n\s*onConvert\?\.\(status\);/);
 });
 
 test("the Contacts panel converts through its own save, status forced onto it", () => {

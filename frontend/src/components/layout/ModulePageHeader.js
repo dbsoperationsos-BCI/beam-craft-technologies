@@ -10,12 +10,7 @@ import NebulaHeaderButton from "@/components/ai/NebulaHeaderButton";
 import TableSelectionActions, { useSelectionActionsProps } from "@/components/data-table/TableSelectionActions";
 import { sidebarLabelForRoute } from "@/constants/navigation.mjs";
 
-const preProductionDestinations = [
-  { label: "All", href: "/project-management/pre-production" },
-  { label: "Dum Dum", href: "/project-management/pre-production/dum-dum" },
-  { label: "Qua Qua", href: "/project-management/pre-production/qua-qua" },
-  { label: "Corp", href: "/project-management/pre-production/corp" },
-];
+import { PRE_PRODUCTION_DESTINATIONS as preProductionDestinations } from "@/lib/lastPage.mjs";
 
 // `titleAddon` and `titleAccessory` are the same slot under two names - the CRM pages reach
 // for the first, assets and image selection for the second. Both render, so neither module's
@@ -24,11 +19,22 @@ const preProductionDestinations = [
 // `onBack` puts a Back arrow ahead of the title, for a page reached from somewhere else rather than
 // from the sidebar - My Profile, say - whose reader wants the page they left, not the module list.
 //
-// `leadingActions` is the one slot ahead of Nebula, for a control that scopes what the page is
-// *showing* rather than doing something to it - the CRM's date range. It sits with the actions
-// rather than beside the title because it is a control the reader operates, and to the left of the
-// quiet Nebula icon because everything after that icon is an action and this is not one.
-export default function ModulePageHeader({ title, titleAddon, titleAccessory, titleContainerClassName = "", tabs, tabValue, onTabChange, tabsAriaLabel, actions, leadingActions, onBack, ownsSelectionActions = false, children }) {
+// `leadingActions` opens the row, for a control that scopes what the page is *showing* rather than
+// doing something to it - the CRM's date range, the Assets register's branch. It sits with the
+// actions rather than beside the title because it is a control the reader operates.
+//
+// `menu` is the trailing ⋮ - Import, Export, whatever else a page keeps behind one glyph. It has a
+// slot of its own so that the row always ends the same way: the page's buttons, then Nebula, then
+// the ⋮. Nebula used to open the row, which read well on a page whose actions were buttons and badly
+// on one that ends in a ⋮ - two quiet icons with the primary button between them. A page passes its
+// ⋮ here rather than at the end of `actions`; passed in `actions` it still draws, just before Nebula
+// instead of after it.
+//
+// `stretchActionsOnPhone` is for a page whose actions are its main controls rather than one short
+// button beside the title - Employee Attendance's Break In and Login. Below `sm` the action row then
+// spans the width, so those buttons can share it (each takes `max-sm:flex-1`) instead of sitting in
+// a clump at the left of an otherwise empty row. From `sm` up it changes nothing.
+export default function ModulePageHeader({ title, titleAddon, titleAccessory, titleContainerClassName = "", tabs, tabValue, onTabChange, tabsAriaLabel, tabsAside, actions, leadingActions, menu, onBack, ownsSelectionActions = false, stretchActionsOnPhone = false, children }) {
   const router = useRouter();
   /*
    * A selection takes the action row over.
@@ -78,8 +84,11 @@ export default function ModulePageHeader({ title, titleAddon, titleAccessory, ti
           it is a quiet icon rather than a call to action, so it reads as part of the furniture and
           leaves the primary button - Add Lead, Add Meet - at the end where the eye expects it. The
           wrapper is not conditional, because a page with no actions of its own still gets Nebula. */}
-      <div className="module-page-header-actions flex max-w-full flex-wrap items-center gap-2 sm:shrink-0 sm:flex-nowrap">{leadingActions}<NebulaHeaderButton />{selection && !ownsSelectionActions ? null : actions}{selection && <TableSelectionActions {...selection} />}</div>
+      {/* The row's order is fixed here rather than page by page: what scopes the page, then what it
+          can do, then Nebula, then the ⋮. The two quiet icons sit together at the end, and the
+          primary button keeps the place the eye goes to - just before them. */}
+      <div className={`module-page-header-actions flex max-w-full flex-wrap items-center gap-2 sm:shrink-0 sm:flex-nowrap ${stretchActionsOnPhone ? "max-sm:w-full max-sm:flex-nowrap" : ""}`}>{leadingActions}{selection && !ownsSelectionActions ? null : actions}<NebulaHeaderButton />{selection && !ownsSelectionActions ? null : menu}{selection && <TableSelectionActions {...selection} />}</div>
     </PageHeaderTopRow>
-    <PageHeaderTabsRow tabs={tabs} tabValue={tabValue} onTabChange={onTabChange} tabsAriaLabel={tabsAriaLabel}>{children}</PageHeaderTabsRow>
+    <PageHeaderTabsRow tabs={tabs} tabValue={tabValue} onTabChange={onTabChange} tabsAriaLabel={tabsAriaLabel} aside={tabsAside}>{children}</PageHeaderTabsRow>
   </header>;
 }

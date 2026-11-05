@@ -1,50 +1,57 @@
+import { previewRungs, recipeFor } from "./imagePresets.mjs";
+
 /**
- * The thumbnail and preview, built on the machine the photos are on.
+ * The thumbnail and preview, built on the machine the photos are on - the one image engine every
+ * Virtual Curation upload runs through: Image Selection and Album Proofing (the upload store),
+ * the Signature Album (its queue), the AI Feature (its Web Worker) and a guest's phone.
  *
  * These used to be built by the backend, which meant every original had to travel to it first. They
  * are built here instead so a master never leaves the studio's own computer: only these two
- * derivatives are uploaded, and only they reach R2. The original is read, decoded and dropped —
- * nothing writes it anywhere.
+ * derivatives are uploaded, and only they reach R2. The original is read, decoded ONCE with its
+ * EXIF orientation folded into the pixels, both derivatives are cut from that one upright frame -
+ * never the thumbnail from the preview, which would stack a second generation of JPEG loss on it -
+ * and the frame is released. Nothing writes the original anywhere.
  *
- * The sizes and the quality ladder are deliberately the same numbers the Sharp pipeline used
- * (`backend/src/modules/image-selection/processing/service.js`), so a gallery filled before this
- * change and one filled after it look alike.
+ * The sizes and qualities are the shared presets (`imagePresets.mjs`, the same table the server
+ * and the desktop read), so a gallery filled before the presets existed and one filled after look
+ * alike: the default is exactly the recipe this file always used.
  */
-
-export const THUMBNAIL = { width: 480, type: "image/webp", quality: 0.76 };
 export const PREVIEW_TYPE = "image/jpeg";
+export const THUMBNAIL_TYPE = "image/webp";
 
-// The client only ever receives the preview, so it is kept small enough to open quickly over a
-// phone connection. Quality steps down, then the long edge, until the encode lands under the
-// ceiling; the last rung is accepted whatever it weighs, because a slightly large preview is worth
-// more than a photo the gallery cannot show at all.
-//
-// The ladder is expressed as scales of the configured long edge so the Processing quality preset
-// can move the whole ladder at once: at the default 1600 the rungs are exactly the fixed numbers
-// this file always used — 1600@0.82, 1600@0.72, 1400@0.66, 1200@0.60, 1000@0.55.
-export const PREVIEW_MAX_BYTES = 200 * 1024;
-export const DEFAULT_PREVIEW_LONG_EDGE = 1600;
-export const PREVIEW_LADDER = [
-  { scale: 1.0, quality: 0.82 },
-  { scale: 1.0, quality: 0.72 },
-  { scale: 0.875, quality: 0.66 },
-  { scale: 0.75, quality: 0.60 },
-  { scale: 0.625, quality: 0.55 },
-];
+const DEFAULT_OPTIONS = recipeFor({ previewPreset: "standard", thumbnailPreset: "standard" });
 
-/** Whether this browser can decode and re-encode a photo without help from a server. */
+/**
+ * Whether this runtime can decode and re-encode a photo without help from a server: a page with a
+ * canvas, or a Web Worker with an OffscreenCanvas.
+ */
 export const supportsDerivatives = () =>
-  typeof window !== "undefined" && typeof window.createImageBitmap === "function" && typeof document !== "undefined";
+  typeof createImageBitmap === "function" && (typeof OffscreenCanvas === "function" || (typeof document !== "undefined" && typeof document.createElement === "function"));
 
 /**
  * The box a photo is drawn into: the long edge capped at `edge`, the aspect ratio kept, and never
- * enlarged — a 300px photo stays 300px rather than being blown up to a blurry 480.
+ * enlarged - a 300px photo stays 300px rather than being blown up to a blurry 480.
  */
 export function fitWithin(width, height, edge) {
   const longest = Math.max(width, height);
   if (!longest || longest <= edge) return { width: width || 1, height: height || 1 };
   const scale = edge / longest;
   return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+}
+
+/**
+ * The plan for one photo, from the options a caller hands in: the preview rungs to walk and the
+ * thumbnail to cut. Pure, so it is unit-tested without a canvas. Accepts the current shape
+ * (`{ preview: { longEdge, quality, targetBytes, byteLadder }, thumbnail: { longEdge, quality } }`,
+ * see `imagePresets.recipeFor`) and the older `{ previewLongEdge, previewMaxBytes }` pair, which
+ * moves the standard ladder to that edge exactly as it always did.
+ */
+export function planDerivatives(options = {}) {
+  const preview = { ...DEFAULT_OPTIONS.preview, ...(options.preview || {}) };
+  if (options.previewLongEdge) preview.longEdge = options.previewLongEdge;
+  if (options.previewMaxBytes) preview.targetBytes = options.previewMaxBytes;
+  const thumbnail = { ...DEFAULT_OPTIONS.thumbnail, ...(options.thumbnail || {}) };
+  return { rungs: previewRungs(preview), targetBytes: preview.targetBytes, thumbnail: { longEdge: thumbnail.longEdge, quality: thumbnail.quality, type: thumbnail.type || THUMBNAIL_TYPE } };
 }
 
 function canvasFor(width, height) {
@@ -66,43 +73,62 @@ async function encode(bitmap, edge, type, quality) {
   const size = fitWithin(bitmap.width, bitmap.height, edge);
   const canvas = canvasFor(size.width, size.height);
   const context = canvas.getContext("2d");
-  // White behind the image so a transparent PNG does not become a black JPEG.
+  // White behind a JPEG so a transparent PNG does not become a black frame; a WebP keeps its alpha.
   if (type === PREVIEW_TYPE) { context.fillStyle = "#ffffff"; context.fillRect(0, 0, size.width, size.height); }
   context.drawImage(bitmap, 0, 0, size.width, size.height);
   return toBlob(canvas, type, quality);
 }
 
 /** Encodes at each rung until one fits, so a 40MB frame and a phone snap leave here alike. */
-async function previewUnder(bitmap, longEdge, maxBytes) {
+async function previewUnder(bitmap, plan) {
   let encoded = null;
-  for (const rung of PREVIEW_LADDER) {
-    encoded = await encode(bitmap, Math.round(longEdge * rung.scale), PREVIEW_TYPE, rung.quality);
-    if (encoded.size <= maxBytes) return encoded;
+  for (const rung of plan.rungs) {
+    encoded = await encode(bitmap, rung.longEdge, PREVIEW_TYPE, rung.quality);
+    if (encoded.size <= plan.targetBytes) return encoded;
   }
   return encoded;
 }
 
 /**
+ * The frame as the camera meant it. `imageOrientation: "from-image"` asks the decoder to fold the
+ * EXIF orientation into the pixels; a browser that does not know the option throws on it, and is
+ * asked again without - those browsers apply the orientation by default.
+ */
+async function decodeUpright(file) {
+  try { return await createImageBitmap(file, { imageOrientation: "from-image" }); }
+  catch (error) {
+    if (error?.name !== "TypeError") throw error;
+    return createImageBitmap(file);
+  }
+}
+
+const failure = (message, code) => { const error = new Error(message); error.code = code; return error; };
+
+/**
  * Both derivatives for one photo, plus the dimensions the gallery records.
  *
- * `options` carries this machine's Processing quality preset — the preview's long edge and byte
- * ceiling; left out, the defaults are the numbers this file always used.
+ * `options` is the module's recipe (`visualCurationCompression.derivativeOptionsFor`); left out,
+ * the standard presets - the numbers this file always used.
  *
- * Throws when the browser cannot decode the file — Chrome cannot read HEIC or TIFF, and a corrupt
- * frame fails here rather than silently becoming a blank tile. The caller reports it against that
- * one photo and carries on with the rest.
+ * Throws `UNDECODABLE` when the browser cannot read the file - Chrome cannot read HEIC or TIFF,
+ * and a corrupt frame fails here rather than silently becoming a blank tile - and
+ * `COMPRESSION_FAILED` when it decoded but could not be encoded. The caller reports it against
+ * that one photo and carries on with the rest; nothing here ever hands back the original as a
+ * stand-in for a derivative.
  */
 export async function buildDerivatives(file, options = {}) {
-  const longEdge = options.previewLongEdge || DEFAULT_PREVIEW_LONG_EDGE;
-  const maxBytes = options.previewMaxBytes || PREVIEW_MAX_BYTES;
-  if (!supportsDerivatives()) throw new Error("This browser cannot prepare photos. Use Chrome or Edge.");
+  if (!supportsDerivatives()) throw failure("This browser cannot prepare photos. Use Chrome or Edge.", "COMPRESSION_FAILED");
+  const plan = planDerivatives(options);
   let bitmap;
-  try { bitmap = await createImageBitmap(file); }
-  catch { throw new Error(`${file.name} could not be read as an image by this browser.`); }
+  try { bitmap = await decodeUpright(file); }
+  catch { throw failure(`${file.name} could not be read as an image by this browser.`, "UNDECODABLE"); }
   try {
-    const thumbnail = await encode(bitmap, THUMBNAIL.width, THUMBNAIL.type, THUMBNAIL.quality);
-    const preview = await previewUnder(bitmap, longEdge, maxBytes);
-    return { thumbnail, preview, width: bitmap.width, height: bitmap.height };
+    const thumbnail = await encode(bitmap, plan.thumbnail.longEdge, plan.thumbnail.type, plan.thumbnail.quality);
+    const preview = await previewUnder(bitmap, plan);
+    const previewSize = fitWithin(bitmap.width, bitmap.height, plan.rungs[0].longEdge);
+    return { thumbnail, preview, width: bitmap.width, height: bitmap.height, previewWidth: previewSize.width, previewHeight: previewSize.height };
+  } catch (error) {
+    throw failure(error?.message || "The image could not be encoded.", "COMPRESSION_FAILED");
   } finally {
     // The decoded frame is megabytes of memory and there may be hundreds in a batch, so it is
     // released now rather than left for whenever the collector notices.

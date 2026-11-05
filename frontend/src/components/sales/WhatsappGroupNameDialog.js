@@ -5,6 +5,7 @@ import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import Button from "@/components/shared/Button";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
+import HelpTip from "@/components/shared/HelpTip";
 import RadioGroupField from "@/components/shared/RadioGroupField";
 import Dialog from "@/components/ui/Dialog";
 import SharedDateField from "@/components/shared/DateField";
@@ -15,6 +16,7 @@ import CloseIcon from "@/components/ui/CloseIcon";
 import { copyToClipboard } from "@/lib/clipboard";
 import { getMasterData } from "@/services/hrm/master-data.service";
 import useBranchRegistry from "@/components/shared/useBranchRegistry";
+import useFormErrors from "@/components/shared/useFormErrors";
 import { searchSalesEnquiries } from "@/services/sales/projects.service";
 import EnquiryCombobox from "@/components/sales/EnquiryCombobox";
 import { buildGroupName, groupNameRequirements, hasValue, quaQuaEvents } from "./whatsappGroupNameUtils";
@@ -26,6 +28,22 @@ import { buildGroupName, groupNameRequirements, hasValue, quaQuaEvents } from ".
  * nothing in it, and no name could be generated at all.
  */
 const FALLBACK_TIERS = ["1t1", "2t2", "3t3", "4t4", "5t5"];
+
+// What each required field says under its box when Save finds it empty.
+const MISSING_MESSAGES = {
+  enquiryId: "Choose the enquiry.",
+  tier: "Choose a tier.",
+  branch: "Choose a branch.",
+  groomName: "Enter the groom's name.",
+  brideName: "Enter the bride's name.",
+  socialMediaPosting: "Choose NSM or SM.",
+  place: "Enter the place.",
+  clientName: "Enter the client's name.",
+  eventName: "Choose the event.",
+  houseType: "Choose the house type.",
+  gou: "Choose Yes or No.",
+  mainEventDate: "Choose the main event date.",
+};
 
 function initialForm() {
   /*
@@ -42,6 +60,7 @@ function initialForm() {
 export default function WhatsappGroupNameDialog({ onClose, onSave }) {
   const [form, setForm] = useState(initialForm);
   const [error, setError] = useState("");
+  const fields = useFormErrors();
   // Only for a copy that failed: a success is drawn on the button itself, as a tick.
   const { notice, showError, clearNotice } = useNotice();
   const [isSaving, setIsSaving] = useState(false);
@@ -122,9 +141,9 @@ export default function WhatsappGroupNameDialog({ onClose, onSave }) {
   }, [enquirySearch]);
   const generatedName = buildGroupName(form);
   /*
-   * What is still missing, asked once and read twice: the copy button turns on when this empties,
-   * and Save names these fields when it does not. Two separate checks would eventually disagree,
-   * and the way that shows up is a name that copies but will not save.
+   * What is still missing, asked of the same list Save checks: the copy button turns on when this
+   * empties, and Save marks each of these under its box when it does not. Two separate lists would
+   * eventually disagree, and the way that shows up is a name that copies but will not save.
    */
   const missingFields = groupNameRequirements(form).filter(([field]) => !hasValue(form[field])).map(([, label]) => label);
   /*
@@ -154,6 +173,7 @@ export default function WhatsappGroupNameDialog({ onClose, onSave }) {
   // clipboard and goes back to being an offer to copy.
   function update(field, value) {
     setCopied(false);
+    fields.clear(field);
     setForm((current) => ({ ...current, [field]: value }));
   }
 
@@ -171,11 +191,9 @@ export default function WhatsappGroupNameDialog({ onClose, onSave }) {
 
   async function submit(event) {
     event.preventDefault();
-    if (missingFields.length) {
-      setError(`Complete required fields: ${missingFields.join(", ")}.`);
-      return;
-    }
     setError("");
+    const problems = Object.fromEntries(groupNameRequirements(form).map(([field, label]) => [field, hasValue(form[field]) ? "" : (MISSING_MESSAGES[field] || `Enter ${label}.`)]));
+    if (!fields.check(problems)) return;
     setIsSaving(true);
     try {
       await onSave(form);
@@ -200,9 +218,9 @@ export default function WhatsappGroupNameDialog({ onClose, onSave }) {
     </>}
   >
     <FloatingNotice notice={notice} onClose={clearNotice} />
-    {(error || branchesError) && <p role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error || branchesError}</p>}
-    <div className="grid gap-4 md:grid-cols-2"><RadioField label="Group Type" value={form.groupType} onChange={(value) => update("groupType", value)} options={["Dum Dum", "Qua Qua", "Corp"]} required /><EnquiryCombobox label="Enquiry ID" required value={form.enquiryId} enquiries={enquiries} loading={isLoadingEnquiries} capped={enquiryPage.capped} total={enquiryPage.total} onSearch={setEnquirySearch} onSelect={(item) => setForm((current) => ({ ...current, enquiryId: item.enquiryId || current.enquiryId, branch: item.sourceBranch && branches.includes(item.sourceBranch) ? item.sourceBranch : current.branch }))} />{form.groupType === "Dum Dum" && <DumDumFields form={form} onChange={update} branches={branches} tiers={tiers} />}{form.groupType === "Qua Qua" && <QuaQuaFields form={form} onChange={update} branches={branches} />}{form.groupType === "Corp" && <CorpFields form={form} onChange={update} branches={branches} />}<div className="md:col-span-2">
-      <label className="block text-[11px] font-semibold text-slate-600 sm:text-xs">Generated WhatsApp Group Name
+    {(error || branchesError || fields.summary) && <p role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error || branchesError || fields.summary}</p>}
+    <div className="grid gap-4 md:grid-cols-2"><RadioField label="Group Type" helperText="The brand this group is for; it decides the fields below." value={form.groupType} onChange={(value) => { fields.clearAll(); update("groupType", value); }} options={["Dum Dum", "Qua Qua", "Corp"]} required /><EnquiryCombobox label="Enquiry ID" helperText="Pick the client's enquiry; its branch fills in for you." required value={form.enquiryId} error={fields.errors.enquiryId} enquiries={enquiries} loading={isLoadingEnquiries} capped={enquiryPage.capped} total={enquiryPage.total} onSearch={setEnquirySearch} onSelect={(item) => { fields.clear("enquiryId"); if (item.sourceBranch && branches.includes(item.sourceBranch)) fields.clear("branch"); setForm((current) => ({ ...current, enquiryId: item.enquiryId || current.enquiryId, branch: item.sourceBranch && branches.includes(item.sourceBranch) ? item.sourceBranch : current.branch })); }} />{form.groupType === "Dum Dum" && <DumDumFields form={form} errors={fields.errors} onChange={update} branches={branches} tiers={tiers} />}{form.groupType === "Qua Qua" && <QuaQuaFields form={form} errors={fields.errors} onChange={update} branches={branches} />}{form.groupType === "Corp" && <CorpFields form={form} errors={fields.errors} onChange={update} branches={branches} />}<div className="md:col-span-2">
+      <label className="block text-[11px] font-semibold text-slate-600 sm:text-xs">Generated WhatsApp Group Name<HelpTip text="Built from the fields above; copy it to name the client's WhatsApp group." />
         {/* The name and its Copy button on one row, and stacked below `sm` - side by side on a
             phone the button would squeeze the name it is there to hand over. */}
         <div className="mt-1.5 flex flex-col gap-2 sm:flex-row sm:items-stretch">
@@ -236,19 +254,19 @@ export default function WhatsappGroupNameDialog({ onClose, onSave }) {
   </Dialog>;
 }
 
-function DumDumFields({ form, onChange, branches, tiers }) {
-  return <><SelectField label="Tier" value={form.tier} onChange={(value) => onChange("tier", value)} options={tiers} required /><SelectField label="Branch" value={form.branch} onChange={(value) => onChange("branch", value)} options={branches} required /><TextField label="Groom Name" value={form.groomName} onChange={(value) => onChange("groomName", value)} required /><TextField label="Bride Name" value={form.brideName} onChange={(value) => onChange("brideName", value)} required /><TextField label="Offer Name" value={form.offerName} onChange={(value) => onChange("offerName", value)} /><RadioField label="Social Media Posting" value={form.socialMediaPosting} onChange={(value) => onChange("socialMediaPosting", value)} options={["NSM", "SM"]} required /><TextField label="Place" value={form.place} onChange={(value) => onChange("place", value)} required /><DateField form={form} onChange={onChange} /></>;
+function DumDumFields({ form, errors, onChange, branches, tiers }) {
+  return <><SelectField label="Tier" helperText="The tier the wedding is booked at; it goes into the name." value={form.tier} error={errors.tier} onChange={(value) => onChange("tier", value)} options={tiers} required /><SelectField label="Branch" helperText="The branch handling this booking; its code goes into the name." value={form.branch} error={errors.branch} onChange={(value) => onChange("branch", value)} options={branches} required /><TextField label="Groom Name" helperText="The groom's name as it should read in the group name." value={form.groomName} error={errors.groomName} onChange={(value) => onChange("groomName", value)} required /><TextField label="Bride Name" helperText="The bride's name as it should read in the group name." value={form.brideName} error={errors.brideName} onChange={(value) => onChange("brideName", value)} required /><TextField label="Offer Name" helperText="The offer the client booked under, if any; added to the name." value={form.offerName} onChange={(value) => onChange("offerName", value)} /><RadioField label="Social Media Posting" helperText="SM if the client allows social media posting, NSM if not." value={form.socialMediaPosting} error={errors.socialMediaPosting} onChange={(value) => onChange("socialMediaPosting", value)} options={["NSM", "SM"]} required /><TextField label="Place" helperText="The town or venue of the event; added to the group name." value={form.place} error={errors.place} onChange={(value) => onChange("place", value)} required /><DateField form={form} error={errors.mainEventDate} onChange={onChange} /></>;
 }
 
-function QuaQuaFields({ form, onChange, branches }) {
-  return <><SelectField label="Branch" value={form.branch} onChange={(value) => onChange("branch", value)} options={branches} required /><TextField label="Offer Name" value={form.offerName} onChange={(value) => onChange("offerName", value)} /><TextField label="Client Name" value={form.clientName} onChange={(value) => onChange("clientName", value)} required /><SelectField label="Event" value={form.eventName} onChange={(value) => onChange("eventName", value)} options={quaQuaEvents} required /><RadioField label="Social Media Posting" value={form.socialMediaPosting} onChange={(value) => onChange("socialMediaPosting", value)} options={["NSM", "SM"]} required /><RadioField label="House Type" value={form.houseType} onChange={(value) => onChange("houseType", value)} options={["IH", "OH"]} required /><RadioField label="GOU" value={form.gou} onChange={(value) => onChange("gou", value)} options={["Yes", "No"]} required /><TextField label="Place" value={form.place} onChange={(value) => onChange("place", value)} required /><DateField form={form} onChange={onChange} /></>;
+function QuaQuaFields({ form, errors, onChange, branches }) {
+  return <><SelectField label="Branch" helperText="The branch handling this booking; its code goes into the name." value={form.branch} error={errors.branch} onChange={(value) => onChange("branch", value)} options={branches} required /><TextField label="Offer Name" helperText="The offer the client booked under, if any; added to the name." value={form.offerName} onChange={(value) => onChange("offerName", value)} /><TextField label="Client Name" helperText="The client's name as it should read in the group name." value={form.clientName} error={errors.clientName} onChange={(value) => onChange("clientName", value)} required /><SelectField label="Event" helperText="The event being shot; added to the group name." value={form.eventName} error={errors.eventName} onChange={(value) => onChange("eventName", value)} options={quaQuaEvents} required /><RadioField label="Social Media Posting" helperText="SM if the client allows social media posting, NSM if not." value={form.socialMediaPosting} error={errors.socialMediaPosting} onChange={(value) => onChange("socialMediaPosting", value)} options={["NSM", "SM"]} required /><RadioField label="House Type" helperText="IH or OH, as booked; added to the group name." value={form.houseType} error={errors.houseType} onChange={(value) => onChange("houseType", value)} options={["IH", "OH"]} required /><RadioField label="GOU" helperText="Yes adds GOU to the group name; No leaves it out." value={form.gou} error={errors.gou} onChange={(value) => onChange("gou", value)} options={["Yes", "No"]} required /><TextField label="Place" helperText="The town or venue of the event; added to the group name." value={form.place} error={errors.place} onChange={(value) => onChange("place", value)} required /><DateField form={form} error={errors.mainEventDate} onChange={onChange} /></>;
 }
 
-function CorpFields({ form, onChange, branches }) {
-  return <><SelectField label="Branch" value={form.branch} onChange={(value) => onChange("branch", value)} options={branches} required /><TextField label="Offer Name" value={form.offerName} onChange={(value) => onChange("offerName", value)} /><TextField label="Client Name" value={form.clientName} onChange={(value) => onChange("clientName", value)} required /><TextField label="Place" value={form.place} onChange={(value) => onChange("place", value)} required /><DateField form={form} onChange={onChange} /></>;
+function CorpFields({ form, errors, onChange, branches }) {
+  return <><SelectField label="Branch" helperText="The branch handling this booking; its code goes into the name." value={form.branch} error={errors.branch} onChange={(value) => onChange("branch", value)} options={branches} required /><TextField label="Offer Name" helperText="The offer the client booked under, if any; added to the name." value={form.offerName} onChange={(value) => onChange("offerName", value)} /><TextField label="Client Name" helperText="The client's name as it should read in the group name." value={form.clientName} error={errors.clientName} onChange={(value) => onChange("clientName", value)} required /><TextField label="Place" helperText="The town or venue of the event; added to the group name." value={form.place} error={errors.place} onChange={(value) => onChange("place", value)} required /><DateField form={form} error={errors.mainEventDate} onChange={onChange} /></>;
 }
 
-function TextField({ label, value, onChange, required }) { return <SharedTextField label={label} required={required} value={value} onChange={(event) => onChange(event.target.value)} />; }
+function TextField({ label, value, onChange, required, error, helperText }) { return <SharedTextField label={label} required={required} helperText={helperText} value={value} error={error} onChange={(event) => onChange(event.target.value)} />; }
 /*
  * The generator's closed lists: Branch, Tier and Event.
  *
@@ -263,7 +281,7 @@ function TextField({ label, value, onChange, required }) { return <SharedTextFie
  * `aria-label` falls back to `label` inside `Dropdown`, so the combobox each of these becomes is
  * still named by the same word it was named by before.
  */
-function SelectField({ label, value, onChange, options, required }) { return <SharedDropdown mode="input" searchable label={label} required={required} placeholder="Select" value={value} onChange={onChange} options={options.map((option) => ({ label: option, value: option }))} />; }
+function SelectField({ label, value, onChange, options, required, error, helperText }) { return <SharedDropdown mode="input" searchable label={label} required={required} helperText={helperText} placeholder="Select" value={value} error={error} onChange={onChange} options={options.map((option) => ({ label: option, value: option }))} />; }
 /*
  * The shared radio group wears a bigger label and a taller box than the text fields beside it,
  * which left every row with a radio on one side sitting lower than its neighbour. Dressed here in
@@ -289,7 +307,7 @@ function RadioField(props) {
  * dialog blank beside it and dropping to a line of its own. Where that space runs out the date
  * takes the full width and falls underneath, which is the same rule the rest of the form follows.
  */
-function DateField({ form, onChange }) {
+function DateField({ form, error, onChange }) {
   return <div className="md:col-span-2">
     <div className="flex flex-wrap items-start gap-x-10 gap-y-4">
       <div>
@@ -298,6 +316,7 @@ function DateField({ form, onChange }) {
           <ToggleSwitch
             checked={Boolean(form.mainEventDateKnown)}
             ariaLabel="Main event date known"
+            helperText="Turn on once the day is fixed, to add the date to the name."
             size="sm"
             label={form.mainEventDateKnown ? "Yes" : "No"}
             onCheckedChange={(checked) => {
@@ -310,7 +329,7 @@ function DateField({ form, onChange }) {
       {/* Full width on a phone, which is what makes it wrap onto its own line there; a fixed
           column beside the toggle everywhere else. */}
       {form.mainEventDateKnown && <div className="w-full sm:w-72">
-        <SharedDateField label="Main Event Date" required value={form.mainEventDate} onChange={(value) => onChange("mainEventDate", value)} />
+        <SharedDateField label="Main Event Date" required helperText="The fixed day of the main event; added to the group name." value={form.mainEventDate} error={error} onChange={(value) => onChange("mainEventDate", value)} />
       </div>}
     </div>
   </div>;

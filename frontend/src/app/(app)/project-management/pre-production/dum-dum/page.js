@@ -1,5 +1,5 @@
-import ProjectWorkflowModulePage from "@/components/project-management/ProjectWorkflowModulePage";
+import PreProductionPage from "@/components/project-management/PreProductionPage";
 
 export default function DumDumPreProductionPage() {
-  return <ProjectWorkflowModulePage moduleKey="pre-production-dum-dum" />;
+  return <PreProductionPage moduleKey="pre-production-dum-dum" />;
 }

@@ -1,9 +1,9 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { createPortal } from "react-dom";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Button from "@/components/shared/Button";
-import ComboBoxField from "@/components/shared/ComboBoxField";
 import DateField from "@/components/shared/DateField";
 import Dropdown from "@/components/shared/Dropdown";
 import TextField from "@/components/shared/TextField";
@@ -14,18 +14,18 @@ import CloseIcon from "@/components/ui/CloseIcon";
 import { apiRequest } from "@/lib/apiClient";
 import { localTimeZone } from "@/lib/meetings";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import useFormErrors from "@/components/shared/useFormErrors";
 
 /**
- * Add Meet: books a Google Meet from the Meetings page.
+ * Add Meet: books a Google Meet from the Calendar, belonging to no lead.
  *
- * The lead's own meetings dialog already books one from inside a lead, where the lead is
- * whichever one is open. Here there is no lead in hand, so the form asks for one - a meeting
- * belongs to an enquiry in the CRM, and one booked against nothing would appear on the
- * calendar with no way back to the client it was for.
+ * A meeting about a client is booked from inside that lead, by the lead's own meetings dialog.
+ * This one is for everything else - an internal catch-up, a vendor, a call not yet a lead - so it
+ * asks for no lead, and is seen by whoever booked it and its guests.
  *
- * The booking itself goes to the lead's own endpoint, unchanged. Google Meet links are issued
- * only as part of a calendar event, and that path already owns creating one; this dialog only
- * decides which lead it is for and hands over the same payload.
+ * It goes to `/api/sales/crm-meetings`, which books it through the same meeting service the lead's
+ * endpoint uses: Google Meet links are issued only as part of a calendar event, and that path
+ * already owns creating one.
  *
  * Built from the CRM's own fields throughout - the same title, date, time, duration, guests
  * and description controls the lead's meetings dialog uses.
@@ -40,14 +40,8 @@ const DURATION_OPTIONS = [
   { value: "120", label: "2 hours" },
 ];
 
-function emptyForm(date = "") {
-  return { lead: "", title: "", date, time: "", duration: "30", attendees: [], description: "" };
-}
-
-// How a lead reads in the picker. The enquiry id is part of the label rather than hidden
-// behind it, because two clients really can share a name and the id is what tells them apart.
-function leadOptionLabel(lead) {
-  return [lead.name || "Unnamed lead", lead.enquiryId].filter(Boolean).join(" · ");
+function emptyForm(date = "", time = "") {
+  return { title: "", date, time, duration: "30", attendees: [], description: "" };
 }
 
 /**
@@ -55,63 +49,20 @@ function leadOptionLabel(lead) {
  *
  * Seeded into the form rather than forced, so a day picked by mistake can still be changed in
  * the field. Opening from the Add Meet button passes nothing and the date starts empty.
+ * `initialTime` ("14:00") is the hour whose ⋮ opened it on the Day view, seeded into Start time the
+ * same way.
  */
-export default function ScheduleMeetDialog({ initialDate = "", onClose, onScheduled }) {
-  const [form, setForm] = useState(() => emptyForm(initialDate));
-  const [leads, setLeads] = useState([]);
+export default function ScheduleMeetDialog({ initialDate = "", initialTime = "", onClose, onScheduled }) {
+  const [form, setForm] = useState(() => emptyForm(initialDate, initialTime));
   const [employeeOptions, setEmployeeOptions] = useState([]);
   const [scheduling, setScheduling] = useState(false);
   // "" while unknown, then one of the server's codes, so the dialog offers Connect or
   // Reconnect rather than a Schedule button that cannot work.
   const [googleIssue, setGoogleIssue] = useState("");
   const [message, setMessage] = useState(null);
-
-  /*
-   * Every lead this dialog has offered, keyed by the label it was offered under.
-   *
-   * The picked lead is resolved from here rather than from the current search results.
-   * Choosing an option puts its whole label in the box - "Name · DBS-EID-DD-ERD-000123" - and that
-   * text matches no lead name and no enquiry id, so searching for it returns nothing. Holding
-   * on to what has already been seen means a lead stays resolvable however the list moves
-   * afterwards.
-   */
-  const knownLeadsRef = useRef(new Map());
-
-  /*
-   * The lead list is searched on the server, not filtered in the browser.
-   *
-   * The CRM holds tens of thousands of leads; handing the whole list to a picker would mean a
-   * multi-megabyte response before the dialog could be used at all. What is typed is sent
-   * instead and only the matches come back.
-   *
-   * Debounced, so typing a name is one request rather than one per keystroke, and the reply
-   * is dropped if the text has moved on - a slow response for "ra" must not overwrite the
-   * results for "ravi".
-   */
-  useEffect(() => {
-    const search = form.lead.trim();
-    // Text that exactly matches a label already offered is a choice made, not a search. Going
-    // back to the server for it would only empty the menu that was just picked from.
-    if (knownLeadsRef.current.has(search)) return undefined;
-
-    let active = true;
-    const timer = window.setTimeout(() => {
-      void apiRequest(`/api/sales/crm-meetings/leads?q=${encodeURIComponent(search)}`)
-        .then((response) => {
-          if (!active) return;
-          const rows = (Array.isArray(response?.data) ? response.data : []).filter((row) => row.enquiryId);
-          for (const row of rows) knownLeadsRef.current.set(leadOptionLabel(row), row.enquiryId);
-          setLeads(rows);
-        })
-        .catch(() => {
-          if (active) setLeads([]);
-        });
-    }, 250);
-    return () => {
-      active = false;
-      window.clearTimeout(timer);
-    };
-  }, [form.lead]);
+  const fields = useFormErrors();
+  // A refused press says only how many boxes are red; what is wrong is under each one.
+  const shown = message || (fields.summary ? { tone: "error", text: fields.summary } : null);
 
   // Checked up front so the Google state is known before the form is filled in, rather than
   // after Schedule is pressed.
@@ -145,6 +96,7 @@ export default function ScheduleMeetDialog({ initialDate = "", onClose, onSchedu
           // Work address first: it is the one a meeting invite belongs on.
           value: String(row.workEmailId || row.emailId || "").trim(),
           label: [row.employeeName, row.designation].filter(Boolean).join(" · ") || row.employeeId || "Employee",
+          avatar: avatarOf(row),
         })));
       })
       .catch(() => {
@@ -159,11 +111,8 @@ export default function ScheduleMeetDialog({ initialDate = "", onClose, onSchedu
   // Not while it is being scheduled: that is not cancellable, so the key is not about this dialog.
   useEscapeKey(() => onClose?.(), !scheduling);
 
-  // What the menu offers: the current search results. Resolution is a separate question and
-  // reads knownLeadsRef, which remembers everything offered so far.
-  const leadLabels = useMemo(() => leads.map(leadOptionLabel), [leads]);
-
   function updateForm(key, value) {
+    fields.clear(key);
     setForm((current) => ({ ...current, [key]: value }));
   }
 
@@ -180,22 +129,20 @@ export default function ScheduleMeetDialog({ initialDate = "", onClose, onSchedu
 
   async function schedule() {
     if (scheduling) return;
-    // Resolved by exact lookup against everything the picker has offered, rather than by
-    // parsing the id back out of the label - a client whose name contains the separator would
-    // defeat any parsing.
-    const enquiryId = knownLeadsRef.current.get(form.lead.trim());
-    if (!enquiryId) return setMessage({ tone: "error", text: "Pick a lead from the list. A meeting belongs to an enquiry." });
-    if (!form.title.trim()) return setMessage({ tone: "error", text: "Give the meeting a title." });
-    if (!form.date || !form.time) return setMessage({ tone: "error", text: "Pick a date and a start time." });
-
+    setMessage(null);
     // The picker gives a local date and a local time; combined they are the local instant,
     // which the browser converts to UTC on the wire.
     const startAt = new Date(`${form.date}T${form.time}`);
-    if (Number.isNaN(startAt.getTime())) return setMessage({ tone: "error", text: "Pick a valid date and start time." });
+    const invalidStart = form.date && form.time && Number.isNaN(startAt.getTime());
+    if (!fields.check({
+      title: form.title.trim() ? "" : "Give the meeting a title.",
+      date: !form.date ? "Pick a date." : (invalidStart ? "Pick a valid date and start time." : ""),
+      time: form.time ? "" : "Pick a start time.",
+    })) return;
 
     setScheduling(true);
     try {
-      const response = await apiRequest(`/api/sales/crm-leads/${encodeURIComponent(enquiryId)}/meetings`, {
+      const response = await apiRequest("/api/sales/crm-meetings", {
         method: "POST",
         body: JSON.stringify({
           title: form.title.trim(),
@@ -211,6 +158,7 @@ export default function ScheduleMeetDialog({ initialDate = "", onClose, onSchedu
     } catch (error) {
       // A Google grant problem is a state the dialog can act on, not just a message.
       if (error?.data?.code) setGoogleIssue(error.data.code);
+      if (fields.fromServer(error, { startAt: "date", durationMinutes: "duration" })) return;
       setMessage({ tone: "error", text: error?.message || "Unable to schedule this meeting." });
     } finally {
       setScheduling(false);
@@ -241,17 +189,17 @@ export default function ScheduleMeetDialog({ initialDate = "", onClose, onSchedu
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6">
-          {message && (
+          {shown && (
             <div
-              role={message.tone === "success" ? "status" : "alert"}
+              role={shown.tone === "success" ? "status" : "alert"}
               className={`mb-5 flex items-start gap-3 rounded-lg border px-4 py-3 text-sm ${
-                message.tone === "success"
+                shown.tone === "success"
                   ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                   : "border-rose-200 bg-rose-50 text-rose-700"
               }`}
             >
-              <span className="min-w-0 flex-1 break-words">{message.text}</span>
-              <button type="button" onClick={() => setMessage(null)} aria-label="Dismiss message" className="shrink-0 opacity-70 hover:opacity-100"><CloseIcon className="h-4 w-4" /></button>
+              <span className="min-w-0 flex-1 break-words">{shown.text}</span>
+              {message && <button type="button" onClick={() => setMessage(null)} aria-label="Dismiss message" className="shrink-0 opacity-70 hover:opacity-100"><CloseIcon className="h-4 w-4" /></button>}
             </div>
           )}
 
@@ -269,42 +217,35 @@ export default function ScheduleMeetDialog({ initialDate = "", onClose, onSchedu
           )}
 
           <div className="grid items-start gap-4 md:grid-cols-3">
-            <div className="md:col-span-3">
-              <ComboBoxField
-                label="Lead"
-                required
-                ariaLabel="Lead"
-                value={form.lead}
-                onChange={(value) => updateForm("lead", value)}
-                options={leadLabels}
-                placeholder="Search a lead by name or enquiry ID"
-              />
-            </div>
             <div className="md:col-span-2">
-              <TextField label="Title" required value={form.title} onChange={(event) => updateForm("title", event.target.value)} placeholder="Discovery call" />
+              <TextField label="Title" helperText="The meeting's name, as it shows on the calendar." required value={form.title} onChange={(event) => updateForm("title", event.target.value)} placeholder="Discovery call" error={fields.errors.title} />
             </div>
             <Dropdown
               mode="input"
               label="Duration"
+              helperText="How long the meeting runs; sets its end time."
               ariaLabel="Duration"
               value={form.duration}
               onChange={(value) => updateForm("duration", value)}
               options={DURATION_OPTIONS}
+              error={fields.errors.duration}
               // A duration scale is ordered by length, which the alphabet would put "1 hour" ahead
               // of "15 minutes" in.
               sorted={false}
             />
-            <DateField label="Date" required value={form.date} onChange={(value) => updateForm("date", value)} />
-            <TimeField label="Start time" required value={form.time} onChange={(event) => updateForm("time", event.target.value)} />
+            <DateField label="Date" helperText="The day the meeting takes place." required value={form.date} onChange={(value) => updateForm("date", value)} error={fields.errors.date} />
+            <TimeField label="Start time" helperText="The meeting ends after the chosen duration from this time." required value={form.time} onChange={(event) => updateForm("time", event.target.value)} error={fields.errors.time} />
             <EmailChipsField
               label="Guests"
+              helperText="Pick staff or type email addresses of people to invite to the meeting."
               values={form.attendees}
               onChange={(next) => updateForm("attendees", next)}
               options={employeeOptions}
               optionsLabel="Employees"
+              error={fields.errors.attendees}
             />
             <div className="md:col-span-3">
-              <TextField label="Description" value={form.description} onChange={(event) => updateForm("description", event.target.value)} placeholder="What is this meeting about?" />
+              <TextField label="Description" helperText="A short note on what the meeting is about." value={form.description} onChange={(event) => updateForm("description", event.target.value)} placeholder="What is this meeting about?" error={fields.errors.description} />
             </div>
           </div>
         </div>

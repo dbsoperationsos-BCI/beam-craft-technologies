@@ -19,7 +19,11 @@ import {
   uploadSessionKey,
 } from "@/lib/imageSelectionUploadStore";
 
-export default function useUploadManager({ projectId, folderId, folderName, projectName, onUploadReady, uploadsBase, replaceExisting = false }) {
+// `compressionModule` names which of the studio's preset pairs the batch follows - Image
+// Selection's by default, Album Proofing's when its pane mounts the dock.
+// Every upload here is Photo Selection's (or Album Proofing's): the AI Culling and AI Editing
+// tabs take no browser upload - the desktop app imports for them.
+export default function useUploadManager({ projectId, folderId, folderName, projectName, onUploadReady, uploadsBase, replaceExisting = false, compressionModule = "imageSelection" }) {
   const key = uploadSessionKey(projectId, folderId);
   const store = useSyncExternalStore(subscribeUploadStore, getUploadStoreSnapshot, getUploadStoreServerSnapshot);
   const session = store.sessions.find((item) => item.key === key) || null;
@@ -65,16 +69,16 @@ export default function useUploadManager({ projectId, folderId, folderName, proj
   }, [folderId, hasSession, projectId, uploadsBase]);
 
   const addFiles = useCallback(
-    (files) => startUpload({ projectId, folderId, folderName, projectName, files, uploadsBase, replaceExisting }),
-    [folderId, folderName, projectId, projectName, replaceExisting, uploadsBase],
+    (files) => startUpload({ projectId, folderId, folderName, projectName, files, uploadsBase, replaceExisting, compressionModule }),
+    [compressionModule, folderId, folderName, projectId, projectName, replaceExisting, uploadsBase],
   );
   const resumeFiles = useCallback(
     async (files) => {
-      const result = await resumeUpload({ projectId, folderId, folderName, projectName, files, uploadsBase, replaceExisting });
+      const result = await resumeUpload({ projectId, folderId, folderName, projectName, files, uploadsBase, replaceExisting, compressionModule });
       if (result.resumed) setResumeBatch(null);
       return result;
     },
-    [folderId, folderName, projectId, projectName, replaceExisting, uploadsBase],
+    [compressionModule, folderId, folderName, projectId, projectName, replaceExisting, uploadsBase],
   );
   const discardResume = useCallback(() => {
     clearSavedUpload(projectId, folderId);

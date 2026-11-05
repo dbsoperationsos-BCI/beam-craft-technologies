@@ -18,15 +18,19 @@ import CrdDocumentResponse from "./CrdDocumentResponse";
  * The share link is issued from here rather than being created with the document, because most
  * responses are never shared and a link that exists is a link that can leak. Pressing it twice
  * returns the same URL, so a link already sent is never invalidated.
+ *
+ * `readOnly` is the Overall Status's View: the answers alone - no share link, no button to make one.
+ * `loadResponse` reads the response another way (the project's own route there), and `layer` stacks
+ * the dialog over the panel it was opened from.
  */
-export default function CrdDocumentViewPanel({ row, onClose }) {
+export default function CrdDocumentViewPanel({ row, onClose, readOnly = false, loadResponse, layer }) {
   const documentId = row?.crdDocument?.id || "";
   const submitted = Boolean(row?.crdDocument?.submittedAt);
 
   const [response, setResponse] = useState(null);
   const [loading, setLoading] = useState(submitted);
   const [error, setError] = useState("");
-  const [shareUrl, setShareUrl] = useState(row?.crdDocument?.sharePath ? `${publicOrigin()}${row.crdDocument.sharePath}` : "");
+  const [shareUrl, setShareUrl] = useState(!readOnly && row?.crdDocument?.sharePath ? `${publicOrigin()}${row.crdDocument.sharePath}` : "");
   const [sharing, setSharing] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -34,14 +38,14 @@ export default function CrdDocumentViewPanel({ row, onClose }) {
     if (!submitted || !documentId) return;
     setLoading(true);
     try {
-      setResponse((await getCrdDocumentResponse(documentId))?.data || null);
+      setResponse((await (loadResponse ? loadResponse() : getCrdDocumentResponse(documentId)))?.data || null);
       setError("");
     } catch (failure) {
       setError(failure.message || "Unable to load this response.");
     } finally {
       setLoading(false);
     }
-  }, [documentId, submitted]);
+  }, [documentId, submitted, loadResponse]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void load(); }, 0);
@@ -76,12 +80,13 @@ export default function CrdDocumentViewPanel({ row, onClose }) {
     size="lg"
     height="tall"
     onClose={onClose}
+    layer={layer}
     footer={<>
       <Button type="button" onClick={onClose}>Close</Button>
-      {submitted && !shareUrl && <Button type="button" variant="primary" disabled={sharing} onClick={() => void share()}>
+      {!readOnly && submitted && !shareUrl && <Button type="button" variant="primary" disabled={sharing} onClick={() => void share()}>
         {sharing ? "Creating..." : "Share Response"}
       </Button>}
-      {submitted && shareUrl && <Button type="button" variant="primary" onClick={() => void copyShareUrl()}>{copied ? "Copied" : "Copy Response Link"}</Button>}
+      {!readOnly && submitted && shareUrl && <Button type="button" variant="primary" onClick={() => void copyShareUrl()}>{copied ? "Copied" : "Copy Response Link"}</Button>}
     </>}
   >
     <div className="pb-2">

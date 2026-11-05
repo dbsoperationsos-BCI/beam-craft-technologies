@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { defaultValidUntil, formatClientPhone, hasSettingsChanges, projectSettingsState, settingsFormState, toDateInput, validateClientPhone, validateSelectionLimit } from "../src/lib/imageSelectionSettings.mjs";
+import { NEW_SELECTION_ITEM_LIMIT, defaultValidUntil, formatClientPhone, hasSettingsChanges, newSelectionItemLimit, pendingSelectionDrafts, projectSettingsState, saveThenShare, settingsFormState, toDateInput, validateClientPhone, validateSelectionLimit } from "../src/lib/imageSelectionSettings.mjs";
 
 const initial = { selectionValidityEnabled: true, allowPhotoSelection: true, selectionValidUntil: "2027-02-15", deliverables: [{ id: "config-1", enabled: true, selectionLimit: 20 }, { id: "config-2", enabled: false, selectionLimit: 10 }] };
 
@@ -79,4 +79,74 @@ test("carries only the editable columns of each selection item into the form", (
   assert.deepEqual(settingsFormState({}, undefined).deliverables, []);
   // Round-trips through the change check the workspace rail uses to decide whether to offer Save.
   assert.equal(hasSettingsChanges(form, structuredClone(form)), false);
+});
+
+test("a typed selection item with no limit is given 1, and a typed limit is kept", () => {
+  assert.equal(NEW_SELECTION_ITEM_LIMIT, 1);
+  assert.equal(newSelectionItemLimit(""), 1);
+  assert.equal(newSelectionItemLimit("   "), 1);
+  assert.equal(newSelectionItemLimit(undefined), 1);
+  assert.equal(newSelectionItemLimit("5"), 5);
+  assert.equal(newSelectionItemLimit("50"), 50);
+  // An invalid number is passed through for validation to refuse, not quietly turned into 1.
+  assert.equal(validateSelectionLimit(newSelectionItemLimit("0")), false);
+});
+
+test("an existing item's saved limit survives the form being rebuilt from the server", () => {
+  const form = settingsFormState({}, [{ id: "a", enabled: true, selectionLimit: 5 }, { id: "b", enabled: true, selectionLimit: 50 }]);
+  assert.deepEqual(form.deliverables.map((item) => item.selectionLimit), [5, 50]);
+});
+
+test("only add rows holding a name are pending, each carrying its shoot and its limit", () => {
+  const pending = pendingSelectionDrafts({
+    "g1": { name: " Album ", limit: "", shootName: "Wedding", shootFolderId: "f-wedding" },
+    "g2": { name: "", limit: "9", shootName: "Reception" },
+    "g3": { name: "Prints", limit: "12", shootName: null },
+  });
+  // The shoot rides by its folder's id where the group is a folder, so a renamed folder still files
+  // the item under the same shoot.
+  assert.deepEqual(pending, [
+    { groupId: "g1", name: "Album", selectionLimit: 1, shootName: "Wedding", shootFolderId: "f-wedding" },
+    { groupId: "g3", name: "Prints", selectionLimit: 12, shootName: null, shootFolderId: null },
+  ]);
+  assert.deepEqual(pendingSelectionDrafts(undefined), []);
+});
+
+test("Review & Share saves, adds the pending items and publishes, in that order, before it opens", async () => {
+  const calls = [];
+  const step = (name) => async () => { calls.push(name); return true; };
+  const result = await saveThenShare({ validate: () => true, save: step("save"), addDrafts: step("addDrafts"), publish: step("publish"), open: () => calls.push("open") });
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(calls, ["save", "addDrafts", "publish", "open"]);
+});
+
+test("Review & Share with nothing pending opens as it always did", async () => {
+  let opened = 0;
+  assert.deepEqual(await saveThenShare({ open: () => { opened += 1; } }), { ok: true });
+  assert.equal(opened, 1);
+});
+
+test("Review & Share stops at a failed validation, save or add, and never opens", async () => {
+  for (const failing of ["validate", "save", "addDrafts", "publish"]) {
+    const calls = [];
+    const step = (name) => async () => { calls.push(name); return name !== failing; };
+    const result = await saveThenShare({
+      validate: () => { calls.push("validate"); return failing !== "validate"; },
+      save: step("save"), addDrafts: step("addDrafts"), publish: step("publish"),
+      open: () => calls.push("open"),
+    });
+    assert.equal(result.ok, false, failing);
+    assert.equal(result.step, failing);
+    assert.ok(!calls.includes("open"), `${failing} failing must not open the share flow`);
+    assert.equal(calls.at(-1), failing, "nothing after the failed step runs");
+  }
+});
+
+test("a save that throws - a dropped network - stops Review & Share rather than escaping", async () => {
+  let opened = false;
+  const error = new Error("Network down");
+  const result = await saveThenShare({ save: async () => { throw error; }, open: () => { opened = true; } });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, error);
+  assert.equal(opened, false);
 });

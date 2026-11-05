@@ -7,7 +7,11 @@ const { checkPermission } = require("../../middleware/permissionMiddleware");
 const iamService = require("../../services/iam.service");
 // The application's own phone rule, so a number stored here is one the SMS gateway will take.
 const { normalizePhoneNumber } = require("../../services/phoneNumber");
+const { renameEmployeeCopies, renameUserCopies } = require("../../services/nameCopies");
 const { LINKABLE_EMPLOYEE_FIELDS, linkProblem, linkableEmployee, readLinkedEmployeeId } = require("./userEmployeeLink");
+const { listPhotoUrl } = require("../../services/employeeOptionLists");
+const { CLIENT_ROLE } = require("../../services/loginCredentials");
+const { forgetRequestCache } = require("../../services/requestCache");
 
 const router = express.Router();
 router.use(protect);
@@ -16,6 +20,13 @@ router.use(protect);
 // number gives NaN, which Prisma rejects with a type error rather than a 404, so the two kinds of
 // id are read differently and never interchangeably.
 const userId = (value) => Number.parseInt(value, 10);
+
+/*
+ * User and Role Management are the studio's own people. A client's sign-in (Create Project -> Client
+ * Credentials, named after the project's WhatsApp group) holds no IAM role and is not listed, offered
+ * a role or counted here; a page of its own can list them if one is ever needed.
+ */
+const STAFF_ONLY = { role: { not: CLIENT_ROLE } };
 const branchIdOf = (value) => (value === null || value === undefined || value === "" ? null : Number.parseInt(value, 10));
 
 // `mobile` is read as well as written: it is where a password-reset code goes for a login with no
@@ -24,7 +35,7 @@ const branchIdOf = (value) => (value === null || value === undefined || value ==
 // Tasks and the org chart find the person behind a login, so the screen that sets it has to
 // show which person is there now. It is a plain unique column rather than a relation, so the
 // employee behind it is attached by `withLinkedEmployees` below rather than by a Prisma select.
-const userFields = { id: true, name: true, email: true, mobile: true, branchId: true, role: true, status: true, linkedEmployeeId: true, branch: { select: { id: true, name: true } } };
+const userFields = { id: true, name: true, email: true, mobile: true, branchId: true, role: true, status: true, linkedEmployeeId: true, profilePhotoUrl: true, createdAt: true, branch: { select: { id: true, name: true } } };
 
 /**
  * Attaches the employee behind each account, as `linkedEmployee` or null.
@@ -36,13 +47,21 @@ const userFields = { id: true, name: true, email: true, mobile: true, branchId: 
  */
 async function withLinkedEmployees(users) {
   const ids = [...new Set(users.map((user) => user.linkedEmployeeId).filter(Boolean))];
-  if (!ids.length) return users.map((user) => ({ ...user, linkedEmployee: null }));
+  // The photo a list carries is a link or nothing (`listPhotoUrl`): the linked employee's, else the login's own.
+  if (!ids.length) return users.map((user) => ({ ...user, profilePhotoUrl: listPhotoUrl(user.profilePhotoUrl), linkedEmployee: null }));
   const employees = await prisma.employee.findMany({
     where: { id: { in: ids }, archivedAt: null },
-    select: { id: true, employeeId: true, employeeName: true, department: true, designation: true },
+    select: { id: true, employeeId: true, employeeName: true, department: true, designation: true, profilePhotoUrl: true },
   });
   const byId = new Map(employees.map((employee) => [employee.id, employee]));
-  return users.map((user) => ({ ...user, linkedEmployee: byId.get(user.linkedEmployeeId) || null }));
+  return users.map((user) => {
+    const employee = byId.get(user.linkedEmployeeId) || null;
+    return {
+      ...user,
+      profilePhotoUrl: listPhotoUrl(employee?.profilePhotoUrl || user.profilePhotoUrl),
+      linkedEmployee: employee && { ...employee, profilePhotoUrl: listPhotoUrl(employee.profilePhotoUrl) },
+    };
+  });
 }
 
 // Every handler is wrapped so a rejected Prisma call reaches the server's error handler instead of
@@ -174,6 +193,7 @@ router.get("/users", READ_USERS, route(async (req, res) => {
   // page of 50 after it arrives would leave the footer promising rows that were thrown away.
   const where = {
     ...branchFilter,
+    ...STAFF_ONLY,
     ...(req.query.status ? { status: String(req.query.status) } : {}),
   };
 
@@ -249,6 +269,7 @@ router.post("/users", WRITE_USERS, route(async (req, res) => {
       },
       select: userFields,
     });
+    forgetRequestCache(); // what this request read about users and roles is now out of date
   } catch (error) {
     if (refuseLostLinkRace(error, res)) return;
     throw error;
@@ -262,7 +283,7 @@ router.patch("/users/:userId", WRITE_USERS, route(async (req, res) => {
   const id = userId(req.params.userId);
   const { name, email, branchId, role, status, mobile, linkedEmployeeId } = req.body || {};
 
-  const target = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+  const target = await prisma.user.findUnique({ where: { id }, select: { id: true, name: true } });
   if (!target) return res.status(404).json({ message: "User not found." });
   if (branchId !== undefined && await refuseUnreachableBranch(req, res, branchIdOf(branchId))) return;
   const number = mobile === undefined ? null : readMobile(mobile);
@@ -278,7 +299,9 @@ router.patch("/users/:userId", WRITE_USERS, route(async (req, res) => {
       where: { id },
       data: {
         ...(name !== undefined && { name }),
-        ...(email !== undefined && { email }),
+        // A blank email is none at all (NULL), never "" - a client login holds no email, and a
+        // second "" would collide with the first under the unique index.
+        ...(email !== undefined && { email: String(email ?? "").trim() || null }),
         ...(branchId !== undefined && { branchId: branchIdOf(branchId) }),
         ...(role !== undefined && { role }),
         ...(status !== undefined && { status }),
@@ -287,6 +310,7 @@ router.patch("/users/:userId", WRITE_USERS, route(async (req, res) => {
       },
       select: userFields,
     });
+    forgetRequestCache(); // what this request read about users and roles is now out of date
   } catch (error) {
     if (refuseLostLinkRace(error, res)) return;
     throw error;
@@ -313,9 +337,25 @@ router.patch("/users/:userId", WRITE_USERS, route(async (req, res) => {
    */
   if (name !== undefined && user.linkedEmployeeId) {
     try {
+      const previous = await prisma.employee.findUnique({ where: { id: user.linkedEmployeeId }, select: { employeeName: true } });
       await prisma.employee.update({ where: { id: user.linkedEmployeeId }, data: { employeeName: name } });
+      // And the records that wrote the employee's name out beside a reference to them - the same
+      // copies the Employee Repository rewrites when the rename starts there. See nameCopies.js.
+      if (previous && previous.employeeName !== name) await renameEmployeeCopies(prisma, user.linkedEmployeeId, previous.employeeName, name);
     } catch (error) {
       console.warn(`Renamed user ${id} but could not rename employee ${user.linkedEmployeeId}:`, error?.message || error);
+    }
+  }
+  /*
+   * The login's own copies - the tasks it gave, holds or was reassigned from, which are written
+   * under `User.name` because tasks are assigned between logins. Kept apart from the employee
+   * mirror above because a login with no employee behind it (the Super Admin) still has tasks.
+   */
+  if (name !== undefined && name !== target.name) {
+    try {
+      await renameUserCopies(prisma, id, target.name, name);
+    } catch (error) {
+      console.warn(`Renamed user ${id} but could not rename the tasks naming them:`, error?.message || error);
     }
   }
 
@@ -347,6 +387,7 @@ async function removeUser(req, id) {
   }
 
   await prisma.user.delete({ where: { id } });
+  forgetRequestCache(); // what this request read about users and roles is now out of date
   return { status: 200 };
 }
 
@@ -385,6 +426,9 @@ router.post("/users/:userId/roles", WRITE_USERS, route(async (req, res) => {
 
   const role = await prisma.role.findUnique({ where: { id: roleId }, select: { id: true } });
   if (!role) return res.status(404).json({ message: "Role not found." });
+  const account = await prisma.user.findUnique({ where: { id: userId(req.params.userId) }, select: { role: true } });
+  if (!account) return res.status(404).json({ message: "User not found." });
+  if (account.role === CLIENT_ROLE) return res.status(400).json({ message: "Roles are for the studio's people; a client's sign-in cannot be given one." });
 
   await iamService.assignRoleToUser(userId(req.params.userId), roleId);
   res.status(201).json({ message: "Role assigned." });
@@ -527,6 +571,7 @@ async function writeRoleMatrix(roleId, grants) {
       }
     }
   });
+  forgetRequestCache(); // what this request read about users and roles is now out of date
 }
 
 router.get("/roles", READ_ROLES, route(async (req, res) => {
@@ -538,6 +583,25 @@ router.get("/roles/:roleId", READ_ROLES, route(async (req, res) => {
   const role = await prisma.role.findUnique({ where: { id: req.params.roleId }, include: roleShape });
   if (!role) return res.status(404).json({ message: "Role not found." });
   res.json({ data: role });
+}));
+
+/**
+ * The accounts that carry a role — the Manage Users section of the role form.
+ *
+ * Guarded by `User Management`, not `Role Management`: who carries a role is read and changed
+ * through `/users/:userId/roles`, which answers to User Management, so the list those changes are
+ * made against answers to the same permission. Narrowed by the same branch filter as `GET /users`
+ * and to active accounts, as the role's own `_count.users` is, so the section never names somebody
+ * the Users screen would not show this caller.
+ */
+router.get("/roles/:roleId/users", READ_USERS, route(async (req, res) => {
+  const branchFilter = await iamService.buildBranchFilter(req.user.id, { module: "ADMIN", feature: "User Management" });
+  const users = await prisma.user.findMany({
+    where: { ...branchFilter, ...STAFF_ONLY, status: "ACTIVE", roles: { some: { roleId: req.params.roleId } } },
+    orderBy: { name: "asc" },
+    select: userFields,
+  });
+  res.json({ data: await withLinkedEmployees(users) });
 }));
 
 router.post("/roles", WRITE_ROLES, route(async (req, res) => {
@@ -563,6 +627,7 @@ router.post("/roles", WRITE_ROLES, route(async (req, res) => {
       isDepartmentLead: Boolean(req.body?.isDepartmentLead),
     },
   });
+  forgetRequestCache(); // what this request read about users and roles is now out of date
   if (grants.length) await writeRoleMatrix(created.id, grants);
   await writeRoleBranches(created.id, branchIds);
 
@@ -604,6 +669,7 @@ router.patch("/roles/:roleId", WRITE_ROLES, route(async (req, res) => {
       ...(isDepartmentLead !== undefined && { isDepartmentLead: Boolean(isDepartmentLead) }),
     },
   });
+  forgetRequestCache(); // what this request read about users and roles is now out of date
 
   const role = await prisma.role.findUnique({ where: { id: req.params.roleId }, include: roleShape });
   res.json({ data: role });
@@ -647,6 +713,7 @@ async function removeRole(roleId) {
   }
 
   await prisma.role.delete({ where: { id: roleId } });
+  forgetRequestCache(); // what this request read about users and roles is now out of date
   return { status: 200 };
 }
 
@@ -692,6 +759,7 @@ router.post("/roles/:roleId/duplicate", WRITE_ROLES, route(async (req, res) => {
       isDepartmentLead: source.isDepartmentLead,
     },
   });
+  forgetRequestCache(); // what this request read about users and roles is now out of date
 
   await writeRoleMatrix(created.id, source.permissions.map((grant) => ({
     permissionId: grant.permissionId,
@@ -716,29 +784,16 @@ router.put("/roles/:roleId/permissions", WRITE_ROLES, route(async (req, res) => 
   res.json({ data: role });
 }));
 
-// ============= ADMIN PERMISSION SET =============
 /*
- * The one matrix every branch administrator carries, on top of whatever their own role grants.
+ * There is no Admin Permission set any more.
  *
- * Guarded by `ADMIN / Role Management` rather than a permission of its own, and deliberately: this
- * *is* role management. Saving it changes what every role marked as a branch administrator may do,
- * which is a strictly larger act than editing one role - so it cannot sit behind a weaker guard,
- * and giving it a weaker one of its own would have been a way around the stronger.
- *
- * `readGrants` is the role editor's own validator, reused unchanged. One level per permission, a
- * DISABLED row means "grant nothing here" and is dropped rather than stored, and a permission that
- * no longer exists is refused - the same three answers the role matrix gives, because it is the
- * same question.
+ * One studio-wide matrix used to be merged on top of every role marked Branch Admin, which meant a
+ * permission unticked on the role came straight back at the next sign-in - the set still named it,
+ * and nothing on the role's own screen said so. Ticking Branch Admin now fills that role's matrix
+ * with every permission, on screen, to be cut back to the job this administrator actually has; what
+ * is left is what they hold, and the tick itself carries `ADMIN / Branch Administration`, which is
+ * what lets them see every record in their branches.
  */
-router.get("/branch-admin-permissions", READ_ROLES, route(async (req, res) => {
-  res.json({ data: await iamService.branchAdminPermissions() });
-}));
-
-router.put("/branch-admin-permissions", WRITE_ROLES, route(async (req, res) => {
-  const grants = await readGrants(req.body?.permissions, res);
-  if (!grants) return;
-  res.json({ data: await iamService.saveBranchAdminPermissions(grants) });
-}));
 
 // ============= PERMISSIONS =============
 router.get("/permissions", READ_ROLES, route(async (req, res) => {

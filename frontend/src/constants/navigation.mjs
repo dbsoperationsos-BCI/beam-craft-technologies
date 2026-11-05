@@ -68,16 +68,28 @@ export const SIDEBAR_MODULES = [
       { id: "subscribe-account-manager", label: "Client Domain Managing", href: "/subscribe/account-manager", activePath: "/subscribe/account-manager" },
     ],
   },
+  /*
+   * What the studio does for its clients through their app, on its own heading after Sales & CRM.
+   * The screens kept their /sales routes when they moved here, so bookmarks and notification links
+   * still open them; their permissions moved to `CLIENT` (migration 20261030100000).
+   */
   {
-    // Beam Craft's client companies, in their own group rather than under HRM.
     id: "client-management",
     title: "Client Management",
-    module: "SUBSCRIBE",
-    icon: "Business",
+    module: "CLIENT",
+    icon: "SupportAgent",
     items: [
-      // Was Employee Repository. The id stays (saved sidebar layouts and the Administration family key
-      // on it); the employee list itself is still reached from the switch beside this page's heading.
-      { id: "employee-repository", label: "Client Details", href: "/hrm/client-details", activePath: "/hrm/client-details" },
+      // Beam Craft's client companies: onboarding invites, their details and their subscriptions.
+      { id: "client-details", label: "Client Details", href: "/hrm/client-details", activePath: "/hrm/client-details" },
+      // DBS's studio-to-customer screens below are off Beam Craft's menu (`hidden`); routes and code are kept.
+      // The offers on the Home page of the clients' app.
+      { id: "client-offers", label: "Client Offers", href: "/sales/client-offers", activePath: "/sales/client-offers", hidden: true },
+      // The chats clients start from their app, answered here.
+      { id: "client-chats", label: "Client Chats", href: "/sales/client-chats", activePath: "/sales/client-chats", hidden: true },
+      // The designs and songs clients make their animated invitations from.
+      { id: "invitation-cards", label: "Invitation Cards", href: "/client-management/invitation-cards", activePath: "/client-management/invitation-cards", hidden: true },
+      // What clients ask about their services and deliverables, answered here.
+      { id: "client-requests", label: "Client Requests", href: "/client-management/client-requests", activePath: "/client-management/client-requests", hidden: true },
     ],
   },
   {
@@ -86,14 +98,27 @@ export const SIDEBAR_MODULES = [
     module: "HRM",
     icon: "Groups",
     items: [
+      { id: "employee-repository", label: "User Management", href: "/employees", activePath: "/employees" },
+      { id: "employee-attendance", label: "Attendance", href: "/hrm/employee-attendance", activePath: "/hrm/employee-attendance" },
       /*
-       * Kept in the registry, taken out of the menu - see `hidden` below. Removing the three rows
-       * outright would also take their names off the Roles screen (`FEATURE_LABELS` is built by
-       * walking this list) and their screens out of Field Settings, and would leave the pages
-       * with no name of their own for the topbar to read.
+       * The studio's attendance register. Off the menu: it is a section of Employee Attendance now,
+       * offered there to whoever holds `HRM / Attendance Approval`. The route stays, and the
+       * permission still appears on the Roles screen under this name.
        */
-      { id: "employee-attendance", label: "Employee Attendance", href: "/hrm/employee-attendance", activePath: "/hrm/employee-attendance", hidden: true },
       { id: "attendance-register", label: "Attendance Register", href: "/hrm/attendance", activePath: "/hrm/attendance", hidden: true },
+      /*
+       * Leave, permission and comp-off requests. Off the menu: they are Employee Attendance's Request
+       * section now, and a request waiting on this login is announced on the notification bell. The
+       * route stays - a bookmark or a notification link to /hrm/requests still opens the screen -
+       * and `HRM / Requests` still appears on the Roles screen under this name.
+       */
+      { id: "requests", label: "Leave or Comp-Off Request", href: "/hrm/requests", activePath: "/hrm/requests", hidden: true },
+      /*
+       * The studio's events - a photo and a description each - posted for everybody to see. Off the
+       * menu: a section of Employee Attendance now, offered there to whoever holds `HRM / Events`.
+       * The route stays - the event notification still links to it - and so does the permission.
+       */
+      { id: "events", label: "Events", href: "/hrm/events", activePath: "/hrm/events", hidden: true },
       /*
        * Off the menu, and reached from the Employee Repository's heading instead, beside Users and
        * Roles - see `constants/rbacSections.js`. It is read about the same people as the repository
@@ -109,6 +134,12 @@ export const SIDEBAR_MODULES = [
       // Google Sheets linked under Settings → Integrations → Interview. Its own permission,
       // `HRM / Interview`, which `modulePermissions.js` names for this route.
       { id: "interview", label: "Interview", href: "/hrm/interview", activePath: "/hrm/interview" },
+      // Payroll, behind its own permission, `HRM / Payroll` - on the sidebar again now that its Main
+      // Page, Advance Salary and Recovery are in use.
+      { id: "payroll", label: "Payroll", href: "/hrm/payroll", activePath: "/hrm/payroll" },
+      // The signed-in employee's own payslips, behind `HRM / My Payslip`. Off the menu: a tab of My
+      // Profile now. The route stays, and so does the permission.
+      { id: "payslip", label: "Payslip", href: "/hrm/payslip", activePath: "/hrm/payslip", hidden: true },
     ],
   },
   {
@@ -131,8 +162,14 @@ export const SIDEBAR_MODULES = [
     icon: "AccountTree",
     items: [
       { id: "projects", label: "Projects", href: "/project-management/projects", activePath: "/project-management/projects", hidden: true },
+      // `activePath` is the board's prefix, so the entry stays lit on the vertical boards beneath it
+      // (`/pre-production/corp`, `/dum-dum`, `/qua-qua`), which share its one permission.
+      { id: "pre-production", label: "Pre Production", href: "/project-management/pre-production", activePath: "/project-management/pre-production", hidden: true },
+      { id: "production", label: "Production", href: "/project-management/production", activePath: "/project-management/production", hidden: true },
+      { id: "shoot-board", label: "Shoot Board", href: "/project-management/shoot-board", activePath: "/project-management/shoot-board", hidden: true },
       { id: "crd-documents", label: "CRD Documents", href: "/project-management/crd-documents", activePath: "/project-management/crd-documents", hidden: true },
       { id: "client-gifts", label: "Client Gifts", href: "/project-management/client-gifts", activePath: "/project-management/client-gifts", hidden: true },
+      { id: "feedback", label: "Customer Issues and Feedback", href: "/project-management/feedback", activePath: "/project-management/feedback", hidden: true },
     ],
   },
   {
@@ -147,15 +184,31 @@ export const SIDEBAR_MODULES = [
       // Selection and nothing else. Overview and Events are the pair its own header switches between,
       // so neither is listed here; the entry lands on the overview and `activePath` is the module.
       { id: "ai-feature", label: "AI Feature", href: "/visual-curation/ai/overview", activePath: "/visual-curation/ai", hidden: true },
+      // Photo Selling sells an event's photos to its guests: a sibling of the AI Feature, not an
+      // option under it, with a permission of its own. Its route sits under the AI Feature's prefix,
+      // so the sidebar lights whichever entry claims the open page most closely.
+      { id: "photo-selling", label: "Photo Selling", href: "/visual-curation/ai/photo-selling", hidden: true },
       // One entry for Image Selection, and it is the only one: Dashboard and Projects are not listed
       // beneath it. They are the pair the module's own header switches between, and listing them
       // here as well put the same choice in two places. The entry lands on the dashboard, and
       // `activePath` is the module rather than that one route, so it stays lit on the Projects page.
-      { id: "image-selection", label: "Image Selection", href: "/image-selection/dashboard", activePath: "/image-selection", hidden: true },
+      // Shown as "Photo Selection"; the id, routes and permission keep the Image Selection names.
+      { id: "image-selection", label: "Photo Selection", href: "/image-selection/dashboard", activePath: "/image-selection", hidden: true },
+      // AI Culling, AI Editing and Signature Album are modules of their own, built the way Photo
+      // Selection is: a Dashboard and a Projects page each, over the same Image Selection projects,
+      // a project opening on that module's own workspace. Each entry lands on its dashboard and
+      // `activePath` is the module, so it stays lit on its Projects page. The routes sit under
+      // /image-selection like Album Proofing's, each longer than that prefix, so the sidebar lights
+      // the module rather than Photo Selection.
+      { id: "ai-culling", label: "AI Culling", href: "/image-selection/ai-culling/dashboard", activePath: "/image-selection/ai-culling", hidden: true },
+      { id: "ai-editing", label: "AI Editing", href: "/image-selection/ai-editing/dashboard", activePath: "/image-selection/ai-editing", hidden: true },
+      { id: "signature-album", label: "Signature Album", href: "/image-selection/signature-album/dashboard", activePath: "/image-selection/signature-album", hidden: true },
       // Album Proofing is a screen of its own, not a section of Image Selection: its own permission,
       // its own page, and its own row here — which is what `sidebarStructure.js` mirrors on the
       // backend as `"visual-curation": ["image-selection", "album-proofing"]`.
-      { id: "album-proofing", label: "Album Proofing", href: "/image-selection/album-proofing", activePath: "/image-selection/album-proofing", hidden: true },
+      // The entry lands on its dashboard, as Image Selection's does, and `activePath` is the module
+      // so it stays lit on the Projects page beside it.
+      { id: "album-proofing", label: "Album Proofing", href: "/image-selection/album-proofing/dashboard", activePath: "/image-selection/album-proofing", hidden: true },
     ],
   },
   {
@@ -168,11 +221,11 @@ export const SIDEBAR_MODULES = [
       { id: "payment-requests", label: "Payment Requests", href: "/accounts/payment-requests", activePath: "/accounts/payment-requests" },
     ],
   },
-  // Pre Production, Production and Post Production have pages and permissions of their own, and are
-  // deliberately not listed here yet: the boards are not ready to be handed to the studio. They are
-  // reached by address until they are, and `NO_MENU_ENTRY` in
-  // `backend/test/permission-catalogue-sidebar.test.js` records that as a decision rather than an
-  // omission, so the drift test does not read them as three grants that lead nowhere.
+  // Post Production has a page and a permission of its own, and is deliberately not listed here yet:
+  // the board is not ready to be handed to the studio. It is reached by address until it is, and
+  // `NO_MENU_ENTRY` in `backend/test/permission-catalogue-sidebar.test.js` records that as a
+  // decision rather than an omission. Pre Production and Production have moved into Project
+  // Management above.
   {
     id: "resource-management",
     title: "Resource Management",
@@ -182,6 +235,7 @@ export const SIDEBAR_MODULES = [
       { id: "assets", label: "Assets", href: "/asset-management/assets", activePath: "/asset-management/assets" },
       { id: "vendors", label: "Vendors", href: "/asset-management/vendors", activePath: "/asset-management/vendors" },
       { id: "client-storage", label: "Client Storage", href: "/asset-management/client-storage", activePath: "/asset-management/client-storage" },
+      { id: "recycling-bin", label: "Project Vault", href: "/asset-management/recycling-bin", activePath: "/asset-management/recycling-bin" },
     ],
   },
 ];
@@ -233,7 +287,7 @@ const normalizeRoute = (pathname) => {
  * its own, and a prefix match would rename all of them after the menu entry above them.
  *
  * Answers `""` for a route the sidebar does not list, which is not a failure: My Profile,
- * Administration and the Pre Production boards are real screens the menu does not carry, and they
+ * Administration and the Pre Production vertical boards are real screens the menu does not carry, and they
  * keep the titles they set for themselves.
  */
 export function sidebarLabelForRoute(pathname) {

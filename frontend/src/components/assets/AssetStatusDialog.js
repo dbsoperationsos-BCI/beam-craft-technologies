@@ -1,10 +1,12 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
 import { assetConditions, assetRepairSeverities, assetShipmentTypes, assetReasonStatuses, assetReceiptStatuses, assetStatusSections, assetStatusTitles, emptyValues } from "@/constants/formPanelConfig";
 import useEditableLists from "@/components/shared/useEditableLists";
 import { getVendorPicker } from "@/services/assets/assets.service";
+import { vendorLabel } from "@/lib/vendorLabel.mjs";
 
 /**
  * The repair details an asset was sent away with are seeded back in when it returns, so whoever
@@ -74,8 +76,8 @@ export default function AssetStatusDialog({ asset, action, employees, saving, on
     cancellation,
     options: {
       ...lists,
-      people: employees.map((employee) => ({ value: String(employee.id), label: `${employee.employeeName} (${employee.employeeId || "—"})` })),
-      vendors: vendors.map((vendor) => ({ value: vendor.vendorName, label: `${vendor.sourceType || "EXT"} - ${vendor.vendorName}` })),
+      people: employees.map((employee) => ({ value: String(employee.id), label: `${employee.employeeName} (${employee.employeeId || "—"})`, avatar: avatarOf(employee) })),
+      vendors: vendors.map((vendor) => ({ value: vendor.vendorName, label: vendorLabel(vendor) })),
     },
     // The vendor is chosen by name, so the record it came from is kept to hand for the address.
     vendorsByName: Object.fromEntries(vendors.map((vendor) => [vendor.vendorName, vendor])),

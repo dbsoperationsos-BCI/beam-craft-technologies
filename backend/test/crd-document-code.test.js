@@ -30,10 +30,13 @@ const tag = (name) => `TCC-${STAMP}-${name}`;
 // `undefined` is the opposite - `accessOrNothing` turns it into a rule matching no rows at all.
 const ALL = {};
 const F = {};
+// A project is keyed to its lead (20260924150000), so every enquiry a fixture names gets one.
+const leadFor = (enquiryId) => prisma.salesCrmLead.upsert({ where: { enquiryId }, create: { enquiryId, name: enquiryId }, update: {} });
 
 before(async () => {
   F.sequence = await prisma.appSequence.findUnique({ where: { key: "CRD_DOCUMENT:QQ" } });
   F.ddSequence = await prisma.appSequence.findUnique({ where: { key: "CRD_DOCUMENT:DD" } });
+  await leadFor(tag("enq"));
   F.project = await prisma.salesProject.create({ data: {
     enquiryId: tag("enq"), eventId: tag("evt"), whatsappGroupName: `QQ ${STAMP}`, clientMainNumber: "+919876543210",
     sourceBranch: "Coimbatore TN", vertical: "QQ", deliverables: "[]", initialConvertedValue: 0, crmName: "Test",
@@ -57,6 +60,7 @@ after(async () => {
     where: { OR: [{ enquiryId: { startsWith: `TCC-${STAMP}-` } }, { projectId: { in: projects.map((project) => project.id) } }] },
   });
   await prisma.salesProject.deleteMany({ where: { eventId: { startsWith: `TCC-${STAMP}-` } } });
+  await prisma.salesCrmLead.deleteMany({ where: { enquiryId: { startsWith: `TCC-${STAMP}-` } } });
   /*
    * The mint below advanced the studio's Qua Qua run. Put it back, or every test run leaves a gap
    * in a sequence somebody reads as a count.
@@ -79,7 +83,7 @@ test("a document raised by hand is given its identifier", async () => {
   // And it is on the row, not only in the reply: the reply is read once, the row is read forever.
   const stored = await prisma.salesProjectCrdDocument.findUnique({ where: { id: F.document.id }, select: { documentCode: true, projectId: true } });
   assert.equal(stored.documentCode, F.document.documentCode);
-  assert.equal(stored.projectId, null, "raised by hand, so it answers to no project yet");
+  assert.equal(stored.projectId, F.project.id, "raised by hand for the Not Applicable project, and linked to it from the start");
 });
 
 test("the register shows that identifier in its CRD ID column", async () => {
@@ -115,6 +119,7 @@ test("the number counts within the vertical it names", async () => {
  */
 
 test("a project answering Applicable raises its document, unsent", async () => {
+  await leadFor(tag("enq-applicable"));
   const project = await prisma.salesProject.create({ data: {
     enquiryId: tag("enq-applicable"), eventId: tag("evt-applicable"), whatsappGroupName: `WED ${STAMP}`,
     clientMainNumber: "+919876543210", sourceBranch: "Erode TN", vertical: "WED", deliverables: "[]",

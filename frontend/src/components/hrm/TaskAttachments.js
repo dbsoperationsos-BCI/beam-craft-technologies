@@ -5,6 +5,7 @@ import AttachFileRoundedIcon from "@mui/icons-material/AttachFileRounded";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import Loader from "@/components/shared/Loader";
 import { deleteTaskAttachment, fetchTaskAttachment } from "@/services/hrm/tasks.service";
+import { useImageViewer } from "@/components/shared/ImageViewer";
 
 /**
  * The files handed over with a task, and the picker that chooses them before there is a task.
@@ -87,6 +88,7 @@ function useAttachmentPreview(taskId, attachment) {
 /** One stored file: a thumbnail where it is a picture, a chip where it is not, and its ⋮. */
 function AttachmentCard({ taskId, attachment, onRemoved, onError, onNotice }) {
   const preview = useAttachmentPreview(taskId, attachment);
+  const openImages = useImageViewer();
   const [busy, setBusy] = useState(false);
   const image = isImage(attachment);
 
@@ -135,11 +137,12 @@ function AttachmentCard({ taskId, attachment, onRemoved, onError, onNotice }) {
     return <figure className={`relative overflow-hidden rounded-lg border border-slate-200 bg-slate-50 ${busy ? "opacity-60" : ""}`}>
       {/* Fixed aspect so a row of photos of different shapes still reads as a row. The ⋮ sits on
           the picture itself, which is where somebody looking at it reaches for it. */}
+      {/* The photo opens in the image viewer (Download stays in its ⋮); outside the app, it downloads. */}
       <button
         type="button"
-        onClick={() => void download()}
-        className="block aspect-[4/3] w-full cursor-pointer bg-slate-100"
-        title={`Download ${attachment.name}`}
+        onClick={() => (openImages && preview ? openImages([{ src: preview, name: attachment.name }]) : void download())}
+        className={`block aspect-[4/3] w-full bg-slate-100 ${openImages && preview ? "cursor-zoom-in" : "cursor-pointer"}`}
+        title={openImages && preview ? `View ${attachment.name}` : `Download ${attachment.name}`}
       >
         {preview
           // eslint-disable-next-line @next/next/no-img-element -- a blob URL, not an optimisable asset

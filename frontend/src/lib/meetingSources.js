@@ -18,14 +18,14 @@
 import { dayKey, formatMeetingDate, formatMeetingTime, isCancelled, meetingTitle, toDate } from "./meetings.js";
 import { inPostProduction, inPreProduction, projectDay } from "./projectStages.js";
 import { verticalOptions, optionValues, resolveVertical } from "./crmOptions.js";
+import { verticalLabel } from "../components/sales/whatsappGroupNameUtils.js";
 
 /*
  * ── The sources ───────────────────────────────────────────────────────────────────────────────
  *
  * `requires` is a disjunction, read the way the calendar's server-side sources are read: a viewer
  * holding any one of the named permissions may be offered the source. Projects answers to either
- * the sale's permission or the plan's, exactly as `/api/schedule` already decides whether to send
- * a project's main event.
+ * the sale's permission or the plan's.
  *
  * Every one of these is fed by an endpoint the viewer's own permission already guards, so this is
  * a narrowing rather than a grant: it stops a source being *offered* to somebody the API would
@@ -40,6 +40,14 @@ export const MEETING_SOURCES = [
   },
   { value: "pre-production", label: "Pre Production", requires: [{ module: "PROJECT", feature: "Pre Production" }] },
   { value: "post-production", label: "Post Production", requires: [{ module: "PROJECT", feature: "Post Production" }] },
+  /*
+   * The production team's own shoots: somebody holding `PROJECT / Production` and none of the three
+   * the server gives every shoot to (`calendar/service.js`), so the shoots they are sent are their
+   * own. Without it such a viewer had My Attendance alone - one source, no All - and every shoot the
+   * server sent them was filtered out of the calendar. Read straight off the calendar's own entries,
+   * since the projects register is not theirs to read.
+   */
+  { value: "shoots", label: "My Shoots", requires: [{ module: "PROJECT", feature: "Production" }], unless: [{ module: "PROJECT", feature: "Projects" }, { module: "PROJECT", feature: "Pre Production" }, { module: "SALES", feature: "Sales Manager" }] },
   { value: "meetings", label: "Meetings", requires: [{ module: "SALES", feature: "CRM Leads" }] },
   /*
    * The interviews HR has scheduled, from the HRM Interview register.
@@ -51,17 +59,16 @@ export const MEETING_SOURCES = [
    */
   { value: "interviews", label: "Interviews", requires: [{ module: "HRM", feature: "Interview" }] },
   /*
-   * Employee Attendance, which everybody may be offered.
-   *
-   * `always` rather than a permission, and it mirrors the server's own source registry: a person's
-   * own attendance is their own record and no permission stands between them and it, while the
-   * studio's belongs to HRM. That is not a question a module and feature can answer, so the server
-   * decides the *scope* and this only decides whether the switch offers the word.
-   *
-   * Offering it to everybody is therefore safe by construction: whoever picks it sees exactly the
-   * days `/api/schedule` already sent them, which for most people is their own.
+   * My Attendance: the viewer's own days that were not simply on time. `HRM / Employee Attendance`,
+   * the same permission the server's calendar source and the person's own Attendance page answer
+   * to - and the server only ever sends the viewer's own days, whoever asks.
    */
-  { value: "attendance", label: "Employee Attendance", requires: [], always: true },
+  { value: "attendance", label: "My Attendance", requires: [{ module: "HRM", feature: "Employee Attendance" }] },
+  /*
+   * Team Attendance: who was Absent and who was On leave, everybody, day by day. An administrator's
+   * only (`administrator`), as the server's source and the attendance Dashboard are.
+   */
+  { value: "team-attendance", label: "Team Attendance", requires: [{ module: "HRM", feature: "Employee Attendance" }], administrator: true },
 ];
 
 // The three that are read out of the projects register, so the page knows whether it has to fetch
@@ -81,8 +88,8 @@ export const meetingSourceLabel = (source) =>
  * All is dropped when there is only one real source left to merge - a switch offering "All" and
  * "Meetings" as two names for the same table is a control that looks like a choice and is not.
  */
-export function permittedSources(can) {
-  const real = MEETING_SOURCES.filter((source) => source.value !== "all" && (source.always || source.requires.some(can)));
+export function permittedSources(can, { isAdministrator = false } = {}) {
+  const real = MEETING_SOURCES.filter((source) => source.value !== "all" && source.requires.some(can) && !(source.unless || []).some(can) && (!source.administrator || isAdministrator));
   return real.length > 1 ? [MEETING_SOURCES[0], ...real] : real;
 }
 
@@ -170,6 +177,25 @@ export const asInterviewRow = (entry) => ({
  * `day` is the entry's own, which attendance always carries - it is kept per day and never as a
  * moment, so there is no clock to read it back from.
  */
+/**
+ * One of the production team's own shoots, as a row of the same table - shaped as a project row
+ * (`row.project`), so every column reads it: the shoot and its project as the name, the project's
+ * Event ID, the shoot's day. Built from the calendar's entry, the register not being theirs to read.
+ */
+export const asShootRow = (entry) => ({
+  id: entry.id,
+  source: "shoots",
+  day: String(entry?.day || ""),
+  meeting: null,
+  project: {
+    id: entry.id,
+    eventId: entry.subject || "",
+    whatsappGroupName: [entry.title, entry.meta?.projectName].filter(Boolean).join(" — "),
+    branchId: entry.branch?.id ?? entry.branchId ?? null,
+    sourceBranch: entry.branch?.name || "",
+  },
+});
+
 export const asAttendanceRow = (entry) => ({
   id: entry.id,
   source: "attendance",
@@ -178,6 +204,21 @@ export const asAttendanceRow = (entry) => ({
   project: null,
   attendance: entry,
 });
+
+/**
+ * Team Attendance as table rows: one per person per day, from the calendar's day entries - which
+ * already carry the names (`meta.people`), so the table asks nothing more of the server.
+ */
+export const asTeamAttendanceRows = (entry) => (entry?.meta?.people || []).map((person) => ({
+  id: `${entry.id}:${person.employeeId}`,
+  source: "team-attendance",
+  day: String(entry?.day || ""),
+  meeting: null,
+  project: null,
+  // The person's own status: a day is one entry holding both the absences and the leaves, so the
+  // entry's `status` is only set where every one of them is the same.
+  teamAttendance: { status: person.status || entry.meta.status, person },
+}));
 
 /**
  * The rows one source holds.
@@ -189,16 +230,20 @@ export const asAttendanceRow = (entry) => ({
  * sources instead would count the same wedding as a project, a pre-production and a post-production
  * and put three identical rows in the table.
  */
-export function sourceRows(source, { meetings = [], projects = [], attendance = [], interviews = [], sources = [] } = {}) {
+export function sourceRows(source, { meetings = [], projects = [], attendance = [], teamAttendance = [], interviews = [], shoots = [], sources = [] } = {}) {
+  // Like My Attendance, its own entry in the switch and never part of All's table.
+  if (source === "team-attendance") return teamAttendance.flatMap(asTeamAttendanceRows);
   if (source === "meetings") return meetings.map(asMeetingRow);
   if (source === "interviews") return interviews.map(asInterviewRow);
   if (source === "projects") return projects.map(asProjectRow);
   if (source === "pre-production") return projects.filter(inPreProduction).map(asProjectRow);
   if (source === "post-production") return projects.filter(inPostProduction).map(asProjectRow);
   if (source === "attendance") return attendance.map(asAttendanceRow);
+  if (source === "shoots") return shoots.map(asShootRow);
   return [
     ...(sources.includes("meetings") ? meetings.map(asMeetingRow) : []),
     ...(sources.some((value) => PROJECT_SOURCES.includes(value)) ? projects.map(asProjectRow) : []),
+    ...(sources.includes("shoots") ? shoots.map(asShootRow) : []),
     /*
      * Interviews *are* in All, unlike attendance below, and the difference is volume rather than
      * principle. An interview is one booking somebody made for one day, a handful a week - exactly
@@ -209,10 +254,10 @@ export function sourceRows(source, { meetings = [], projects = [], attendance = 
     /*
      * Attendance is left out of All in the *table*, and that is deliberate rather than an omission.
      *
-     * It is one row per person per day: a fortnight of a dozen people is three hundred rows, which
-     * would bury the handful of bookings the list is read for and make every count in the tabs above
+     * It is one row per day it was not on time, and those rows would sit between the handful of
+     * bookings the list is read for and make every count in the tabs above
      * it meaningless. The calendar shows it under All because a chip in a day cell costs nothing;
-     * a table row costs a table. Employee Attendance is its own entry in the switch for exactly
+     * a table row costs a table. My Attendance is its own entry in the switch for exactly
      * this reason.
      */
   ];
@@ -225,14 +270,13 @@ export function sourceRows(source, { meetings = [], projects = [], attendance = 
  * am I looking at" whichever way the diary is being read.
  *
  * The two halves are shaped differently and the mapping has to say so. The list reads whole records
- * - a meeting, a project - while the calendar draws *bookings*, and one project puts two kinds of
- * booking on the grid: its shoots and its main event. So Projects on the calendar is both of those,
- * not just the main events, or a source called Projects would hide the very days the studio works.
+ * - a meeting, a project - while the calendar draws *bookings*: a project's shoots, the days the
+ * studio works. A project's main event is not a calendar entry.
  *
  * The stages are decided the same way the list decides them - `inPreProduction` / `inPostProduction`
  * over the projects register - so a project that is in pre-production in the table cannot be absent
  * from the grid under the same word. A booking is matched back to its project by the event id both
- * sides carry: a shoot's `subject`, a main event's `reference`.
+ * sides carry: a shoot's `subject`.
  */
 
 const scheduleEventId = (entry) => String(entry?.subject || entry?.reference || "").trim();
@@ -250,7 +294,8 @@ const scheduleEventId = (entry) => String(entry?.subject || entry?.reference || 
  * with the rest would take the holidays off the calendar for everybody who picked a source, and
  * off it entirely for a viewer whose only source is one the holidays are not part of.
  */
-const isHoliday = (entry) => entry?.kind === "holiday";
+// A blocked period is the same kind of fact - a branch's hours that are not free - and stays the same way.
+const isHoliday = (entry) => entry?.kind === "holiday" || entry?.kind === "block";
 
 export function sourceScheduleEntries(source, entries = [], { projects = [], sources = [] } = {}) {
   const all = Array.isArray(entries) ? entries : [];
@@ -262,9 +307,10 @@ export function sourceScheduleEntries(source, entries = [], { projects = [], sou
   if (source === "meetings") return withHolidays(list.filter((entry) => entry?.kind === "meeting"));
   if (source === "interviews") return withHolidays(list.filter((entry) => entry?.kind === "interview"));
   if (source === "attendance") return withHolidays(list.filter((entry) => entry?.kind === "attendance"));
+  if (source === "team-attendance") return withHolidays(list.filter((entry) => entry?.kind === "teamAttendance"));
 
-  const fromProjects = (entry) => entry?.kind === "shoot" || entry?.kind === "project";
-  if (source === "projects") return withHolidays(list.filter(fromProjects));
+  const fromProjects = (entry) => entry?.kind === "shoot";
+  if (source === "projects" || source === "shoots") return withHolidays(list.filter(fromProjects));
 
   if (source === "pre-production" || source === "post-production") {
     const inStage = source === "pre-production" ? inPreProduction : inPostProduction;
@@ -291,6 +337,14 @@ export function sourceScheduleEntries(source, entries = [], { projects = [], sou
     if (entry?.kind === "meeting") return sources.includes("meetings");
     if (entry?.kind === "interview") return sources.includes("interviews");
     if (entry?.kind === "attendance") return sources.includes("attendance");
+    if (entry?.kind === "teamAttendance") return sources.includes("team-attendance");
+    /*
+     * A shoot the server sent is one this viewer may see: it already narrowed them - every shoot for
+     * the studio-wide permissions, only the ones they are named on for Production, by the Shoot
+     * Board's own rule. Asking for a project source here as well dropped a crew member's whole
+     * roster, since Production and Shoot Board are not one.
+     */
+    if (entry?.kind === "shoot") return true;
     return sources.some((value) => PROJECT_SOURCES.includes(value));
   }));
 }
@@ -321,15 +375,16 @@ export const rowReference = (row) =>
   row.meeting ? row.meeting.enquiryId || "" : row.interview ? row.interview.reference || "" : row.project?.eventId || "";
 
 // A lead's vertical is folded onto one of the three, the way the lead table reads it. A
-// project's is shown as the register stores it - `resolveVertical` would quietly turn "QQ" into
-// Dum Dum, which is its documented fallback for a lead and a wrong answer for a project.
+// project's stored code is named the same way - WED is Dum Dum, QQ is Qua Qua - so a project row
+// reads, and filters, like a lead's. Not through `resolveVertical`, whose fallback would quietly
+// turn an unrecognised code into Dum Dum.
 // A candidate belongs to no vertical - the studio's three are where an enquiry came from, which is
 // not a question anybody asks of somebody applying for a job - so an interview row leaves it blank
 // rather than borrowing a word that would read as a fact.
 export const rowVertical = (row) =>
   row.meeting
     ? (row.meeting.lead ? resolveVertical(row.meeting.lead.vertical) : "")
-    : row.interview ? "" : String(row.project?.vertical || "");
+    : row.interview ? "" : verticalLabel(row.project?.vertical);
 
 // Whose booking it is. The CRM who sold the lead, falling back to whoever hosts the call; for a
 // project, whoever owns the day - the same order the calendar's own `projectOwner` reads it in.
@@ -500,48 +555,60 @@ const INTERVIEW_COLUMNS = [
 ];
 
 /*
- * ── Employee Attendance, as a table ───────────────────────────────────────────────────────────
+ * ── My Attendance, as a table ─────────────────────────────────────────────────────────────────
  *
- * The same days the calendar draws as chips, read as rows: who, when, and what the day said. The
- * chip has room for a name and a word; the table has room for the hours and for where the answer
- * came from, which is the part somebody reading a month of attendance actually needs.
- *
- * "Source" is not decoration. *Measured* is what the application saw - the person was using it -
- * and *Marked* is what somebody decided, which is the difference between a register that records
- * and one that asserts. A day corrected to Leave and a day nobody was seen on both read as
- * something other than Present, and only this column says which of the two happened.
+ * The same days the calendar draws as chips, read as rows: the signed-in person's own days from the
+ * HRM register that were not simply on time - when, what the day said, and its login, logout and
+ * hours. The chip has room for a word; the table has room for the times behind it.
  */
-const ATTENDANCE_STATUSES = ["Present", "Absent", "Half day", "Leave", "Holiday", "Week off"];
+// The days the calendar shows a person: every one that was not simply on time (the server's `ATTENDANCE_SHOWN`).
+const ATTENDANCE_STATUSES = ["Absent", "On leave", "Comp off", "Late", "Half day", "Early exit"];
 
 const attendanceOf = (row) => row?.attendance || {};
 
+/** A login or logout as the clock reads it, blank for a day without one. */
+export function attendanceClock(value) {
+  return value ? formatMeetingTime(value) : "";
+}
+
 /** Minutes as the hours and minutes a register is read in, blank for a day with none. */
-function attendanceWorked(row) {
+export function attendanceWorked(row) {
   const minutes = Math.max(0, Math.round(Number(attendanceOf(row).meta?.workedMinutes) || 0));
   if (!minutes) return "";
   if (minutes < 60) return `${minutes}m`;
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
+/*
+ * One column, **Attendance**, rather than a status and three clocks.
+ *
+ * A day was spread over Status, Login, Logout and Worked - four columns, three of them blank on the
+ * days people actually read this list for, since an absence and a day's leave have no times at all.
+ * What the day was is the answer; the register's own times are the detail behind it, and the detail
+ * belongs where the rest of an entry's detail is - the popup, which already draws them.
+ *
+ * The id stays `status`: the board groups the list by this column and filters it by the six
+ * statuses, and both are still exactly what this column holds. Only the heading and the three
+ * columns beside it have changed.
+ */
 const ATTENDANCE_COLUMNS = [
-  // The person leads it: a register is read down a name, and the calendar chip leads with it too.
-  { id: "employee", label: "Employee", filter: "choice", optionsFrom: true, value: (row) => String(attendanceOf(row).owner || "") },
   dateColumn("Date"),
-  { id: "status", label: "Status", filter: "choice", options: ATTENDANCE_STATUSES, value: (row) => String(attendanceOf(row).title || "") },
-  // Sorted on the minutes rather than the words, or "46m" files above "2h 53m" on the alphabet.
-  { id: "worked", label: "Worked", value: attendanceWorked, sort: (row) => Number(attendanceOf(row).meta?.workedMinutes) || 0 },
-  {
-    id: "source",
-    label: "Source",
-    filter: "choice",
-    options: ["Measured", "Marked"],
-    value: (row) => (attendanceOf(row).meta?.source === "marked" ? "Marked" : attendanceOf(row).meta?.source === "measured" ? "Measured" : ""),
-  },
-  { id: "note", label: "Note", value: (row) => String(attendanceOf(row).meta?.note || "") },
+  { id: "status", label: "Attendance", filter: "choice", options: ATTENDANCE_STATUSES, value: (row) => String(attendanceOf(row).title || "") },
+];
+
+const teamAttendanceOf = (row) => row?.teamAttendance || {};
+const TEAM_ATTENDANCE_COLUMNS = [
+  dateColumn("Date"),
+  { id: "status", label: "Status", filter: "choice", options: ["Absent", "On leave"], value: (row) => String(teamAttendanceOf(row).status || "") },
+  { id: "employee", label: "Employee", value: (row) => String(teamAttendanceOf(row).person?.employeeName || "") },
+  { id: "employeeCode", label: "Employee ID", value: (row) => String(teamAttendanceOf(row).person?.employeeCode || "") },
+  { id: "branch", label: "Branch", value: (row) => String(teamAttendanceOf(row).person?.branchName || "") },
+  { id: "department", label: "Department", value: (row) => String(teamAttendanceOf(row).person?.department || "") },
 ];
 
 const COLUMNS = {
   all: ALL_COLUMNS,
+  "team-attendance": TEAM_ATTENDANCE_COLUMNS,
   meetings: MEETING_COLUMNS,
   interviews: INTERVIEW_COLUMNS,
   attendance: ATTENDANCE_COLUMNS,
@@ -572,8 +639,99 @@ export function sourceEmptyMessage(source) {
   if (source === "pre-production") return "No project has a pre-production coordinator yet.";
   if (source === "post-production") return "No project has a post-production coordinator yet.";
   if (source === "projects") return "No projects have been started yet.";
+  if (source === "shoots") return "You are not on any shoot yet. A shoot shows here once you are named on it.";
   // Never "nothing scheduled": attendance is a record of days that have happened rather than
   // something anybody books, so an empty one is a question about the range, not about the diary.
-  if (source === "attendance") return "No attendance in this range yet.";
+  if (source === "attendance") return "No absences, late arrivals or half days in this range. Today shows once the day closes.";
+  if (source === "team-attendance") return "Nobody was absent or on leave in this range.";
   return "Nothing has been scheduled yet.";
+}
+
+/*
+ * ── The branch filter, over the calendar ──────────────────────────────────────────────────────
+ *
+ * Each entry carries its branch from the server - the lead's for a meeting, the project's for a
+ * shoot, the candidate's for an interview - or none: a holiday is the whole
+ * studio's and attendance is the viewer's own, so both stay whichever branch is picked.
+ */
+
+/** The branches the entries are in, `{ id, name }` by name - what the branch filter offers. */
+export function scheduleBranches(entries = []) {
+  const branches = new Map();
+  for (const entry of entries) {
+    if (entry?.branch?.id && !branches.has(entry.branch.id)) branches.set(entry.branch.id, entry.branch);
+    // A Team Attendance day is in every branch its people are.
+    for (const person of entry?.meta?.people || []) {
+      if (entry.kind === "teamAttendance" && person.branchId && !branches.has(person.branchId)) branches.set(person.branchId, { id: person.branchId, name: person.branchName || "" });
+    }
+  }
+  return [...branches.values()].sort((left, right) => String(left.name).localeCompare(String(right.name)));
+}
+
+/**
+ * The ids a branch filter was given, as numbers - one, several, or none for every branch.
+ *
+ * The picker hands back strings and an entry's branch is a number, so the comparison is made once
+ * here rather than at each of the four places that used to coerce it. `null`, `""` and `[]` all mean
+ * "not narrowed", because that is what an empty filter has always meant on these screens.
+ */
+const branchSet = (branchIds) => {
+  const list = (Array.isArray(branchIds) ? branchIds : [branchIds])
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  return list.length ? new Set(list) : null;
+};
+
+/** The entries of the branches picked, and those of none; every entry when none is picked. */
+export function branchScheduleEntries(entries = [], branchIds = null) {
+  const wanted = branchSet(branchIds);
+  if (!wanted) return entries;
+  return entries.flatMap((entry) => {
+    // A Team Attendance day holds people of every branch and of both statuses: narrowed to the
+    // branches picked, with the count and the per-status groups behind it rebuilt from whoever is
+    // left - or the chip would say five over a pop-up listing two.
+    if (entry?.kind === "teamAttendance") {
+      const people = (entry.meta?.people || []).filter((person) => wanted.has(Number(person.branchId)));
+      if (!people.length) return [];
+      const groups = (entry.meta?.groups || []).map((group) => ({
+        status: group.status,
+        count: people.filter((person) => person.status === group.status).length,
+      })).filter((group) => group.count);
+      return [{
+        ...entry,
+        title: `Attendance · ${people.length}`,
+        meta: { ...entry.meta, status: groups.length === 1 ? groups[0].status : null, count: people.length, groups, people },
+      }];
+    }
+    return !entry?.branch || wanted.has(Number(entry.branch.id)) ? [entry] : [];
+  });
+}
+
+/*
+ * ── The branch filter, over the list ──────────────────────────────────────────────────────────
+ *
+ * A row's branch as `{ id, name }`: the lead's for a meeting, the project's for a project, the
+ * candidate's for an interview - and none for the viewer's own attendance, kept whichever is picked.
+ */
+export function rowBranch(row) {
+  if (row?.meeting) return row.meeting.lead?.branchId ? { id: row.meeting.lead.branchId, name: row.meeting.lead.branchName || "" } : null;
+  if (row?.project) return row.project.branchId ? { id: row.project.branchId, name: row.project.sourceBranch || "" } : null;
+  if (row?.interview) return row.interview.branch || null;
+  if (row?.teamAttendance) return row.teamAttendance.person?.branchId ? { id: row.teamAttendance.person.branchId, name: row.teamAttendance.person.branchName || "" } : null;
+  return null;
+}
+
+/** The branches the rows are in, `{ id, name }` by name - what the list's branch filter offers. */
+export function rowBranches(rows = []) {
+  return scheduleBranches(rows.map((row) => ({ branch: rowBranch(row) })));
+}
+
+/** The rows of the branches picked, and those of none; every row when none is picked. */
+export function branchRows(rows = [], branchIds = null) {
+  const wanted = branchSet(branchIds);
+  if (!wanted) return rows;
+  return rows.filter((row) => {
+    const branch = rowBranch(row);
+    return !branch || wanted.has(Number(branch.id));
+  });
 }

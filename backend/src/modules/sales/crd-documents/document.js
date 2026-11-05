@@ -20,6 +20,7 @@ const MAX_FAMILY_IMAGES = 10;
 const MAX_FAMILY_DETAILS = 20;
 const MAX_HELP_WITH = 40;
 
+const { eventsSchema } = require("./events");
 const text = (max) => z.string().trim().max(max).optional().default("");
 
 /**
@@ -111,6 +112,9 @@ const commonSchema = z.object({
   eventStartAt: text(40),
   eventEndAt: text(40),
   eventAddressLink: text(1000),
+  // One event per shoot of the project, each with its own start, end and venue link (`events.js`).
+  // The three above are what a document asked before, when it had one event; they are kept for it.
+  events: eventsSchema,
   helpWith: z.array(z.string().trim().max(191)).max(MAX_HELP_WITH).optional().default([]),
   // Free text rather than a list of links: the client pastes what they have, one reference per
   // line, and the studio reads them. Generous ceilings because a mood board can run long.

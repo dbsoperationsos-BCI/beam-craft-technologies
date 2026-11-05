@@ -39,9 +39,55 @@ export function normalizeBrandingDraft(fields = {}) {
     // the email then uses the name it ships with.
     loginCredentialName: String(fields?.loginCredentialName ?? "").trim(),
     galleryLogoUrl: fields?.galleryLogoUrl || null,
-    // The tab mark travels with the logo: same shape, same "" means cleared, same null stored.
+    // The dark-theme logo and the two tab marks travel with it: same shape, same "" means
+    // cleared, same null stored.
+    galleryLogoDarkUrl: fields?.galleryLogoDarkUrl || null,
     faviconUrl: fields?.faviconUrl || null,
+    faviconDarkUrl: fields?.faviconDarkUrl || null,
   };
+}
+
+/** The fields the Branding Logo form edits, in the order it shows them. */
+export const BRANDING_FIELDS = ["studioName", "loginCredentialName", "galleryLogoUrl", "galleryLogoDarkUrl", "faviconUrl", "faviconDarkUrl"];
+
+/** What the save notice calls each field. */
+const BRANDING_FIELD_LABELS = {
+  studioName: "Global Name",
+  loginCredentialName: "Login Credential Name",
+  galleryLogoUrl: "Global Logo",
+  galleryLogoDarkUrl: "Global Logo (dark mode)",
+  faviconUrl: "Favicon",
+  faviconDarkUrl: "Favicon (dark mode)",
+};
+
+/**
+ * Whether the application's theme wants the dark-mode marks: anything but the light theme. Named
+ * here rather than read off the theme list in `@/lib/theme`, so the rule can be held by
+ * `node --test` beside the rest of the branding rules.
+ */
+export function themeWantsDarkMark(theme) {
+  return Boolean(theme) && String(theme) !== "light";
+}
+
+/**
+ * The Global Logo a surface should show: the mark uploaded for its theme, then the one uploaded
+ * for the other, and "" where neither exists - which every reader takes as the bundled mark.
+ *
+ * The light mark is the one every white surface reads directly (`galleryLogoUrl`) - a PDF, a
+ * quotation page, a client gallery, a document's snapshot - and none of them come through here.
+ * This is for the surfaces that follow the application's theme: the top bar, the sign-in page.
+ *
+ * @param {{galleryLogoUrl?: string|null, galleryLogoDarkUrl?: string|null}|null} branding
+ * @param {boolean} dark whether the surface is in a dark theme - see `themeWantsDarkMark`.
+ * @returns {{src: string, ownMark: boolean}} the mark, and whether it was uploaded for this theme
+ *   rather than borrowed from the other - the top bar inverts a borrowed light mark to read on its
+ *   dark bar, and must leave a mark drawn for the dark bar alone.
+ */
+export function logoFor(branding, dark = false) {
+  const light = String(branding?.galleryLogoUrl ?? "").trim();
+  const night = String(branding?.galleryLogoDarkUrl ?? "").trim();
+  if (dark) return night ? { src: night, ownMark: true } : { src: light, ownMark: false };
+  return light ? { src: light, ownMark: true } : { src: night, ownMark: false };
 }
 
 /** Whether saving `draft` would change anything in `saved`. Nothing read yet is nothing to save. */
@@ -49,10 +95,7 @@ export function hasBrandingChanges(saved, draft) {
   if (!saved) return false;
   const before = normalizeBrandingDraft(saved);
   const after = normalizeBrandingDraft(draft);
-  return before.studioName !== after.studioName
-    || before.loginCredentialName !== after.loginCredentialName
-    || before.galleryLogoUrl !== after.galleryLogoUrl
-    || before.faviconUrl !== after.faviconUrl;
+  return BRANDING_FIELDS.some((field) => before[field] !== after[field]);
 }
 
 /**
@@ -63,12 +106,8 @@ export function hasBrandingChanges(saved, draft) {
 export function brandingSavedNotice(saved, draft) {
   const before = normalizeBrandingDraft(saved);
   const after = normalizeBrandingDraft(draft);
-  const nameChanged = before.studioName !== after.studioName;
-  const credentialNameChanged = before.loginCredentialName !== after.loginCredentialName;
-  const logoChanged = before.galleryLogoUrl !== after.galleryLogoUrl;
-  const faviconChanged = before.faviconUrl !== after.faviconUrl;
   // Named parts, in the order the form shows them, so the notice says what was actually written.
-  const parts = [nameChanged && "Global Name", credentialNameChanged && "Login Credential Name", logoChanged && "Global Logo", faviconChanged && "Favicon"].filter(Boolean);
+  const parts = BRANDING_FIELDS.filter((field) => before[field] !== after[field]).map((field) => BRANDING_FIELD_LABELS[field]);
   if (!parts.length) return "Global Logo saved.";
   if (parts.length === 1) return `${parts[0]} saved.`;
   return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]} saved.`;

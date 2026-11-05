@@ -152,9 +152,14 @@ function echoToConsole({ to, code, message }) {
  * Never throws: every caller has the same two things to say, and for an OTP a failed send is a log
  * line and a message on screen rather than a stack trace. The reason is safe to log - it names the
  * gateway's complaint, never the key and never the code.
+ *
+ * `templateId`, when given, stands in for `SMS_TEMPLATE_ID` on this one send: a gateway that only
+ * delivers approved templates (MSG91's DLT) needs a different template per kind of message, and a
+ * caller that is not the password reset must never go out under that wording.
  */
-async function sendSms({ to, message, code }) {
-  const settings = config();
+async function sendSms({ to, message, code, templateId = null }) {
+  const configured = config();
+  const settings = configured && templateId ? { ...configured, templateId } : configured;
   if (!settings) {
     // Locally there is no gateway to fail over to, so the console is the delivery. Anywhere else
     // this stays exactly what it was: an honest "nothing was sent", and a reason worth logging.
@@ -191,4 +196,13 @@ function describeSms() {
   };
 }
 
-module.exports = { sendSms, describeSms, gatewayNumber, config, PROVIDERS };
+/**
+ * Whether a code sent now would reach somebody: a gateway is configured, or this is a development
+ * machine echoing to its console. A step that depends on an SMS arriving asks this first, so a
+ * server without a gateway does not shut people out.
+ */
+function smsAvailable(env = process.env) {
+  return Boolean(config(env)) || devEchoAllowed(env);
+}
+
+module.exports = { smsAvailable, sendSms, describeSms, gatewayNumber, config, devEchoAllowed, PROVIDERS };

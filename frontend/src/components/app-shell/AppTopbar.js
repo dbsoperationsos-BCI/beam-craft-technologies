@@ -24,13 +24,14 @@ import { usePermissions } from "@/components/auth/PermissionsProvider";
 import { firstPermittedRoute } from "@/constants/modulePermissions";
 import { meetingsToggle } from "@/lib/meetingsToggle";
 import ReleaseInfoDialog from "@/components/app-shell/ReleaseInfoDialog";
+import RaiseRequestLauncher from "@/components/hrm/RaiseRequestLauncher";
 import MenuRoundedIcon from "@mui/icons-material/MenuRounded";
 import { PROFILE_PHOTO_CHANGED_EVENT } from "@/lib/profilePhoto";
 import { getMyProfile } from "@/services/user/profile.service";
 import { rememberProfileReturnTo } from "@/lib/profileReturn";
 import { THEMES, THEME_LABELS } from "@/lib/theme";
 import useThemePreference from "@/components/preferences/useThemePreference";
-import { announceTableSettingsSaved, OPEN_GLOBAL_SETTINGS_EVENT } from "@/lib/globalSettings";
+import { announceTableSettingsSaved, OPEN_GLOBAL_SETTINGS_EVENT, openGlobalSettings, rememberSettingsSection, settingsSectionInUrl } from "@/lib/globalSettings";
 
 
 /*
@@ -50,7 +51,7 @@ function ThemeIcon({ theme }) {
 export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { hasPermission } = usePermissions();
+  const { hasPermission, isAdministrator } = usePermissions();
   // The Global Name from Settings, written beside the mark so the bar says whose OS this is. Left
   // empty there, nothing is written at all - the studio's name is the studio's to give.
   const branding = useStudioBranding();
@@ -73,6 +74,7 @@ export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
   const [settingsInitialNotice, setSettingsInitialNotice] = useState(null);
   const [settingsSession, setSettingsSession] = useState(0);
   const [releaseOpen, setReleaseOpen] = useState(false);
+  const [raiseOpen, setRaiseOpen] = useState(false);
   const [user, setUser] = useState(null);
   /*
    * The appearance now lives inside this menu rather than in a pill of its own on the bar.
@@ -127,6 +129,14 @@ export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
     };
     window.addEventListener(OPEN_GLOBAL_SETTINGS_EVENT, openSettings);
     return () => window.removeEventListener(OPEN_GLOBAL_SETTINGS_EVENT, openSettings);
+  }, []);
+
+  // A reload with Settings open comes back to it, on the same section - see `rememberSettingsSection`.
+  useEffect(() => {
+    const section = settingsSectionInUrl();
+    if (!section) return undefined;
+    const timer = window.setTimeout(() => openGlobalSettings({ section }), 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -217,7 +227,9 @@ export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
         {/* `data-sidebar-toggle` is how the drawer's own outside-press handler tells this button
             apart from the rest of the bar. Every other control on the bar closes the drawer when it
             is pressed; this one toggles, and closing it first would reopen it. */}
-        <IconButton data-sidebar-toggle="true" label={sidebarOpen ? "Close navigation" : "Open navigation"} size="sm" onClick={onMenuClick} className="text-slate-600 hover:bg-slate-100"><MenuRoundedIcon fontSize="small" aria-hidden="true" /></IconButton>
+        <span className="relative inline-flex">
+          <IconButton data-sidebar-toggle="true" label={sidebarOpen ? "Close navigation" : "Open navigation"} size="sm" onClick={onMenuClick} className="text-slate-600 hover:bg-slate-100"><MenuRoundedIcon fontSize="small" aria-hidden="true" /></IconButton>
+        </span>
         {/*
           The studio's mark, where the product name used to be, and the sidebar's header no longer
           carries it: one logo on screen rather than two, and it is on the bar that is present on
@@ -228,7 +240,13 @@ export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
           same first permitted route the rest of the bar falls back to.
         */}
         <Link href={firstPermittedRoute(hasPermission) || "/sales/crm"} aria-label="DBS Operations OS home" className="app-logo shrink-0 rounded-md py-1 pl-0.5 pr-1">
-          <AppLogo variant="navbar" priority />
+          {/* The one surface that asks for the dark-mode Global Logo: the bar is repainted by
+              both dark appearances, and every other place the mark is shown is white whatever the
+              viewer's theme - see `AppLogo`. */}
+          {/* Smaller under 400px, so the controls on the right stay on screen; the same image, so
+              the browser fetches it once. */}
+          <span className="min-[400px]:hidden"><AppLogo variant="navbarCompact" priority themed /></span>
+          <span className="hidden min-[400px]:inline"><AppLogo variant="navbar" priority themed /></span>
         </Link>
         {/* The Global Name, to the right of the mark and level with its centre, in Montserrat, the
             studio's face, at 14px, in the bar's own text colour so it reads in every theme.
@@ -293,7 +311,7 @@ export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
            * the initial and the name alone; the box - a tint and a hairline - appears under the
            * pointer and on keyboard focus, so the bar carries one less permanent shape.
            */
-          triggerClassName="crm-user-button !h-auto !w-auto whitespace-nowrap rounded-full border border-transparent bg-transparent !px-3 !py-1.5 !text-sm font-medium text-slate-700 hover:border-slate-200 hover:bg-slate-100 focus-visible:border-slate-200 focus-visible:bg-slate-100"
+          triggerClassName="crm-user-button !h-auto !w-auto whitespace-nowrap rounded-full border border-transparent bg-transparent !px-1.5 min-[400px]:!px-3 !py-1.5 !text-sm font-medium text-slate-700 hover:border-slate-200 hover:bg-slate-100 focus-visible:border-slate-200 focus-visible:bg-slate-100"
           triggerContent={
             <span className="flex items-center gap-2">
               {/* The face first, then the name - the way a contact reads. On a phone the name
@@ -301,7 +319,8 @@ export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
                   login's id, so it stays the same if the person is renamed. */}
               <EmployeeAvatar name={displayName} photoUrl={photoUrl} seed={user?.id ?? displayName} size="xs" />
               <span className="hidden max-w-[12rem] truncate sm:inline">{displayName}</span>
-              <ChevronIcon size={18} className="shrink-0 text-slate-500" />
+              {/* Under 400px the face alone is the button: the chevron was the width the bell needed. */}
+              <ChevronIcon size={18} className="hidden shrink-0 text-slate-500 min-[400px]:block" />
             </span>
           }
           items={[
@@ -325,6 +344,17 @@ export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
             // Your own page, first: the menu is about the person, and this is the person. The page
             // it was chosen from is noted so the Back button on it knows where to return.
             { label: "My Profile", onSelect: () => { rememberProfileReturnTo(pathname); router.push("/profile"); } },
+            /*
+             * A copy of the Request screen's Raise Request, so leave, a permission or a comp-off can
+             * be asked for from any page - next to My Profile, as the other thing here about the
+             * person themselves. For whoever may raise one - either permission the request routes
+             * accept; the server holds the request to the caller's own employee record.
+             */
+            // Not offered to an administrator at all: they do not raise requests of their own, and a
+            // menu row they can never use is left out rather than shown greyed.
+            ...(!isAdministrator && (hasPermission("HRM", "Requests", "READ") || hasPermission("HRM", "Employee Attendance", "READ"))
+              ? [{ label: "Raise Request", onSelect: () => setRaiseOpen(true) }]
+              : []),
             /*
              * No "User Settings" row. It opened a second full-screen Settings whose whole content -
              * the WhatsApp table - Settings below already lists, under User Settings > WhatsApp; it
@@ -360,6 +390,8 @@ export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
                 setAdminSettingsOpen(true);
               },
             },
+            // The attendance rules are not here any more: they are Settings → Employee → Attendance
+            // Rules, an administrator's alone.
             { label: "Sign out", tone: "danger", onSelect: () => setConfirmSignOut(true) },
           ]}
         />
@@ -380,7 +412,9 @@ export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
     <SettingsOverlay
       key={settingsSession}
       open={adminSettingsOpen}
+      onSectionChange={rememberSettingsSection}
       onClose={() => {
+        rememberSettingsSection(null);
         setAdminSettingsOpen(false);
         setSettingsInitialIntegration(null);
         setSettingsInitialNotice(null);
@@ -391,6 +425,7 @@ export default function AppTopbar({ theme, sidebarOpen, onMenuClick }) {
       onCustomFieldsSaved={announceTableSettingsSaved}
     />
     <ReleaseInfoDialog open={releaseOpen} onClose={() => setReleaseOpen(false)} />
+    <RaiseRequestLauncher open={raiseOpen} onClose={() => setRaiseOpen(false)} />
     <ConfirmDialog
       open={confirmSignOut}
       title="Sign out?"

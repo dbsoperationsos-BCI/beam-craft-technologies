@@ -206,7 +206,8 @@ test("somebody who sees every lead is offered it too", () => {
    * before it returns `unlimited()`, so the two cannot drift.
    */
   const body = declaration(CONTROLLER, "async function readerManagesAnyone(req)", "\n}");
-  assert.match(body, /dataScope\.seesEverything\(Number\(req\.user\.id\), \{ module: req\.permission\.module, feature: req\.permission\.feature \}\)/);
+  // Asked about the board's own permission - a finer guard stacked after it overwrites `req.permission`.
+  assert.match(body, /dataScope\.seesEverything\(Number\(req\.user\.id\), CRM_LEADS_PERMISSION\)/);
   // Asked first, so the org-chart walk is skipped entirely for them.
   assert.ok(body.indexOf("seesEverything") < body.indexOf("subtreeEmployeeIds"));
 });
@@ -227,7 +228,7 @@ test("it is answered on a real read and not on every scroll append", () => {
   const page = declaration(CONTROLLER, "    const [scope, mine] = await Promise.all", "\n  }");
   // The org-chart walk is a recursive query; an append is the same board the reader is already on.
   assert.match(page, /appending \? Promise\.resolve\(false\) : readerManagesAnyone\(req\)/);
-  assert.match(page, /\.\.\.\(appending \? \{\} : \{ total, counts, managesAnyone \}\)/);
+  assert.match(page, /\.\.\.\(appending \? \{\} : \{ total, counts, managesAnyone, \.\.\.\(values \? \{ values \} : \{\}\) \}\)/);
 });
 
 test("hiding the switch can never widen a board", () => {

@@ -67,10 +67,16 @@ test("designation is seeded from the invite once, on create and not on resubmiss
    * deliberately not on the update beside it - re-applying it every time would undo a correction
    * made during review.
    */
-  const create = code.slice(code.indexOf("return tx.employee.create"));
+  // The two writes are `const created = await tx.employee.create` and `const updated = await
+  // tx.employee.update` - awaited rather than returned, because the department, skill and language
+  // rows beside the row (services/employeeReferences.js) are written once its id exists.
+  const createAt = code.indexOf("const created = await tx.employee.create");
+  const updateAt = code.indexOf("const updated = await tx.employee.update");
+  assert.ok(createAt > updateAt && updateAt >= 0, "the create and the update are no longer where this test expects them");
+  const create = code.slice(createAt);
   assert.match(create, /designation: invite\.intendedDesignation \|\| null/, "a new record no longer takes the invite's designation");
 
-  const update = code.slice(code.indexOf("return tx.employee.update"), code.indexOf("return tx.employee.create"));
+  const update = code.slice(updateAt, createAt);
   assert.doesNotMatch(update, /designation:/, "a resubmission is writing the designation again");
 });
 

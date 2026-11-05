@@ -21,7 +21,7 @@ import path from "node:path";
 const HERE = import.meta.dirname;
 const src = (...parts) => fs.readFileSync(path.join(HERE, "..", "src", ...parts), "utf8");
 const ADD = src("components", "hrm", "InterviewAddApplicationDialog.js");
-const PANEL = src("components", "hrm", "InterviewCandidateFormPanel.js");
+const PANEL = src("components", "hrm", "InterviewCandidatePopup.js");
 const SERVICE = src("services", "hrm", "interview.service.js");
 const PHONE_FIELD = src("components", "shared", "PhoneField.js");
 const TEXT_FIELD = src("components", "shared", "TextField.js");

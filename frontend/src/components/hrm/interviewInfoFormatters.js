@@ -93,6 +93,34 @@ function decisionList(entries) {
   </ul>;
 }
 
+/**
+ * The same log read as **what happened** rather than as what was said.
+ *
+ * `statusNotes` is the only history a candidate has, and the card shows it twice for two different
+ * questions: Remarks is the conversation - the note text, which is what somebody reads before ringing
+ * a candidate - and this is the record: the stage, when it moved and who moved it, one line each.
+ * Without the split the card would hold one list in two tabs.
+ *
+ * Only entries that moved something. A note posted on its own carries the stage the candidate was
+ * already at, and listing those here would fill the record with "Follow Up" repeated once per note
+ * while saying nothing about what was done.
+ */
+function activityLog(entries) {
+  const rows = (Array.isArray(entries) ? entries : []).filter((entry) => entry && entry.status);
+  const moves = rows.filter((entry, index) => index === 0 || entry.status !== rows[index - 1].status);
+  if (!moves.length) return "—";
+  return <ul className="space-y-1.5">
+    {moves.slice().reverse().map((entry, index) => <li key={`${entry.at || entry.status}-${index}`} className="flex flex-wrap items-baseline gap-x-2 text-xs sm:text-sm">
+      <span className="font-semibold text-slate-700">{entry.status}</span>
+      {entry.at && <span className="font-normal text-slate-400">{formatDay(entry.at)}</span>}
+      {/* Who, where the entry carries it. The older rows do not - the log only began recording a name
+          when the popup started writing to it - so the line simply ends rather than saying "unknown". */}
+      {entry.by && <span className="font-normal text-slate-500">· {entry.by}</span>}
+      {entry.nextFollowUpDate && <span className="font-normal text-slate-400">· next {formatDay(entry.nextFollowUpDate)}</span>}
+    </li>)}
+  </ul>;
+}
+
 /** The day a decision was taken, or nothing where the stamp is not a date this can read. */
 function formatDay(value) {
   const date = new Date(value);
@@ -101,6 +129,7 @@ function formatDay(value) {
 
 const interviewInfoFormatters = {
   statusNotes: decisionList,
+  activityLog,
   attachments: attachmentList,
   meetLink,
   // The same reading the table's own cell gives: a count shown as the round it makes, and nothing

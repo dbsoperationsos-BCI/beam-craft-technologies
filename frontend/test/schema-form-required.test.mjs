@@ -171,10 +171,8 @@ test("a form may opt out, and opting out does not silence the caller", () => {
   assert.match(PANEL, /errors=\{shownErrors\}/, "the fields no longer draw the merged marks");
 });
 
-test("the sentence names the fields, and does not run on", () => {
+test("the line above the form counts the marked fields rather than naming them", () => {
   assert.equal(describeMissing([]), "");
-  assert.equal(describeMissing(["A"]), "Complete required fields: A");
-  assert.equal(describeMissing(["A", "B", "C"]), "Complete required fields: A, B, C");
-  assert.equal(describeMissing(["A", "B", "C", "D"]), "Complete required fields: A, B, C...",
-    "a form with twenty empty fields would name all twenty in one line");
+  assert.equal(describeMissing(["A"]), "Check the field marked in red.");
+  assert.equal(describeMissing(["A", "B", "C", "D"]), "Check the 4 fields marked in red.");
 });

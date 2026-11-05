@@ -241,10 +241,10 @@ where they were not already.
   register's permissions on a screen that never needed them answered a gift chaser with nothing at
   all, which is how this was found.
 - **D28 (2026-09-06) The project scope follows the person choosing, not the write.**
-  `recordCashEntry()` serves two callers: a person filling in a form, and an approval writing the
-  entry a payment request already agreed. Only the first is scoped. An approver files the entry
-  against the project *the request* named, and need not be able to read that project themselves —
-  scoping the write would have blocked legitimate approvals. The distinction is a named `chooser`
+  `recordCashEntry()` serves two callers: a person filling in a form, and the release of money an
+  approved payment request already agreed. Only the first is scoped. Whoever releases it files the
+  entries against the project *the request* named, and need not be able to read that project
+  themselves — scoping the write would have blocked legitimate payments. The distinction is a named `chooser`
   argument rather than a default, so a new caller has to say which it is.
 - **D29 (2026-09-06) A hard disc has names *and* a project.** Client Storage is the first table
   scoped by both: the three names it carries — `assignedToId` (who is holding it), `assignedById`
@@ -391,7 +391,7 @@ Production will differ and the report is run there before anything is written.
 | 5 | Fix `employees/read.service.js` filtering on a `branchId` Employee does not have — `Employee.branchId` added (NULL, backfilled at 7), id first with the text as fallback, five regression tests | Done |
 | 6 | Add `branch_id` / `vertical_id` / `owner_employee_id` columns; **match report; stop** | Done — columns added, report run, the four decisions taken |
 | 7 | After approval: backfill, switch reads and writes, scope records and reports as well as lists | 7a `063272e`: backfill applied and proven row for row, matchers shared, resolver extended. 7b `f305ff9`: CRM Leads on the resolver — board, counts, every record endpoint, every bulk action, every lead-joined report; references kept in step on every write path. 7c: projects (register, every record endpoint, the assistant's tools, references on create / update / import), quotations (list, record, write) and CRD documents. 7d `d42b273`: cash entries, payment requests, tasks, WhatsApp group names and the assistant's accounts, HRM and project reads. 7e: the CRM assistant's own context. **Stage 7 done** — every module that reads records reads them through the resolver, screens and AI alike |
-| 8 | Drop the text columns once nothing reads them | `sales_crm_lead.branch` renamed to `vertical` (D21). The rest wait until the screens read the references |
+| 8 | Drop the text columns once nothing reads them | `sales_crm_lead.branch` renamed to `vertical` (D21). Every Prisma read, the CRM board and the bell now return the linked name with the text as fallback (D39, `services/resolvedNames.js`, `RESOLVED_LEAD_SQL`); a few report groupings still read the text. Until they move, the text is a *copy* that follows its row: a rename rewrites every copy in the same transaction (D35) and the former name stays on the row (D38), and every reference column carries a foreign key and an index (`20260924100000`) |
 | 9 | The one rule replaces the four-scope setting; the asset manager counted as an owner | Done |
 
 ## Found on the way
@@ -469,6 +469,85 @@ Worth revisiting if somebody asks why an entry they typed is not on their screen
   week on the phone made those calls; and an activity row written before its actor was linked to a
   login is named by nobody, so it answers only to a Super Admin or a branch administrator — the same
   position as every other record with no name on it.
+- **D35 (2026-09-24) A stored name is a copy of its row, and follows it.** Stage 8 leaves the text
+  columns in place until the screens read the references, and until then the text is what the
+  screens print and what every write path starts from - the reference is *derived* from it by
+  `referenceMatchers`. Renaming a branch in Settings -> Branches, a person in the Employee Repository
+  or a login in Administration -> Users changed the register and nothing else: every project, lead,
+  task and cash entry went on printing the old name, and the next save of one of those rows looked
+  the old text up, found no branch, and wrote `branch_id = NULL` - a rename took rows out of scope one
+  save at a time. Field Settings had fixed the same fault for its own lists (`renameUsage`); the rule
+  is now one list for all four kinds of name, `services/nameCopies.js`, and one rewrite. A copy with a
+  reference beside it is rewritten **by the reference**, whatever spelling it held; a copy with none
+  is rewritten by exact text; **people only ever by reference**, because two employees can share a
+  name and the row whose owner matched nobody is exactly the ambiguous case. Audit rows (asset status
+  log, task activity, album and AI event activity) are not copies: they say who did something at the
+  time and keep that name. Branches and verticals now declare these uses in the master-data
+  definitions, so Field Settings counts them and refuses to delete a branch or vertical in use.
+  Beside it, `20260924100000_reference_foreign_keys` gives the 103 bare reference columns - every
+  `created_by`, `*_user_id`, `*_employee_id`, `linked_employee_id` and the unlinked `branch_id`s - a
+  foreign key and an index, after clearing the ids that already pointed at nothing. Two readers that
+  still matched a person by *name* moved to the reference at the same time: the bell's follow-ups
+  (`owner_employee_id` = the employee behind the login, name only for an unowned lead) and the
+  lead-assignment notice (`referenceMatchers` -> employee -> linked active login, the login's name
+  only when the matcher places nobody).
+- **D36 (2026-09-24) An employee's list answers are references too, and the lists held several of
+  are rows.** The employee form offers twelve maintained lists and the row stored only the words -
+  `designation = "Team Leader"`, `department = "Sales, Accounts"`, `skills = "Photography, Editing"`
+  - so nothing could join, count or index a person by department, and Field Settings renamed an
+  entry by rewriting every row's text. The same move as D2 and D6: a reference beside the text,
+  derived on every write and backfilled once (`20260924120000`), with the text left as what the API
+  carries and the screens print. Single-valued answers are `*_id` columns (designation, work type,
+  gender, blood group, marital status, emergency-contact relationship, and the two work locations,
+  both pointing at `work_location`); department, skills and languages are `employee_department`,
+  `employee_skill` and `employee_language`, because a comma-separated column is the one shape a
+  database cannot ask a question of. `services/employeeReferences.js` is the one rule - exactly one
+  row of the list must fold to the text, two spelt the same resolve to NULL rather than a guess,
+  inactive rows still match - and it now also answers the vertical and the branch that
+  `referenceColumnsFor` used to. Every employee write goes through it: the repository's create,
+  import and update, and the onboarding submission and resubmission. Field Settings' `usedBy` for
+  those lists carries the reference (`idField`), so a rename rewrites by it. Not moved: the employee
+  status, which eight code paths write on their own and which stays a name until they share one
+  writer; the interview candidate's position, department, source and employment type; and the
+  readers, which still filter on text (Stage 8).
+- **D37 (2026-09-24) The lead's children are keyed to the lead, the CRD document to its project; the
+  sheet ledger deliberately is not.** In two steps. `20260924130000` keyed the occasion rows and the
+  watch row, which always carry a lead. `20260924150000` keyed the rest with the rules the
+  application's own delete (`purgeLeads`) already followed: a project, a quotation or a CRD document
+  raised against the lead **refuses** its deletion (RESTRICT - a booking is created with an enquiry,
+  always, so its column allows NULL only so a legacy row with a blank or unknown one cannot block the
+  key; `npm run report:lead-keys` lists such rows); a meeting, a WhatsApp group name and a call
+  transcript **go with** the lead (CASCADE), and the CRD document goes with the project it was
+  collected for, which had no key at all - and a document raised by hand for a project that answered Not Applicable is now linked to that project on creation (older ones backfilled where one live project carries the enquiry), the register telling the two kinds apart by the project's answer rather than by the link. "" had meant "no lead" and became NULL; the transcript
+  writer stores nothing rather than "", and a quotation, a document, a group name or a transcript may
+  still exist with no lead. `purgeLeads` lists group names and transcripts among the owned tables
+  now, and unlinks only the runtime call-log table, which has no key. `sales_google_sheet_row` gets
+  no key on purpose - it is the memory that survives a deleted lead so the sync does not import it
+  again, and a key would delete or blank exactly that memory. D30 and D33 can now answer through the
+  relation instead of per row, which is the follow-up this makes possible.
+- **D38 (2026-09-24) A row remembers the names it gave up, and the matcher honours them.** D35
+  rewrites every copy inside the database; a Google Sheet or CSV still holding the old name is
+  outside it, and on the next sync the stale cell matched nothing and was written back as text with
+  `branch_id = NULL` - the rename undone one sync at a time. `branch.aliases` and `employee.aliases`
+  (JSON lists, `20260924140000`) are written by `renameBranchCopies` / `renameEmployeeCopies` at the
+  moment of the rename, and `referenceMatchers` resolves a former name to its row (`kind: "alias"` /
+  `"former-name"`) after every current name has had its chance: a former name somebody holds now is
+  theirs, one two rows gave up is ambiguous. `refs.branchName` then rewrites the cell's text to the
+  current spelling, so a sync *repairs* a stale sheet rather than the reverse. The branch code is
+  accepted as well (`kind: "code"`), and the list also takes the studio's own spellings ("Tirupur").
+  The hard-coded `BRANCH_ALIASES` map stays as it was, by the tripwire in `branch-alias-vizag.test.js`.
+- **D39 (2026-09-24) A read returns the linked name; the stored text is the fallback.** Stage 8's
+  reading half, done once rather than ninety times: `services/resolvedNames.js` is a Prisma client
+  extension applied in `config/db.js` that, for every model carrying a text copy beside a reference,
+  asks for the referenced row on every read and writes its name over the text before the rows are
+  handed back - under the same key, so no screen changes - and leaves the text alone where the
+  reference is NULL. A relation the caller asked for stays; one the rule asked for is removed again.
+  Only the top level of a query is resolved (a lead inside a meeting's `include` is not). The raw SQL
+  readers follow the same rule written in SQL - `RESOLVED_LEAD_SQL` in `crmLeadService` behind
+  `CRM_LEAD_SELECT_LIST` and the board's page query, the bell's follow-ups, the call report's CRM
+  column - as correlated subqueries on the reference, with the text as the fallback. Remaining text
+  readers: the reports that group leads by `crm` or `assigned_branch` text, and the sheet sync's
+  own compare of a cell against the stored text, which is what keeps the text a copy for now.
 
 ## Open questions
 

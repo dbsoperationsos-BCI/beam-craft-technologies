@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Button from "@/components/shared/Button";
 import TextField from "@/components/shared/TextField";
+import useFormErrors from "@/components/shared/useFormErrors";
 import Dialog from "@/components/ui/Dialog";
 import { createAlbumProof } from "@/services/image-selection/album-proofs.service";
 
@@ -17,11 +18,14 @@ export default function CreateAlbumProofDialog({ project, onClose, onCreated }) 
   const [form, setForm] = useState({ name: "", albumType: "", viewerMode: "SPREAD", revisionLimit: "3", proofExpiryDays: "30" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const set = (key) => (value) => setForm((current) => ({ ...current, [key]: value }));
+  const fields = useFormErrors();
+  const set = (key) => (value) => { fields.clear(key); setForm((current) => ({ ...current, [key]: value })); };
 
   async function submit(event) {
     event.preventDefault();
-    setBusy(true); setError("");
+    setError("");
+    if (!fields.check({ name: form.name.trim() ? "" : "Enter the album name." })) return;
+    setBusy(true);
     try {
       const response = await createAlbumProof({
         projectId: project.id, name: form.name.trim(), albumType: form.albumType || null,
@@ -45,12 +49,12 @@ export default function CreateAlbumProofDialog({ project, onClose, onCreated }) 
     onSubmit={submit}
     footer={<>
       <Button type="button" className="max-sm:flex-1" onClick={onClose} disabled={busy}>Cancel</Button>
-      <Button type="submit" variant="primary" className="max-sm:flex-1" disabled={busy || !form.name.trim()}>{busy ? "Creating..." : "Create Album"}</Button>
+      <Button type="submit" variant="primary" className="max-sm:flex-1" disabled={busy}>{busy ? "Creating..." : "Create Album"}</Button>
     </>}
   >
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <TextField label="Album Name" required autoFocus className="sm:col-span-2" value={form.name} maxLength={191} onChange={(event) => set("name")(event.target.value)} placeholder="e.g. Main Wedding Album" />
-      <TextField label="Album Type" value={form.albumType} maxLength={100} onChange={(event) => set("albumType")(event.target.value)} placeholder="e.g. Signature / Parents" />
+      <TextField label="Album Name" helperText="The album's name as the client sees it on the proof." required autoFocus className="sm:col-span-2" value={form.name} maxLength={191} onChange={(event) => set("name")(event.target.value)} placeholder="e.g. Main Wedding Album" error={fields.errors.name} />
+      <TextField label="Album Type" helperText="Which album this is, such as Signature or Parents." value={form.albumType} maxLength={100} onChange={(event) => set("albumType")(event.target.value)} placeholder="e.g. Signature / Parents" />
       <label className="block text-[11px] font-semibold text-slate-600 sm:text-xs">
         <span>Viewer Mode</span>
         <select value={form.viewerMode} onChange={(event) => set("viewerMode")(event.target.value)} className={select}>
@@ -68,7 +72,7 @@ export default function CreateAlbumProofDialog({ project, onClose, onCreated }) 
           <option value="unlimited">Unlimited</option>
         </select>
       </label>
-      <TextField label="Proof Expiry (days)" type="number" min="1" max="365" value={form.proofExpiryDays} onChange={(event) => set("proofExpiryDays")(event.target.value)} />
+      <TextField label="Proof Expiry (days)" helperText="Days the client's proof link stays open, from 1 to 365." type="number" min="1" max="365" value={form.proofExpiryDays} onChange={(event) => set("proofExpiryDays")(event.target.value)} />
     </div>
     {error && <p role="alert" className="mt-4 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
   </Dialog>;

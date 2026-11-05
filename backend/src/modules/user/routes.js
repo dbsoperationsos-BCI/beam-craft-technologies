@@ -2,11 +2,15 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const { protect } = require("../../middleware/authMiddleware");
 const iamService = require("../../services/iam.service");
+const { isAdministrator, isSuperAdmin } = require("../../services/administrator");
 const prisma = require("../../config/db");
+const { signOutEverywhere } = require("../../services/passwordSessions");
 const { storeImage, discardUploads } = require("../../services/imageStorage");
 const { keyFromUrl } = require("../../services/objectStorage");
 const { passwordProblem } = require("../../services/passwordPolicy");
 const { passwordReuseProblem, nextPasswordHistory } = require("../../services/passwordHistory");
+const { CLIENT_ROLE } = require("../../services/loginCredentials");
+const clientPush = require("../../services/clientPush");
 const orgChartService = require("../hrm/org-chart/service");
 const preferencesService = require("./preferences/service");
 
@@ -98,7 +102,7 @@ router.get("/profile", async (req, res) => {
          * studio's notes about somebody rather than their own answers.
          */
         select: {
-          employeeName: true, profilePhotoUrl: true, contactNumber: true, employeeId: true,
+          employeeName: true, profilePhotoUrl: true, contactNumber: true, companyGivenNumber: true, employeeId: true,
           // Personal
           gender: true, dateOfBirth: true, emailId: true, dateOfJoining: true, workType: true,
           bloodGroup: true, currentAddress: true, permanentAddress: true, skills: true,
@@ -121,6 +125,9 @@ router.get("/profile", async (req, res) => {
           children: { select: { name: true, dateOfBirth: true }, orderBy: { id: "asc" } },
           // Employment facts HR maintains, kept for the header rather than the detail below it.
           designation: true, department: true, workBaseLocation: true, currentWorkLocation: true,
+          // Their own Work History tab: each stint, read from the joining date and the rejoins.
+          employmentStatus: true, dateOfRelieving: true,
+          rejoins: { orderBy: { rejoinedOn: "asc" }, select: { leftOn: true, separationType: true, separationReason: true, designation: true, department: true, rejoinedOn: true } },
         },
       })
       : null;
@@ -144,6 +151,10 @@ router.get("/profile", async (req, res) => {
           workLocation: employee.currentWorkLocation || employee.workBaseLocation,
           bloodGroup: employee.bloodGroup,
           gender: employee.gender,
+          // For their Work History tab (`lib/workHistory.mjs` reads this shape).
+          employmentStatus: employee.employmentStatus,
+          dateOfRelieving: employee.dateOfRelieving,
+          rejoins: employee.rejoins,
         } : null,
         /*
          * What this person answered when they joined, keyed exactly as the onboarding form names
@@ -154,6 +165,7 @@ router.get("/profile", async (req, res) => {
           gender: employee.gender,
           dateOfBirth: employee.dateOfBirth,
           contactNumber: employee.contactNumber,
+          companyGivenNumber: employee.companyGivenNumber,
           emailId: employee.emailId,
           dateOfJoining: employee.dateOfJoining,
           workType: employee.workType,
@@ -368,12 +380,39 @@ router.get("/profile-photo/download", async (req, res) => {
 
 // Changes the caller's own password, on the strength of knowing the current one — the JWT alone is
 // not enough for this: a walked-away-from session must not be a way to lock its owner out.
+/*
+ * A team member's phone, for pushes of what reaches their DBS bell (the Beam Craft app, signed in as
+ * staff). The same store as clients' phones; the token is only ever this login's own.
+ */
+const PUSH_TOKEN = /^Expo(nent)?PushToken\[[^\]]{1,200}\]$/;
+router.post("/push-token", async (req, res) => {
+  const token = String(req.body?.token || "").trim();
+  const platform = ["android", "ios"].includes(req.body?.platform) ? req.body.platform : null;
+  if (!PUSH_TOKEN.test(token)) return res.status(400).json({ message: "Not a push token." });
+  try {
+    await prisma.clientPushToken.upsert({ where: { token }, create: { token, platform, userId: Number(req.user.id) }, update: { platform, userId: Number(req.user.id) } });
+    return res.status(204).end();
+  } catch (error) {
+    console.error("Unable to save the push token:", error);
+    return res.status(500).json({ message: "Unable to turn on notifications." });
+  }
+});
+router.delete("/push-token", async (req, res) => {
+  try {
+    await prisma.clientPushToken.deleteMany({ where: { token: String(req.body?.token || "").trim(), userId: Number(req.user.id) } });
+    return res.status(204).end();
+  } catch (error) {
+    console.error("Unable to remove the push token:", error);
+    return res.status(500).json({ message: "Unable to turn off notifications." });
+  }
+});
+
 router.post("/change-password", async (req, res) => {
   try {
     const currentPassword = String(req.body?.currentPassword || "");
     const newPassword = String(req.body?.newPassword || "");
 
-    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { password: true, passwordHistory: true } });
+    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { password: true, passwordHistory: true, role: true } });
     if (!user) return res.status(404).json({ message: "User not found" });
 
     const matches = await bcrypt.compare(currentPassword, user.password);
@@ -387,13 +426,29 @@ router.post("/change-password", async (req, res) => {
     if (reused) return res.status(400).json({ message: reused });
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
-    // They have just chosen it themselves, so there is nothing left to force on next sign-in. The
-    // password being replaced joins the history, which is what lets the check above refuse it later.
-    await prisma.user.update({
-      where: { id: req.user.id },
-      data: { password: hashedPassword, mustChangePassword: false, passwordHistory: nextPasswordHistory(user.password, user.passwordHistory) },
+    /*
+     * They have just chosen it themselves, so there is nothing left to force on next sign-in. The
+     * password being replaced joins the history, which is what lets the check above refuse it later.
+     *
+     * And the account is signed out of **every** device, this one included (`signOutEverywhere`):
+     * a token carries no password and is good for days, so without this somebody who changed their
+     * password because it had been found out went on being followed by whoever had it. The next
+     * request each device makes is a 401 and the app asks for the new password.
+     */
+    const changedAt = new Date();
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: req.user.id },
+        data: { password: hashedPassword, mustChangePassword: false, passwordHistory: nextPasswordHistory(user.password, user.passwordHistory) },
+      });
+      await signOutEverywhere(req.user.id, tx, changedAt);
     });
-    res.json({ message: "Password changed." });
+    // A client (the Beam Craft app) hears of it on every phone signed in to the login, so a change
+    // they did not make does not go unnoticed. After the save, and never holding the answer up.
+    if (user.role === CLIENT_ROLE) {
+      clientPush.notifyUser(req.user.id, { title: "Your password was changed", body: "If this was not you, please contact the studio straight away.", data: { type: "password" } });
+    }
+    res.json({ message: "Password changed. You have been signed out everywhere - sign in again with the new password.", signedOut: true });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -440,11 +495,16 @@ router.delete("/preferences/:key", async (req, res) => {
   }
 });
 
-// Get current user's permissions
+// Get current user's permissions - and whether they are an administrator, for the few screens that
+// belong to administrators whatever a role's permission levels say (`services/administrator.js`).
 router.get("/permissions", async (req, res) => {
   try {
-    const permissions = await iamService.getUserPermissions(req.user.id);
-    res.json({ permissions });
+    const [permissions, administrator, superAdmin] = await Promise.all([
+      iamService.getUserPermissions(req.user.id),
+      isAdministrator(req.user.id),
+      isSuperAdmin(req.user.id),
+    ]);
+    res.json({ permissions, isAdministrator: administrator, isSuperAdmin: superAdmin });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

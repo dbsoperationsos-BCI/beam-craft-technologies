@@ -3,10 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DataTable from "@/components/data-table/DataTable";
 import DataTableShell from "@/components/data-table/DataTableShell";
+import KanbanBoard, { columnsFromRows, groupValue } from "@/components/data-table/KanbanBoard";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import Button from "@/components/shared/Button";
 import Checkbox from "@/components/shared/Checkbox";
 import PhoneField from "@/components/shared/PhoneField";
 import TextField from "@/components/shared/TextField";
+import useFormErrors from "@/components/shared/useFormErrors";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import Dialog from "@/components/ui/Dialog";
 import OptionsMenu from "@/components/ui/OptionsMenu";
@@ -15,6 +18,7 @@ import {
   removeExcludedNumber, removeExcludedNumbers, importExcludedNumbers,
 } from "@/services/sales/excluded-numbers.service";
 import { isUsableNumber, parseExcludedNumbersCsv, usableCount, csvTemplateBlob } from "@/lib/excludedNumbers";
+import { phoneProblem } from "@/lib/formErrors.mjs";
 
 /**
  * Settings -> Exclude Phone Numbers.
@@ -53,15 +57,22 @@ function NumberDialog({ entry = null, saving = false, error = "", onClose, onSub
   const [initial] = useState(() => ({ name: entry?.name || "", number: entry?.number || "" }));
   const [form, setForm] = useState(initial);
 
+  const fields = useFormErrors();
   const set = (patch) => setForm((current) => ({ ...current, ...patch }));
-  // The same rule the rest of the app's dialogs follow: Add needs a number, Update needs a change.
+  // The same rule the rest of the app's dialogs follow: Update needs a change. A missing or short
+  // number is said under its box when Add is pressed.
   const dirty = JSON.stringify(form) !== JSON.stringify(initial);
-  const ready = isUsableNumber(form.number) && !saving && (!isEdit || dirty);
-  const submit = () => onSubmit({ name: form.name.trim(), number: form.number.trim() });
+  const ready = !saving && (!isEdit || dirty);
+  const submit = () => {
+    const number = isUsableNumber(form.number)
+      ? ""
+      : phoneProblem(form.number, "Enter the number to exclude.") || "Enter the full phone number.";
+    if (!fields.check({ number })) return;
+    onSubmit({ name: form.name.trim(), number: form.number.trim() });
+  };
 
   return <Dialog
     title={isEdit ? "Edit Excluded Number" : "Add Excluded Number"}
-    description="Calls to and from this number will not create leads."
     size="sm"
     layer="dialogOverPanel"
     busy={saving}
@@ -73,7 +84,7 @@ function NumberDialog({ entry = null, saving = false, error = "", onClose, onSub
       </Button>
     </>}
   >
-    {error && <p className="mb-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
+    {(error || fields.summary) && <p role="alert" className="mb-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error || fields.summary}</p>}
     <div className="space-y-4">
       <TextField
         label="Contact Name"
@@ -82,15 +93,18 @@ function NumberDialog({ entry = null, saving = false, error = "", onClose, onSub
         // Enter is what anyone types at the end of a short form, and there is no form to submit it.
         onKeyDown={(event) => { if (event.key === "Enter" && ready) { event.preventDefault(); submit(); } }}
         placeholder="Whose number this is"
+        helperText="Only a label, so the team knows whose number is set aside."
         disabled={saving}
       />
       <PhoneField
         label="Contact Number"
         field="number"
+        helperText="Calls to or from this number stop becoming leads."
         required
         value={form.number}
-        onChange={(_field, value) => set({ number: value })}
+        onChange={(_field, value) => { fields.clear("number"); set({ number: value }); }}
         disabled={saving}
+        error={fields.errors.number}
       />
     </div>
   </Dialog>;
@@ -136,6 +150,7 @@ function ImportDialog({ saving = false, error = "", result = null, onClose, onSu
 
   return <Dialog
     title="Import Numbers"
+    descriptionAsTip
     description="Upload a CSV of the numbers to exclude."
     size="md"
     layer="dialogOverPanel"
@@ -197,6 +212,16 @@ function ImportDialog({ saving = false, error = "", result = null, onClose, onSu
   </Dialog>;
 }
 
+/*
+ * The Board's grouping. An excluded number has no status or category - only a name and a number -
+ * so the board files it the way a phone book does, under the first letter of its name ("#" for a
+ * name that starts with anything else), and the numbers nobody named under "—". A view only.
+ */
+const initialOf = (row) => {
+  const first = String(row.name || "").trim().charAt(0).toUpperCase();
+  return !first ? "" : /[A-Z]/.test(first) ? first : "#";
+};
+
 export default function ExcludedNumbersPanel({ canWrite = true, onNotice, onError }) {
   const [numbers, setNumbers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -207,6 +232,7 @@ export default function ExcludedNumbersPanel({ canWrite = true, onNotice, onErro
   const [confirming, setConfirming] = useState(null);
   const [saving, setSaving] = useState(false);
   const [dialogError, setDialogError] = useState("");
+  const [layout, setLayout] = useTableBoardLayout("crm-excluded-numbers");
 
   const notify = useCallback((message) => onNotice?.(message), [onNotice]);
   const fail = useCallback((message) => onError?.(message), [onError]);
@@ -252,6 +278,12 @@ export default function ExcludedNumbersPanel({ canWrite = true, onNotice, onErro
 
   const allSelected = numbers.length > 0 && selected.size === numbers.length;
   const someSelected = selected.size > 0 && !allSelected;
+
+  // A number's ⋮ - the table row's and its Board card's. Read / Write only; nothing for a reader.
+  const numberActionItems = useCallback((number) => (canWrite ? [
+    { label: "Edit", onSelect: () => { setDialogError(""); setEditing(number); } },
+    { label: "Remove", tone: "danger", onSelect: () => setConfirming({ ids: [number.id], label: number.name || number.number }) },
+  ] : undefined), [canWrite]);
 
   const columns = useMemo(() => [
     {
@@ -309,14 +341,11 @@ export default function ExcludedNumbersPanel({ canWrite = true, onNotice, onErro
       cell: ({ row }) => canWrite ? <OptionsMenu
         ariaLabel={`Actions for ${row.original.name || row.original.number}`}
         zIndex={MENU_Z_INDEX}
-        items={[
-          { label: "Edit", onSelect: () => { setDialogError(""); setEditing(row.original); } },
-          { label: "Remove", tone: "danger", onSelect: () => setConfirming({ ids: [row.original.id], label: row.original.name || row.original.number }) },
-        ]}
+        items={numberActionItems(row.original)}
       /> : null,
       exportValue: () => "",
     },
-  ], [allSelected, canWrite, numbers, selected, someSelected, toggleOne]);
+  ], [allSelected, canWrite, numberActionItems, numbers, selected, someSelected, toggleOne]);
 
   async function submitNumber(values) {
     setSaving(true);
@@ -374,19 +403,18 @@ export default function ExcludedNumbersPanel({ canWrite = true, onNotice, onErro
   }
 
   return <div className="flex min-h-0 flex-col gap-3">
-    {/* One line, on the row the buttons are already on. It says the one thing somebody arriving
-        here needs to know and nothing else - what the list does, not who to put on it. */}
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <p className="text-sm text-slate-600">Calls to and from these numbers are never turned into leads.</p>
-      {canWrite && <div className="flex shrink-0 flex-wrap gap-2">
-        <Button type="button" onClick={() => { setDialogError(""); setImportResult(null); setImporting(true); }}>Import Numbers</Button>
-        <Button type="button" variant="primary" onClick={() => { setDialogError(""); setEditing({}); }}>Add Number</Button>
-      </div>}
+    {/* What the list does is the Settings heading's helper line (`settingsHelp.js`). */}
+    <div className="flex flex-wrap items-center justify-end gap-3">
+      <div className="flex shrink-0 flex-wrap gap-2">
+        <TableBoardSwitch value={layout} onChange={setLayout} />
+        {canWrite && <><Button type="button" onClick={() => { setDialogError(""); setImportResult(null); setImporting(true); }}>Import Numbers</Button>
+        <Button type="button" variant="primary" onClick={() => { setDialogError(""); setEditing({}); }}>Add Number</Button></>}
+      </div>
     </div>
 
     {/* Selecting rows is what the tick boxes are for, so the action they enable belongs beside them
         rather than inside a menu that has to be found. */}
-    {selected.size > 0 && canWrite && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
+    {layout !== "board" && selected.size > 0 && canWrite && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
       <span className="text-sm font-medium text-blue-900">{selected.size.toLocaleString()} selected</span>
       <div className="flex gap-2">
         <Button type="button" size="sm" onClick={() => setSelected(new Set())}>Clear</Button>
@@ -394,7 +422,24 @@ export default function ExcludedNumbersPanel({ canWrite = true, onNotice, onErro
       </div>
     </div>}
 
-    <DataTableShell>
+    {layout === "board" ? <div className="flex h-[28rem] min-h-0 min-w-0 rounded-xl border border-slate-200 bg-white">
+      <KanbanBoard
+        rows={numbers}
+        columns={columnsFromRows(numbers, initialOf)}
+        statusOf={(row) => groupValue(initialOf(row))}
+        card={{ title: (row) => row.name || "Not named", subtitle: (row) => row.number }}
+        getRowId={(row) => String(row.id)}
+        // A card opens the number's Edit, as the row menu's Edit does - for whoever may edit.
+        onOpen={canWrite ? (row) => { setDialogError(""); setEditing(row); } : undefined}
+        // The card's ⋮ is the row's ⋮, lifted over the settings panel as the row's is.
+        cardActions={numberActionItems}
+        cardMenuProps={{ zIndex: MENU_Z_INDEX }}
+        viewOnly="Numbers are grouped by the first letter of their name. Edit the name from the row's ⋮ to move it."
+        loading={loading}
+        noun="numbers"
+        ariaLabel="Excluded phone numbers board"
+      />
+    </div> : <DataTableShell>
       <DataTable
         columns={columns}
         data={numbers}
@@ -414,7 +459,7 @@ export default function ExcludedNumbersPanel({ canWrite = true, onNotice, onErro
         className="max-h-[28rem]"
         features={{ filtering: true, sorting: true, infiniteScroll: { pageSize: 50 } }}
       />
-    </DataTableShell>
+    </DataTableShell>}
 
     {editing && <NumberDialog
       entry={editing.id ? editing : null}

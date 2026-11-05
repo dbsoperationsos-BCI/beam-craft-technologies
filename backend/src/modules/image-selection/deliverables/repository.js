@@ -1,6 +1,6 @@
 const prisma = require("../../../config/db");
 
-const configSelect = { id: true, imageSelectionProjectId: true, projectPostProductionAllocationId: true, projectShootDeliverableId: true, name: true, manualShootName: true, enabled: true, selectionLimitOverride: true, displayOrder: true, selectionSubmittedAt: true, inactiveAt: true, createdAt: true, updatedAt: true };
+const configSelect = { id: true, imageSelectionProjectId: true, projectPostProductionAllocationId: true, projectShootDeliverableId: true, name: true, manualShootName: true, manualShootFolderId: true, manualShootFolder: { select: { id: true, name: true } }, enabled: true, selectionLimitOverride: true, displayOrder: true, selectionSubmittedAt: true, inactiveAt: true, createdAt: true, updatedAt: true };
 
 function createDeliverableRepository(client = prisma) {
   return {
@@ -23,6 +23,9 @@ function createDeliverableRepository(client = prisma) {
     // own name. `deleteConfig` is only ever used on one of these — an allocation-derived row is
     // retired with `inactiveAt` instead, because the allocation still exists.
     listManualConfigs: (imageSelectionProjectId) => client.imageSelectionDeliverableConfig.findMany({ where: { imageSelectionProjectId, projectPostProductionAllocationId: null, projectShootDeliverableId: null, inactiveAt: null }, select: configSelect, orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }] }),
+    // A manual project's active root folder - one of its shoots - by id, or every one of them.
+    findRootFolder: (projectId, folderId) => client.imageSelectionFolder.findFirst({ where: { id: folderId, projectId, parentId: null, deletedAt: null }, select: { id: true, name: true } }),
+    listRootFolders: (projectId) => client.imageSelectionFolder.findMany({ where: { projectId, parentId: null, deletedAt: null }, select: { id: true, name: true }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] }),
     countSelections: (configId) => client.imageSelectionPhotoSelection.count({ where: { imageSelectionDeliverableConfigId: configId } }),
     // Reopening any item means the project's selection is no longer wholly submitted, so the
     // publication's own submitted stamp — set when the last item completed — is lifted with it.

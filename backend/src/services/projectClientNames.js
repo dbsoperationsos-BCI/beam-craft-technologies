@@ -1,23 +1,25 @@
-const prisma = require("../config/db");
-
 /**
- * The client's name for a set of sales projects.
+ * The client's name for a set of sales projects, as every staff screen shows it.
  *
- * It lives on the reserved WhatsApp group name rather than on the project, and
- * `whatsappGroupNameId` is a plain column with no relation, so it cannot be included and is
- * resolved in one extra query for a whole page of rows instead of one per row.
+ * It is the project's **WhatsApp group name**, in every vertical. The group name is what the studio
+ * reads and types into WhatsApp, and it is the one name every project has, however it was made.
  *
- * Client Storage and Accounts both show a project by its client, which is why this sits here
- * rather than in either module.
+ * It used to prefer the generator's own Client Name field, which only Qua Qua and Corp ask for -
+ * Dum Dum asks for the groom and the bride instead - so the same column read "Kavya" on one row and
+ * "WED 3t3 ERD Kavin & Thangamani | SM | Namakkal | …" on the next, and a project typed or imported
+ * without the generator read the group name whatever its vertical. One rule now, for all three.
+ *
+ * Pages a *client* reads (their gallery, the CRD form) greet them by their own names instead and do
+ * not come through here.
+ *
+ * `projectClientNames` is kept so its callers - which ask for a page of names in one go - need not
+ * change; there is nothing left to look up.
  */
-async function projectClientNames(projects) {
-  const ids = [...new Set((projects || []).map((project) => project?.whatsappGroupNameId).filter(Boolean))];
-  if (!ids.length) return new Map();
-  const groups = await prisma.salesWhatsappGroupName.findMany({ where: { id: { in: ids } }, select: { id: true, clientName: true } });
-  return new Map(groups.map((group) => [group.id, group.clientName]));
+async function projectClientNames() {
+  return new Map();
 }
 
-/** The one name to show for a project: the reserved client name, else the group name it was saved with. */
-const clientNameOf = (project, names) => (project && (names.get(project.whatsappGroupNameId) || project.whatsappGroupName)) || null;
+/** The one name to show for a project: its WhatsApp group name. */
+const clientNameOf = (project) => project?.whatsappGroupName || null;
 
 module.exports = { projectClientNames, clientNameOf };

@@ -46,6 +46,13 @@ const TOOLS = [
       result.byStatus?.length ? `\nBy status:\n${result.byStatus.map((row) => `- ${row.status}: ${row.count}`).join("\n")}` : "",
       result.byVertical?.length ? `\nBy vertical:\n${result.byVertical.map((row) => `- ${row.vertical}: ${row.count}`).join("\n")}` : "",
       result.byBranch?.length ? `\nBy branch:\n${result.byBranch.map((row) => `- ${row.branch}: ${row.count}`).join("\n")}` : "",
+      /*
+       * Per project manager, each status on its own line under them - so "how many does Arun have"
+       * is read, not worked out. Without it the model took the status total (2) for Arun's (1).
+       */
+      result.byManager?.length
+        ? `\nBy project manager:\n${result.byManager.map((row) => [`- ${row.manager}: ${row.count}`, ...row.byStatus.map((entry) => `  - ${entry.status}: ${entry.count}`)].join("\n")).join("\n")}`
+        : "",
     ].filter(Boolean).join("\n"),
     renderBrief: (result) => `Projects: ${result.total} in the pipeline, ${result.unassigned} without a manager.`,
   },

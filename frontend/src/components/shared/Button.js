@@ -2,7 +2,11 @@ const variants = {
   primary: "bg-blue-600 text-white hover:bg-blue-700 disabled:bg-slate-300",
   secondary: "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50",
   danger: "bg-red-600 text-white hover:bg-red-700 disabled:opacity-60",
-  ghost: "text-slate-600 hover:bg-slate-100 hover:text-slate-900",
+  // Green, for the action that settles something rather than saves it - Finalize Quotation.
+  success: "bg-green-600 text-white hover:bg-green-700 disabled:bg-slate-300",
+  // Faded and unmoved by hover when disabled: without it a switched-off icon button - a pager's Next
+  // on its last page - looked and hovered exactly like one that works.
+  ghost: "text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-slate-600",
   /*
    * No colours at all: the caller supplies them.
    *

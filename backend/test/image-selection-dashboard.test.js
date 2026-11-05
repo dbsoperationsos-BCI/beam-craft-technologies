@@ -84,11 +84,11 @@ test("attention rows: overdue, unopened, quiet, newly submitted, ready to downlo
   // Picks exist but no stamps (a gallery from before the stamps): a pick proves an open.
   assert.deepEqual(classify.attentionFlagsOf({ ...photos, archivedAt: null, selectionProgress: "partiallyCompleted", publication: published(), configs: [{ id: "a", selectionSubmittedAt: null, selectionLimit: 50, selectedCount: 3 }] }, NOW), { ...none, inactive: true });
   // Submitted two days ago with photos: new submission and ready to download; a submitted project is never overdue.
-  assert.deepEqual(classify.attentionFlagsOf({ ...photos, archivedAt: null, selectionProgress: "completed", publication: published({ expiresAt: daysAgo(1), selectionSubmittedAt: daysAgo(2) }), configs: [{ id: "a", selectionSubmittedAt: daysAgo(2), selectionLimit: 50, selectedCount: 12 }] }, NOW), { ...none, newSubmissions: true, readyToDownload: true });
+  assert.deepEqual(classify.attentionFlagsOf({ ...photos, archivedAt: null, selectionProgress: "completed", publication: published({ expiresAt: daysAgo(1), selectionSubmittedAt: daysAgo(2) }), configs: [{ id: "a", selectionSubmittedAt: daysAgo(2), selectionLimit: 50, selectedCount: 12 }] }, NOW), { ...none, newSubmissions: true, clientSubmitted: true, readyToDownload: true });
   // Submitted a month ago: ready to download, but no longer new.
-  assert.deepEqual(classify.attentionFlagsOf({ ...photos, archivedAt: null, selectionProgress: "completed", publication: published({ selectionSubmittedAt: daysAgo(30) }), configs: [{ id: "a", selectionSubmittedAt: daysAgo(30), selectionLimit: 50, selectedCount: 12 }] }, NOW), { ...none, readyToDownload: true });
+  assert.deepEqual(classify.attentionFlagsOf({ ...photos, archivedAt: null, selectionProgress: "completed", publication: published({ selectionSubmittedAt: daysAgo(30) }), configs: [{ id: "a", selectionSubmittedAt: daysAgo(30), selectionLimit: 50, selectedCount: 12 }] }, NOW), { ...none, clientSubmitted: true, readyToDownload: true });
   // Legacy gallery with no items: the whole-gallery flag and count stand in.
-  assert.deepEqual(classify.attentionFlagsOf({ ...photos, archivedAt: null, selectionProgress: "inProgress", publication: published({ selectionSubmittedAt: daysAgo(1), galleryFirstOpenedAt: daysAgo(3), galleryLastOpenedAt: daysAgo(3) }), configs: [], legacySelectedCount: 8 }, NOW), { ...none, newSubmissions: true, readyToDownload: true });
+  assert.deepEqual(classify.attentionFlagsOf({ ...photos, archivedAt: null, selectionProgress: "inProgress", publication: published({ selectionSubmittedAt: daysAgo(1), galleryFirstOpenedAt: daysAgo(3), galleryLastOpenedAt: daysAgo(3) }), configs: [], legacySelectedCount: 8 }, NOW), { ...none, newSubmissions: true, clientSubmitted: true, readyToDownload: true });
   // Archived: on no row at all. Unpublished with photos: only "client sending not done".
   assert.deepEqual(classify.attentionFlagsOf({ ...photos, archivedAt: NOW, selectionProgress: "inProgress", publication: published({ expiresAt: daysAgo(1) }), configs: [] }, NOW), none);
   assert.deepEqual(classify.attentionFlagsOf({ ...photos, archivedAt: null, selectionProgress: "notStarted", publication: null, configs: [] }, NOW), { ...none, notPublished: true });
@@ -183,8 +183,11 @@ function fakeRepository() {
     state,
     listProjects: async () => { state.calls.push(["listProjects"]); return state.projects; },
     countAllProjects: async () => state.projects.length,
+    // Every linked project's shoot is behind it unless a test stages `state.shoots`.
+    listShootDatesForSalesProjects: async (ids) => state.shoots || ids.map((projectId) => ({ projectId, dateCreated: daysAgo(10) })),
     periodCounts: async (range) => { state.calls.push(["periodCounts", range.key]); return { projectsCreated: 2, photosAdded: 300, selectionsMade: 187, itemsSubmitted: 0 }; },
     clientNames: async () => new Map(),
+    rootFolders: async (ids) => { state.calls.push(["rootFolders", ids.length]); return (state.rootFolders || []).filter((folder) => ids.includes(folder.projectId)); },
     snapshotData: async (ids) => { state.calls.push(["snapshotData", ids.length]); return { publications: state.publications, configs: state.configs, photoCounts: state.photoCounts, legacySelected: [], selectionCounts: state.selectionCounts }; },
     storageStats: async (range) => { state.lastStorageRange = range; return { totalPhotos: 1540, readyPhotos: 1540, processingPhotos: 0, failedPhotos: 0, originalBytes: 1024, registeredOriginals: 1540, serverOriginals: 0, r2Objects: 1540, r2PreviewBytes: 512, activeBatches: 0, added: { photos: 300, originalBytes: 256, registeredOriginals: 300, r2Objects: 300, r2PreviewBytes: 128 } }; },
     queueCounts: async () => { throw new Error("Redis is down"); },
@@ -226,7 +229,7 @@ test("the dashboard is one response: counts, stages, attention, progress, storag
   assert.equal(data.storage.totalPhotos, 1540); assert.deepEqual(data.storage.queue, { available: false });
   // One list read, one period read, one batched snapshot read, and one more batched snapshot read
   // for where things stood at the start of the range — never one per project.
-  assert.deepEqual(repo.state.calls, [["listProjects"], ["periodCounts", "month"], ["snapshotData", 4], ["snapshotData", 1]]);
+  assert.deepEqual(repo.state.calls, [["listProjects"], ["periodCounts", "month"], ["snapshotData", 4], ["rootFolders", 0], ["snapshotData", 1]]);
 });
 
 test("every card says which way it has moved since the start of the range", async () => {
@@ -341,7 +344,7 @@ test("an attention row narrows to exactly the projects it counted", async () => 
 
 test("the Projects list accepts the dashboard's attention filter and asks the dashboard to apply it", async () => {
   const rows = [{ id: "p1", projectName: "One", salesProjectId: null, createdAt: NOW, totalPhotoSize: BigInt(0) }, { id: "p2", projectName: "Two", salesProjectId: null, createdAt: NOW, totalPhotoSize: BigInt(0) }];
-  const repo = { listProjects: async () => rows, listSalesProjectsAwaitingImageProject: async () => [], selectionProgressData: async () => ({ publishedProjectIds: [], configs: [], selectedConfigIds: [] }) };
+  const repo = { listProjects: async () => rows, listSalesProjectsAwaitingImageProject: async () => [], listShootDatesForSalesProjects: async (ids) => ids.map((projectId) => ({ projectId, dateCreated: new Date("2026-01-01") })), selectionProgressData: async () => ({ publishedProjectIds: [], configs: [], selectedConfigIds: [] }) };
   const asked = [];
   const attention = { attentionProjectIds: async (projects, kind) => { asked.push([projects.map((row) => row.id), kind]); return new Set(["p2"]); } };
   const listed = await createImageSelectionProjectService(repo, { attention }).list({ sort: "dateAdded", order: "desc", archived: false, attention: "overdue" });
@@ -354,7 +357,8 @@ test("the Projects list accepts the dashboard's attention filter and asks the da
 });
 
 test("query validation: only the ranges and windows the page offers", () => {
-  assert.deepEqual(dashboardQuerySchema.parse({}), { range: "month" });
+  // The full dashboard unless the Expand view is asked for.
+  assert.deepEqual(dashboardQuerySchema.parse({}), { range: "month", expand: false });
   assert.equal(dashboardQuerySchema.parse({ range: "lifetime" }).range, "lifetime");
   // A range the picker no longer offers is refused rather than quietly answered.
   assert.equal(dashboardQuerySchema.safeParse({ range: "5d" }).success, false);
@@ -417,4 +421,71 @@ test("an abandoned batch reads as finished, not as frozen part-way", () => {
   assert.equal(done.overallProgress, 100);
   assert.equal(done.etaSeconds, 0);
   assert.equal(serializeBatch({ ...batch, status: "UPLOADING" }).overallProgress, 40, "one still running is unchanged");
+});
+
+/*
+ * Yet to Download opens a project on the shoot that put it there. Which items put it there is the
+ * flag's own rule asked item by item; which folder is theirs is the rule the project page uses to
+ * scope Download Selected to a shoot.
+ */
+test("the items behind Yet to Download are the submitted ones with picks, newer than the download", () => {
+  const item = (id, submitted, count) => ({ id, selectionSubmittedAt: submitted, selectedCount: count });
+  const configs = [item("a", daysAgo(5), 10), item("b", daysAgo(1), 4), item("c", null, 9), item("d", daysAgo(2), 0)];
+  assert.deepEqual(classify.readyToDownloadConfigs({ configs }).map((c) => c.id), ["a", "b"], "never downloaded: every submitted item with picks");
+  assert.deepEqual(classify.readyToDownloadConfigs({ configs, selectedDownloadedAt: daysAgo(3) }).map((c) => c.id), ["b"], "only what was sent after the last download");
+  // Judged item by item now: a stamp newer than every submission means nothing is left to download.
+  assert.deepEqual(classify.readyToDownloadConfigs({ configs, selectedDownloadedAt: daysAgo(0.5) }).map((c) => c.id), [], "everything downloaded since it was sent: nothing behind the flag");
+  // An item's own stamp decides for it: "a" copied out after it was sent, "b" not yet.
+  assert.deepEqual(classify.readyToDownloadConfigs({ configs: [{ ...configs[0], selectedDownloadedAt: daysAgo(4) }, configs[1]] }).map((c) => c.id), ["b"]);
+});
+
+test("the folder opened is the first in tree order that stands for one of those shoots", () => {
+  const folders = [
+    { id: "f-pre", name: "Pre Wedding", projectShootId: "s-pre" },
+    { id: "f-wed", name: "Wedding", projectShootId: "s-wed" },
+    { id: "f-rec", name: "Reception", projectShootId: null },
+  ];
+  const on = (shootId, name) => ({ shoot: { shootId, name } });
+  assert.equal(classify.downloadFolderOf([on("s-wed", "Wedding")], folders), "f-wed", "only the second shoot is ready: not the first folder");
+  assert.equal(classify.downloadFolderOf([on("s-rec", "reception "), on("s-wed", "Wedding")], folders), "f-wed", "two ready: the tree's order decides");
+  assert.equal(classify.downloadFolderOf([on("s-rec", "Reception")], folders), "f-rec", "a folder with no shoot behind it matches by name");
+  assert.equal(classify.downloadFolderOf([on(null, "RECEPTION")], folders), "f-rec", "a manual project's shoot group matches by name");
+  assert.equal(classify.downloadFolderOf([on("s-gone", "Engagement")], folders), null, "no folder for the shoot: the project opens as it always has");
+  assert.equal(classify.downloadFolderOf([on("s-other", "Wedding")], folders), null, "a shoot folder is matched by its shoot, not by a name that happens to agree");
+  assert.equal(classify.downloadFolderOf([{ shoot: null }], folders), null);
+});
+
+test("a Yet to Download row carries its shoot folder, and no other row does", async () => {
+  const repo = fakeRepository();
+  repo.state.configs = [
+    { id: "c1", imageSelectionProjectId: "p1", selectionSubmittedAt: daysAgo(1), selectionLimitOverride: 250, projectShootDeliverableId: "d1", projectPostProductionAllocationId: null, manualShootName: null, shootDeliverable: { selectionLimit: 250, numberOfPhotos: null, quantity: 1, shootId: "s-wed", shoot: { shoot: "Wedding" } }, postProductionAllocation: null },
+    { id: "c2", imageSelectionProjectId: "p2", selectionSubmittedAt: null, selectionLimitOverride: null, projectShootDeliverableId: "d2", projectPostProductionAllocationId: null, manualShootName: null, shootDeliverable: { selectionLimit: 40, numberOfPhotos: null, quantity: 1, shootId: "s-x", shoot: { shoot: "Launch" } }, postProductionAllocation: null },
+  ];
+  repo.state.rootFolders = [
+    { id: "f-pre", projectId: "p1", name: "Pre Wedding", projectShootId: "s-pre" },
+    { id: "f-wed", projectId: "p1", name: "Wedding", projectShootId: "s-wed" },
+    { id: "f-launch", projectId: "p2", name: "Launch", projectShootId: "s-x" },
+  ];
+  const data = await service(repo).build({ range: "month" });
+  const byId = Object.fromEntries(data.recentProjects.map((row) => [row.id, row]));
+  assert.equal(byId.p1.views.readyToDownload, true);
+  assert.equal(byId.p1.readyToDownloadFolderId, "f-wed");
+  assert.equal(byId.p2.readyToDownloadFolderId, null, "not on Yet to Download");
+  assert.ok(repo.state.calls.some(([name, count]) => name === "rootFolders" && count === 1), "folders are read for the ready rows only");
+  assert.ok(data.recentProjects.every((row) => !("downloadConfigs" in row)), "the working list never leaves the service");
+});
+
+test("a linked project none of whose shoots has passed is no card or row, as it is no sidebar row", async () => {
+  const repo = fakeRepository();
+  repo.state.projects.push(project({ id: "p5", projectCode: "DBS-VCIS-000005", projectName: "Booked, not shot", sourceType: "Sales", salesProjectId: "sales-5", createdAt: daysAgo(1), updatedAt: daysAgo(1) }));
+  repo.state.shoots = [{ projectId: "sales-5", dateCreated: daysAgo(-3) }];
+  const held = await service(repo).build({ range: "month" });
+  assert.equal(held.totalProjectsAllTime, 4, "counted as the sidebar lists it");
+  assert.equal(held.summary.totalProjects, 4);
+  assert.equal(held.summary.yetToUpload, 1, "not an empty project waiting on an upload");
+  // The day after its shoot, it is counted like any other.
+  repo.state.shoots = [{ projectId: "sales-5", dateCreated: daysAgo(2) }];
+  const shot = await service(repo).build({ range: "month" });
+  assert.equal(shot.totalProjectsAllTime, 5);
+  assert.equal(shot.summary.yetToUpload, 2);
 });

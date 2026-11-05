@@ -63,20 +63,62 @@ export function hasValue(value) {
   return value === true || value === false || String(value || "").trim().length > 0;
 }
 
+/*
+ * ── The branch, as the group name says it ─────────────────────────────────────────────────────
+ *
+ * A group name is read in WhatsApp's own list, where the whole thing is truncated to fit a phone's
+ * width - so "Erode" spends five characters saying what "ERD" says in three, and the part somebody
+ * is actually scanning for (the couple, the date) is what falls off the end.
+ *
+ * **Deliberately not `branchCode` from `backend/src/services/identifiers.js`**, though six of the
+ * same branches are in it. That list mints enquiry ids - `DBS-EID-DD-ERD-000001` - and two of its
+ * codes are not the ones the studio wants here: it writes Tiruppur as `TUP` and Vizag as `VIZAG`,
+ * against the `TPR` and `VSKP` asked for. Changing it there would rename the branch segment of
+ * every id minted from that day on, leaving one studio's records split across two spellings of the
+ * same branch. So the group name keeps its own list, and this comment is why there are two.
+ *
+ * Matched on the front of the normalised name, because the register spells a branch with its state
+ * after it - "Erode TN", "Visakhapatnam AP" - and the sheets and forms do not.
+ */
+const GROUP_BRANCH_CODES = [
+  { code: "ERD", aliases: ["erode"] },
+  { code: "TPR", aliases: ["tiruppur", "tirupur"] },
+  { code: "CBE", aliases: ["coimbatore"] },
+  { code: "BLR", aliases: ["bangalore", "bengaluru"] },
+  { code: "HYD", aliases: ["hyderabad"] },
+  // The studio says Vizag; the branch list spells it Visakhapatnam. Both reach VSKP.
+  { code: "VSKP", aliases: ["vizag", "visakhapatnam"] },
+];
+
+/**
+ * The short code for a branch, for a group name. A branch nobody has a code for is left exactly as
+ * it was typed - a name nobody recognises is still better than a group with no branch on it.
+ */
+export function groupBranchCode(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const key = raw.toLowerCase().replace(/[^a-z]/g, "");
+  const match = GROUP_BRANCH_CODES.find((entry) => entry.aliases.some((alias) => key.startsWith(alias)));
+  return match ? match.code : raw;
+}
+
 export function buildGroupName(form) {
   if (groupNameRequirements(form).some(([field]) => !hasValue(form[field]))) return "";
   // An unknown date is no date: every format drops the segment rather than leaving an empty one,
   // so a name never ends in a dangling separator.
   const date = form.mainEventDateKnown ? formatGroupDate(form.mainEventDate) : "";
   if (form.groupType === "Dum Dum") {
-    const head = ["WED", form.tier.trim(), form.branch, form.offerName?.trim(), `${form.groomName.trim()} & ${form.brideName.trim()}`].filter(Boolean).join(" ");
+    const head = ["WED", form.tier.trim(), groupBranchCode(form.branch), form.offerName?.trim(), `${form.groomName.trim()} & ${form.brideName.trim()}`].filter(Boolean).join(" ");
     return [head, form.socialMediaPosting, form.place.trim(), date].filter(Boolean).join(" | ");
   }
   if (form.groupType === "Qua Qua") {
-    const details = [`QQ${form.branch}`, form.offerName?.trim(), form.clientName.trim()].filter(Boolean).join(" ");
+    // "QQ TPR", not "QQTPR". It ran straight onto the prefix - and before the codes, onto the name:
+    // "QQErode" - which reads as one word and was the odd one out beside "WED Premium VSKP" and
+    // "CORP CBE". The three are read side by side in a list of groups.
+    const details = ["QQ", groupBranchCode(form.branch), form.offerName?.trim(), form.clientName.trim()].filter(Boolean).join(" ");
     return [details, form.eventName, form.socialMediaPosting, form.houseType, form.gou === "Yes" ? "GOU" : null, form.place.trim(), date].filter(Boolean).join(" | ");
   }
-  return [["CORP", form.branch, form.offerName?.trim(), form.clientName.trim()].filter(Boolean).join(" "), form.place.trim(), date].filter(Boolean).join(" | ");
+  return [["CORP", groupBranchCode(form.branch), form.offerName?.trim(), form.clientName.trim()].filter(Boolean).join(" "), form.place.trim(), date].filter(Boolean).join(" | ");
 }
 
 export function toInputDate(value) {

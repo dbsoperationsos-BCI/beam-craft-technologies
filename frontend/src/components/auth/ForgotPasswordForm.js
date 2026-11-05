@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import PhoneField from "@/components/shared/PhoneField";
+import useFormErrors from "@/components/shared/useFormErrors";
+import { phoneProblem } from "@/lib/formErrors.mjs";
 import { requestPasswordResetOtp, verifyPasswordResetOtp } from "@/services/auth/auth.service";
 
 /**
@@ -37,6 +39,7 @@ const asClock = (seconds) => `${String(Math.floor(seconds / 60)).padStart(2, "0"
 export default function ForgotPasswordForm() {
   const router = useRouter();
   const { notice, showNotice, showError, clearNotice } = useNotice();
+  const fields = useFormErrors();
 
   // "asking" is the number; "code" is the six digits sent to it. There is no third state - a
   // verified code leaves this screen for the one that sets the password.
@@ -115,11 +118,17 @@ export default function ForgotPasswordForm() {
     setOtp("");
     setSecondsLeft(0);
     clearNotice();
+    fields.clearAll();
   };
 
+  // A box left empty or short is marked under itself rather than the button refusing in silence.
   function submit(event) {
     event.preventDefault();
-    if (step === "asking") return void sendCode();
+    if (step === "asking") {
+      if (!fields.check({ mobile: phoneProblem(mobile, "Enter your mobile number.") })) return;
+      return void sendCode();
+    }
+    if (!fields.check({ otp: otp.length !== 6 ? "Enter the six-digit code." : "" })) return;
     return void verifyCode();
   }
 
@@ -133,17 +142,19 @@ export default function ForgotPasswordForm() {
     <p className="mt-3 text-sm leading-6 text-slate-500">{lead}</p>
     <FloatingNotice notice={notice} onClose={clearNotice} />
 
-    <form onSubmit={submit} className="mt-7 space-y-5">
+    <form noValidate onSubmit={submit} className="mt-7 space-y-5">
       {/* The application's own phone control, with its country picker — the same one the number was
           recorded with, so what is typed here is the shape the record holds. Locked once a code is
           out: changing the number under a live code would ask for one phone and check the other. */}
       <PhoneField
         required
         label="Mobile number"
+        helperText="The mobile number registered to your account; the reset code is sent there."
         field="mobile"
         value={mobile}
-        onChange={(_field, next) => setMobile(next)}
+        onChange={(_field, next) => { setMobile(next); fields.clear("mobile"); }}
         disabled={busy || step === "code"}
+        error={fields.errors.mobile}
       />
 
       {step === "code" && <div>
@@ -158,11 +169,13 @@ export default function ForgotPasswordForm() {
             maxLength={6}
             value={otp}
             // Digits only, so a pasted "123 456" or "code: 123456" still lands as six digits.
-            onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))}
+            onChange={(event) => { setOtp(event.target.value.replace(/\D/g, "").slice(0, 6)); fields.clear("otp"); }}
             disabled={busy || expired}
             placeholder="000000"
-            className="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-center text-lg tracking-[0.4em] outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-400"
+            aria-invalid={fields.errors.otp ? true : undefined}
+            className={`mt-2 block w-full rounded-lg border bg-white px-3 py-3 text-center text-lg tracking-[0.4em] outline-none focus:ring-2 disabled:bg-slate-50 disabled:text-slate-400 ${fields.errors.otp ? "border-red-400 focus:border-red-500 focus:ring-red-100" : "border-slate-300 focus:border-blue-500 focus:ring-blue-100"}`}
           />
+          {fields.errors.otp && <p role="alert" className="mt-1.5 font-normal text-red-600">{fields.errors.otp}</p>}
         </label>
         {/* What is left, said as a clock rather than as a bar: somebody typing a code wants to know
             whether they have time, and "0:38" answers that exactly. */}
@@ -185,7 +198,7 @@ export default function ForgotPasswordForm() {
 
       <button
         type="submit"
-        disabled={busy || (step === "code" && (expired || otp.length !== 6))}
+        disabled={busy || (step === "code" && expired)}
         className="w-full rounded-lg bg-blue-600 px-4 py-3 font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
       >
         {busy ? "Please wait..." : step === "asking" ? "Send OTP" : "Verify code"}

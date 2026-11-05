@@ -35,12 +35,15 @@ function walk(dir) {
 /** The lines of a file that are code rather than comment - a `<table>` named in a comment is history, not markup. */
 const codeLines = (text) => text.split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*|\{\/\*)/.test(line));
 
+/** A file's path below src/, spelled with "/" on every platform - Windows hands back "\" and the allow-list is written with "/". */
+const relative = (file) => path.relative(SRC, file).split(path.sep).join("/");
+
 test("no component draws its own <table>", () => {
   const allowed = new Set(["components/data-table/DataTable.js", "components/data-table/SimpleTable.js"]);
   const offenders = walk(SRC)
-    .filter((file) => !allowed.has(path.relative(SRC, file)))
+    .filter((file) => !allowed.has(relative(file)))
     .filter((file) => codeLines(fs.readFileSync(file, "utf8")).some((line) => line.includes("<table")))
-    .map((file) => path.relative(SRC, file));
+    .map(relative);
   assert.deepEqual(offenders, [], `a table is drawn by hand again in: ${offenders.join(", ")}`);
 });
 

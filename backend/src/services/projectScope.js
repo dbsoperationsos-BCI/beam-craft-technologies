@@ -160,4 +160,25 @@ async function readableProject({ userId, projectId, permissions, select = { id: 
   return client.salesProject.findFirst({ where: { id: String(projectId), deletedAt: null, AND: [access] }, select });
 }
 
-module.exports = { projectAccessWhere, readableProject, NAMED_ON_FIELDS, REGISTER_READERS, PROJECT_SCOPE_COLUMNS };
+/**
+ * A child row whose project - if it names one - is not in Resource Management → Recycling Bin.
+ *
+ * Deleting a project only stamps its `deletedAt`; the rows hanging off it (cash entries, payment
+ * request lines, extra quotations, tasks, chats, shoots) are never touched, so Restore can bring the
+ * project back whole. Every read of such a child therefore asks for its project to be live, or a
+ * binned project goes on showing through its children. A row naming no project is unaffected.
+ *
+ * `relation` / `column` are the child's relation to `SalesProject` and the column holding its key;
+ * `shoot` names a relation to `ProjectShoot`, whose own project is asked the same of.
+ *
+ *   where: { deletedAt: null, AND: [liveProjectWhere()] }
+ *   where: { AND: [liveProjectWhere({ shoot: "shoot" })] }
+ */
+function liveProjectWhere({ relation = "project", column = "projectId", shoot } = {}) {
+  const parts = [];
+  if (relation) parts.push({ OR: [{ [column]: null }, { [relation]: { deletedAt: null } }] });
+  if (shoot) parts.push({ OR: [{ [`${shoot}Id`]: null }, { [shoot]: { project: { deletedAt: null } } }] });
+  return parts.length === 1 ? parts[0] : { AND: parts };
+}
+
+module.exports = { projectAccessWhere, readableProject, liveProjectWhere, NAMED_ON_FIELDS, REGISTER_READERS, PROJECT_SCOPE_COLUMNS };

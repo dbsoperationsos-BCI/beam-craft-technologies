@@ -1,19 +1,7 @@
-import { Cormorant_Garamond, Great_Vibes, Oswald, Plus_Jakarta_Sans, Poppins } from "next/font/google";
+import { quotationFontVariables } from "../quotationFonts";
 
-/*
- * The client's copy sets its own type, and it is served with the page rather than fetched at the
- * moment the PDF renderer loads it: `next/font` self-hosts these at build time, so a heading is
- * never printed in a fallback face because the webfont arrived a beat late. Each is exposed as a
- * variable the template's stylesheet reads; nothing else in the application uses them.
- *
- * On the layout rather than the page, so the quotation and its Terms & Conditions page - which is
- * the same sheet - are set in the same faces without either naming them twice.
- */
-const display = Cormorant_Garamond({ subsets: ["latin"], weight: ["400", "500", "600", "700"], style: ["normal", "italic"], variable: "--q-font-display", display: "swap" });
-const body = Plus_Jakarta_Sans({ subsets: ["latin"], weight: ["400", "500", "600", "700"], variable: "--q-font-body", display: "swap" });
-const script = Great_Vibes({ subsets: ["latin"], weight: "400", variable: "--q-font-script", display: "swap" });
-const condensed = Oswald({ subsets: ["latin"], weight: ["400", "500"], variable: "--q-font-condensed", display: "swap" });
-const footer = Poppins({ subsets: ["latin"], weight: ["500", "600", "700"], variable: "--q-font-footer", display: "swap" });
+// The sheet's faces - the design's five and the Tamil beside them - live in `../quotationFonts`,
+// shared with the studio's Preview so both are set alike.
 
 /*
  * The client's copy is one 1080px sheet, and it is the same sheet on a phone as on a laptop.
@@ -57,5 +45,5 @@ export const viewport = {
 };
 
 export default function QuotationPublicLayout({ children }) {
-  return <div className={`${display.variable} ${body.variable} ${script.variable} ${condensed.variable} ${footer.variable}`}>{children}</div>;
+  return <div className={quotationFontVariables}>{children}</div>;
 }

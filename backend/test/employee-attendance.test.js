@@ -122,7 +122,8 @@ test("attendance measures the same thing Work Hours does, the same way", () => {
    */
   assert.match(SERVICE, /`s`\.`context` = 'app'/);
   assert.match(SERVICE, /GROUP BY `s`\.`user_id`, `day`/);
-  assert.match(SERVICE, /DATE\(`s`\.`started_at`\) AS `day`/);
+  // The studio's day, not the UTC one - see studio-day.test.js for what that means.
+  assert.match(SERVICE, /\$\{studioDaySql\("\\`s\\`\.\\`started_at\\`"\)\} AS \\`day\\`/);
   // A stretch that ends before it starts would subtract from the day.
   assert.match(SERVICE, /`s`\.`ended_at` >= `s`\.`started_at`/);
 });

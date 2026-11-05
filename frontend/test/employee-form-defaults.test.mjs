@@ -54,7 +54,8 @@ test("all three places the six-month rule is applied are still there", () => {
   // review. A fourth answer, or one of these going missing, is two rules that can disagree.
   assert.match(code, /defaultNextReviewDate\(form\.dateOfJoining\)/, "not applied on load");
   assert.match(code, /nextReviewDate: syncedNextReviewDate\(/, "not applied when the joining date is edited");
-  assert.match(code, /: defaultNextReviewDate\(current\.dateOfJoining\)/, "not applied when the last review is deleted");
+  // With no cyclic review left, a stored date stands and six months from joining fills a blank one.
+  assert.match(code, /: \(current\.nextReviewDate \|\| defaultNextReviewDate\(current\.dateOfJoining\)\)/, "not applied when the last review is deleted");
 });
 
 test("a stored review date outranks the default, so nothing HR chose is overwritten", () => {
@@ -114,8 +115,8 @@ test("creating the account refuses while Employment Details is unanswered", () =
   const body = submit.slice(0, submit.indexOf("\n  }"));
   const guard = /if \(hasProblems\) \{[\s\S]*?showFirstProblem\(\);[\s\S]*?return;[\s\S]*?\}/.exec(body);
   assert.ok(guard, "the credentials page creates an account without checking its own required fields");
-  // And it says what is missing, in the same sentence the record page refuses with - the marks and
-  // the scroll answer "where", not "what".
+  // And it says so out loud, in the same line the record page refuses with - the marks under each
+  // box say what, the scroll answers where.
   assert.match(guard[0], /credentialForm\.showError\(describeProblems\(validation\.missing, validation\.invalid\)\)/, "the refusal is silent");
   // Ahead of both writes: the record save below it is conditional on `recordDirty`, so a check
   // living in there would be skipped by the ordinary case of nobody touching the fields at all.
@@ -134,7 +135,7 @@ test("the credentials page validates Employment Details and the record pages val
   // the check added above asks for those ten and not for the whole record.
   assert.match(
     code,
-    /twoPage && page === "credentials" \? employmentSection\.fields : sections\.flatMap\(\(section\) => section\.fields\)/,
+    /twoPage && page === "credentials"\s+\? employmentSection\.fields\s+(?:\/\/[^\n]*\n\s+)?: \[\.\.\.new Map\(\[\.\.\.sections\.flatMap\(\(section\) => section\.fields\),/,
     "each page no longer validates its own fields",
   );
   // And Employment Details is on page two only — it is not in `sections`, which is what page one

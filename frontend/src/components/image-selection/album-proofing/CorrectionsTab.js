@@ -160,7 +160,7 @@ export default function CorrectionsTab({ album, canWrite, qcCanWrite, onChanged 
         <Button type="submit" variant="primary" className="max-sm:flex-1" busy={busyId === resolving.id}>Mark Resolved</Button>
       </>}
     >
-      <TextAreaField label="Resolution note (optional)" placeholder='e.g. "Replaced with IMG_9021.jpg."' value={resolutionNote} maxLength={2000} onChange={(event) => setResolutionNote(event.target.value)} />
+      <TextAreaField label="Resolution note (optional)" helperText="What was changed to fix this correction, for the record." placeholder='e.g. "Replaced with IMG_9021.jpg."' value={resolutionNote} maxLength={2000} onChange={(event) => setResolutionNote(event.target.value)} />
     </Dialog>}
 
     {viewing && <CorrectionSpreadDialog albumId={album.id} correction={viewing.correction} onClose={() => setViewing(null)} />}

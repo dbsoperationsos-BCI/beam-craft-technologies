@@ -78,7 +78,10 @@ test("an invite row offers it too, through the same panel an employee is offboar
 test("the panel offboards an invite against the invite, and an employee against the employee", () => {
   const panel = read("components", "employees", "SeparationFormPanel.js");
   assert.match(panel, /const inviteId = employee\.type === "invite" \? employee\.inviteId : null;/);
-  assert.match(panel, /createSeparation\(inviteId \? \{ \.\.\.payload, inviteId \} : \{ \.\.\.payload, employeeId: employee\.id \}\)/);
+  assert.match(panel, /else if \(inviteId\) saved = await createSeparation\(\{ \.\.\.payload, inviteId \}\);/);
+  // An employee - after any pending work has been handed over (`HandOverDialog`).
+  assert.match(panel, /saved = await createSeparation\(\{ \.\.\.payload, employeeId: employee\.id \}\);/);
+  assert.match(panel, /createSeparation\(\{ \.\.\.handOver\.payload, employeeId: employee\.id, handOverToEmployeeId \}\)/);
   // An invite has no offboarding to load, and `invite:<id>` is not an id the endpoint would take.
   assert.match(panel, /const \[loading, setLoading\] = useState\(employee\.type !== "invite"\);/);
 });
@@ -88,9 +91,10 @@ test("the panel offboards an invite against the invite, and an employee against 
  * the only trace of a departure that was taken back would be a status quietly reading Active again.
  */
 test("coming back asks why, and will not proceed until it is answered", () => {
-  assert.match(DIALOG, /confirmDisabled=\{!reason\.trim\(\)\}/);
-  assert.match(DIALOG, /onConfirm=\{\(\) => onConfirm\(reason\.trim\(\)\)\}/);
-  assert.match(DIALOG, /<TextAreaField\s+label="Reason"\s+required/);
+  // Confirm stays pressable; a blank reason is marked under its box and nothing is sent.
+  assert.match(DIALOG, /if \(!fields\.check\(\{ reason: reason\.trim\(\) \? "" : "Enter a reason\." \}\)\) return;\s+onConfirm\(reason\.trim\(\)\);/);
+  assert.match(DIALOG, /error=\{fields\.errors\.reason\}/);
+  assert.match(DIALOG, /<TextAreaField\s+label="Reason"\s+(?:helperText="[^"]*"\s+)?required/);
   // Keyed by the row where it is drawn, so the reason typed for one employee is never carried into
   // the next one's confirmation - the dialog would otherwise stay mounted between openings.
   assert.match(PAGE, /<ReactivateEmployeeDialog key=\{reactivatingEmployee\?\.id \|\| "none"\}/);
@@ -134,7 +138,7 @@ test("the page confirms before it acts, and reloads the list after", () => {
  */
 test("the dialog says which of the two it is about to do", () => {
   assert.match(DIALOG, /removes \$\{name\}'s offboarding record/);
-  assert.match(DIALOG, /tone=\{offboarded \? "danger" : "primary"\}/);
+  assert.match(DIALOG, /tone=\{offboarded \|\| withdrawing \? "danger" : "primary"\}/);
   // The half nobody can see from the repository: the login the departure closed is reopened.
   assert.match(DIALOG, /reopens their login/);
 });

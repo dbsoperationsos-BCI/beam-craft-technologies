@@ -1,7 +1,9 @@
 const express = require("express");
 const { protect } = require("../../../middleware/authMiddleware");
 const { checkAnyPermission, checkPermission } = require("../../../middleware/permissionMiddleware");
-const { listTemplates, getTemplate, saveTemplate } = require("./controller");
+const { listTemplates, getTemplate, saveTemplate,
+  setTemplateEnabled, listLeadWelcomeVerticals, listSwitches, setSwitch } = require("./controller");
+const { WISH_SWITCHES } = require("../../../services/messageTemplateSwitches");
 
 const router = express.Router();
 router.use(protect);
@@ -26,11 +28,54 @@ const mayRead = checkAnyPermission([
   { module: "SETTINGS", feature: "Message Template", level: "READ" },
   { module: "ACCOUNTS", feature: "Cash Management", level: "READ" },
   { module: "HRM", feature: "Employee Management", level: "READ" },
+  // The Attendance Register's Send reads the attendance report, and the register is behind this.
+  { module: "HRM", feature: "Attendance Approval", level: "READ" },
+  // Create Project's Client Login Ready hands a client their login in the Client Login Credential
+  // wording, and only somebody holding User Management makes a client login.
+  { module: "ADMIN", feature: "User Management", level: "READ" },
+  // The CRD Documents screen's CRD Link Ready hands a client their CRD form in the CRD Document Link
+  // wording - without this its users would get the built-in text, silently.
+  { module: "PROJECT", feature: "CRD Documents", level: "READ" },
+  // The Feedback page's thank-you and issues messages, written from the studio's templates.
+  { module: "PROJECT", feature: "Feedback", level: "READ" },
 ]);
 const maySettings = checkPermission("SETTINGS", "Message Template", "READ_WRITE");
 
+/*
+ * Each message's ON / OFF (`services/messageTemplateSwitches.js`). Read by whoever reads a message,
+ * and by the screens that send one without reading it first - the Interview invite, a client's login
+ * from Create Project - so their Send WhatsApp is absent while the message is OFF, and by the Wishes
+ * Scheduler. Switched by whoever rewords that message: `SETTINGS / Wishes` for the wishes,
+ * `SETTINGS / Message Template` for every other.
+ */
+const maySeeSwitches = checkAnyPermission([
+  { module: "SETTINGS", feature: "Message Template", level: "READ" },
+  { module: "SETTINGS", feature: "Wishes", level: "READ" },
+  { module: "ACCOUNTS", feature: "Cash Management", level: "READ" },
+  { module: "HRM", feature: "Employee Management", level: "READ" },
+  { module: "HRM", feature: "Interview", level: "READ" },
+  { module: "ADMIN", feature: "User Management", level: "READ" },
+  { module: "SALES", feature: "Sales Manager", level: "READ" },
+  { module: "PROJECT", feature: "CRD Documents", level: "READ" },
+  // The Feedback page sends the client its thank-you or issues message.
+  { module: "PROJECT", feature: "Feedback", level: "READ" },
+]);
+const maySwitch = (req, res, next) => (WISH_SWITCHES.has(String(req.params.key || ""))
+  ? checkPermission("SETTINGS", "Wishes", "READ_WRITE")
+  : maySettings)(req, res, next);
+
 router.get("/", mayRead, listTemplates);
+// New Lead Welcome's wording per vertical: the verticals and their two template keys, for the editor
+// alone - only Settings writes these, so reading the list is Settings' Read. Above `/:key`.
+router.get("/lead-welcome/verticals", checkPermission("SETTINGS", "Message Template", "READ"), listLeadWelcomeVerticals);
+// Above `/:key`, which would otherwise read "switches" as a template key.
+router.get("/switches", maySeeSwitches, listSwitches);
+router.put("/switches/:key", maySwitch, setSwitch);
 router.get("/:key", mayRead, getTemplate);
 router.put("/:key", maySettings, saveTemplate);
+// The switch on its own, so a message can be turned off without publishing a wording - above nothing
+// and behind the same guard as saving one, because switching a message off is changing what the
+// studio sends.
+router.put("/:key/enabled", maySettings, setTemplateEnabled);
 
 module.exports = router;

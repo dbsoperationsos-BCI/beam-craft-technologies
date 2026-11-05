@@ -50,7 +50,7 @@ async function registerOriginalBatch(req, res) {
   const body = parse(registerBatchSchema, req.body, res, "Invalid registration request.");
   if (!params || !body) return;
   try {
-    const result = await service.registerBatch(params.projectId, { folderId: body.folderId || null, storageRootId: body.storageRootId, files: body.files, userId: req.user.id });
+    const result = await service.registerBatch(params.projectId, { folderId: body.folderId || null, storageRootId: body.storageRootId, files: body.files, userId: req.user.id, holdForCulling: body.holdForCulling, holdForEditing: body.holdForEditing });
     return res.status(result.skipped.length ? 207 : 201).json({ data: result });
   } catch (error) { return handleError(error, res, "register"); }
 }

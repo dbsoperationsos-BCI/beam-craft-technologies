@@ -1,10 +1,12 @@
 "use client";
 
+import HelpTip from "./HelpTip";
 import { createPortal } from "react-dom";
 import { useEffect, useRef, useState } from "react";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import useCloseWhenTriggerHidden from "./useCloseWhenTriggerHidden";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 /**
  * A form field that can be picked from a list or typed into freely.
@@ -31,6 +33,8 @@ export default function ComboBoxField({
   // to say one at all, which made a required combo box the one field on a form that could refuse a
   // save and give the reader nothing to look at.
   error = "",
+  // A grey line under the field saying what to enter; the error replaces it.
+  helperText = "",
   hideLabel = false,
   label,
   onChange,
@@ -53,10 +57,20 @@ export default function ComboBoxField({
   useCloseWhenTriggerHidden(open, wrapperRef, () => setOpen(false));
 
   const typed = String(value || "").trim().toLowerCase();
-  // A value that exactly matches an option is a choice already made, not a search - the list
-  // stays whole so the others can still be reached.
-  const exact = options.some((option) => option.toLowerCase() === typed);
-  const shown = typed && !exact ? options.filter((option) => option.toLowerCase().includes(typed)) : options;
+  /*
+   * Whether the text in the box is something being **typed** or an answer already given.
+   *
+   * It used to be answered from the text alone: a value that matched an option exactly was read as
+   * a choice already made, so the list stayed whole. That is right when the field is reopened on a
+   * saved answer - the other districts have to be reachable - and wrong while somebody is typing,
+   * which is when it showed: typing "Coimbatore" in full listed every district, and rubbing out the
+   * last letter narrowed it to the one. The reader does the same thing twice and gets two answers.
+   *
+   * So the question is who put the text there. Typing searches, whatever it comes to; opening the
+   * field, or choosing from it, shows the whole list again.
+   */
+  const [searching, setSearching] = useState(false);
+  const shown = typed && searching ? options.filter((option) => matchesWordChunks(option, typed)) : options;
 
   // Closes the suggestions and nothing else - not the form they are being typed into.
   useEscapeKey(() => setOpen(false), open);
@@ -130,6 +144,8 @@ export default function ComboBoxField({
         event.preventDefault();
         onChange?.(picked);
       }
+      // Chosen, so the box holds an answer rather than a search: the list opens whole next time.
+      setSearching(false);
       setOpen(false);
       return;
     }
@@ -138,10 +154,11 @@ export default function ComboBoxField({
 
   return (
     <div className={`block text-xs font-semibold text-slate-600 ${className}`}>
-      {!hideLabel && <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</span>}
+      {!hideLabel && <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}<HelpTip text={helperText} /></span>}
       <span ref={wrapperRef} className={`relative flex min-h-9 w-full items-center rounded-lg border transition ${error ? "border-red-400" : "border-slate-300"} ${readOnly ? "bg-slate-100" : error ? "bg-white focus-within:border-red-500 focus-within:ring-2 focus-within:ring-red-100" : "bg-white focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100"} ${hideLabel ? "" : "mt-1.5"}`}>
         <input
           value={value}
+          aria-invalid={error ? true : undefined}
           disabled={disabled}
           readOnly={readOnly}
           placeholder={readOnly ? "" : placeholder}
@@ -149,11 +166,12 @@ export default function ComboBoxField({
           onChange={(event) => {
             onChange?.(event.target.value);
             setActiveIndex(0);
+            setSearching(true);
             if (!open) setOpen(true);
           }}
           // Read-only, focus opens nothing: there is a list behind this field and no way to choose
           // from it, so opening one would be a menu that cannot be acted on.
-          onFocus={() => { if (!inert) setOpen(true); }}
+          onFocus={() => { if (!inert) { setSearching(false); setOpen(true); } }}
           onKeyDown={(event) => { if (!inert) handleKeyDown(event); }}
           className={`min-w-0 flex-1 bg-transparent px-3 text-sm font-normal outline-none placeholder:text-slate-400 disabled:cursor-not-allowed ${readOnly ? "cursor-default text-slate-600" : "text-slate-700"}`}
         />
@@ -189,6 +207,7 @@ export default function ComboBoxField({
               aria-selected={option === value}
               onClick={() => {
                 onChange?.(option);
+                setSearching(false);
                 setOpen(false);
               }}
               onMouseEnter={() => setActiveIndex(index)}

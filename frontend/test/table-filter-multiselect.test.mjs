@@ -27,8 +27,11 @@ test("a filter holding a list matches any of it, and one holding text still matc
    * in the application gets the list filter without any of them being told about it, and no caller
    * that passes a string behaves differently than it did.
    */
-  assert.match(CELLS, /if \(Array\.isArray\(query\)\) return query\.length === 0 \|\| query\.includes\(shown\);/);
-  assert.match(CELLS, /return shown\.toLowerCase\(\)\.includes\(String\(query \|\| ""\)\.toLowerCase\(\)\);/);
+  assert.match(CELLS, /if \(Array\.isArray\(query\)\) return query\.length === 0 \|\| query\.includes\(shown\) \|\| listParts\(shown\)/);
+  // Text is Word Chunk Search: every chunk typed (lib/wordChunks.mjs) - except a date or
+  // day, which is read as one phrase, so "12 Oct" means that date.
+  assert.match(CELLS, /if \(type === "date" \|\| type === "day"\) return shown\.toLowerCase\(\)\.includes\(String\(query \|\| ""\)\.toLowerCase\(\)\);/);
+  assert.match(CELLS, /return matchesWordChunks\(shown, query\);/);
   /*
    * Matched on what the cell **shows**, for both: a date filters as "01/09/2026" the way it reads,
    * and a value picked from the list is the same string the list was built from - so an exact match
@@ -56,14 +59,38 @@ test("a column offers a list only where its values are a set, and the cost is bo
    * anybody wants is to type one.
    */
   assert.match(CELLS, /if \(type === "date" \|\| type === "day" \|\| type === "link" \|\| type === "image"\) return null;/);
-  // Blank cells are not an option on the list; a column of nothing offers no list at all.
-  assert.match(CELLS, /if \(shown === "—"\) continue;/);
-  assert.match(CELLS, /return seen\.size \? \[\.\.\.seen\]\.sort/);
+  /*
+   * And **one value per row is an identifier, not a set**: an Employee ID, an Event ID, a phone
+   * number, an email address. A list of those is a list of every row, which answers nothing anybody
+   * would ask it - what they want is to type the one they are after.
+   *
+   * The cap alone made the control depend on how big the studio had grown: a column of 20 employee
+   * IDs was a menu of 20 IDs in a studio of 20 and a text box in a studio of 41 - the same screen,
+   * the same code, flipping silently at the 41st hire. That is what the studio noticed between
+   * develop and production, and both answers could not be right.
+   *
+   * Nine in ten rather than every one, so two people sharing a surname do not turn a column of names
+   * back into a menu of names; and only from eight rows up, because below that every value trivially
+   * differs and a real category column - three employees in three departments - would be mistaken
+   * for an identifier.
+   */
+  assert.match(CELLS, /const IDENTITY_MIN_ROWS = 8;/);
+  assert.match(CELLS, /const IDENTITY_SHARE = 0\.9;/);
+  assert.match(CELLS, /if \(filled >= IDENTITY_MIN_ROWS && seen\.size >= filled \* IDENTITY_SHARE\) return null;/);
+  // Judged on the rows that hold something: a column twelve people filled in is judged on those
+  // twelve, not on the three hundred who left it empty.
+  assert.match(CELLS, /if \(shown === "—"\) continue;\n\s+filled \+= 1;/);
+  // A column that knows better than either rule still says so itself and is never asked.
+  assert.match(CELLS, /\.\.\.\(listed && !listed\.has\(accessorKey\) \? \{ filter: "text" \} : \{\}\)/);
+  // Blank cells are not an option on the list; a column of nothing offers no list at all - said
+  // before the identity test now, so an empty column answers "no list" rather than "every row".
+  assert.match(CELLS, /if \(!seen\.size\) return null;/);
+  assert.match(CELLS, /return \[\.\.\.seen\]\.sort\(\(a, b\) => a\.localeCompare/);
 
   // Memoised on the data, because that is the only thing it depends on: typing in one filter must
   // not recount every column on the board.
   assert.match(TABLE, /const filterChoices = useMemo\(/);
-  assert.match(TABLE, /\}, \[columns, data, filtering, filterValues\]\);/);
+  assert.match(TABLE, /}, \[columns, data, filtering, filterValues, knownLists\]\);/);
   /*
    * And skipped entirely for a **paged** table. Derived from the loaded rows, such a menu offers
    * the values of the hundred scrolled into view - it grows as you scroll and hides the rows you
@@ -113,10 +140,179 @@ test("the control reads as part of the filter row, and says what is being shown"
   // a menu that stayed where it was drawn would sit over the wrong column.
   assert.match(CONTROL, /createPortal\(/);
   assert.match(CONTROL, /window\.requestAnimationFrame\(track\)/);
-  // A search box only where the list is long enough to hunt through.
-  assert.match(CONTROL, /normalized\.length > 8 && <div/);
-  // Escape closes it and leaves the row exactly as it was.
-  assert.match(CONTROL, /useEscapeKey\(\(\) => setMenu\(false\), open\)/);
+  // A search box wherever the list is long enough to hunt through, which is five values up - a box
+  // over Yes and No is furniture, and a list of services or branches is not.
+  assert.match(CONTROL, /const SEARCH_FROM = 5;/);
+  assert.match(CONTROL, /const searchable = normalized\.length >= SEARCH_FROM;/);
+  assert.match(CONTROL, /\{searchable && <div/);
+  // Escape closes it and leaves the row exactly as it was, with focus back on the field.
+  assert.match(CONTROL, /useEscapeKey\(\(\) => \{ setMenu\(false\); triggerRef\.current\?\.focus\(\); \}, open\)/);
+});
+
+const COMBO = read("components", "shared", "FilterCombobox.js");
+
+const KEYS = read("components", "shared", "useListKeyboard.js");
+
+test("the walk is written once and both column filters take it", () => {
+  /*
+   * A filter row reachable by Tab that could only be answered by clicking is a filter row that is
+   * not reachable. Down and Up walk the list and wrap at either end, Home and End reach the ends,
+   * and the highlight is scrolled into view; Escape was already the shared listener's.
+   *
+   * One copy of it, because two were already drifting: the same thirty-five lines sat in both
+   * controls, and only one of them forgot the walk when its menu closed.
+   */
+  assert.match(KEYS, /export default function useListKeyboard\(\{ count = 0, listRef \}\)/);
+  assert.match(KEYS, /if \(next < 0\) return count - 1;/);
+  assert.match(KEYS, /if \(next >= count\) return 0;/);
+  assert.match(KEYS, /scrollIntoView\(\{ block: "nearest" \}\)/);
+  /*
+   * Home and End are claimed only once a walk is under way. Focus in both controls sits in a text
+   * box - the search box in one, the filter field itself in the other - where those keys move the
+   * caret, so a menu that took them outright stopped somebody reaching the start of what they were
+   * typing. Taken unconditionally at first, which is exactly that.
+   */
+  assert.match(KEYS, /if \(\(event\.key === "Home" \|\| event\.key === "End"\) && activeIndex >= 0 && count\)/);
+  // It says whether it took the key, so a caller can hand it everything and deal with the rest.
+  assert.match(KEYS, /return false;\s*\n\s*\}/);
+
+  for (const [name, source] of [["FilterMultiSelect", CONTROL], ["FilterCombobox", COMBO]]) {
+    assert.match(source, /const \{ activeIndex, setActiveIndex, walk \} = useListKeyboard\(/, `${name} should share the walk`);
+    // Down on a closed menu opens it, which is what the key means on every other listbox.
+    assert.match(source, /if \(!open\) \{ event\.preventDefault\(\); setMenu\(true\); return; \}/, `${name} should open on ArrowDown`);
+    assert.match(source, /if \(!open \|\| walk\(event\)\) return;/, `${name} should let the walk go first`);
+    /*
+     * Enter acts only on a row somebody has actually walked to. Without the guard it would take
+     * whichever option happened to be first, which is not a choice anybody made - and on the
+     * combobox it would overwrite text being typed the moment Enter was pressed.
+     */
+    assert.match(source, /const option = shown\[activeIndex\];\s*\n\s*if \(!option\) return;/, `${name} should need a highlight before Enter`);
+    // Searching rebuilds the list underneath, so the walk starts again rather than pointing at
+    // whatever now sits at the old index.
+    assert.match(source, /setActiveIndex\(-1\);/, `${name} should reset the highlight as the list narrows`);
+    // The pointer and the keyboard agree on which row is live.
+    assert.match(source, /onMouseEnter=\{\(\) => setActiveIndex\(index\)\}/, `${name} should follow the pointer too`);
+    /*
+     * One background class, chosen in code. Which of two Tailwind classes wins is their order in
+     * the generated stylesheet and not their order in the attribute, so `bg-blue-50 bg-blue-100`
+     * on one element is a coin toss rather than an override.
+     */
+    assert.match(source, /const background = active/, `${name} should pick one background`);
+    // And the row says which it is, for a reader who is not looking at the colour.
+    assert.match(source, /aria-activedescendant=/, `${name} should name the active row`);
+  }
+  /*
+   * Enter **ticks** on the multi-select and **closes** on the combobox. The difference is the
+   * question each asks: several answers means coming back to the list, and one answer does not.
+   */
+  assert.match(CONTROL, /toggle\(option\.value\);/);
+  assert.match(COMBO, /function choose\(option\) \{[\s\S]{0,160}?setMenu\(false\);/);
+});
+
+test("every way of closing either menu forgets the walk", () => {
+  /*
+   * Four gestures end these menus - Escape, a mousedown outside, the field scrolling out of view,
+   * and the chevron - and a highlight left behind by one of them came back on the next open,
+   * pointing at a row the reader never walked to and, where the options had been refetched
+   * meanwhile, at a different value again. On the combobox that was one focus away: focusing the
+   * field reopens the menu.
+   *
+   * So each control has **one** close, and it is the only thing that writes `open`.
+   */
+  for (const [name, source] of [["FilterMultiSelect", CONTROL], ["FilterCombobox", COMBO]]) {
+    assert.match(source, /const setMenu = useCallback\(\(next\) => \{[\s\S]{0,200}?setActiveIndex\(-1\);/, `${name} should clear the walk on every close`);
+    /* Scoped to a statement rather than to the word: both files explain in a comment what used to
+       call `setOpen(false)` directly, and a bare count would read its own prose as code. */
+    assert.equal([...source.matchAll(/^\s*setOpen\(/gm)].length, 1, `${name} should write open in one place`);
+    // Stable, so the mousedown listener can name it and still attach once per opening.
+    assert.match(source, /\}, \[setActiveIndex\]\);/, `${name} should keep the close helper stable`);
+    assert.match(source, /\}, \[open, setMenu\]\);/, `${name} should depend on it rather than close over a stale one`);
+  }
+});
+
+test("the search box takes focus, but only when nobody else has it", () => {
+  /*
+   * Opening a filter and typing is one gesture. Without the focus it is a click on the trigger and
+   * a second one into the box, which is what made the search feel like it was not there.
+   *
+   * An effect rather than `autoFocus`, because the box does not always exist when the menu opens: a
+   * column whose values are fetched opens with no options and no search box, and mounts one when
+   * the answer lands - hundreds of milliseconds later. `autoFocus` runs on mount, so it would have
+   * snatched focus back from wherever the reader had moved on to.
+   */
+  // Scoped to the attribute: the word survives in the comment that explains why it went.
+  assert.doesNotMatch(CONTROL, /^\s*autoFocus$/m);
+  assert.match(CONTROL, /const held = document\.activeElement;\s*\n\s*if \(held && held !== document\.body && held !== triggerRef\.current\) return;/);
+  /* Keyed on the box existing, not on the menu being open: the portal is drawn a render late, so
+     an effect watching `open` fires once, finds no input, and never runs again. */
+  assert.match(CONTROL, /const menuMounted = open && Boolean\(menuStyle\);/);
+  assert.match(CONTROL, /\}, \[menuMounted, searchable\]\);/);
+});
+
+test("one handler hears every key, and takes Enter only from the two controls that mean it", () => {
+  /*
+   * There is exactly **one** key handler, on the field, although the search box it serves sits in a
+   * menu portalled to `document.body`. A React portal propagates its events up the React tree
+   * rather than the document one, so the key already arrives; a second handler on the menu - added
+   * on the assumption that it could not - ran every keystroke twice, and one ArrowDown moved the
+   * highlight by two.
+   *
+   * That same reach is why Enter is taken only from the search box and the trigger. Select all,
+   * Clear and the option rows are buttons inside that portal, so their Enter arrives here too, and
+   * taking it would tick the highlighted row and swallow the button the reader had tabbed to.
+   */
+  assert.equal(CONTROL.split("onKeyDown={handleKeyDown}").length - 1, 1);
+  assert.match(CONTROL, /onKeyDown=\{handleKeyDown\}\s*\n\s*className=\{`relative flex min-h-7/);
+  assert.match(CONTROL, /if \(event\.target !== searchRef\.current && event\.target !== triggerRef\.current\) return;/);
+  // The combobox needs neither: its search box **is** the field, so focus never leaves it and the
+  // portalled menu is never what a key is pressed in.
+  assert.equal(COMBO.split("onKeyDown={handleKeyDown}").length - 1, 1);
+});
+
+test("a listbox holds options and nothing else", () => {
+  /*
+   * The role used to sit on the portal wrapper, which also holds the search field and the Select
+   * all / Clear row - and an `<input role="combobox">` nested inside a listbox is a shape a screen
+   * reader is entitled to skip. It is on the scroller now, which holds the option rows alone, and
+   * that is what `aria-controls` on the search box names.
+   */
+  assert.match(CONTROL, /id=\{listId\}\s*\n\s*role="listbox"\s*\n\s*aria-multiselectable="true"/);
+  assert.match(CONTROL, /aria-controls=\{listId\}/);
+  assert.match(CONTROL, /id=\{`\$\{listId\}-\$\{index\}`\}/);
+});
+
+test("neither menu can open outside the window", () => {
+  /*
+   * The filter row scrolls sideways with the table, so a column half off the left edge gave its
+   * menu a negative `left` and a column wider than a phone gave it a `minWidth` wider than the
+   * screen - a menu overflowing both edges at once, with no way to scroll to either. Measured at
+   * 360px: the trigger's own cell was 594px wide at left -103.
+   *
+   * Three steps, in order, because each needs the one before it: fit the width to the room, slide
+   * the menu back inside, then cap it at the room to the right of where it landed. Capping before
+   * the slide left one long option free to grow past the edge again, which is what happened.
+   */
+  for (const [name, source] of [["FilterMultiSelect", CONTROL], ["FilterCombobox", COMBO]]) {
+    assert.match(source, /const room = window\.innerWidth - padding \* 2;/, `${name} should measure the room`);
+    assert.match(source, /const width = Math\.min\(.*, room\);/, `${name} should fit the width to it`);
+    assert.match(source, /const left = Math\.min\(Math\.max\(rect\.left, padding\), window\.innerWidth - padding - width\);/, `${name} should slide back inside`);
+    assert.match(source, /maxWidth: window\.innerWidth - padding - left,/, `${name} should cap against where it landed`);
+  }
+  // The multi-select keeps its 180px floor, so a narrow column still opens a readable menu.
+  assert.match(CONTROL, /const width = Math\.min\(Math\.max\(rect\.width, 180\), room\);/);
+});
+
+test("a long option narrows the menu rather than the window", () => {
+  /*
+   * The combobox drew its options `whitespace-nowrap` against a menu with no width cap, so one long
+   * value - a service named in full, a venue - stretched the menu past the edge of the window and
+   * carried the end of every other option out with it.
+   */
+  assert.match(COMBO, /className=\{`block w-full truncate px-3 py-2 text-left/);
+  // Scoped to the class attribute: the word survives in the comment that explains why it went.
+  assert.doesNotMatch(COMBO, /className=\{`block w-full whitespace-nowrap/);
+  // The multi-select already truncated its own.
+  assert.match(CONTROL, /className="min-w-0 flex-1 truncate"/);
 });
 
 /*

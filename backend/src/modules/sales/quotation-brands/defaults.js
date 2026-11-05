@@ -95,9 +95,15 @@ const DEFAULT_PDF_CONTENT = {
   servicesTitle: "Services",
   deliverablesTitle: "Deliverables",
   deliverableFootnote: "Storage Note: Storage to be provided by client for raw data delivery",
-  // ── The money ──
+  // ── The money: the Pricing & Total card ──
   pricingLabel: "Pricing & Total of Services and Deliverables",
-  validityText: "This Quotation Valid up-to 3 Months from the Date Created",
+  // `{gst}` is the quotation's own GST rate, which its pricing decided; the words only state it.
+  gstText: "+ {gst}% GST APPLICABLE",
+  paymentLabel: "For Payment",
+  // How long a quotation is valid, in whole months: what `{months}` and `{validUntil}` print.
+  validityMonths: "3",
+  // `{months}` and `{validUntil}` (the quotation's own date plus `validityMonths`) are filled at print.
+  validityText: "This Quotation Valid up-to {months} Months from the Date Created",
   notesTitle: "Additional Notes",
   // Printed under the notes heading when the quotation itself carries no note. Blank prints no card.
   notesDefault: "",
@@ -146,6 +152,20 @@ const GENERAL_PDF_CONTENT_KEYS = [
   "infrastructureTitle", "infrastructureSubtitle", "infrastructureTagline",
 ];
 const BRAND_PDF_CONTENT_KEYS = PDF_CONTENT_KEYS.filter((key) => !GENERAL_PDF_CONTENT_KEYS.includes(key));
+
+/*
+ * The Pricing & Total card's words, set for every brand on General - and, for the two a brand's PDF
+ * Content tab already offered (the heading and the validity line), still answerable by the brand.
+ *
+ * So they are neither General's alone nor a brand's alone: General's stand for every brand, and a
+ * brand that has typed its own heading or validity line keeps it - the order a quotation is read in
+ * is brand, then General, then the template's own words. The GST rate itself is not here: it is the
+ * quotation's own, from its pricing, and `{gst}` only states it.
+ */
+const PRICING_PDF_CONTENT_KEYS = ["pricingLabel", "gstText", "paymentLabel", "validityMonths", "validityText"];
+
+/** Whole months a quotation may be said to be valid for: what General accepts for `validityMonths`. */
+const MAX_VALIDITY_MONTHS = 60;
 const GENERAL_ASSET_KEYS = ["indiaMapUrl", "infrastructure", "journey"];
 
 /*
@@ -167,7 +187,12 @@ const MAX_INFRASTRUCTURE_PHOTOS = 8;
  * General. Only an explicit `false` hides one: a settings row that has never been saved, and every
  * version raised before these existed, prints all four exactly as before.
  */
-const SECTION_KEYS = ["notes", "trademark", "journey", "infrastructure"];
+/*
+ * And the Pricing & Total card's own four, also on General: the whole card, and inside it the GST
+ * line, the payment link and the validity line. Hiding one prints nothing in its place and changes
+ * no figure - the total is the saved one either way.
+ */
+const SECTION_KEYS = ["notes", "trademark", "journey", "infrastructure", "pricing", "gst", "payment", "validity"];
 const DEFAULT_PDF_SECTIONS = Object.fromEntries(SECTION_KEYS.map((key) => [key, true]));
 
 /**
@@ -186,7 +211,7 @@ function mergePdfSections(stored) {
   return Object.fromEntries(SECTION_KEYS.map((key) => [key, source[key] !== false]));
 }
 
-/** Only the four keys, as booleans - what is worth storing. */
+/** Only the eight keys, as booleans - what is worth storing. */
 function pdfSectionsFor(input) {
   const source = input && typeof input === "object" ? input : {};
   return Object.fromEntries(SECTION_KEYS.map((key) => [key, source[key] !== false]));
@@ -437,6 +462,8 @@ module.exports = {
   PDF_CONTENT_KEYS,
   GENERAL_PDF_CONTENT_KEYS,
   BRAND_PDF_CONTENT_KEYS,
+  PRICING_PDF_CONTENT_KEYS,
+  MAX_VALIDITY_MONTHS,
   GENERAL_ASSET_KEYS,
   BRAND_ASSET_KEYS,
   MAX_INFRASTRUCTURE_PHOTOS,

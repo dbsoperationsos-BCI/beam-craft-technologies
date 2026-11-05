@@ -27,6 +27,52 @@ const blankToNull = (value) => {
 const optionalText = (max) => z.preprocess(blankToNull, z.string().max(max).nullable());
 
 /**
+ * A social media link: optional, and checked loosely - enough to catch a sentence typed into the
+ * box, not enough to argue with a real link.
+ *
+ * Two things it is strict about, because the link is meant to be opened. Nothing but http(s) may
+ * come before the address: no colon is allowed ahead of the domain, so `javascript:alert(1).x` is
+ * refused rather than stored for a page to render as an `href`. And a link typed without a scheme
+ * - "instagram.com/beamcraft" - is stored with `https://` in front, so it opens as the address it
+ * names instead of as a path on whichever page shows it.
+ */
+const LINK = /^(https?:\/\/)?[^\s/?#:]+\.[^\s]*$/i;
+const LINK_MESSAGE = "Enter a valid link, starting with https://.";
+const withScheme = (link) => (/^https?:\/\//i.test(link) ? link : `https://${link}`);
+const optionalLink = () => z.preprocess(
+  blankToNull,
+  z.string().max(500).regex(LINK, LINK_MESSAGE).transform(withScheme).nullable(),
+);
+
+/**
+ * The branch's social media links - its Instagram accounts, a LinkedIn page, a YouTube channel - added
+ * from the Social Media Links section's "+ Add social media link", each with the label the studio
+ * gave it. There are no fixed social media fields: every one is a link the studio added and named.
+ *
+ * A JSON list of `{ label, url }`, in the studio's order, like the UPI IDs: values the branch owns,
+ * never looked up by. The link is held to the same rule as every other link here; a field added and
+ * left empty is refused rather than saved as a label with nothing behind it, and two links may not
+ * share a label. At most `MAX_CUSTOM_SOCIAL_LINKS`. NULL, or nothing sent, is no extra links.
+ */
+const MAX_CUSTOM_SOCIAL_LINKS = 10;
+const customSocialLinkList = z.preprocess(
+  (value) => (value === null || value === undefined ? [] : value),
+  z.array(z.object({
+    label: z.string().trim().min(1, "Name this link.").max(50, "Keep the label under 50 characters."),
+    url: z.string().trim().min(1, "Enter the link, or remove this field.").max(500).regex(LINK, LINK_MESSAGE).transform(withScheme),
+  }).strict())
+    .max(MAX_CUSTOM_SOCIAL_LINKS, `A branch may hold at most ${MAX_CUSTOM_SOCIAL_LINKS} extra social media links.`)
+    .superRefine((links, context) => {
+      const seen = new Set();
+      links.forEach((link, index) => {
+        const key = link.label.toLowerCase();
+        if (seen.has(key)) context.addIssue({ code: "custom", path: [index, "label"], message: "Two links cannot share a label." });
+        seen.add(key);
+      });
+    }),
+);
+
+/**
  * An optional identifier: trimmed, folded to upper case, then matched.
  *
  * Upper case first, so a PAN typed in lower case is accepted rather than refused for a difference
@@ -57,6 +103,100 @@ const IFSC = /^[A-Z]{4}0[A-Z0-9]{6}$/;
 const GSTIN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/;
 // An Indian bank account number: digits only, nine to eighteen of them.
 const ACCOUNT_NUMBER = /^\d{9,18}$/;
+// A UPI ID: an address of letters, digits, dots, hyphens or underscores, "@", then a handle of
+// letters and digits. The shape every one shares, and no more than that.
+const UPI_ID = /^[A-Za-z0-9._-]+@[A-Za-z0-9]+$/;
+/*
+ * How many a branch may hold. Not a rule the studio asked for - it is a ceiling on what one request
+ * may write, so a list is a list and not a way to fill a column.
+ */
+const MAX_UPI_IDS = 10;
+/*
+ * How many accounts one branch may hold. A ceiling on what one request may write rather than a rule
+ * the studio asked for, exactly like `MAX_UPI_IDS` above it.
+ */
+const MAX_BANK_ACCOUNTS = 10;
+
+/**
+ * One account a branch is paid into: all four fields, every time.
+ *
+ * Nothing here is optional, and that is the rule the four columns on `branch` already enforced - a
+ * branch had to carry a holder, a bank, a number and an IFSC before it could be created, because a
+ * branch nobody can be paid at is a branch nobody can bill from. A row holding three of them is a
+ * payment card a client cannot use, which is worse than no card at all: they would try.
+ *
+ * The number and the IFSC are held to the same patterns as before, and the IFSC is folded to upper
+ * case for the same reason a PAN is - the difference does not exist on the passbook.
+ */
+/*
+ * Trimmed, and **never** null: an empty box is `""` here rather than the null the optional fields
+ * fold to, so what a blank gets told is "this is required" instead of zod's own note about having
+ * been handed the wrong type. The message is the whole purpose of the field being required.
+ */
+const requiredText = (max, message) => z.preprocess(
+  (value) => (value === null || value === undefined ? "" : String(value).trim()),
+  z.string().min(1, message).max(max),
+);
+
+const bankAccountSchema = z.object({
+  accountHolderName: requiredText(150, "Account holder name is required."),
+  bankName: requiredText(120, "Bank name is required."),
+  accountNumber: requiredText(18, "Account number is required.").refine((value) => ACCOUNT_NUMBER.test(value), "Enter a valid account number (9 to 18 digits)."),
+  ifscCode: z.preprocess(
+    (value) => String(value ?? "").trim().toUpperCase(),
+    z.string().min(1, "IFSC is required.").max(11).refine((value) => IFSC.test(value), "Enter a valid 11-character IFSC."),
+  ),
+}).strict();
+
+/**
+ * The branch's accounts, in the studio's own order - which is the order the client's payment page
+ * prints them in, the first being the one the branch leads with.
+ *
+ * At least one, for the reason each row needs all four fields: a branch is a place the studio bills
+ * from. No two rows may name the same account number, which is a thing rather than a spelling -
+ * the same number twice in one list is somebody having pasted a row, not a branch with two
+ * accounts. Across *branches* the same check is the service's, since only it can see the others.
+ */
+const bankAccountList = z.array(bankAccountSchema)
+  .min(1, "Add at least one bank account.")
+  .max(MAX_BANK_ACCOUNTS, `A branch may hold at most ${MAX_BANK_ACCOUNTS} bank accounts.`)
+  .superRefine((rows, context) => {
+    const seen = new Map();
+    rows.forEach((row, index) => {
+      const first = seen.get(row.accountNumber);
+      if (first === undefined) seen.set(row.accountNumber, index);
+      else context.addIssue({ code: z.ZodIssueCode.custom, path: [index, "accountNumber"], message: `Account ${first + 1} already uses this number.` });
+    });
+  });
+
+/**
+ * A branch's UPI IDs, as a list: trimmed, blanks dropped, the first spelling of any repeat kept.
+ *
+ * Blanks are dropped rather than refused because the form always carries one empty box and adds
+ * another each time somebody presses Add - a row left unfilled is not a mistake to report, it is a
+ * row nobody used. A repeat is dropped for the same reason and because storing a handle twice would
+ * print it twice on the client's copy; the form says so under the box before it gets here, so
+ * nobody is silently corrected. Compared without case, since `A@ybl` and `a@ybl` are one handle.
+ *
+ * Anything left has to be a UPI ID. A single string is read as a list of one, so a caller that has
+ * only ever sent one is still understood.
+ */
+const upiIdList = z.preprocess(
+  (value) => {
+    if (value === null || value === undefined) return [];
+    const seen = new Set();
+    return (Array.isArray(value) ? value : [value])
+      .map(blankToNull)
+      .filter((entry) => {
+        if (entry === null) return false;
+        const key = entry.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  },
+  z.array(z.string().max(100).regex(UPI_ID, "Enter a valid UPI ID, for example name@upi.")).max(MAX_UPI_IDS, `A branch may hold at most ${MAX_UPI_IDS} UPI IDs.`),
+);
 
 /**
  * The branch code, exactly as the studio writes it.
@@ -102,12 +242,25 @@ const branchFields = {
     blankToNull,
     z.string().max(255).regex(/^(https?:\/\/)?[^\s/?#]+\.[^\s]*$/i, "Enter a valid web address, for example beamcraft.in.").nullable(),
   ),
+  // External URLs beside the web address: where the branch is on a map, and where it is reviewed.
+  locationUrl: optionalLink(),
+  googleReviewUrl: optionalLink(),
+  // Social Media Links: the labelled links the studio adds, held to the same rule.
+  customSocialLinks: customSocialLinkList,
   gstNumber: optionalPattern(GSTIN, 15, "Enter a valid 15-character GSTIN."),
   panNumber: optionalPattern(PAN, 10, "Enter a valid 10-character PAN."),
-  bankAccountName: optionalText(150),
-  bankName: optionalText(120),
-  bankAccountNumber: optionalPattern(ACCOUNT_NUMBER, 18, "Enter a valid account number (9 to 18 digits)."),
-  bankIfsc: optionalPattern(IFSC, 11, "Enter a valid 11-character IFSC."),
+  /*
+   * The accounts the branch is paid into - a list since 20261007090000, four columns on the branch
+   * before it, which could hold exactly one. See `bankAccountList`.
+   */
+  /*
+   * `.optional()` so the object itself parses when the list is absent, and the branch is then
+   * refused by `REQUIRED` below with "Bank account is required." - the same machinery, and the same
+   * wording, as every other field a branch must carry. Required *here* instead, the object parse
+   * failed on the missing list and `superRefine` never ran, so a bare request was told about its
+   * accounts and about nothing else it was missing.
+   */
+  bankAccounts: bankAccountList.optional(),
   /*
    * The picture of the QR a client scans to pay this branch.
    *
@@ -121,6 +274,21 @@ const branchFields = {
    * is a MEDIUMTEXT: on a machine without object storage the picture itself is what gets stored.
    */
   qrCodeUrl: z.preprocess(blankToNull, z.string().max(10_000_000).nullable()),
+  /*
+   * The UPI IDs a client may pay this branch through - what the QR beside them encodes, as text.
+   *
+   * A list, in the order the studio typed it, because a branch is commonly paid into more than one
+   * handle. Optional and empty by default: `[]` is a branch that takes no UPI payment, which is
+   * why nothing here is nullable - a list says "none" by being empty, and there is no second way
+   * to say it.
+   *
+   * Each entry is trimmed and stored exactly as typed: a UPI handle is the provider's spelling and
+   * folding its case would store an address the studio did not write. Checked only against the
+   * shape every UPI ID shares - an address, one "@", a handle - so "name@okaxis", "9876543210@upi"
+   * and "business@paytm" all pass and a sentence typed into the wrong box does not. Nothing
+   * provider-specific: a handle this file has not heard of is still a valid one.
+   */
+  upiIds: upiIdList,
   isHeadOffice: z.boolean(),
   isActive: z.boolean(),
 };
@@ -148,15 +316,16 @@ const REQUIRED = [
   "code", "name",
   "addressLine1", "city", "state", "postalCode",
   "phone",
-  "bankAccountName", "bankName", "bankAccountNumber", "bankIfsc",
+  // And where money is paid to it, which is now a list of its own - `bankAccounts`, required by
+  // its own schema rather than by this list, since "missing" for a list means empty rather than null.
+  "bankAccounts",
 ];
 
 /** What each one is called when it is the thing that is missing. */
 const LABELS = {
   code: "Branch code", name: "Branch name", addressLine1: "Address Line 1", city: "City", state: "State",
   postalCode: "Postal code", phone: "Phone",
-  bankAccountName: "Account holder name", bankName: "Bank name", bankAccountNumber: "Account number",
-  bankIfsc: "IFSC",
+  bankAccounts: "Bank account",
 };
 
 /** A field that must be there, reported against the field itself so the form can point at it. */
@@ -204,4 +373,4 @@ const updateBranchSchema = z.object(branchFields).partial().strict().superRefine
   for (const field of REQUIRED) if (field in value && value[field] === null) requireField(context, field);
 });
 
-module.exports = { createBranchSchema, updateBranchSchema, REQUIRED, PAN, IFSC, GSTIN, ACCOUNT_NUMBER };
+module.exports = { createBranchSchema, updateBranchSchema, REQUIRED, PAN, IFSC, GSTIN, ACCOUNT_NUMBER, UPI_ID, MAX_UPI_IDS, MAX_BANK_ACCOUNTS, MAX_CUSTOM_SOCIAL_LINKS };

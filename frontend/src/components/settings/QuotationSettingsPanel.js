@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Button from "@/components/shared/Button";
 import Dropdown from "@/components/shared/Dropdown";
+import HelpTip from "@/components/shared/HelpTip";
 import ImageUploadField from "@/components/shared/ImageUploadField";
 import InfrastructureImageGrid from "@/components/shared/InfrastructureImageGrid";
 import Loader from "@/components/shared/Loader";
@@ -11,6 +12,7 @@ import SortableList from "@/components/shared/SortableList";
 import TextAreaField from "@/components/shared/TextAreaField";
 import TextField from "@/components/shared/TextField";
 import ToggleSwitch from "@/components/shared/ToggleSwitch";
+import useFormErrors from "@/components/shared/useFormErrors";
 import useUnsavedGuard from "@/components/shared/useUnsavedGuard";
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
@@ -78,37 +80,37 @@ const BRAND_TABS = [
  */
 const PDF_FIELD_GROUPS = [
   ["The head of the page", [
-    ["tagline", "Tagline under the name", "text"],
-    ["motto", "Motto (the pill under the tagline)", "text"],
+    ["tagline", "Tagline under the name", "text", "The short line printed under the brand name on the cover."],
+    ["motto", "Motto (the pill under the tagline)", "text", "One line printed in a rounded pill under the tagline."],
     ["websiteUrl", "Website", "text", "Left blank, the quotation's branch website prints - Organization → Branches."],
-    ["coverQuote", "Quote under the cover photograph", "area"],
-    ["proposalLabel", "Proposal card label", "text"],
+    ["coverQuote", "Quote under the cover photograph", "area", "Printed in italics just below the opening photograph."],
+    ["proposalLabel", "Proposal card label", "text", "The small words above the client's name on the proposal card."],
   ]],
   ["The events", [
     ["eventSectionLabel", "Event section label", "text", "The small gold line over the event cards - \"Ceremonial Itinerary\" for a wedding, \"Production scope\" for a corporate job."],
     ["eventSectionTitle", "Event section title", "text", "The heading over the event cards - \"Event Coverage & Deliverables Details\" or \"Project Itinerary\"."],
     ["eventLabel", "Event card label", "text", "\"Event\" prints as EVENT 01, EVENT 02 …; a corporate brand may prefer \"Project\"."],
-    ["mainEventBadge", "Main event badge", "text"],
-    ["servicesTitle", "Services heading", "text"],
-    ["deliverablesTitle", "Deliverables heading", "text"],
+    ["mainEventBadge", "Main event badge", "text", "Marks the event card the quotation flags as its main event."],
+    ["servicesTitle", "Services heading", "text", "The heading over each event card's list of services."],
+    ["deliverablesTitle", "Deliverables heading", "text", "The heading over each event card's list of deliverables."],
     ["deliverableFootnote", "Storage note", "text", "The bar under the events. Left blank, no bar prints."],
   ]],
   ["The money", [
-    ["pricingLabel", "Pricing card label", "text"],
-    ["validityText", "Validity line", "text"],
+    ["pricingLabel", "Pricing card label", "text", "Left blank, the heading set on General → Pricing & Total prints."],
+    ["validityText", "Validity line", "text", "Left blank, the line set on General → Pricing & Total prints. {months} and {validUntil} are filled in there too."],
   ]],
   ["The close of the proposal", [
-    ["closingQuote", "Closing quote", "area"],
-    ["closingThanks", "Closing thanks", "area"],
-    ["termsTitle", "Terms heading", "text"],
+    ["closingQuote", "Closing quote", "area", "Printed in italics near the end, before the terms link."],
+    ["closingThanks", "Closing thanks", "area", "The thank-you paragraph printed under the closing quote."],
+    ["termsTitle", "Terms heading", "text", "The words on the link that opens this brand's terms."],
   ]],
   ["The Thank You page", [
-    ["thankYouQuote", "Thank You quote", "area"],
-    ["thankYouTitle", "Thank You (script)", "text"],
-    ["thankYouSubtitle", "Thank You subtitle", "text"],
-    ["footerNote", "Footer paragraph", "area"],
+    ["thankYouQuote", "Thank You quote", "area", "Printed in italics above the large Thank You on the last page."],
+    ["thankYouTitle", "Thank You (script)", "text", "The large handwritten-style words across the last page."],
+    ["thankYouSubtitle", "Thank You subtitle", "text", "The smaller line printed under the large Thank You."],
+    ["footerNote", "Footer paragraph", "area", "Printed at the foot of the last page; {brand} prints the brand name."],
     ["contactPhone", "Footer phone", "text", "Left blank, the quotation's branch phone prints."],
-    ["socialHandle", "Social handle", "text"],
+    ["socialHandle", "Social handle", "text", "Printed beside the website on the last page, e.g. @yourstudio."],
     ["copyrightText", "Copyright line", "text", "Left blank: Copyright © <year> <brand name>. All rights reserved."],
   ]],
 ];
@@ -125,32 +127,46 @@ const PDF_PICTURES = [
  * hint]` shape; `{brand}` prints as the brand's name on each brand's copy.
  */
 const GENERAL_FIELD_GROUPS = [
+  ["Pricing & Total", [
+    ["pricingLabel", "Pricing card heading", "text", "A brand's own heading, on its PDF Content tab, still prints for that brand."],
+    ["gstText", "GST line", "text", "{gst} prints the quotation's own GST rate - set by its pricing, not here. Printed only where the quotation carries a rate."],
+    ["paymentLabel", "Payment link label", "text", "The link to the branch's payment details, shown only where the branch has some."],
+    ["validityMonths", "Valid for (months)", "months", "Whole months, 1 to 60."],
+    ["validityText", "Validity line", "area", "{months} prints the months above; {validUntil} the quotation's own date that many months on - \"14 Jan 2027\". A brand's own validity line, on its PDF Content tab, still prints for that brand."],
+  ]],
   ["Additional Notes", [
-    ["notesTitle", "Additional notes heading", "text"],
+    ["notesTitle", "Additional notes heading", "text", "The heading over the notes card on every brand's quotation."],
     ["notesDefault", "Standard note", "area", "Printed under the heading when the quotation itself carries no note. Left blank, a quotation without a note prints no card."],
   ]],
   ["Officially Trademarked Brand", [
-    ["trademarkBadge", "Trademark badge", "text"],
-    ["trademarkTitle", "Trademark heading", "text"],
-    ["trademarkBody", "Trademark paragraph", "area"],
-    ["trademarkNote", "Trademark footnote (italic)", "area"],
+    ["trademarkBadge", "Trademark badge", "text", "The small gold badge at the top of the trademark card."],
+    ["trademarkTitle", "Trademark heading", "text", "The heading of the trademark card on every brand's quotation."],
+    ["trademarkBody", "Trademark paragraph", "area", "The paragraph inside the trademark card; left blank, none prints."],
+    ["trademarkNote", "Trademark footnote (italic)", "area", "A small italic line under the trademark card; left blank, none prints."],
   ]],
   ["Journey & Legacy", [
-    ["journeyTitle", "Journey heading", "text"],
-    ["journeySubtitle", "Journey subheading", "text"],
-    ["journeyIntro", "Journey introduction (italic)", "text"],
+    ["journeyTitle", "Journey heading", "text", "The heading over the Journey & Legacy timeline."],
+    ["journeySubtitle", "Journey subheading", "text", "The spaced-out line printed under the Journey heading."],
+    ["journeyIntro", "Journey introduction (italic)", "text", "One italic sentence introducing the timeline below it."],
     ["locationsTitle", "Locations heading", "text", "The chips under it are the active branches from Organization → Branches."],
   ]],
   ["Our Infrastructure", [
-    ["infrastructureTitle", "Infrastructure heading", "text"],
-    ["infrastructureSubtitle", "Infrastructure subheading", "text"],
-    ["infrastructureTagline", "Infrastructure tagline", "text"],
+    ["infrastructureTitle", "Infrastructure heading", "text", "The heading over the branch photograph collages."],
+    ["infrastructureSubtitle", "Infrastructure subheading", "text", "The spaced-out line printed under the Infrastructure heading."],
+    ["infrastructureTagline", "Infrastructure tagline", "text", "The closing line printed under the branch photographs."],
   ]],
 ];
 const GENERAL_FIELDS = GENERAL_FIELD_GROUPS.flatMap(([, fields]) => fields);
 
-/** The four sections of the client's copy the studio can switch off, and what each is called. */
+/**
+ * The sections of the client's copy the studio can switch off, and what each is called - the four
+ * shared cards, and the Pricing & Total card with the three lines inside it.
+ */
 const SECTION_SWITCHES = [
+  ["pricing", "Pricing & Total"],
+  ["gst", "GST line"],
+  ["payment", "Payment link"],
+  ["validity", "Validity line"],
   ["notes", "Additional Notes"],
   ["trademark", "Officially Trademarked Brand"],
   ["journey", "Journey & Legacy"],
@@ -210,9 +226,6 @@ export default function QuotationBrandSettingsPanel({ code, canWrite = false, on
   const shared = { code, name, config, canWrite, onNotice, onError, patch, reload: load };
 
   return <div className="space-y-5">
-    <p className="text-xs text-slate-500 sm:text-sm">
-      The terms and the client-facing PDF of a <span className="font-medium text-slate-700">{name}</span> quotation. Changes apply to quotations raised from now on; every version already sent keeps the terms, pictures and words it was raised with.
-    </p>
     <Tabs tabs={BRAND_TABS} value={tab} onChange={(next) => guardTabChange(() => setTab(next))} ariaLabel={`${name} quotation settings`} className="border-b border-slate-200" />
     {tab === "terms" && <TermsTab {...shared} />}
     {tab === "pdf" && <PdfContentTab {...shared} unsavedRef={unsavedEditsRef} />}
@@ -310,12 +323,12 @@ function TermsTab({ code, name, config, canWrite, onNotice, onError, patch }) {
   }
 
   return <div className="space-y-4">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <p className="max-w-2xl text-xs text-slate-500 sm:text-sm">
-        {terms.length
-          ? `The Terms & Conditions printed on a ${name} quotation, in this order. Each can be edited, reordered, hidden or removed.`
-          : `${name} has no terms of its own, so its quotations print the studio's standard terms shown below. Edit or remove one to make them this brand's own, or add a term of your own.`}
-      </p>
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      {/* With no terms of its own the line stays on screen: it says the list below is the studio's,
+          not this brand's, which is what the user has to act on. */}
+      {terms.length
+        ? sectionTitle("Terms & Conditions", `The Terms & Conditions printed on a ${name} quotation, in this order. Each can be edited, reordered, hidden or removed.`)
+        : <p className="max-w-2xl text-xs text-slate-500 sm:text-sm">{`${name} has no terms of its own, so its quotations print the studio's standard terms shown below. Edit or remove one to make them this brand's own, or add a term of your own.`}</p>}
       {canWrite && <div className="flex flex-wrap gap-2">
         {terms.length === 0 && standard.length > 0 && <Button type="button" disabled={adopting} onClick={() => void adoptStandardTerms()}>{adopting ? "Copying..." : "Edit the standard terms"}</Button>}
         <Button type="button" variant="primary" onClick={() => setEditing({})}>Add term</Button>
@@ -377,23 +390,28 @@ function TermsTab({ code, name, config, canWrite, onNotice, onError, patch }) {
 function TermDialog({ title, initial, onClose, onSave }) {
   const [values, setValues] = useState(initial);
   const [saving, setSaving] = useState(false);
-  const complete = values.title.trim() && values.body.trim();
+  const fields = useFormErrors();
+  const set = (name, value) => { fields.clear(name); setValues((current) => ({ ...current, [name]: value })); };
 
   // A plain dialog, not a form - see `MasterDialog` for why.
   async function submit() {
-    if (!complete || saving) return;
+    if (saving) return;
+    if (!fields.check({
+      title: values.title.trim() ? "" : "Enter the term's title.",
+      body: values.body.trim() ? "" : "Write the clause.",
+    })) return;
     setSaving(true);
     try { await onSave(values); } finally { setSaving(false); }
   }
 
   return <Dialog title={title} size="md" layer="dialogOverPanel" busy={saving} onClose={onClose} footer={<>
     <Button type="button" onClick={onClose} disabled={saving}>Cancel</Button>
-    <Button type="button" variant="primary" className="ml-auto" disabled={saving || !complete} onClick={() => void submit()}>{saving ? "Saving..." : "Save"}</Button>
+    <Button type="button" variant="primary" disabled={saving} onClick={() => void submit()}>{saving ? "Saving..." : "Save"}</Button>
   </>}>
     <div className="space-y-4">
-      <TextField label="Title" required value={values.title} maxLength={191} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submit(); } }} onChange={(event) => setValues((current) => ({ ...current, title: event.target.value }))} />
-      <TextAreaField label="Clause" required rows={5} maxLength={4000} value={values.body} onChange={(event) => setValues((current) => ({ ...current, body: event.target.value }))} />
-      <ToggleSwitch ariaLabel="Printed on new quotations" checked={values.isActive} label={values.isActive ? "Printed on new quotations" : "Not printed"} onCheckedChange={(checked) => setValues((current) => ({ ...current, isActive: checked }))} />
+      <TextField label="Title" required helperText="The short heading this clause prints under in the terms." value={values.title} maxLength={191} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submit(); } }} onChange={(event) => set("title", event.target.value)} error={fields.errors.title} />
+      <TextAreaField label="Clause" required helperText="The full wording of the clause, exactly as the client should read it." rows={5} maxLength={4000} value={values.body} onChange={(event) => set("body", event.target.value)} error={fields.errors.body} />
+      <ToggleSwitch ariaLabel="Printed on new quotations" helperText="Off keeps the clause here but leaves it off new quotations." checked={values.isActive} label={values.isActive ? "Printed on new quotations" : "Not printed"} onCheckedChange={(checked) => setValues((current) => ({ ...current, isActive: checked }))} />
     </div>
   </Dialog>;
 }
@@ -422,19 +440,24 @@ const COLLAGE_PICTURE = { maxBytes: 450 * 1024, maxDimension: 1600 };
 const emptyGroup = () => ({ title: "", subtitle: "", photos: [] });
 const emptyJourneyRow = () => ({ year: "", title: "", detail: "", place: "" });
 
-const sectionTitle = (text) => <h3 className="text-sm font-semibold text-slate-800">{text}</h3>;
-const note = (text) => <p className="text-xs text-slate-500 sm:text-sm">{text}</p>;
+/** A section's heading, with what the section does in its ⓘ rather than a paragraph under it. */
+const sectionTitle = (text, tip) => <h3 className="flex items-center text-sm font-semibold text-slate-800">{text}<HelpTip text={tip} /></h3>;
 
 /** A group of wording fields, each showing the standard wording it replaces. */
-function WordingFields({ groups, values, defaults, canWrite, onChange }) {
+/** Blank (the template's three), or a whole number of months from 1 to 60. */
+const validMonths = (value) => {
+  const text = String(value ?? "").trim();
+  return !text || (/^\d{1,2}$/.test(text) && Number(text) >= 1 && Number(text) <= 60);
+};
+
+function WordingFields({ groups, values, defaults, canWrite, onChange, errors = {} }) {
   return groups.map(([groupTitle, fields]) => <div key={groupTitle}>
     <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">{groupTitle}</p>
     <div className="grid gap-x-6 gap-y-4 md:grid-cols-2">
       {fields.map(([key, label, type, hint]) => {
-        const shared = { label, value: values[key] || "", placeholder: defaults[key] || "Nothing printed", readOnly: !canWrite, onChange: (event) => onChange(key, event.target.value) };
+        const shared = { label, helperText: hint, value: values[key] || "", placeholder: defaults[key] || "Nothing printed", readOnly: !canWrite, error: errors[key], onChange: (event) => onChange(key, event.target.value) };
         return <div key={key} className={type === "area" ? "md:col-span-2" : ""}>
-          {type === "area" ? <TextAreaField rows={3} maxLength={2000} {...shared} /> : <TextField maxLength={191} {...shared} />}
-          {hint && <p className="mt-1 text-[11px] text-slate-500">{hint}</p>}
+          {type === "area" ? <TextAreaField rows={3} maxLength={2000} {...shared} /> : type === "months" ? <TextField type="number" inputMode="numeric" min="1" max="60" step="1" {...shared} /> : <TextField maxLength={191} {...shared} />}
         </div>;
       })}
     </div>
@@ -545,6 +568,9 @@ function CollagePhotos({ photos, setPhotos, canWrite, saving }) {
         key={selected === null ? "add" : `replace-${selected}`}
         label={selected === null ? `Add photograph ${photos.length + 1}` : `Replace photograph ${selected + 1}`}
         value={selected === null ? "" : photos[selected] || ""}
+        helperText={selected !== null
+          ? "Choosing a picture replaces this one where it stands, and clearing the field removes it. Click the frame again to stop replacing it."
+          : "Added at the end. Drag a photograph, or use the chevrons on it, to arrange the collage; click one to replace it."}
         disabled={saving}
         maxBytes={PICTURE_PICK_LIMIT}
         compress={COLLAGE_PICTURE}
@@ -559,13 +585,13 @@ function CollagePhotos({ photos, setPhotos, canWrite, saving }) {
           if (value) setPhotos((current) => (current.length >= MAX_INFRA_PHOTOS ? current : [...current, value]));
         }}
       />}
-      <p className="mt-1.5 text-[11px] text-slate-500">
-        {selected !== null
-          ? "Choosing a picture replaces this one where it stands, and clearing the field removes it. Click the frame again to stop replacing it."
-          : full
-            ? `This branch holds the most a collage can print - ${MAX_INFRA_PHOTOS} photographs. Remove one before adding another.`
-            : `Added at the end. Drag a photograph, or use the chevrons on it, to arrange the collage; click one to replace it. ${MAX_INFRA_PHOTOS - photos.length} of ${MAX_INFRA_PHOTOS} left.`}
-      </p>
+      {/* Kept on screen: the count left, and the limit once it is reached, are the state of the
+          collage rather than an explanation of it. */}
+      {selected === null && <p className="mt-1.5 text-[11px] text-slate-500">
+        {full
+          ? `This branch holds the most a collage can print - ${MAX_INFRA_PHOTOS} photographs. Remove one before adding another.`
+          : `${MAX_INFRA_PHOTOS - photos.length} of ${MAX_INFRA_PHOTOS} left.`}
+      </p>}
     </div>}
   </div>;
 }
@@ -595,16 +621,15 @@ function InfrastructureEditor({ groups, setGroups, canWrite, saving, branchOptio
     return current && !options.includes(current) ? [...options, current] : options;
   };
   return <div className="space-y-3">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      {note(`One collage per branch: the branch's name, its state, and one to ${MAX_INFRA_PHOTOS} photographs. The composition follows the count - eight print the reference mosaic, fewer print a composition of their own rather than the mosaic with gaps in it - and every branch stands the same height on the page.`)}
-      {canWrite && <Button type="button" onClick={() => setGroups((current) => [...current, emptyGroup()])}>Add branch</Button>}
-    </div>
+    {canWrite && <div className="flex justify-end">
+      <Button type="button" onClick={() => setGroups((current) => [...current, emptyGroup()])}>Add branch</Button>
+    </div>}
     {groups.length === 0 && <p className="rounded-md border border-dashed border-slate-300 bg-slate-50 px-4 py-4 text-xs text-slate-500 sm:text-sm">No collages yet - the section is left off the quotation.</p>}
     <div className="space-y-4">
       {groups.map((group, index) => <div key={index} className="rounded-lg border border-slate-200 p-4">
         <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
-          <Dropdown label="Branch" placeholder="Select a branch" value={group.title} readOnly={!canWrite} options={optionsFor(index)} onChange={(value) => setGroups((current) => current.map((row, position) => position === index ? { ...row, title: value, subtitle: stateFor(value) } : row))} />
-          <TextField label="State" placeholder="Tamil Nadu" value={group.subtitle} readOnly={!canWrite} onChange={(event) => setGroups((current) => current.map((row, position) => position === index ? { ...row, subtitle: event.target.value } : row))} />
+          <Dropdown label="Branch" placeholder="Select a branch" helperText="The branch whose photos this collage shows." value={group.title} readOnly={!canWrite} options={optionsFor(index)} onChange={(value) => setGroups((current) => current.map((row, position) => position === index ? { ...row, title: value, subtitle: stateFor(value) } : row))} />
+          <TextField label="State" placeholder="Tamil Nadu" helperText="Printed after the branch name; filled from the branch you pick." value={group.subtitle} readOnly={!canWrite} onChange={(event) => setGroups((current) => current.map((row, position) => position === index ? { ...row, subtitle: event.target.value } : row))} />
           {canWrite && <div className="flex gap-2">
             <Button type="button" size="sm" ariaLabel="Move collage up" disabled={index === 0} onClick={() => setGroups((current) => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next; })}>↑</Button>
             <Button type="button" size="sm" ariaLabel="Move collage down" disabled={index === groups.length - 1} onClick={() => setGroups((current) => { const next = [...current]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; return next; })}>↓</Button>
@@ -620,23 +645,20 @@ function InfrastructureEditor({ groups, setGroups, canWrite, saving, branchOptio
 /** The Journey & Legacy milestones: a year and title, a line of detail, and the place on the right. */
 function JourneyEditor({ rows, setRows, canWrite, journeyDefaults }) {
   return <div className="space-y-3">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      {note("One row per milestone: the year and title, a line of detail, and the place printed on the right. With no rows of your own, the standard timeline below prints.")}
-      {canWrite && <div className="flex gap-2">
-        {rows.length === 0 && journeyDefaults.length > 0 && <Button type="button" onClick={() => setRows(() => journeyDefaults.map((row) => ({ ...row })))}>Start from the standard timeline</Button>}
-        <Button type="button" onClick={() => setRows((current) => [...current, emptyJourneyRow()])}>Add milestone</Button>
-      </div>}
-    </div>
+    {canWrite && <div className="flex flex-wrap justify-end gap-2">
+      {rows.length === 0 && journeyDefaults.length > 0 && <Button type="button" onClick={() => setRows(() => journeyDefaults.map((row) => ({ ...row })))}>Start from the standard timeline</Button>}
+      <Button type="button" onClick={() => setRows((current) => [...current, emptyJourneyRow()])}>Add milestone</Button>
+    </div>}
     {rows.length === 0
       ? <ol className="space-y-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4">
         {journeyDefaults.map((row, index) => <li key={index} className="text-xs text-slate-600 sm:text-sm"><span className="font-semibold text-slate-700">{row.year} • {row.title}</span> <span className="text-slate-500">— {row.detail}</span> <span className="italic text-slate-500">({row.place})</span></li>)}
       </ol>
       : <div className="space-y-3">
         {rows.map((row, index) => <div key={index} className="grid gap-3 rounded-lg border border-slate-200 p-3 md:grid-cols-[5rem_minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)_auto] md:items-end">
-          <TextField label="Year" value={row.year} readOnly={!canWrite} onChange={(event) => setRows((current) => current.map((item, position) => position === index ? { ...item, year: event.target.value } : item))} />
-          <TextField label="Title" value={row.title} readOnly={!canWrite} onChange={(event) => setRows((current) => current.map((item, position) => position === index ? { ...item, title: event.target.value } : item))} />
-          <TextField label="Detail" value={row.detail} readOnly={!canWrite} onChange={(event) => setRows((current) => current.map((item, position) => position === index ? { ...item, detail: event.target.value } : item))} />
-          <TextField label="Place (right side)" value={row.place} readOnly={!canWrite} onChange={(event) => setRows((current) => current.map((item, position) => position === index ? { ...item, place: event.target.value } : item))} />
+          <TextField label="Year" helperText="The year this milestone happened." value={row.year} readOnly={!canWrite} onChange={(event) => setRows((current) => current.map((item, position) => position === index ? { ...item, year: event.target.value } : item))} />
+          <TextField label="Title" helperText="A few words naming the milestone." value={row.title} readOnly={!canWrite} onChange={(event) => setRows((current) => current.map((item, position) => position === index ? { ...item, title: event.target.value } : item))} />
+          <TextField label="Detail" helperText="One short line on what changed that year." value={row.detail} readOnly={!canWrite} onChange={(event) => setRows((current) => current.map((item, position) => position === index ? { ...item, detail: event.target.value } : item))} />
+          <TextField label="Place (right side)" helperText="The place printed opposite, on the right." value={row.place} readOnly={!canWrite} onChange={(event) => setRows((current) => current.map((item, position) => position === index ? { ...item, place: event.target.value } : item))} />
           {canWrite && <div className="flex gap-2">
             <Button type="button" size="sm" ariaLabel="Move milestone up" disabled={index === 0} onClick={() => setRows((current) => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next; })}>↑</Button>
             <Button type="button" size="sm" ariaLabel="Move milestone down" disabled={index === rows.length - 1} onClick={() => setRows((current) => { const next = [...current]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; return next; })}>↓</Button>
@@ -733,10 +755,6 @@ function CoverSetsEditor({ sets, shoots, religions = [], canWrite, saving, onCha
         ariaLabel="Category these picture sets are for"
         className="border-b border-slate-200"
       />
-      <p className="mt-2 text-[11px] text-slate-500">
-        Each category has its own sets. A quotation prints the sets of the category it was raised for; a
-        category with none falls back to the sets that name no category.
-      </p>
     </div>}
 
     {rows.map((row, index) => <div key={index} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
@@ -777,9 +795,8 @@ function CoverSetsEditor({ sets, shoots, religions = [], canWrite, saving, onCha
       <div className="mt-4 grid gap-5 md:grid-cols-2">
         {PDF_PICTURES.map(([key, label, hint]) => <div key={key}>
           {canWrite
-            ? <ImageUploadField label={label} value={row[key] || ""} disabled={saving} maxBytes={PICTURE_PICK_LIMIT} compress={LARGE_PICTURE} onChange={(value) => update(index, { [key]: value || "" })} />
-            : <p className="text-sm text-slate-600">{label}: {row[key] ? "uploaded" : "none"}</p>}
-          <p className="mt-1 text-[11px] text-slate-500">{hint}</p>
+            ? <ImageUploadField label={label} helperText={hint} value={row[key] || ""} disabled={saving} maxBytes={PICTURE_PICK_LIMIT} compress={LARGE_PICTURE} onChange={(value) => update(index, { [key]: value || "" })} />
+            : <p className="flex items-center text-sm text-slate-600">{label}: {row[key] ? "uploaded" : "none"}<HelpTip text={hint} /></p>}
         </div>)}
       </div>
 
@@ -861,8 +878,7 @@ function PdfImageTab({ code, name, config, canWrite, onNotice, onError, patch, u
 
   return <div className="space-y-8">
     <section className="space-y-3">
-      {sectionTitle("Pictures")}
-      {note("The photographs this brand's quotation opens and closes on, chosen by what the quotation is for. Pick the shoots a pair belongs to, then add another set for the shoots that deserve different pictures. A quotation prints the set its main event falls in; anything the sets do not name prints the first set. Each picture is optional, and a section with none prints without one rather than with a gap. The India map and the infrastructure collages are shared by every brand and live under General.")}
+      {sectionTitle("Pictures", `The photographs this brand's quotation opens and closes on, chosen by what the quotation is for. Pick the shoots a pair belongs to, then add another set for the shoots that deserve different pictures. A quotation prints the set its main event falls in; anything the sets do not name prints the first set.${religions.length > 0 ? " Each category has its own sets; a category with none falls back to the sets that name no category." : ""} Each picture is optional. The India map and the infrastructure collages are shared by every brand and live under General.`)}
       <CoverSetsEditor
         sets={values.coverSets}
         shoots={config.shoots || []}
@@ -938,8 +954,7 @@ function PdfContentTab({ code, name, config, canWrite, onNotice, onError, patch,
       * decision rather than a hidden button.
       */}
     <section className="space-y-3">
-      {sectionTitle("Client download")}
-      {note("Whether the client reading this brand's quotation link may save it as a PDF. No hides the download control and refuses the file itself, so a link already sent stops handing out a copy the moment this is switched off. Your own download from Sales → Quotations is unaffected. The cover and Thank You photographs are on the PDF Image tab.")}
+      {sectionTitle("Client download", "Whether the client reading this brand's quotation link may save it as a PDF. No hides the download control and refuses the file itself, so a link already sent stops handing out a copy the moment this is switched off. Your own download from Sales → Quotations is unaffected. The cover and Thank You photographs are on the PDF Image tab.")}
       {/* Full width on a phone, a field's width from `sm` up: a Yes/No does not need the row. */}
       <div className="w-full sm:max-w-xs">
         <Dropdown
@@ -955,10 +970,7 @@ function PdfContentTab({ code, name, config, canWrite, onNotice, onError, patch,
     </section>
 
     <section className="space-y-5">
-      <div>
-        {sectionTitle("Wording on the client's copy")}
-        {note("Only the words change; the layout, the type and the order of the sections are the same for every brand. Each field shows the standard wording it replaces, and a blank field prints that standard wording. {brand} inside a sentence prints as the brand's name. The Additional Notes, trademark, Journey & Legacy and Our Infrastructure wording is shared by every brand and lives under General.")}
-      </div>
+      {sectionTitle("Wording on the client's copy", "Only the words change; the layout, the type and the order of the sections are the same for every brand. Each field shows the standard wording it replaces, and a blank field prints that standard wording. {brand} inside a sentence prints as the brand's name. The Additional Notes, trademark, Journey & Legacy and Our Infrastructure wording is shared by every brand and lives under General.")}
       <WordingFields groups={PDF_FIELD_GROUPS} values={values} defaults={defaults} canWrite={canWrite} onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))} />
     </section>
 
@@ -984,6 +996,7 @@ export function QuotationGeneralSettingsPanel({ canWrite = false, onNotice, onEr
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [values, setValues] = useState(null);
+  const fields = useFormErrors();
 
   const initialFor = useCallback((general) => ({
     // Only an explicit false is off, so a settings row nobody has saved prints all four.
@@ -1034,6 +1047,8 @@ export function QuotationGeneralSettingsPanel({ canWrite = false, onNotice, onEr
   const setAssets = (update) => setValues((current) => ({ ...current, assets: { ...current.assets, ...update(current.assets) } }));
 
   async function save() {
+    // The one wording field that is a figure, refused outside 1-60, said under itself.
+    if (!fields.check({ validityMonths: validMonths(values.validityMonths) ? "" : "Enter a whole number of months from 1 to 60." })) return;
     setSaving(true);
     try {
       const response = await updateQuotationGeneralSettings({
@@ -1056,7 +1071,7 @@ export function QuotationGeneralSettingsPanel({ canWrite = false, onNotice, onEr
   }
 
   const group = (title) => GENERAL_FIELD_GROUPS.filter(([groupTitle]) => groupTitle === title);
-  const onWord = (key, value) => setValues((current) => ({ ...current, [key]: value }));
+  const onWord = (key, value) => { fields.clear(key); setValues((current) => ({ ...current, [key]: value })); };
   const setSection = (key, on) => setValues((current) => ({ ...current, sections: { ...current.sections, [key]: on } }));
 
   /*
@@ -1064,10 +1079,22 @@ export function QuotationGeneralSettingsPanel({ canWrite = false, onNotice, onEr
    * fields below stay as they are - so wording and pictures can be prepared, or kept, without
    * printing. Quotations already raised keep the switches they were raised under.
    */
-  const sectionHeader = (key, title) => {
+  // One line inside the Pricing & Total card: printed or not, beside its name.
+  const partSwitch = (key, title) => {
+    const on = values.sections[key] !== false;
+    return <div key={key} className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2">
+      <span className="text-sm text-slate-700">{title}</span>
+      {canWrite
+        ? <ToggleSwitch ariaLabel={`Print the ${title} on the quotation`} checked={on} onCheckedChange={(checked) => setSection(key, checked)} />
+        : <span className="text-xs text-slate-500">{on ? "Printed" : "Not printed"}</span>}
+    </div>;
+  };
+
+  // Each heading's ⓘ says what its switch does, plus anything the section needs explaining.
+  const sectionHeader = (key, title, more = "") => {
     const on = values.sections[key] !== false;
     return <div className="flex flex-wrap items-center justify-between gap-3">
-      {sectionTitle(title)}
+      {sectionTitle(title, more || "Off, this whole card is left off the client's copy and what is typed below it is kept.")}
       {canWrite
         ? <ToggleSwitch ariaLabel={`Print ${title} on the quotation`} checked={on} onCheckedChange={(checked) => setSection(key, checked)} />
         : <span className="text-xs text-slate-500">{on ? "Printed" : "Not printed"}</span>}
@@ -1075,9 +1102,15 @@ export function QuotationGeneralSettingsPanel({ canWrite = false, onNotice, onEr
   };
 
   return <div className="space-y-8">
-    <p className="text-xs text-slate-500 sm:text-sm">
-      What every brand&apos;s quotation prints the same way: the notes and trademark cards, the Journey &amp; Legacy section and the infrastructure collages. Each has a switch - off, that whole card is left off the client&apos;s copy and what is typed below it is kept. A brand&apos;s own pictures and words are on its own screen. Changes apply to quotations raised from now on.
-    </p>
+    <section className="space-y-4">
+      {sectionHeader("pricing", "Pricing & Total", "The navy card with the quotation's total. Off, the whole card is left off the client's copy; each line in it can be left off on its own. The total and the GST charged never change here. A brand's own pictures and words are on its own screen.")}
+      <div className="grid gap-2 sm:grid-cols-3">
+        {partSwitch("gst", "GST line")}
+        {partSwitch("payment", "Payment link")}
+        {partSwitch("validity", "Validity line")}
+      </div>
+      <WordingFields groups={group("Pricing & Total")} values={values} defaults={defaults} canWrite={canWrite} onChange={onWord} errors={fields.errors} />
+    </section>
 
     <section className="space-y-4">
       {sectionHeader("notes", "Additional Notes")}
@@ -1090,26 +1123,25 @@ export function QuotationGeneralSettingsPanel({ canWrite = false, onNotice, onEr
     </section>
 
     <section className="space-y-4">
-      {sectionHeader("journey", "Journey & Legacy")}
+      {sectionHeader("journey", "Journey & Legacy", "Off, this whole card is left off the client's copy and what is typed below it is kept. One row per milestone: the year and title, a line of detail, and the place printed on the right. With no rows of your own, the standard timeline below prints.")}
       <WordingFields groups={group("Journey & Legacy")} values={values} defaults={defaults} canWrite={canWrite} onChange={onWord} />
       <div>
         {canWrite
-          ? <ImageUploadField label="India map" value={values.assets.indiaMapUrl} disabled={saving} maxBytes={PICTURE_PICK_LIMIT} compress={MAP_PICTURE} onChange={(value) => setAssets(() => ({ indiaMapUrl: value || "" }))} />
-          : <p className="text-sm text-slate-600">India map: {values.assets.indiaMapUrl ? "uploaded" : "none"}</p>}
-        <p className="mt-1 text-[11px] text-slate-500">Drawn faintly behind the timeline.</p>
+          ? <ImageUploadField label="India map" helperText="Drawn faintly behind the timeline." value={values.assets.indiaMapUrl} disabled={saving} maxBytes={PICTURE_PICK_LIMIT} compress={MAP_PICTURE} onChange={(value) => setAssets(() => ({ indiaMapUrl: value || "" }))} />
+          : <p className="flex items-center text-sm text-slate-600">India map: {values.assets.indiaMapUrl ? "uploaded" : "none"}<HelpTip text="Drawn faintly behind the timeline." /></p>}
       </div>
       <JourneyEditor rows={values.assets.journey} setRows={(update) => setAssets((assets) => ({ journey: update(assets.journey) }))} canWrite={canWrite} journeyDefaults={config.journeyDefaults || []} />
     </section>
 
     <section className="space-y-4">
-      {sectionHeader("infrastructure", "Our Infrastructure")}
+      {sectionHeader("infrastructure", "Our Infrastructure", `Off, this whole card is left off the client's copy and what is typed below it is kept. One collage per branch: the branch's name, its state, and one to ${MAX_INFRA_PHOTOS} photographs. The composition follows the count - eight print the reference mosaic, fewer print a composition of their own - and every branch stands the same height on the page.`)}
       <WordingFields groups={group("Our Infrastructure")} values={values} defaults={defaults} canWrite={canWrite} onChange={onWord} />
       <InfrastructureEditor groups={values.assets.infrastructure} setGroups={(update) => setAssets((assets) => ({ infrastructure: update(assets.infrastructure) }))} canWrite={canWrite} saving={saving} branchOptions={config.branches || []} />
     </section>
 
     {canWrite && <div className="flex flex-wrap items-center gap-3 border-t border-slate-200 pt-4">
       <Button type="button" variant="primary" disabled={!dirty || saving} onClick={() => void save()}>{saving ? "Saving..." : "Save shared content"}</Button>
-      {dirty && <Button type="button" disabled={saving} onClick={() => setValues(initial)}>Discard changes</Button>}
+      {dirty && <Button type="button" disabled={saving} onClick={() => { setValues(initial); fields.clearAll(); }}>Discard changes</Button>}
     </div>}
   </div>;
 }

@@ -1,5 +1,7 @@
 import { verticalCode } from "@/components/sales/whatsappGroupNameUtils";
 import { formatSessionTiming } from "./AddShootDialog";
+// The one name every screen gives a deliverable line - its brand and size where it was sold as a variant.
+import { deliverableRowLabel } from "@/lib/deliverableBrands.mjs";
 
 /**
  * A project's shoots carry their own nested plans, so the info panel summarises them rather than
@@ -20,7 +22,7 @@ function formatDate(value) {
 /** Every shoot on the project: when it was raised, where it is, and how long it runs. */
 function shootList(shoots) {
   if (!shoots.length) return "No shoots added.";
-  return `${shoots.length} shoot${shoots.length === 1 ? "" : "s"} added\n${shoots.map((shoot) => `Shoot ID: ${shoot.shootId || "—"} — ${formatDate(shoot.dateCreated)} — ${shoot.shoot} — ${shoot.shootPlace} — ${shoot.district}, ${shoot.state} — ${formatSessionTiming(shoot)}`).join("\n")}`;
+  return `${shoots.length} shoot${shoots.length === 1 ? "" : "s"} added\n${shoots.map((shoot) => `Shoot ID: ${shoot.shootId || "—"} — ${formatDate(shoot.dateCreated)} — ${shoot.shoot} — ${[shoot.shootPlace, shoot.district, shoot.state].filter(Boolean).join(", ") || "Place not set"} — ${formatSessionTiming(shoot)}`).join("\n")}`;
 }
 
 /** The deliverables planned per shoot, counted first so the panel reads as a summary. */
@@ -28,7 +30,7 @@ function shootDeliverables(shoots) {
   const shootsWithPlans = shoots.filter((shoot) => Array.isArray(shoot.deliverables) && shoot.deliverables.length);
   if (!shootsWithPlans.length) return "No production plan added.";
   const totalDeliverables = shootsWithPlans.reduce((total, shoot) => total + shoot.deliverables.length, 0);
-  return `${shootsWithPlans.length} shoot${shootsWithPlans.length === 1 ? "" : "s"} with production plan · ${totalDeliverables} deliverable${totalDeliverables === 1 ? "" : "s"}\n${shootsWithPlans.map((shoot) => `${shoot.shoot} · Shoot ID: ${shoot.shootId || "—"}: ${shoot.deliverables.map((item) => `${item.deliverableName} x${item.quantity}`).join(", ")}`).join("\n")}`;
+  return `${shootsWithPlans.length} shoot${shootsWithPlans.length === 1 ? "" : "s"} with production plan · ${totalDeliverables} deliverable${totalDeliverables === 1 ? "" : "s"}\n${shootsWithPlans.map((shoot) => `${shoot.shoot} · Shoot ID: ${shoot.shootId || "—"}: ${shoot.deliverables.map((item) => `${deliverableRowLabel(item)} x${item.quantity}`).join(", ")}`).join("\n")}`;
 }
 
 /** The services allocated per shoot, in the same summary-then-detail shape as the deliverables. */

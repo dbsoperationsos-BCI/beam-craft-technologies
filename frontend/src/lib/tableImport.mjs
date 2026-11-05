@@ -67,6 +67,17 @@ function csvField(value) {
  * One row rather than a row of examples. An example row is a row somebody forgets to delete, and it
  * imports as a record named "e.g. Ravi Studio".
  */
+/**
+ * Every heading a column answers to: the one the template prints, and the ones it used to.
+ *
+ * A column renamed is a column the studio's saved spreadsheets no longer carry, and headings are
+ * matched by name - so without this a rename turns last month's file into one with an unknown column
+ * and a field silently left empty. The server's own importer reads the same `aliases`
+ * (`services/tableImport.js`), because an inspection that accepts a file the server then ignores is
+ * worse than refusing it.
+ */
+const headingsOf = (column) => [column.label, ...(column.aliases || [])].map(normalizeHeader).filter(Boolean);
+
 export function templateCsv(columns = []) {
   return `${columns.map((column) => csvField(column.label ?? column)).join(",")}\n`;
 }
@@ -83,11 +94,12 @@ export function inspectImportFile(columns = [], rows = []) {
 
   const [headers, ...body] = rows;
   const present = new Set(headers.map(normalizeHeader).filter(Boolean));
-  const claimed = new Set(columns.map((column) => normalizeHeader(column.label)));
+  const claimed = new Set(columns.flatMap(headingsOf));
 
-  const missing = columns.filter((column) => column.required && !present.has(normalizeHeader(column.label))).map((column) => column.label);
+  const carried = (column) => headingsOf(column).some((heading) => present.has(heading));
+  const missing = columns.filter((column) => column.required && !carried(column)).map((column) => column.label);
   const unknown = headers.filter((heading) => normalizeHeader(heading) && !claimed.has(normalizeHeader(heading)));
-  const matched = columns.filter((column) => present.has(normalizeHeader(column.label))).map((column) => column.label);
+  const matched = columns.filter(carried).map((column) => column.label);
 
   if (missing.length) {
     return {
@@ -128,6 +140,11 @@ export function mergeImportResults(left, right) {
     // Capped the way the server caps its own: a file whose every row fails would otherwise build a
     // list as long as itself in the browser's memory.
     errors: [...(left?.errors || []), ...(right?.errors || [])].slice(0, 50),
+    // The projects an import with Replace deleted, or would delete - one entry per project, though a
+    // project's shoots can arrive in different batches.
+    replaced: [...(left?.replaced || []), ...(right?.replaced || [])].filter((item, index, all) => all.findIndex((other) => other.eventId === item.eventId) === index),
+    // The deleted projects and shoots an import with Restore brought back, once each.
+    restored: [...(left?.restored || []), ...(right?.restored || [])].filter((item, index, all) => all.findIndex((other) => other.kind === item.kind && other.id === item.id) === index),
   };
 }
 

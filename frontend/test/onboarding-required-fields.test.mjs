@@ -57,6 +57,8 @@ const OPTIONAL_BY_DESIGN = {
   experiences: "a fresher has no previous employment to list",
   // Plenty of married people have no children, which is why the list opens empty and says so.
   children: "a married candidate may have no children",
+  // The studio issues these after somebody joins, not before - most candidates have none yet.
+  companyGivenNumber: "most candidates do not have a company-issued number yet",
 };
 
 test("every field on the form is required, apart from the three that cannot be", () => {

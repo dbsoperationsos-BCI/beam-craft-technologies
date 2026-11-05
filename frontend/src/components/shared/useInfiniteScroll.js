@@ -21,7 +21,7 @@ import { useEffect, useRef } from "react";
  * only ever asked for once more items have actually arrived, which also stops a page that comes
  * back empty from being requested for ever.
  */
-function scrollParentOf(node) {
+export function scrollParentOf(node) {
   for (let parent = node?.parentElement; parent; parent = parent.parentElement) {
     const overflowY = window.getComputedStyle(parent).overflowY;
     if (overflowY === "auto" || overflowY === "scroll") return parent;

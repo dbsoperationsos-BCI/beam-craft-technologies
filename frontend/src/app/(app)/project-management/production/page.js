@@ -1,5 +1,5 @@
-import ProjectWorkflowModulePage from "@/components/project-management/ProjectWorkflowModulePage";
+import ProductionPage from "@/components/project-management/production/ProductionPage";
 
-export default function ProductionPage() {
-  return <ProjectWorkflowModulePage moduleKey="production" />;
+export default function ProductionRoutePage() {
+  return <ProductionPage />;
 }

@@ -3,6 +3,7 @@
 import ArrowForward from "@mui/icons-material/ArrowForward";
 import LockOutlined from "@mui/icons-material/LockOutlined";
 import { useEffect, useRef, useState } from "react";
+import useFormErrors from "@/components/shared/useFormErrors";
 
 /*
  * How many boxes the gate draws.
@@ -26,12 +27,14 @@ export default function ClientPinGate({ meta, onVerify }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const inputs = useRef([]);
-  const complete = digits.every(Boolean);
+  // An incomplete PIN is said under the boxes; a wrong one keeps the server's message below them.
+  const fields = useFormErrors();
 
   useEffect(() => { inputs.current[0]?.focus(); }, []);
 
   async function submit(pin = digits.join("")) {
-    if (busy || pin.length !== pinLength) return;
+    if (busy) return;
+    if (!fields.check({ pin: pin.length === pinLength ? "" : pin ? `Enter all ${pinLength} digits.` : "Enter the PIN." })) return;
     setBusy(true); setError("");
     try { await onVerify(pin); }
     catch (verifyError) {
@@ -42,6 +45,7 @@ export default function ClientPinGate({ meta, onVerify }) {
   }
 
   function update(index, raw) {
+    fields.clear("pin");
     const entered = raw.replace(/\D/g, "").slice(0, pinLength - index).split("");
     if (!entered.length) { setDigits((current) => current.map((digit, position) => position === index ? "" : digit)); return; }
     const next = digits.map((digit, position) => position >= index && position < index + entered.length ? entered[position - index] : digit);
@@ -54,6 +58,7 @@ export default function ClientPinGate({ meta, onVerify }) {
     const pin = (event.clipboardData.getData("text") || "").replace(/\D/g, "").slice(0, pinLength);
     if (!pin) return;
     event.preventDefault();
+    fields.clear("pin");
     setDigits(pin.padEnd(pinLength, "").split(""));
     inputs.current[Math.min(pin.length, pinLength - 1)]?.focus();
     if (pin.length === pinLength) submit(pin);
@@ -73,10 +78,11 @@ export default function ClientPinGate({ meta, onVerify }) {
         <p className="mt-5 text-sm leading-6 text-slate-600">Please enter your 6-digit PIN to access your album proof.</p>
         <fieldset className="mt-7 flex justify-center gap-2 sm:gap-2.5" onPaste={handlePaste}>
           <legend className="sr-only">Six digit album proof PIN</legend>
-          {digits.map((digit, index) => <input key={index} ref={(element) => { inputs.current[index] = element; }} value={digit} onChange={(event) => update(index, event.target.value)} onKeyDown={(event) => { if (event.key === "Backspace" && !digits[index] && index > 0) inputs.current[index - 1]?.focus(); }} aria-label={`PIN digit ${index + 1}`} autoComplete={index === 0 ? "one-time-code" : "off"} inputMode="numeric" pattern="[0-9]*" maxLength={1} disabled={busy} className="h-14 w-10 rounded-xl border border-slate-200 bg-slate-50 text-center text-xl font-semibold text-slate-900 outline-none transition focus:border-blue-600 focus:bg-white focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60 sm:h-16 sm:w-[52px]" />)}
+          {digits.map((digit, index) => <input key={index} ref={(element) => { inputs.current[index] = element; }} value={digit} onChange={(event) => update(index, event.target.value)} onKeyDown={(event) => { if (event.key === "Backspace" && !digits[index] && index > 0) inputs.current[index - 1]?.focus(); }} aria-label={`PIN digit ${index + 1}`} autoComplete={index === 0 ? "one-time-code" : "off"} inputMode="numeric" pattern="[0-9]*" maxLength={1} disabled={busy} aria-invalid={fields.errors.pin && !digit ? true : undefined} className={`h-14 w-10 rounded-xl border ${fields.errors.pin && !digit ? "border-red-400" : "border-slate-200"} bg-slate-50 text-center text-xl font-semibold text-slate-900 outline-none transition focus:border-blue-600 focus:bg-white focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60 sm:h-16 sm:w-[52px]`} />)}
         </fieldset>
+        {fields.errors.pin && <p role="alert" className="mt-2 text-xs font-normal text-red-600">{fields.errors.pin}</p>}
         {error && <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
-        <button type="submit" disabled={!complete || busy} className="mt-7 inline-flex h-14 w-full items-center justify-center gap-2 rounded-xl bg-[#7fa4fa] px-5 text-sm font-semibold text-white transition hover:bg-[#638df0] focus:outline-none focus:ring-4 focus:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-50">{busy ? "Checking PIN..." : <>Enter Album Proof <ArrowForward style={{ fontSize: 17 }} aria-hidden="true" /></>}</button>
+        <button type="submit" disabled={busy} className="mt-7 inline-flex h-14 w-full items-center justify-center gap-2 rounded-xl bg-[#7fa4fa] px-5 text-sm font-semibold text-white transition hover:bg-[#638df0] focus:outline-none focus:ring-4 focus:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-50">{busy ? "Checking PIN..." : <>Enter Album Proof <ArrowForward style={{ fontSize: 17 }} aria-hidden="true" /></>}</button>
         <p className="mt-4 text-xs text-slate-500">Your review link is private and protected by this PIN.</p>
       </form>
 

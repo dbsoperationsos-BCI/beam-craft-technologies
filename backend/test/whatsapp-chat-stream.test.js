@@ -226,7 +226,6 @@ test("every write to a thread announces itself, from the repository", () => {
     ["setPinned", "pin"],
     ["markDeleted", "delete"],
     ["markRevoked", "revoke"],
-    ["setIncomingMedia", "media"],
     ["updateBody", "edit"],
   ]) {
     const start = repository.indexOf(`async function ${fn}(`);
@@ -250,26 +249,21 @@ test("a redelivered message announces nothing", () => {
   assert.match(save, /if \(stored\) announce\(message\.enquiryId, "message"\);/);
 });
 
-test("an incoming file is fetched after the message is stored, never before", () => {
+test("a file in the thread is never downloaded or stored by the CRM", () => {
   /*
-   * The slowest thing on this screen, and the reason a photo sometimes never arrived at all.
-   *
-   * `storeIncomingMedia` downloads the file from WhatsApp and uploads it to the studio's bucket.
-   * Awaited before the row was written, that put both of those in front of the message appearing -
-   * seconds on a good connection, and on a bad one the message was lost with the download.
+   * The studio's phone holds every file a client sends, so the CRM keeps no copy - not in the
+   * bucket, not on disk. The message is stored with WhatsApp's own reference to the file, and View
+   * and Download fetch it from WhatsApp when asked (mediaOnDemand.js).
    */
   const manager = read("sessionManager.js");
+  assert.doesNotMatch(manager, /putMedia|storeIncomingMedia|mediaStore/);
   const record = manager.slice(manager.indexOf("async function recordSocketMessage("), manager.indexOf("async function openSocket("));
-  const save = record.indexOf("const stored = await saveMessage(");
-  const media = record.indexOf("storeIncomingMedia(session, message, mediaType, enquiryId)");
-  assert.notEqual(save, -1);
-  assert.notEqual(media, -1);
-  assert.ok(save < media, "the message is being written after its file is fetched again");
-  // And the fetch is not awaited, so one slow download cannot hold up the messages behind it in
-  // the same delivery.
-  assert.match(record, /if \(stored && !history && mediaType\) \{\s*\n\s*void \(async \(\) => \{/);
-  // Replayed history still never downloads: a year of conversation is a year of files.
-  assert.match(record, /!history && mediaType/);
+  assert.doesNotMatch(record, /downloadMediaMessage/);
+  // What View and Download need is kept: the message as WhatsApp delivered it.
+  assert.match(record, /rawMessage: mediaType \? message : undefined/);
+  const send = manager.slice(manager.indexOf("async function sendMediaToLead("), manager.indexOf("function mediaStreamFor("));
+  assert.doesNotMatch(send, /mediaPath/);
+  assert.match(send, /rawMessage: sent/);
 });
 
 test("the panel reads one thread at a time, and slows its polling when the line is open", () => {

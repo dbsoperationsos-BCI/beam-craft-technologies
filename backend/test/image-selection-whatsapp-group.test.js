@@ -35,7 +35,7 @@ function setup({ projects = [project()], groups = [GROUP_A, GROUP_B, GROUP_C], n
     sendMessageToGroup: async (input) => { if (sendError) throw sendError; state.sent.push(input); return { waMessageId: `wa-${state.sent.length}`, chatJid: input.jid }; },
   };
   const publishShare = { prepareForNotification: async () => prepared || { gallery: { publishVersion: 2, pin: "1234", clientUrl: "https://gallery.example/ABC" }, client: { clientName: "Arun", whatsappRecipientMasked: "+919•••••3210" }, deliverables: [], whatsappPreview: { message: "Client Name : Arun\nLink : https://gallery.example/ABC\nPIN : 1234" }, _recipient: "+919876543210" } };
-  return { state, service: createGroupLinkService(repo, { sessions, publishShare, now: () => new Date("2026-09-19T10:05:00Z") }) };
+  return { state, service: createGroupLinkService(repo, { sessions, publishShare, activity: { track: (_context, send) => send() }, now: () => new Date("2026-09-19T10:05:00Z") }) };
 }
 
 test("two names are the same name whatever the case and spacing", () => {

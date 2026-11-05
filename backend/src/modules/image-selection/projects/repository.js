@@ -1,13 +1,17 @@
 const { nextIdentifier } = require("../../../services/identifiers");
 const prisma = require("../../../config/db");
+const { everyChunk } = require("../../../services/wordChunks");
+const { reachedConfigWhere } = require("../shoot-visibility");
 
 const projectSelect = {
   id: true, projectCode: true, projectName: true, sourceType: true, salesProjectId: true, clientName: true, clientMainNumber: true, status: true,
-  photoSelectionTab: true, photoCullingTab: true, signatureAlbumTab: true,
+  photoSelectionTab: true, photoCullingTab: true, signatureAlbumTab: true, aiEditingTab: true,
   selectionValidUntil: true, selectionValidityEnabled: true, allowPhotoSelection: true, publicSlug: true, archivedAt: true,
   lastOpenedAt: true, totalPhotoSize: true, publishVersion: true, createdByUserId: true,
   whatsappGroupJid: true, whatsappGroupSubject: true, whatsappGroupLinkedAt: true,
   deletedAt: true, createdAt: true, updatedAt: true,
+  // Disabled from Expand: the sidebar marks it and the workspace holds back uploading and sending.
+  disabledAt: true,
 };
 
 // A linked project may only be listed while the Sales Manager project behind it is still live.
@@ -15,6 +19,13 @@ const projectSelect = {
 // under it, and the only thing that hides the rows already in the database from before that
 // cascade existed. A manual project has no parent to outlive, so it is always in scope.
 const LIVE_PARENT = { OR: [{ salesProjectId: null }, { salesProject: { is: { deletedAt: null } } }] };
+// The identifier run each module's own projects are numbered from (`services/identifiers.js`).
+const MODULE_PROJECT_SCHEMES = { culling: "VC_AI_CULLING", editing: "VC_AI_EDITING", album: "VC_SIGNATURE_ALBUM" };
+// Photo Selection's own projects: every project from Project Management (its allocation decides),
+// and a manual one only when it was created in Photo Selection - null is a project from before the
+// choice existed, which always was. A workspace made only for AI Culling, AI Editing or Signature
+// Album is theirs, not a Photo Selection project.
+const IN_PHOTO_SELECTION = { OR: [{ salesProjectId: { not: null } }, { photoSelectionTab: null }, { photoSelectionTab: true }] };
 
 function createRepository(client = prisma) {
   return {
@@ -22,8 +33,9 @@ function createRepository(client = prisma) {
     // Album Proofing files its own projects in this same table under `albumProofing: true`; every
     // query here pins the flag false, so this repository only ever sees the Projects page's rows
     // and Album Proofing's module is the only thing that can touch its own.
+    // Word Chunk Search: every word typed, any order.
     listProjects: ({ search, archived, orderBy }) => client.imageSelectionProject.findMany({
-      where: { deletedAt: null, albumProofing: false, ...LIVE_PARENT, archivedAt: archived ? { not: null } : null, ...(search ? { projectName: { contains: search } } : {}) },
+      where: { deletedAt: null, albumProofing: false, ...LIVE_PARENT, archivedAt: archived ? { not: null } : null, AND: [IN_PHOTO_SELECTION, ...(search ? everyChunk(search, (chunk) => ({ projectName: { contains: chunk } })) : [])] },
       select: projectSelect, orderBy,
     }),
     findProject: (id, { archived } = {}) => client.imageSelectionProject.findFirst({
@@ -49,12 +61,28 @@ function createRepository(client = prisma) {
       const rows = await client.$queryRaw`SELECT id FROM sales_project WHERE id = ${id} AND deleted_at IS NULL FOR UPDATE`;
       return rows.length ? { id: rows[0].id } : null;
     },
-    // Sales projects the production team has moved into an in-progress state that have no Image
-    // Selection presence yet — the rows the list sync turns into linked projects automatically.
-    listSalesProjectsAwaitingImageProject: (statuses) => client.salesProject.findMany({
-      where: { deletedAt: null, projectStatus: { in: statuses }, whatsappGroupName: { not: "" }, imageSelectionProjects: { none: { albumProofing: false } } },
+    // Sales projects that have been started - any status but the ones named here - and have no
+    // Image Selection presence yet: the rows the list sync turns into linked projects automatically.
+    listSalesProjectsAwaitingImageProject: (notStartedStatuses) => client.salesProject.findMany({
+      where: { deletedAt: null, projectStatus: { notIn: notStartedStatuses }, whatsappGroupName: { not: "" }, imageSelectionProjects: { none: { albumProofing: false } } },
       select: { id: true, whatsappGroupName: true },
     }),
+    /*
+     * Linked Projects-page rows whose name is no longer their Sales project's WhatsApp group name -
+     * the group was renamed in Project Management after the row was made. Compared byte for byte
+     * (`BINARY`): a rename that only changes case is still a rename, and the two tables need not share
+     * a collation for the comparison to be asked. Album Proofing's rows are its own module's.
+     */
+    listRenamedLinkedProjects: () => client.$queryRaw`
+      SELECT p.id AS id, TRIM(sp.whatsapp_group_name) AS name
+      FROM image_selection_project p JOIN sales_project sp ON sp.id = p.sales_project_id
+      WHERE p.deleted_at IS NULL AND p.album_proofing = 0 AND sp.deleted_at IS NULL
+        AND TRIM(sp.whatsapp_group_name) <> '' AND BINARY p.project_name <> BINARY TRIM(sp.whatsapp_group_name)`,
+    // The live shoots of these Sales projects and their dates, in one read for the whole list, so
+    // the sidebar can hold back a linked project none of whose shoots has reached its day yet.
+    listShootDatesForSalesProjects: (salesProjectIds) => salesProjectIds.length
+      ? client.projectShoot.findMany({ where: { projectId: { in: salesProjectIds }, deletedAt: null }, select: { projectId: true, dateCreated: true } })
+      : Promise.resolve([]),
     // What the sidebar dot needs to say where each project stands, batched for the whole list:
     // which projects are published, their live selection items, and which items the client has
     // picked at least one photo for.
@@ -62,7 +90,7 @@ function createRepository(client = prisma) {
       if (!projectIds.length) return { publishedProjectIds: [], configs: [], selectedConfigIds: [] };
       const [publications, configs] = await Promise.all([
         client.imageSelectionGalleryPublication.findMany({ where: { projectId: { in: projectIds }, status: "PUBLISHED" }, select: { projectId: true } }),
-        client.imageSelectionDeliverableConfig.findMany({ where: { imageSelectionProjectId: { in: projectIds }, inactiveAt: null, enabled: true }, select: { id: true, imageSelectionProjectId: true, selectionSubmittedAt: true } }),
+        client.imageSelectionDeliverableConfig.findMany({ where: { imageSelectionProjectId: { in: projectIds }, inactiveAt: null, enabled: true, ...reachedConfigWhere() }, select: { id: true, imageSelectionProjectId: true, selectionSubmittedAt: true } }),
       ]);
       const selections = configs.length
         ? await client.imageSelectionPhotoSelection.findMany({ where: { imageSelectionDeliverableConfigId: { in: configs.map((config) => config.id) } }, distinct: ["imageSelectionDeliverableConfigId"], select: { imageSelectionDeliverableConfigId: true } })
@@ -87,6 +115,16 @@ function createRepository(client = prisma) {
       select: projectSelect,
     }),
     updateProject: (id, data) => client.imageSelectionProject.update({ where: { id }, data, select: projectSelect }),
+    // How many AI Culling, AI Editing and Signature Album projects stand on this workspace.
+    countModuleProjects: (imageSelectionProjectId) => client.visualCurationModuleProject.count({ where: { imageSelectionProjectId } }),
+    /*
+     * An AI Culling, AI Editing or Signature Album project on a photo workspace, handed its own
+     * DBS-VCAC / VCAE / VCSA number on the way in, as a workspace is handed its DBS-VCIS one.
+     */
+    createModuleProject: async ({ module, ...data }) => client.visualCurationModuleProject.create({
+      data: { ...data, module, projectCode: await nextIdentifier(MODULE_PROJECT_SCHEMES[module], {}, client) },
+      select: { id: true, module: true, projectCode: true, projectName: true },
+    }),
     listFoldersForDuplicate: (projectId) => client.imageSelectionFolder.findMany({ where: { projectId, deletedAt: null }, select: { id: true, parentId: true, name: true, sortOrder: true, createdByUserId: true }, orderBy: [{ parentId: "asc" }, { sortOrder: "asc" }, { createdAt: "asc" }] }),
     createFolder: (data) => client.imageSelectionFolder.create({ data, select: { id: true } }),
     listDeliverableConfigs: (imageSelectionProjectId) => client.imageSelectionDeliverableConfig.findMany({ where: { imageSelectionProjectId }, select: { projectPostProductionAllocationId: true, projectShootDeliverableId: true, enabled: true, selectionLimitOverride: true, displayOrder: true, inactiveAt: true } }),
@@ -94,7 +132,12 @@ function createRepository(client = prisma) {
     // What each photo left on this server and in the bucket, read before the rows go so the files
     // can be removed after. `originalPath` is only read to tell a browser upload (whose master is
     // ours to delete) from a registered one (whose master is the studio's and is never touched).
-    listUploadFilesForPurge: (projectId) => client.imageSelectionUpload.findMany({ where: { projectId }, select: { storageName: true, originalPath: true, thumbnailName: true, processedName: true, thumbnailKey: true, previewKey: true } }),
+    // Every file the purge frees: the project's photos, and the photos uploaded to its Signature
+    // Album alone - those live only in R2, under the album's prefix, and would otherwise be left there.
+    listUploadFilesForPurge: async (projectId) => [
+      ...(await client.imageSelectionUpload.findMany({ where: { projectId }, select: { storageName: true, originalPath: true, thumbnailName: true, processedName: true, thumbnailKey: true, previewKey: true, edit: { select: { outputKey: true, outputPreviewKey: true, outputThumbnailKey: true, referenceKey: true } } } })),
+      ...(await client.signatureAlbumPhoto.findMany({ where: { album: { projectId } }, select: { thumbnailKey: true, previewKey: true } })),
+    ],
     // What deleting the whole project would take with it, counted before anything is destroyed.
     // A client-submitted selection is a photo selection whose item the client already sent
     // (`selectionSubmittedAt` set) — its presence escalates the delete to a high-impact warning.
@@ -118,6 +161,8 @@ function createRepository(client = prisma) {
       await transaction.imageSelectionFacePerson.deleteMany({ where: { projectId } });
       await transaction.imageSelectionPhotoSelection.deleteMany({ where: { image: { projectId } } });
       await transaction.imageSelectionUpload.deleteMany({ where: { projectId } });
+      // The album's own uploads, whose files the purge has just freed; the items placing them go too.
+      await transaction.signatureAlbumPhoto.deleteMany({ where: { album: { projectId } } });
       await transaction.imageSelectionUploadBatch.deleteMany({ where: { projectId } });
       await transaction.imageSelectionFolder.updateMany({ where: { projectId }, data: { parentId: null } });
       await transaction.imageSelectionFolder.deleteMany({ where: { projectId } });
@@ -136,3 +181,5 @@ const repository = createRepository();
 module.exports = repository;
 module.exports.createRepository = createRepository;
 module.exports.LIVE_PARENT = LIVE_PARENT;
+module.exports.IN_PHOTO_SELECTION = IN_PHOTO_SELECTION;
+module.exports.MODULE_PROJECT_SCHEMES = MODULE_PROJECT_SCHEMES;

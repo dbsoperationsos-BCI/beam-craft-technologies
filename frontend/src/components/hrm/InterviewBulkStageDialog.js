@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Button from "@/components/shared/Button";
 import TextAreaField from "@/components/shared/TextAreaField";
+import useFormErrors from "@/components/shared/useFormErrors";
 import Dialog from "@/components/ui/Dialog";
 import InterviewStatusPills from "@/components/hrm/InterviewStatusPills";
 import { setCandidateStatusBulk } from "@/services/hrm/interview.service";
@@ -47,16 +48,16 @@ export default function InterviewBulkStageDialog({ resolveIds, count = 0, canWri
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-
+  const fields = useFormErrors();
 
   const candidates = `${count} candidate${count === 1 ? "" : "s"}`;
 
   async function submit(event) {
     event.preventDefault();
     if (!canWrite || saving) return;
-    if (!status) { setError("Choose the stage to move them to."); return; }
-    setSaving(true);
     setError("");
+    if (!fields.check({ status: status ? "" : "Choose the stage to move them to." })) return;
+    setSaving(true);
     try {
       /*
        * One call rather than one per candidate. The server moves them one at a time - each note is
@@ -88,19 +89,25 @@ export default function InterviewBulkStageDialog({ resolveIds, count = 0, canWri
       <Button type="button" variant="secondary" onClick={onClose} disabled={saving}>Cancel</Button>
       {/* Red only for the harsh one, exactly as the single decision dialog is: Selected and On Hold
           are answers a studio is pleased to record, and one red button for all three would say they
-          are the same kind of thing. Refused until a stage is chosen, because "move them" with no
-          stage names nothing to move them to. */}
-      <Button type="submit" variant={status === REJECTED_STATUS ? "danger" : "primary"} disabled={saving || !canWrite || !status}>
+          are the same kind of thing. Pressed with no stage chosen, it marks the stage, because
+          "move them" with no stage names nothing to move them to. */}
+      <Button type="submit" variant={status === REJECTED_STATUS ? "danger" : "primary"} disabled={saving || !canWrite}>
         {saving ? "Moving…" : `Move ${candidates}`}
       </Button>
     </>}
   >
-    {error && <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-normal text-red-700 sm:text-sm">{error}</p>}
+    {(error || fields.summary) && <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-normal text-red-700 sm:text-sm">{error || fields.summary}</p>}
     <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Stage</p>
-    <InterviewStatusPills value={status} onChange={(next) => { setStatus(next); setError(""); }} options={BULK_STAGE_STATUSES} />
+    {/* The pills draw no error of their own, so the mark sits under them; `data-invalid` is what
+        `useFormErrors` scrolls to. */}
+    <div data-invalid={fields.errors.status ? "true" : undefined}>
+      <InterviewStatusPills value={status} onChange={(next) => { setStatus(next); setError(""); fields.clear("status"); }} options={BULK_STAGE_STATUSES} />
+      {fields.errors.status && <p role="alert" className="mt-1.5 text-xs font-normal text-red-600">{fields.errors.status}</p>}
+    </div>
     <div className="mt-4">
       <TextAreaField
         label="Remarks"
+        helperText="Saved on every chosen candidate's record with the stage change."
         value={note}
         onChange={(event) => setNote(event.target.value)}
         rows={4}

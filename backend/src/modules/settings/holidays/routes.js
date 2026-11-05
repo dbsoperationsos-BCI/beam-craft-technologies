@@ -1,7 +1,7 @@
 const express = require("express");
 const { protect } = require("../../../middleware/authMiddleware");
 const { requireModule } = require("../../../middleware/permissionMiddleware");
-const { listHolidays, createHoliday, updateHoliday, deleteHoliday } = require("./controller");
+const { listHolidays, listHolidayBranches, createHoliday, updateHoliday, deleteHoliday } = require("./controller");
 
 const router = express.Router();
 router.use(protect);
@@ -21,6 +21,9 @@ router.use(protect);
 router.use(requireModule("SETTINGS", "Holidays"));
 
 router.get("/", listHolidays);
+// The branches this caller may declare a holiday for - the picker's list, by the same reach the
+// writes are judged on. Above `/:id`, which would otherwise read "branches" as a holiday's id.
+router.get("/branches", listHolidayBranches);
 router.post("/", createHoliday);
 router.put("/:id", updateHoliday);
 router.delete("/:id", deleteHoliday);

@@ -18,11 +18,17 @@ async function enqueue(uploadId) {
   return queueInstance.add("compress-image", { uploadId }, { jobId });
 }
 
+// Rows the worker can actually finish after a restart. A photo a workstation registered
+// (`storageRootId` set) has no bytes on this server: it is PROCESSING until the desktop posts
+// its derivatives, and re-queuing it would only fail it. The worker guards the rest per row
+// (`isWorkerReadableSource`), this keeps thousands of such rows off the queue at boot.
+const recoverableWhere = () => ({ status: "PROCESSING", storageRootId: null });
+
 async function recoverPending() {
   let cursor;
   let recovered = 0;
   while (true) {
-    const pending = await prisma.imageSelectionUpload.findMany({ where: { status: "PROCESSING" }, select: { id: true }, orderBy: { id: "asc" }, take: 500, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}) });
+    const pending = await prisma.imageSelectionUpload.findMany({ where: recoverableWhere(), select: { id: true }, orderBy: { id: "asc" }, take: 500, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}) });
     if (!pending.length) break;
     await Promise.all(pending.map((upload) => enqueue(upload.id)));
     recovered += pending.length;
@@ -32,4 +38,4 @@ async function recoverPending() {
   return recovered;
 }
 
-module.exports = { QUEUE_NAME, enqueue, recoverPending, getQueue };
+module.exports = { QUEUE_NAME, enqueue, recoverPending, recoverableWhere, getQueue };

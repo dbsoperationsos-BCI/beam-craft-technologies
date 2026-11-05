@@ -3,6 +3,8 @@
 import { useState } from "react";
 import BrandFallbackLogo, { FALLBACK_LOGO_ALT } from "./BrandFallbackLogo";
 import useStudioBranding from "./useStudioBranding";
+import useDocumentTheme from "./useDocumentTheme";
+import { logoFor, themeWantsDarkMark } from "@/lib/studioBranding.mjs";
 
 /**
  * The one component that shows the studio's mark, wherever the application shows one.
@@ -11,6 +13,19 @@ import useStudioBranding from "./useStudioBranding";
  * selection gallery, a quotation on screen and in the PDF printed from it, and the CRD document:
  *
  *     the Global Logo from Settings, if one is configured → otherwise the bundled mark
+ *
+ * Settings holds a light-mode and a dark-mode Global Logo, and **a surface is given the dark one
+ * only if it asks** - `themed`, below. That is deliberate and it is the whole safety of the pair:
+ * the appearance picker paints the *application* dark (`globals.css` scopes every dark rule to
+ * `.app-shell`, `.app-topbar`, `.crm-page` and the sidebar), while the sign-in page, the public
+ * onboarding and interview forms, the client's selection gallery, the album proofing room, the AI
+ * Feature guest pages and the client's quotation are white whatever the viewer's theme is. Driving
+ * the choice off `data-theme` alone would put a dark mark on every one of those the moment a
+ * *member of staff* with Dark Mode selected opened one - including the quotation that is printed
+ * to PDF for the client. So the top bar asks, and nothing else does.
+ *
+ * Either mark still stands in for the other when only one is uploaded, on every surface: a studio
+ * that has uploaded only a dark mark shows it rather than the bundled one.
  *
  * and the bundled mark is never removed. It is the permanent default branding, so there is no
  * state in which a surface shows a broken image or an empty space where the logo goes: an
@@ -50,6 +65,9 @@ export const LOGO_VARIANTS = {
   // its edges. 160 is what is left beside the menu button and the account controls on a 360px
   // phone, and it is about the width the bundled wordmark wants at this height anyway.
   navbar: { height: 40, maxWidth: 160 },
+  // The same bar on a phone narrower than 400px, where the full-size mark pushed the calendar, the
+  // account and the bell off the right edge.
+  navbarCompact: { height: 30, maxWidth: 104 },
   // Sign-in, above the form: the largest the mark is ever shown. The column is 420px at its widest
   // and 328px on a 360px screen, so 260 fits with room around it.
   login: { height: 96, maxWidth: 260 },
@@ -59,6 +77,11 @@ export const LOGO_VARIANTS = {
   // 56×240 the wordmark all but fills its box, so the gap under the mark is the same whatever the
   // studio has configured.
   onboarding: { height: 56, maxWidth: 240 },
+  // The expired-link card, above its hourglass: a shade under onboarding's, so the mark leads the
+  // card without outweighing the message, and it fits a 360px phone's card with room either side.
+  expiredLink: { height: 48, maxWidth: 210 },
+  // The same card on a phone, below `sm`: the bundled wordmark at about 165px wide.
+  expiredLinkMobile: { height: 38, maxWidth: 170 },
   // The client's selection gallery: its 248px sidebar and folder grid, its mobile bar, and the
   // badge at the foot of the welcome screen.
   clientSelection: { height: 56, maxWidth: 144 },
@@ -75,6 +98,8 @@ export const LOGO_VARIANTS = {
   quotationCover: { height: 120, maxWidth: 400 },
   // A document header that sits in a row beside other things rather than owning the width.
   document: { height: 40, maxWidth: 160 },
+  // The same header on a phone, where the title beside it needs the width more than the mark does.
+  documentCompact: { height: 28, maxWidth: 104 },
   // The CRD form's header band, whose slot is 256px wide.
   crd: { height: 68, maxWidth: 240 },
   // Anything printed: a shade smaller than the screen header, because paper has less room.
@@ -100,14 +125,33 @@ const BASE_CLASS = "block w-auto object-contain object-center";
  *                 the width cap belong to the variant, so one module's mark cannot quietly differ
  *                 from another's.
  */
-export default function AppLogo({ variant = "default", src = "", alt = "", className = "", priority = false }) {
+/**
+ * @param themed  whether this surface actually turns dark with the appearance picker, and so may
+ *                be given the dark-mode Global Logo. Only the app bar passes it - see above.
+ * @param surface "dark" for a surface that is dark whatever the appearance picker says - the
+ *                guest landing page's mark over an event photograph - and so takes the dark-mode
+ *                Global Logo outright, with the same fallbacks `logoFor` gives the app bar.
+ */
+export default function AppLogo({ variant = "default", src = "", alt = "", className = "", priority = false, themed = false, surface = "light" }) {
   const branding = useStudioBranding();
+  // Read unconditionally - a hook cannot be called behind a condition - and used only where the
+  // surface has said it goes dark.
+  const theme = useDocumentTheme();
+  const dark = surface === "dark" || (themed && themeWantsDarkMark(theme));
+  const mark = logoFor(branding, dark);
+  /*
+   * `studio-logo-own-dark` marks an upload made *for* the dark theme, and `globals.css` leaves it
+   * alone. The top bar inverts an uploaded logo on its dark bar, which is the right guess for a
+   * light mark it has borrowed and the wrong thing to do to a mark drawn for that bar.
+   */
+  const ownDark = !src && dark && mark.ownMark;
   return <LogoImage
     variant={variant}
-    src={src || branding?.galleryLogoUrl || ""}
+    src={src || mark.src}
     alt={alt || branding?.studioName || FALLBACK_LOGO_ALT}
-    className={className}
+    className={`${ownDark ? "studio-logo-own-dark " : ""}${className}`}
     priority={priority}
+    darkFallback={surface === "dark"}
   />;
 }
 
@@ -127,7 +171,7 @@ export function DocumentLogo({ variant = "document", src = "", alt = "", classNa
 }
 
 /** The rendering both of the above share; it takes the source as given and decides nothing. */
-function LogoImage({ variant, src, alt, className, priority }) {
+function LogoImage({ variant, src, alt, className, priority, darkFallback = false }) {
   // The last source that failed to load. Compared by value, so a logo saved in Settings while the
   // page is open is tried afresh rather than being written off by the failure before it.
   const [brokenSrc, setBrokenSrc] = useState("");
@@ -156,7 +200,7 @@ function LogoImage({ variant, src, alt, className, priority }) {
 
   // No logo to show, or one that would not load: the bundled mark stands there at the same height
   // instead. Never a gap, never a broken image.
-  if (!source || source === brokenSrc) return <BrandFallbackLogo alt={label} style={style} className={sizing} />;
+  if (!source || source === brokenSrc) return <BrandFallbackLogo alt={label} style={style} className={sizing} dark={darkFallback} />;
 
   /*
    * A plain <img>, not next/image.

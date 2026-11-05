@@ -1,8 +1,10 @@
+const { withUserNames } = require("../../services/userNames");
 const { z } = require("zod");
 const { workingEmployeeStatuses } = require("../../services/employeeOptionLists");
 const { optionNames } = require("../../services/optionLists");
 const { importTableRows, templateHeaders } = require("../../services/tableImport");
 const prisma = require("../../config/db");
+const { everyChunk } = require("../../services/wordChunks");
 const { storeDocuments } = require("../../services/documentStorage");
 const { storeImages, discardUploads } = require("../../services/imageStorage");
 const { projectClientNames, clientNameOf } = require("../../services/projectClientNames");
@@ -56,10 +58,49 @@ const transitions = {
  * Computed per record here rather than in the browser, so the menu can only ever offer what this
  * endpoint would accept.
  */
-function nextStatusesFor(record) {
-  if (record.status === transitStatus) return record.isShootStatusPending ? ["Yet to Receive"] : ["Delivered"];
+function nextStatusesFor(record, shootStatusPending = record.isShootStatusPending) {
+  if (record.status === transitStatus) return shootStatusPending ? ["Yet to Receive"] : ["Delivered"];
   return transitions[record.status] || null;
 }
+
+/**
+ * Whether each of these projects still has a shoot to come, keyed by project id.
+ *
+ * This is what "Shoot Status Pending" means, and it is read from the project's own shoots rather
+ * than ticked by hand: while any shoot is still ahead, the disc is not finished with, so a
+ * delivered one goes back round for that shoot instead of resting at "Delivered".
+ *
+ * Derived on every read, never stored. A stored flag would be wrong the moment Project Management
+ * added a shoot to a project whose footage had already been delivered — the exact case the loop
+ * exists for — and would stay wrong until somebody noticed and re-ticked it.
+ *
+ * "Still to come" is judged from the start of today, so a shoot happening today counts as ahead:
+ * the footage from it has not been handed over yet.
+ */
+async function pendingShootsByProject(projectIds, client = prisma) {
+  const ids = [...new Set(projectIds.filter(Boolean))];
+  if (!ids.length) return new Map();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const upcoming = await client.projectShoot.findMany({
+    where: { projectId: { in: ids }, deletedAt: null, dateCreated: { gte: today } },
+    select: { projectId: true },
+    distinct: ["projectId"],
+  });
+  return new Map(upcoming.map((shoot) => [shoot.projectId, true]));
+}
+
+/**
+ * The same question for one record, which is what the status-change guard needs - and what Pre
+ * Production → Import asks before it writes a disc the old sheet has seen through to Delivered, in
+ * its own transaction (hence `client`).
+ */
+async function shootStatusPendingFor(record, client = prisma) {
+  const projectId = record.projectId || null;
+  if (!projectId) return false;
+  return (await pendingShootsByProject([projectId], client)).get(projectId) === true;
+}
+exports.shootStatusPendingFor = shootStatusPendingFor;
 /**
  * Every status, in the order the flow reads, with the off-to-the-side "not done" sitting next to
  * the step it interrupts. Declared rather than derived from `transitions`, so reordering that map
@@ -74,9 +115,6 @@ const checkbox = z.boolean().optional();
 // from the client. `projectId` is not writable either: it follows the shoot that is chosen.
 const storageInput = z.object({
   shootId: z.preprocess((value) => value === "" ? null : value, z.string().cuid().nullable().optional()),
-  // Set by hand for now. It is meant to follow the project's last shoot date, and once that rule
-  // exists this should stop being something a person edits.
-  isShootStatusPending: checkbox,
   product: optionalText(191),
   type: optionalText(191),
   wid: optionalText(100),
@@ -381,19 +419,25 @@ function withShootContext(row, names) {
 
 /** Attaches the creating user's name so the list can show who added each record. */
 async function decorate(rows) {
-  const list = Array.isArray(rows) ? rows : [rows];
-  const ids = [...new Set(list.map((row) => row.createdBy).filter(Boolean))];
-  const [users, names] = await Promise.all([
-    ids.length ? prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [],
+  // Who created, updated and assigned each record, by name - the user's linked employee (`services/userNames`).
+  const list = await withUserNames(Array.isArray(rows) ? rows : [rows]);
+  const [names, pending] = await Promise.all([
     clientNames(list.map((row) => row.project || row.shoot?.project)),
+    // One query for the whole page rather than one per row.
+    pendingShootsByProject(list.map((row) => row.projectId || row.shoot?.project?.id || row.project?.id)),
   ]);
-  const userNames = new Map(users.map((user) => [user.id, user.name]));
-  const result = list.map((row) => ({
-    ...withShootContext(row, names),
-    addedBy: row.createdBy ? { id: row.createdBy, name: userNames.get(row.createdBy) || null } : null,
-    // Carried per record so the row menu offers exactly the moves this record can make.
-    nextStatuses: nextStatusesFor(row) || [],
-  }));
+  const result = list.map((row) => {
+    // Derived once and used for both, so what the record says and what the menu offers can never
+    // disagree — they are the same answer.
+    const shootStatusPending = pending.get(row.projectId || row.shoot?.project?.id || row.project?.id) === true;
+    return {
+      ...withShootContext(row, names),
+      isShootStatusPending: shootStatusPending,
+      addedBy: row.createdBy ? { id: row.createdBy, name: row.createdByName || null } : null,
+      // Carried per record so the row menu offers exactly the moves this record can make.
+      nextStatuses: nextStatusesFor(row, shootStatusPending) || [],
+    };
+  });
   return Array.isArray(rows) ? result : result[0];
 }
 
@@ -407,12 +451,13 @@ exports.list = handler(async (req) => {
    * the rule on the asset and project lists.
    */
   const access = await readerWhere(req);
-  const where = { isDeleted: false, ...(input.status && { status: input.status }), AND: [access, ...(input.q ? [{ OR: [{ storageId: { contains: input.q } }, { wid: { contains: input.q } }, { hardDiscBrand: { contains: input.q } }, { shoot: { shootId: { contains: input.q } } }] }] : [])] };
+  // Word Chunk Search: every word typed, any order.
+  const where = { isDeleted: false, ...(input.status && { status: input.status }), AND: [access, ...everyChunk(input.q, (chunk) => ({ OR: [{ storageId: { contains: chunk } }, { wid: { contains: chunk } }, { hardDiscBrand: { contains: chunk } }, { shoot: { shootId: { contains: chunk } } }] }))] };
   // The tab counts and the "last updated" note describe every record this person may read, not the
   // filtered page, so they drop the status filter but keep the rule.
   const unfiltered = { isDeleted: false, AND: [access] };
   const [rows, total, grouped, latest] = await Promise.all([
-    prisma.clientStorage.findMany({ where, include: recordInclude, orderBy: { createdAt: "desc" }, skip: (input.page - 1) * input.limit, take: input.limit }),
+    prisma.clientStorage.findMany({ where, include: recordInclude, orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip: (input.page - 1) * input.limit, take: input.limit }),
     prisma.clientStorage.count({ where }),
     prisma.clientStorage.groupBy({ by: ["status"], where: unfiltered, _count: { _all: true } }),
     prisma.clientStorage.findFirst({ where: unfiltered, orderBy: { updatedAt: "desc" }, select: { updatedAt: true } }),
@@ -431,7 +476,9 @@ exports.list = handler(async (req) => {
 exports.shoots = handler(async (req) => {
   const input = listInput.parse(req.query);
   const rows = await prisma.projectShoot.findMany({
-    where: { deletedAt: null, ...(input.q && { OR: [{ shootId: { contains: input.q } }, { shoot: { contains: input.q } }] }) },
+    // Word Chunk Search: every word typed, any order.
+    // Not a shoot of a project in the Recycling Bin.
+    where: { deletedAt: null, project: { deletedAt: null }, ...(input.q && { AND: everyChunk(input.q, (chunk) => ({ OR: [{ shootId: { contains: chunk } }, { shoot: { contains: chunk } }] })) }) },
     select: shootInclude.select,
     orderBy: { dateCreated: "desc" },
     take: 200,
@@ -535,7 +582,7 @@ exports.update = handler(async (req) => {
 exports.changeStatus = handler(async (req) => {
   const current = await activeRecord(req, req.params.storageId);
   const input = statusInput.parse(req.body);
-  const allowed = nextStatusesFor(current);
+  const allowed = nextStatusesFor(current, await shootStatusPendingFor(current));
   if (!allowed) throw fail(409, `This record carries an unrecognised status (${current.status}).`);
   if (input.nextStatus === current.status) throw fail(409, `This record is already ${current.status}.`);
   if (!allowed.includes(input.nextStatus)) {

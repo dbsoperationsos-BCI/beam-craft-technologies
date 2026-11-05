@@ -4,13 +4,14 @@ import { useMemo, useState } from "react";
 import Button from "@/components/shared/Button";
 import TextField from "@/components/shared/TextField";
 import Dialog from "@/components/ui/Dialog";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 export default function ManageColumnsDialog({ open, columns, visibility, defaultVisibility, onClose, onApply }) {
   const [draft, setDraft] = useState(() => ({ ...visibility }));
   const [query, setQuery] = useState("");
   const filteredColumns = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
-    return normalizedQuery ? columns.filter((column) => column.label.toLocaleLowerCase().includes(normalizedQuery)) : columns;
+    return normalizedQuery ? columns.filter((column) => matchesWordChunks(column.label, normalizedQuery)) : columns;
   }, [columns, query]);
   if (!open) return null;
 
@@ -20,7 +21,7 @@ export default function ManageColumnsDialog({ open, columns, visibility, default
     // The search stays above the list rather than scrolling away with it.
     toolbar={<TextField type="search" label="" aria-label="Search columns" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search columns..." />}
     footer={<>
-      <Button className="mr-auto max-sm:mr-0" type="button" variant="ghost" onClick={() => setDraft({ ...defaultVisibility })}>Reset to Default</Button>
+      <Button className="max-sm:flex-1" type="button" variant="ghost" onClick={() => setDraft({ ...defaultVisibility })}>Reset to Default</Button>
       <Button className="max-sm:flex-1" type="button" onClick={onClose}>Cancel</Button>
       <Button className="max-sm:flex-1" type="button" variant="primary" onClick={() => { onApply(draft); onClose(); }}>Apply</Button>
     </>}

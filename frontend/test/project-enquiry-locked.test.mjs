@@ -48,7 +48,7 @@ test("an existing project shows its enquiry; a new one is asked for it", () => {
    * package to somebody else, and it drew a settled value around an empty string - locking the one
    * field the person had to answer.
    */
-  assert.match(CREATE, /enquiryLocked=\{Boolean\(project\?\.enquiryId\)\}/, "editing a project can re-point it at another enquiry");
+  assert.match(CREATE, /const enquiryLocked = Boolean\(project\?\.enquiryId \|\| draft\?\.enquiryLocked\)/, "editing a project can re-point it at another enquiry");
   assert.doesNotMatch(CREATE, /enquiryLocked=\{Boolean\(project\)\}/, "a duplicate opens with its enquiry locked around nothing");
   /*
    * Start / Edit Project always has a booking behind it, so there is nothing to decide - and it now
@@ -63,8 +63,8 @@ test("an existing project shows its enquiry; a new one is asked for it", () => {
   assert.doesNotMatch(START, /canEditSale/, "Start Project decides again whether the sale may be edited from it");
   // And the section passes it through rather than deciding for itself - only the panel knows which
   // of its two jobs it is doing.
-  assert.match(SECTION, /enquiryLocked = false \}\) \{/);
-  assert.match(SECTION, /<EnquiryCombobox required readOnly=\{enquiryLocked\}/);
+  assert.match(SECTION, /enquiryLocked = false, savedQuotationId = "", errors = \{\}, onFieldChange \}\) \{/);
+  assert.match(SECTION, /<EnquiryCombobox (?:helperText="[^"]*" )?required readOnly=\{enquiryLocked\}/);
 });
 
 test("locked, it is drawn as a value rather than as a control that refuses", () => {

@@ -1,5 +1,7 @@
 "use client";
 
+import { settingsHelpFor } from "@/constants/settingsHelp";
+import { searchSettings } from "@/lib/settingsSearch.mjs";
 import { createPortal } from "react-dom";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Button from "@/components/shared/Button";
@@ -10,22 +12,39 @@ import { useUnloadWarning } from "@/components/shared/useUnsavedGuard";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
 import SchemaFormSection from "@/components/schema-form/SchemaFormSection";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
-import { useModuleAccess } from "@/components/auth/PermissionsProvider";
+import { useModuleAccess, usePermissions } from "@/components/auth/PermissionsProvider";
 import { layers } from "@/constants/layers";
 import WhatsAppUsersTable from "@/components/settings/WhatsAppUsersTable";
 import MessageTemplatePanel from "@/components/settings/MessageTemplatePanel";
+import NotificationTemplatePanel from "@/components/settings/NotificationTemplatePanel";
+import LeadWelcomeVerticalTemplates from "@/components/settings/LeadWelcomeVerticalTemplates";
+import InterviewWelcomePanel from "@/components/settings/InterviewWelcomePanel";
+import WishesSchedulerPanel from "@/components/settings/WishesSchedulerPanel";
+import AttendanceRulesSettingsPanel from "@/components/settings/AttendanceRulesSettingsPanel";
+import OfferLetterPanel from "@/components/settings/OfferLetterPanel";
+import CertificateTemplatePanel from "@/components/settings/CertificateTemplatePanel";
+import PayrollRulesPanel from "@/components/settings/PayrollRulesPanel";
+import AttendanceWhatsAppReportPanel from "@/components/settings/AttendanceWhatsAppReportPanel";
+import WhatsAppActivityLogPanel from "@/components/settings/WhatsAppActivityLogPanel";
+import PhotoSelectionSubmittedPanel from "@/components/settings/PhotoSelectionSubmittedPanel";
+import PaymentReminderPanel from "@/components/settings/PaymentReminderPanel";
+import ShootCrewNoticePanel from "@/components/settings/ShootCrewNoticePanel";
+import NewLeadWelcomePanel from "@/components/settings/NewLeadWelcomePanel";
+import { getAttendanceReportGroup } from "@/services/hrm/attendance.service";
 import ReferralAmountPanel from "@/components/settings/ReferralAmountPanel";
 import SidebarLayoutPanel from "@/components/settings/SidebarLayoutPanel";
 import BranchesPanel from "@/components/settings/BranchesPanel";
 import HolidaysPanel from "@/components/settings/HolidaysPanel";
 import StudioBrandingPanel from "@/components/settings/StudioBrandingPanel";
 import ApplicationMonitoringPanel from "@/components/settings/ApplicationMonitoringPanel";
+import ActivityLogPurgePanel from "@/components/settings/ActivityLogPurgePanel";
 import FieldSettingsPanel from "@/components/settings/FieldSettingsPanel";
-import LoginSlidePanel from "@/components/settings/LoginSlidePanel";
+import LoginSlidePanel, { ClientPageImagesPanel } from "@/components/settings/LoginSlidePanel";
 import QuotationBrandSettingsPanel, { QuotationGeneralSettingsPanel } from "@/components/settings/QuotationSettingsPanel";
 import { QUOTATION_BRANDS } from "@/lib/quotationBrand.mjs";
 import GoogleSheetsIntegrationSection from "@/components/settings/GoogleSheetsIntegrationSection";
 import { CRM_VERTICAL_OPTIONS, INTERVIEW_SHEET_INTEGRATION, SALES_SHEET_INTEGRATION, SHEET_INTEGRATION_SECTION_IDS } from "@/components/settings/sheetIntegrationConfigs";
+import EmployeeWhatsAppGroupsPanel from "@/components/settings/EmployeeWhatsAppGroupsPanel";
 
 /*
  * The anchors Project Settings contributes to the rail.
@@ -103,15 +122,29 @@ const PROJECT_SPY_LINE_PX = 4;
  */
 const PROJECT_SPY_PAUSE_MS = 800;
 
+/*
+ * Screens that moved, by their old id: the three automatic WhatsApp messages left Automatic WhatsApp
+ * Message for their own Templates entries. A saved link or a bookmark naming an old id still opens
+ * the screen it meant.
+ */
+const MOVED_SECTIONS = {
+  "attendance-whatsapp-report": "message-attendance-report",
+  "photo-selection-submitted": "message-photo-selection-submitted",
+  "new-lead-welcome": "message-crm-lead-welcome-verticals",
+};
+
 
 export default function SettingsOverlay({
   open,
   onClose,
-  initialSection = "whatsapp",
+  initialSection: requestedSection = "whatsapp",
   initialIntegration = null,
   initialNotice = null,
   onCustomFieldsSaved,
+  // Told the section on show whenever it changes, so the top bar can keep it in the address.
+  onSectionChange,
 }) {
+  const initialSection = MOVED_SECTIONS[requestedSection] || requestedSection;
   // Settings opens with the user's own settings first. A module shortcut can still take
   // the reader directly to the same section it opened before the panel moved into the app shell.
   /*
@@ -158,6 +191,11 @@ export default function SettingsOverlay({
    * are offered on write alone, because a two-field form nobody may submit is not a section.
    */
   const { canRead: canReadUserSettings } = useModuleAccess("SETTINGS", "User Settings");
+  // The activity log is read by whoever holds it; Resend inside it needs Read / Write, passed down to the dialog.
+  const { canRead: canReadWhatsAppActivity, canWrite: canWriteWhatsAppActivity } = useModuleAccess("SETTINGS", "WhatsApp Activity Log");
+  // The Photo Selection Submitted notification: its switch, group and sender behind this row; its
+  // wording is a message template and saves through that section's own permission, passed down.
+  const { canRead: canReadAutomaticWhatsApp, canWrite: canWriteAutomaticWhatsApp } = useModuleAccess("SETTINGS", "Automatic WhatsApp Message");
   const { canWrite: canWriteTableSettings } = useModuleAccess("SETTINGS", "Table Settings");
   const { canWrite: canWriteFieldSettings } = useModuleAccess("SETTINGS", "Field Settings");
   const { canWrite: canWriteProjectSettingsSection } = useModuleAccess("SETTINGS", "Project Settings");
@@ -166,10 +204,15 @@ export default function SettingsOverlay({
   const { canWrite: canWriteQuotationSettings } = useModuleAccess("SETTINGS", "Quotation Settings");
   const { canRead: canReadReferralSetting } = useModuleAccess("SETTINGS", "Employee Referral");
   const { canRead: canReadMessageTemplates, canWrite: canWriteMessageTemplates } = useModuleAccess("SETTINGS", "Message Template");
+  const { canRead: canReadWishes, canWrite: canWriteWishes } = useModuleAccess("SETTINGS", "Wishes");
   const { canWrite: canWriteOrganization } = useModuleAccess("SETTINGS", "Organization");
   const { canRead: canReadHolidays, canWrite: canWriteHolidays } = useModuleAccess("SETTINGS", "Holidays");
   const { canWrite: canWriteLoginSlide } = useModuleAccess("SETTINGS", "Login Slide");
+  const { canWrite: canWriteClientPageImages } = useModuleAccess("SETTINGS", "Client Page Images");
+  const { canRead: canReadPaymentReminder } = useModuleAccess("SETTINGS", "Payment Reminder");
+  const { canRead: canReadShootCrewNotice } = useModuleAccess("SETTINGS", "Shoot Crew Notice");
   const { canWrite: canWriteMonitoring } = useModuleAccess("SETTINGS", "Application Monitoring");
+  const { canRead: canReadActivityLogPurge, canWrite: canWriteActivityLogPurge } = useModuleAccess("SETTINGS", "Activity Log Purge");
   /*
    * The referral amount answers to `HRM / Employee Referral`, which is what its own routes enforce.
    *
@@ -179,6 +222,28 @@ export default function SettingsOverlay({
    * because the figure is worth being able to look up — the panel drops its Save without write.
    */
   const { canRead: canReadReferrals, canWrite: canWriteReferrals } = useModuleAccess("HRM", "Employee Referral");
+  // The Employee section is administrators' alone - the server's answer, not a role name read here.
+  const { isAdministrator, hasPermission } = usePermissions();
+  /*
+   * The Attendance WhatsApp Report page opens for an administrator and for a holder of its
+   * permission - and for the **chosen sender**, whoever they are, because this page is now the only
+   * place the report's group is linked from (the Attendance Register lost its WhatsApp button). The
+   * sender is not a permission but a choice on the server, so it is asked for rather than read: only
+   * while Settings is open, and only by somebody not already let in. Anybody else is refused the
+   * read, which leaves the page off the rail.
+   */
+  const admittedToAttendanceReport = isAdministrator || hasPermission("HRM", "Attendance WhatsApp Report", "READ");
+  const [isAttendanceReportSender, setIsAttendanceReportSender] = useState(false);
+  useEffect(() => {
+    if (!open || admittedToAttendanceReport) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      getAttendanceReportGroup()
+        .then((response) => { if (!cancelled) setIsAttendanceReportSender(Boolean(response?.data?.canManage)); })
+        .catch(() => { if (!cancelled) setIsAttendanceReportSender(false); });
+    }, 0);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [open, admittedToAttendanceReport]);
   /*
    * Field Settings edits the HRM master-data lists - the designations, departments, verticals
    * and skills the employee form offers - and `/api/hrm/<resource>` gates every write on
@@ -195,15 +260,15 @@ export default function SettingsOverlay({
    */
   const { canWrite: canWriteInterview } = useModuleAccess("HRM", "Interview");
   /*
-   * Project Settings' Save, and whether there is anything for it to write.
+   * What Project Settings reports back: whether it has its rows yet, and whether a write is running.
    *
-   * The panel stages every edit and writes them together, which is the workflow it had as a screen
-   * of its own and the one it keeps here - so Settings has to carry its footer. The handle is how
-   * that footer's Save reaches it, and `projectSettingsState` is what the panel reports back so the
-   * button can be held shut until something is staged.
+   * Its Services and Deliverables are written by their own dialogs the moment Add, Update or Remove
+   * is pressed, so it holds nothing for the footer's Save to write - that Save finishes the Settings
+   * session and closes it. `busy` holds the Save shut while a write is in flight, so Settings is
+   * never closed under one; `loading` is there because the rail cannot scroll to a section that is
+   * not in the page yet.
    */
-  const projectSettingsRef = useRef(null);
-  const [projectSettingsState, setProjectSettingsState] = useState({ dirty: false, busy: false, loading: true });
+  const [projectSettingsState, setProjectSettingsState] = useState({ busy: false, loading: true });
   /*
    * Whether Table Settings has edits that have not been saved, and the section somebody tried
    * to leave for while it did.
@@ -229,11 +294,17 @@ export default function SettingsOverlay({
    */
   const studioBrandingUnsavedRef = useRef(false);
   const loginSlideUnsavedRef = useRef(false);
+  const clientPageImagesUnsavedRef = useRef(false);
   const applicationMonitoringUnsavedRef = useRef(false);
   // One ref for the whole Message Template group: its children are the same panel with a different
   // key, and only one is ever on screen.
   const messageTemplateUnsavedRef = useRef(false);
+  // Both wish lists answer from the one ref the mounted panel writes - only one is on screen at a time.
+  const wishesUnsavedRef = useRef(false);
   const referralAmountUnsavedRef = useRef(false);
+  const experienceCertificateUnsavedRef = useRef(false);
+  const offerLetterUnsavedRef = useRef(false);
+  const employmentCertificateUnsavedRef = useRef(false);
   /*
    * Quotation Settings. The shared content is its own screen, and the brands share one ref for the
    * same reason the message templates do: three rail entries, one panel, and only ever one of them
@@ -255,7 +326,6 @@ export default function SettingsOverlay({
    */
   const handleProjectSettingsState = useCallback((state) => {
     setProjectSettingsState({
-      dirty: Boolean(state?.dirty),
       busy: Boolean(state?.busy),
       // The sections are not in the page until the rows arrive, so a rail click that lands while
       // the panel is still loading has nothing to scroll to; the effect below waits for this.
@@ -302,19 +372,32 @@ export default function SettingsOverlay({
     "sidebar-layout": sidebarLayoutUnsavedRef,
     "studio-branding": studioBrandingUnsavedRef,
     "login-slide": loginSlideUnsavedRef,
+    "client-page-images": clientPageImagesUnsavedRef,
     "application-monitoring": applicationMonitoringUnsavedRef,
-    // All three message templates answer from the one ref the mounted panel writes - only ever one
-    // of them is on screen, the same way the quotation brand entries share theirs below.
+    "wishes-scheduler": wishesUnsavedRef,
+    // Every message template answers from the one ref the mounted panel writes - only ever one of
+    // them is on screen, the same way the quotation brand entries share theirs below.
     "message-cash-received": messageTemplateUnsavedRef,
     "message-employee-invite": messageTemplateUnsavedRef,
+    "message-employee-offboarding-form": messageTemplateUnsavedRef,
+    "message-employee-offboarding-reminder": messageTemplateUnsavedRef,
+    "message-employee-offboarding-approved": messageTemplateUnsavedRef,
+    "message-employee-offboarding-not-accepted": messageTemplateUnsavedRef,
     "message-login-credentials": messageTemplateUnsavedRef,
+    "message-photo-selection-submitted": messageTemplateUnsavedRef,
+    "message-payment-reminder": messageTemplateUnsavedRef,
+    "message-crm-lead-welcome-verticals": messageTemplateUnsavedRef,
+    "message-interview-welcome": messageTemplateUnsavedRef,
+    "message-interview-application-invite": messageTemplateUnsavedRef,
     "employee-referral": referralAmountUnsavedRef,
+    "certificate-experience": experienceCertificateUnsavedRef,
+    "certificate-employment": employmentCertificateUnsavedRef,
+    "certificate-offer-letter": offerLetterUnsavedRef,
     "quotation-general": quotationGeneralUnsavedRef,
     // Every brand entry answers from the one ref the mounted brand panel writes.
     ...Object.fromEntries(QUOTATION_BRANDS.map((brand) => [`quotation-brand-${brand.code}`, quotationBrandUnsavedRef])),
   })[id];
-  const sectionHoldsUnsavedEdits = (id) => Boolean(unsavedRefFor(id)?.current)
-    || (isProjectSection(id) && projectSettingsState.dirty);
+  const sectionHoldsUnsavedEdits = (id) => Boolean(unsavedRefFor(id)?.current);
   // The edit is gone with the panel, so nothing is left behind still claiming to be unsaved.
   const forgetUnsavedEdits = (id) => { const ref = unsavedRefFor(id); if (ref) ref.current = false; };
 
@@ -326,6 +409,15 @@ export default function SettingsOverlay({
    * Only while Settings is open: nothing else in the application stages work this way.
    */
   useUnloadWarning(open, () => sectionHoldsUnsavedEdits(activeSection));
+
+  /*
+   * The chosen section, not the one drawn: right after a reload the reader's permissions are still
+   * loading, the rail has not got the entry yet and the first screen stands in - reporting that would
+   * overwrite the address the reload is about to honour.
+   */
+  useEffect(() => {
+    if (open) onSectionChange?.(activeSection);
+  }, [activeSection, onSectionChange, open]);
 
   // Closing is a way out of the section too, so it goes through the same question the rail asks.
   const requestCloseSettings = () => {
@@ -434,6 +526,35 @@ export default function SettingsOverlay({
     return () => scroller.removeEventListener("scroll", readPosition);
   }, [onProjectSections, open, projectSettingsState.loading]);
 
+  /*
+   * Search, at the top of the rail - Role Management's search (`lib/settingsSearch.mjs`): every word
+   * typed, over each screen's name, the groups it sits in, its help text and the settings on it. Only
+   * the rail as this reader has it is searched, and nothing is asked of the server while typing.
+   */
+  const [settingsQuery, setSettingsQuery] = useState("");
+  // The setting a result pointed at, shown once its screen is on: scrolled to and briefly marked.
+  const [settingToShow, setSettingToShow] = useState(null);
+  useEffect(() => {
+    if (!settingToShow || settingToShow.id !== activeSection) return undefined;
+    let tries = 0;
+    let unmark = null;
+    const wanted = settingToShow.field.toLocaleLowerCase();
+    const timer = window.setInterval(() => {
+      tries += 1;
+      const body = document.querySelector("[data-settings-body]");
+      const found = body && [...body.querySelectorAll("label, legend, h2, h3, h4, p, span, th")].find((node) => node.textContent.trim().toLocaleLowerCase() === wanted && node.offsetParent);
+      if (!found && tries < 30) return;
+      window.clearInterval(timer);
+      setSettingToShow(null);
+      if (!found) return;
+      const target = found.closest("label, fieldset, div") || found;
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      target.classList.add("ring-2", "ring-amber-400", "rounded-md", "bg-amber-50");
+      unmark = window.setTimeout(() => target.classList.remove("ring-2", "ring-amber-400", "rounded-md", "bg-amber-50"), 2200);
+    }, 100);
+    return () => { window.clearInterval(timer); if (unmark) window.clearTimeout(unmark); };
+  }, [settingToShow, activeSection]);
+
   if (!open || typeof document === "undefined") return null;
 
   /**
@@ -457,22 +578,39 @@ export default function SettingsOverlay({
    * already in use.
    */
   const settingsSections = [
-    ...(canReadUserSettings ? [{
-      id: "user-settings",
-      title: "User Settings",
-      children: [
-        {
+    /*
+     * Each entry on its own gate, and the group offered to whoever can open one of them: WhatsApp
+     * behind `SETTINGS / User Settings`, the Attendance WhatsApp Report to an administrator or a
+     * holder of its permission - who keeps it without being given User Settings as well.
+     */
+    ...(() => {
+      const userSettings = [
+        ...(canReadUserSettings ? [{
           id: "whatsapp",
           title: "WhatsApp",
           render: () => <WhatsAppUsersTable />,
-        },
+        }] : []),
+        // The automatic WhatsApp messages - Attendance WhatsApp Report, Photo Selection Submitted,
+        // New Lead Welcome - are under Templates now, each with its notification above its wording.
+        /*
+         * Every WhatsApp message the app sent or tried to send, manual or automatic, with every try
+         * and a Resend for a failed one - behind `SETTINGS / WhatsApp Activity Log`, its own row,
+         * so a studio can hand somebody the log without the switches above it.
+         */
+        ...(canReadWhatsAppActivity ? [{
+          id: "whatsapp-activity-log",
+          title: "WhatsApp Activity Log",
+          wide: true,
+          render: () => <WhatsAppActivityLogPanel canWrite={canWriteWhatsAppActivity} onNotice={setSectionNotice} />,
+        }] : []),
         // Referrals used to sit here, as a studio figure among the other studio figures. Both the
         // register of who is owed one and the amount it pays are HRM's own Employee Referral
         // screen now — the register is the page, the amount is the Settings panel on its header —
         // because a figure is set by whoever is looking at what it produced, not three screens
         // away under User Settings. Both answer to `HRM / Employee Referral`.
-      ],
-    }] : []),
+      ];
+      return userSettings.length ? [{ id: "user-settings", title: "User Settings", children: userSettings }] : [];
+    })(),
     /*
      * What this login has decided for itself, and nobody else.
      *
@@ -516,9 +654,6 @@ export default function SettingsOverlay({
       wide: true,
       render: () => (
         <div className="space-y-3">
-          <p className="text-xs text-slate-500 sm:text-sm">
-            Choose a module and vertical, then build the fields its table and forms carry.
-          </p>
           <TableSettingsSection
             verticalOptions={CRM_VERTICAL_OPTIONS}
             onSaved={handleTableSettingsSaved}
@@ -611,14 +746,14 @@ export default function SettingsOverlay({
        *
        * It used to open from the Projects board's ⋮ as a second full-screen form over the app -
        * settings that lived outside Settings. The three screens are unchanged and so is everything
-       * they do: the same rows, the same configure-in-a-dialog step, the same staging, and the same
-       * Save that writes all three sections together. What changed is where the rail for them is -
-       * this one - so the studio has one place it configures the application from.
+       * they do: the same rows and the same configure-in-a-dialog step, each dialog writing its row
+       * the moment it is submitted. What changed is where the rail for them is - this one - so the
+       * studio has one place it configures the application from.
        *
-       * One panel across all three entries, deliberately: the rail switches `activeSection` on the
-       * same mounted component rather than mounting a new one per screen, so a service staged on
-       * Services is still staged when the reader looks at Deliverables and one Save writes both.
-       * That is why the three renders below are the same element with a different section named.
+       * One panel across all the entries, deliberately: the rail switches `activeSection` on the
+       * same mounted component rather than mounting a new one per screen, so moving between them
+       * only scrolls. That is why the renders below are the same element with a different section
+       * named.
        */
       id: "project-settings",
       title: "Project Settings",
@@ -631,18 +766,15 @@ export default function SettingsOverlay({
         /*
          * Every entry draws the same thing: all three sections, stacked, as one scrolling document.
          *
-         * They are anchors rather than screens. One Save writes Services, Deliverables and Size
-         * Options together, and a Save at the foot of a page showing only Services reads as
-         * Services' own however many sections it actually covers - so the page shows all three and
-         * the rail moves within it, which is what this panel has always done. Selecting one scrolls
-         * to it; see `scrollToProjectSection`.
+         * They are anchors rather than screens: the page shows every section and the rail moves
+         * within it, which is what this panel has always done. Selecting one scrolls to it; see
+         * `scrollToProjectSection`.
          *
          * `raw` because the panel brings its own three sections with their own headings: wrapping
          * it in a fourth would put "Services" above all of them.
          */
         raw: true,
         render: () => <ProjectSettingsPanel
-          ref={projectSettingsRef}
           embedded
           // The rail's own ids, so the anchors it scrolls to are the entries it lists.
           idPrefix="project-"
@@ -679,25 +811,107 @@ export default function SettingsOverlay({
       ],
     }] : []),
     /*
-     * What the studio pays for a referral.
+     * Employee settings, gathering what concerns the studio's people.
      *
-     * A plain screen rather than a group: one figure and a Save, so there is nothing under it to
-     * list. It moved here out of the Employee Referral register's own ⋮ — the studio would rather
-     * find its settings in one place than have each screen carry its own.
+     * **Employee Referral** - what the studio pays for a referral, one figure and a Save - lives
+     * inside it. It moved here out of the Employee Referral register's own ⋮, and then from the rail
+     * into this group. It keeps its own gate, `HRM / Employee Referral` (the permission its routes
+     * enforce) with `SETTINGS / Employee Referral`, and its id, which the unsaved-changes map above
+     * names - so anybody who could reach it still can, through this group.
      *
-     * On `HRM / Employee Referral`, the permission its routes enforce, rather than on the System
-     * Settings write the sections around it use. See `canReadReferrals` above.
+     * **Payroll rules** holds the **Attendance calculator** now - the studio's pay period (start and
+     * end date) and its payable date, which is what a payroll month reads attendance over - beside
+     * the salary rules, so everything the payroll is worked out by is in one place. Each block keeps
+     * its own access: the calculator is an administrator's alone (the server's `isAdministrator`, not
+     * a permission granted role by role), the salary rules `HRM / Payroll Register`. The section is
+     * offered to whoever holds either, and shows only the block they hold.
+     *
+     * **Attendance Rules** is an administrator's alone too: the studio's working day, moved here from the account menu, where anybody with `HRM / Employee Attendance` saw
+     * it. Changing them is still the server's answer (`HRM / Attendance Rules` Read / Write); an
+     * administrator without that reads them.
+     *
+     * **Certificate** is an administrator's alone (the server's `isAdministrator`), like Attendance
+     * Rules - a group of three sections, Experience, Employment and Offer Letter. Empty for now; each
+     * is filled in step by step.
+     *
+     * **Wishes** - the scheduler and the birthday and anniversary wishes - sits here as a group of
+     * its own, on `SETTINGS / Wishes` as before; its ids are unchanged.
+     *
+     * The group is offered to whoever can open something in it, and not at all to anybody else.
      */
-    ...(canReadReferrals && canReadReferralSetting ? [{
-      id: "employee-referral",
-      title: "Employee Referral",
-      render: () => <ReferralAmountPanel
-        canWrite={canWriteReferrals}
-        unsavedRef={referralAmountUnsavedRef}
-        onNotice={setSectionNotice}
-        onError={setLinkError}
-      />,
-    }] : []),
+    ...(() => {
+      const children = [
+        ...(canReadReferrals && canReadReferralSetting ? [{
+          id: "employee-referral",
+          title: "Employee Referral",
+          render: () => <ReferralAmountPanel
+            canWrite={canWriteReferrals}
+            unsavedRef={referralAmountUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        }] : []),
+        // The WhatsApp groups employees are added to (`HRM / Employee Management`: Read lists them,
+        // Read / Write adds and removes); an employee is added to them from their Employee Preference.
+        ...(hasPermission("HRM", "Employee Management", "READ") ? [{
+          id: "employee-whatsapp-groups",
+          title: "WhatsApp Groups",
+          // A table, not a form: the section's 1040px cap left it ending halfway across the pane.
+          wide: true,
+          render: () => <EmployeeWhatsAppGroupsPanel
+            canWrite={hasPermission("HRM", "Employee Management", "READ_WRITE")}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        }] : []),
+        ...(isAdministrator ? [{
+          id: "employee-attendance-rules",
+          title: "Attendance Rules",
+          wide: true,
+          render: () => <AttendanceRulesSettingsPanel onNotice={setSectionNotice} onError={setLinkError} />,
+        }] : []),
+        // Everything Payroll -> Main Page is worked out by: the attendance calculator (an
+        // administrator's) and how the loss of pay and rounding go (`HRM / Payroll Register`, the
+        // permission those endpoints answer to - Read shows the rules, Read / Write changes them).
+        ...(isAdministrator || hasPermission("HRM", "Payroll Register", "READ") ? [{
+          id: "employee-payroll-rules",
+          title: "Payroll rules",
+          render: () => <PayrollRulesPanel
+            canManagePayCycle={isAdministrator}
+            canReadRules={hasPermission("HRM", "Payroll Register", "READ")}
+            canWrite={hasPermission("HRM", "Payroll Register", "READ_WRITE")}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        }] : []),
+        // Certificate, a group of its own inside Employee: one section per kind of letter. Experience and
+        // Employment each hold an e-signature, signatory, note and the A4 preview; Offer Letter its A4 preview.
+        ...(isAdministrator ? [{
+          id: "employee-certificate",
+          title: "Certificate",
+          children: [
+            {
+              id: "certificate-experience",
+              title: "Experience",
+              wide: true,
+              // The HR's e-signature and a note, then the certificate on an A4 sheet, as the Payslip's.
+              render: () => <CertificateTemplatePanel key="experience" kind="experience" label="Experience" unsavedRef={experienceCertificateUnsavedRef} onNotice={setSectionNotice} onError={setLinkError} />,
+            },
+            {
+              id: "certificate-employment",
+              title: "Employment",
+              wide: true,
+              // The same as Experience, with the employment certificate's own wording and settings.
+              render: () => <CertificateTemplatePanel key="employment" kind="employment" label="Employment" unsavedRef={employmentCertificateUnsavedRef} onNotice={setSectionNotice} onError={setLinkError} />,
+            },
+            // When each employee's offer letter comes, then its sign-off as the certificates', above its A4 sheet.
+            { id: "certificate-offer-letter", title: "Offer Letter", wide: true, render: () => <OfferLetterPanel unsavedRef={offerLetterUnsavedRef} onNotice={setSectionNotice} onError={setLinkError} /> },
+          ],
+        }] : []),
+        // The Attendance WhatsApp Report is under User Settings.
+      ];
+      return children.length ? [{ id: "employee", title: "Employee", children }] : [];
+    })(),
     /*
      * The wording of the messages the studio sends, under one **Templates** entry.
      *
@@ -729,10 +943,14 @@ export default function SettingsOverlay({
      * So visibility answers to Read and editability to Read / Write, which is what the two levels
      * mean everywhere else.
      */
-    ...(canReadMessageTemplates ? [{
-      id: "templates",
-      title: "Templates",
-      children: [
+    /*
+     * Every message's wording, one entry each. The birthday and anniversary wishes join them on their
+     * own permission (`SETTINGS / Wishes`), so somebody holding only that still finds them here and
+     * the group is offered to whoever can open one of its entries.
+     */
+    ...(() => {
+      const templates = [
+      ...(canReadMessageTemplates ? [
         {
           id: "message-cash-received",
           title: "Cash Received",
@@ -756,6 +974,50 @@ export default function SettingsOverlay({
           />,
         },
         {
+          id: "message-employee-offboarding-form",
+          title: "Offboarding Form",
+          render: () => <MessageTemplatePanel
+            templateKey="EMPLOYEE_OFFBOARDING_FORM"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        {
+          id: "message-employee-offboarding-reminder",
+          title: "Offboarding Reminder",
+          render: () => <MessageTemplatePanel
+            templateKey="EMPLOYEE_OFFBOARDING_REMINDER"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        {
+          id: "message-employee-offboarding-approved",
+          title: "Offboarding Confirmed",
+          render: () => <MessageTemplatePanel
+            templateKey="EMPLOYEE_OFFBOARDING_APPROVED"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        {
+          id: "message-employee-offboarding-not-accepted",
+          title: "Offboarding Not Accepted",
+          render: () => <MessageTemplatePanel
+            templateKey="EMPLOYEE_OFFBOARDING_NOT_ACCEPTED"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        {
           id: "message-login-credentials",
           title: "Login Credentials",
           render: () => <MessageTemplatePanel
@@ -766,8 +1028,224 @@ export default function SettingsOverlay({
             onError={setLinkError}
           />,
         },
-      ],
-    }] : []),
+        // A client's login, handed over from Create Project's Client Login Ready.
+        {
+          id: "message-client-login-credentials",
+          title: "Client Login Credentials",
+          render: () => <MessageTemplatePanel
+            templateKey="CLIENT_LOGIN_CREDENTIALS"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        {
+          id: "message-crd-document-link",
+          title: "CRD Document Link",
+          render: () => <MessageTemplatePanel
+            templateKey="CRD_DOCUMENT_LINK"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        // The client's answer to their feedback, from the Feedback page once it is given.
+        {
+          id: "message-feedback-thank-you",
+          title: "Feedback Thank You",
+          render: () => <MessageTemplatePanel
+            templateKey="FEEDBACK_THANK_YOU"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        {
+          id: "message-feedback-issues",
+          title: "Feedback Issues",
+          render: () => <MessageTemplatePanel
+            templateKey="FEEDBACK_ISSUES"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+      ] : []),
+      /*
+       * The automatic WhatsApp messages, each with its notification above its wording, as Interview
+       * Welcome is. Each entry is offered to whoever can open either half and shows only the halves
+       * the reader holds: the notification on its own permission, the wording on Message Template.
+       *
+       * The day's attendance report: when, from whose WhatsApp and into which group - an
+       * administrator or a holder of its permission, and the chosen sender, who links the group
+       * here - and its wording, which the Attendance Register's Send also uses: one report, one
+       * wording.
+       */
+      ...(admittedToAttendanceReport || isAttendanceReportSender || canReadMessageTemplates ? [{
+        id: "message-attendance-report",
+        title: "Attendance WhatsApp Report",
+        render: () => <NotificationTemplatePanel
+          notification={admittedToAttendanceReport || isAttendanceReportSender ? <AttendanceWhatsAppReportPanel onNotice={setSectionNotice} /> : null}
+          message={canReadMessageTemplates ? <MessageTemplatePanel
+            templateKey="ATTENDANCE_DAILY_REPORT"
+            canWrite={canWriteMessageTemplates}
+            switchable={false}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          /> : null}
+        />,
+      }] : []),
+      // What a WhatsApp group reads when a client submits their photo selection: its switch, senders
+      // and group (`SETTINGS / Automatic WhatsApp Message`), then its wording.
+      ...(canReadAutomaticWhatsApp || canReadMessageTemplates ? [{
+        id: "message-photo-selection-submitted",
+        title: "Photo Selection Submitted",
+        render: () => <NotificationTemplatePanel
+          notification={canReadAutomaticWhatsApp ? <PhotoSelectionSubmittedPanel onNotice={setSectionNotice} canWrite={canWriteAutomaticWhatsApp} /> : null}
+          message={canReadMessageTemplates ? <MessageTemplatePanel
+            templateKey="PHOTO_SELECTION_SUBMITTED"
+            canWrite={canWriteMessageTemplates}
+            switchable={false}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          /> : null}
+        />,
+      }] : []),
+      // What a new lead from a linked Google Sheet reads, from its owner's WhatsApp: its switch
+      // (`SETTINGS / Automatic WhatsApp Message`), then its wording per vertical, for office time and
+      // after hours. A lead whose vertical has nothing written is not messaged.
+      ...(canReadAutomaticWhatsApp || canReadMessageTemplates ? [{
+        id: "message-crm-lead-welcome-verticals",
+        title: "New Lead Welcome",
+        render: () => <NotificationTemplatePanel
+          notification={canReadAutomaticWhatsApp ? <NewLeadWelcomePanel onNotice={setSectionNotice} canWrite={canWriteAutomaticWhatsApp} /> : null}
+          message={canReadMessageTemplates ? <LeadWelcomeVerticalTemplates
+            canWrite={canWriteMessageTemplates}
+            switchable={false}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          /> : null}
+        />,
+      }] : []),
+      ...(canReadMessageTemplates ? [
+        // What a project's WhatsApp group reads two days before a payment is due - sent on its own by
+        // Project Management → Payment reminder, which holds no editor of it.
+        {
+          id: "message-payment-reminder",
+          title: "Payment Reminder",
+          render: () => <MessageTemplatePanel
+            templateKey="PAYMENT_DUE_REMINDER"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        // What a shoot's crew reads two days before it, and what somebody taken off it reads
+        // instead - both sent on their own by Project Management → Shoot crew notice.
+        /*
+         * And the six a **vendor** reads, from the project's Production Manager: confirmed, reminded
+         * two days before, each kind of change, and off the shoot. Six rather than two because a
+         * reminder that reads like a first contact is read as one.
+         */
+        ...[
+          ["SHOOT_CREW_ASSIGNED", "Shoot Crew Notice"], ["SHOOT_CREW_REMOVED", "Shoot Crew Removed"],
+          ["VENDOR_SHOOT_CONFIRMED", "Vendor Shoot Confirmed"], ["VENDOR_SHOOT_REMINDER", "Vendor Shoot Reminder"],
+          ["VENDOR_SHOOT_DATE_CHANGED", "Vendor Shoot Date Changed"], ["VENDOR_SHOOT_PLACE_CHANGED", "Vendor Shoot Place Changed"],
+          ["VENDOR_SHOOT_SERVICE_CHANGED", "Vendor Shoot Service Changed"], ["VENDOR_SHOOT_REMOVED", "Vendor Off A Shoot"],
+        ].map(([templateKey, title]) => ({
+          id: `message-${templateKey.toLowerCase().replace(/_/g, "-")}`,
+          title,
+          render: () => <MessageTemplatePanel
+            templateKey={templateKey}
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        })),
+        // What Interview → Send Application Invite sends a candidate on WhatsApp, and whether it is sent.
+        {
+          id: "message-interview-application-invite",
+          title: "Interview Application Invite",
+          render: () => <MessageTemplatePanel
+            templateKey="INTERVIEW_APPLICATION_INVITE"
+            name="Interview Application Invite"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        // What a new candidate from a linked interview sheet reads, with whether it is sent and from
+        // whose WhatsApp above the wording.
+        {
+          id: "message-interview-welcome",
+          title: "Interview Welcome",
+          render: () => <InterviewWelcomePanel
+            canWriteTemplate={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        // The three production messages, posted to the project's WhatsApp group by the steps.
+        {
+          id: "message-production-started",
+          title: "Production — Started From Studio",
+          render: () => <MessageTemplatePanel
+            templateKey="PRODUCTION_STARTED_FROM_STUDIO"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        {
+          id: "message-production-reached",
+          title: "Production — Reached Shoot Place",
+          render: () => <MessageTemplatePanel
+            templateKey="PRODUCTION_REACHED_SHOOT_PLACE"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+        {
+          id: "message-production-completed",
+          title: "Production — Shoot Completed",
+          render: () => <MessageTemplatePanel
+            templateKey="PRODUCTION_SHOOT_COMPLETED"
+            canWrite={canWriteMessageTemplates}
+            unsavedRef={messageTemplateUnsavedRef}
+            onNotice={setSectionNotice}
+            onError={setLinkError}
+          />,
+        },
+      ] : []),
+      // The Wishes Scheduler, with the ten birthday, ten (wedding) anniversary and ten work anniversary
+      // wishes it sends as tabs, one picked at random each time. Shown on `SETTINGS / Wishes` Read,
+      // reworded on Read / Write.
+      ...(canReadWishes ? [
+        // Where and when the wishes go and who sends them, with the three wordings it sends as tabs
+        // under it (Birthday, Anniversary, Work Anniversary) - one screen for the sending and what is sent.
+        {
+          id: "wishes-scheduler",
+          title: "Wishes Scheduler",
+          render: () => <WishesSchedulerPanel canWrite={canWriteWishes} unsavedRef={wishesUnsavedRef} onNotice={setSectionNotice} onError={setLinkError} />,
+        },
+      ] : []),
+      ];
+      return templates.length ? [{ id: "templates", title: "Templates", children: templates }] : [];
+    })(),
     /*
      * Studio Branding, last, after Project Settings.
      *
@@ -827,6 +1305,22 @@ export default function SettingsOverlay({
       render: () => <LoginSlidePanel unsavedRef={loginSlideUnsavedRef} />,
     }] : []),
     /*
+     * Project Management: what the studio sets for the client side of a project. Client page
+     * images - the pictures on the client sign-in page's film strip - and the Payment reminder, each
+     * on a permission of its own, which is the one its endpoint checks. The reminder is shown on
+     * Read; the panel asks the server whether the sender and time may be changed.
+     */
+    ...(canWriteClientPageImages || canReadPaymentReminder || canReadShootCrewNotice ? [{
+      id: "project-management",
+      title: "Project Management",
+      children: [
+        ...(canWriteClientPageImages ? [{ id: "client-page-images", title: "Client page images", render: () => <ClientPageImagesPanel unsavedRef={clientPageImagesUnsavedRef} /> }] : []),
+        ...(canReadPaymentReminder ? [{ id: "payment-reminder", title: "Payment reminder", render: () => <PaymentReminderPanel onNotice={setSectionNotice} /> }] : []),
+        // The crew's own notice, two days before each shoot. Its two wordings are templates below.
+        ...(canReadShootCrewNotice ? [{ id: "shoot-crew-notice", title: "Shoot crew notice", render: () => <ShootCrewNoticePanel onNotice={setSectionNotice} /> }] : []),
+      ],
+    }] : []),
+    /*
      * Application Monitoring, last: the two above are what the studio looks like, this is how it
      * is measured.
      *
@@ -839,6 +1333,16 @@ export default function SettingsOverlay({
       id: "application-monitoring",
       title: "Application Monitoring",
       render: () => <ApplicationMonitoringPanel unsavedRef={applicationMonitoringUnsavedRef} />,
+    }] : []),
+    /*
+     * Activity Log Purge, under Application Monitoring: deleting the User Activity Logs' older lines.
+     * Offered on Read, which shows what a purge would delete; the delete itself is offered only on
+     * Read / Write, which is also all `POST /api/settings/activity-log-purge` accepts.
+     */
+    ...(canReadActivityLogPurge ? [{
+      id: "activity-log-purge",
+      title: "Activity Log Purge",
+      render: () => <ActivityLogPurgePanel canWrite={canWriteActivityLogPurge} />,
     }] : []),
   ];
 
@@ -874,17 +1378,32 @@ export default function SettingsOverlay({
   const settingsScreens = railSections.flatMap(screensWithin);
   const openSection = settingsScreens.find((section) => section.id === activeSection) || settingsScreens[0];
 
+  // Search, at the top of the rail (the state and the setting it points at are above, before any return).
+  const railEntries = railSections.map(railEntryFor);
+  const searchResults = searchSettings(railEntries, settingsQuery, settingsHelpFor);
+  // A result is a move like a rail click - an unsaved edit still asks first - and the search is put
+  // away, so the rail is back as it was with the group holding the screen opened.
+  function openSearchResult(result) {
+    setSettingsQuery("");
+    setSettingToShow(result.field ? { id: result.id, field: result.field } : null);
+    selectSettingsSection(result.id);
+  }
+
+
+
   /*
-   * Whether Project Settings is the screen on show, and whether leaving it would lose work.
-   *
-   * The group's three entries are one page, so moving between them only scrolls and keeps what is
-   * staged; moving *out* of the group unmounts the panel, and the staged edits exist nowhere else.
-   * That is the one move here that has to ask first, the same as the form builder above.
+   * A move asked for from anywhere - the rail, or a screen pointing at another: any section holding
+   * an unsaved edit asks before it is left; the rest go straight through, because a rail that
+   * questions every click stops being read. A section is only asked about when the move actually
+   * leaves it.
    */
-  const onProjectSettings = isProjectSection(openSection.id);
-  const leavingLosesProjectEdits = (id) => onProjectSettings && !isProjectSection(id) && projectSettingsState.dirty;
-
-
+  function selectSettingsSection(id) {
+    if (id !== activeSection && sectionHoldsUnsavedEdits(activeSection)) {
+      setPendingSection({ id });
+      return;
+    }
+    openSettingsSection(id);
+  }
 
   // The move itself, once there is nothing left to ask about.
   function openSettingsSection(id) {
@@ -904,21 +1423,14 @@ export default function SettingsOverlay({
     <>
       <SchemaFormPanel
         title="Settings"
+        descriptionAsTip
         description="Application-wide settings and configuration tools."
         // Rail entries only — the screen itself is passed as the body below, so the rail lists every
         // section without stacking every section. A third element makes an entry a group.
-        sections={railSections.map(railEntryFor)}
+        sections={railEntries}
+        sidebarSearch={{ query: settingsQuery, onQueryChange: setSettingsQuery, results: searchResults, onResultSelect: openSearchResult, placeholder: "Search settings...", ariaLabel: "Search settings", emptyMessage: "No settings found" }}
         activeSectionId={openSection.id}
-        onSectionSelect={(id) => {
-          // Any section holding an unsaved edit asks before it is left; the rest go straight
-          // through, because a rail that questions every click stops being read. A section is only
-          // asked about when the move actually leaves it.
-          if (id !== activeSection && (sectionHoldsUnsavedEdits(activeSection) || leavingLosesProjectEdits(id))) {
-            setPendingSection({ id });
-            return;
-          }
-          openSettingsSection(id);
-        }}
+        onSectionSelect={selectSettingsSection}
         values={{}}
         onChange={() => {}}
         errors={{}}
@@ -927,28 +1439,28 @@ export default function SettingsOverlay({
         onClose={requestCloseSettings}
         /*
          * Nothing here saves as one form: Table Settings saves a vertical at a time, each linked
-         * sheet is saved by its own dialog, and an excluded number is saved as it is added. So a
-         * stray Enter in a field must not act as a submit - and most sections pass no footer at
-         * all, since a bar across the bottom holding one Close button only repeated the X the
-         * header already carries.
+         * sheet is saved by its own dialog, a service or deliverable by its own dialog, and an
+         * excluded number is saved as it is added. So a stray Enter in a field must not act as a
+         * submit - and most sections pass no footer at all, since a bar across the bottom holding
+         * one Close button only repeated the X the header already carries.
          */
         onSubmit={(event) => event.preventDefault()}
         /*
-         * Project Settings is the exception, and keeps the footer it had as a screen of its own.
+         * Project Settings keeps its footer: Close, and the Save that finishes the session.
          *
-         * Its three sections stage their edits and write them together, so there has to be a Save
-         * to press - Close and Save, in that order, disabled until something is staged and while a
-         * save is in flight, exactly as before. It is passed only while one of those sections is
-         * on screen, so every other section still has no bar at the bottom.
+         * Every Add, Update and Remove there has already been written by its own dialog, and no
+         * other section can be holding an edit while this one is on screen - one section is
+         * mounted at a time, and leaving one that holds an edit asks first. So Save has nothing
+         * left to write: it closes Settings, through the same unsaved-edit question every other
+         * way out asks, and is held shut while a dialog's write is still running.
          */
-        footer={onProjectSettings ? <>
+        footer={isProjectSection(openSection.id) ? <>
           <Button type="button" onClick={requestCloseSettings} disabled={projectSettingsState.busy}>Close</Button>
           <Button
             type="button"
             variant="primary"
-            className="ml-auto"
-            onClick={() => void projectSettingsRef.current?.save()}
-            disabled={!projectSettingsState.dirty || projectSettingsState.busy}
+            onClick={requestCloseSettings}
+            disabled={projectSettingsState.busy}
           >
             {projectSettingsState.busy ? "Saving..." : "Save"}
           </Button>
@@ -974,9 +1486,12 @@ export default function SettingsOverlay({
             padding match every other form in the app. */}
         {/* A section that brings its own headings is drawn as it is; everything else is wrapped in
             the shared one, so its heading and padding match every other form in the app. */}
-        {openSection.raw ? openSection.render() : <SchemaFormSection id={openSection.id} title={openSection.title} wide={Boolean(openSection.wide)}>
-          {openSection.render()}
-        </SchemaFormSection>}
+        {/* `data-settings-body` is what a search result's setting is looked for in; `contents` adds no box. */}
+        <div data-settings-body className="contents">
+          {openSection.raw ? openSection.render() : <SchemaFormSection id={openSection.id} title={openSection.title} description={settingsHelpFor(openSection.id)} wide={Boolean(openSection.wide)}>
+            {openSection.render()}
+          </SchemaFormSection>}
+        </div>
 
         {/* The question and the two answers, the way every other confirmation in the CRM asks.
             Cancel stays on Table Settings with the canvas untouched, so the work is still there
@@ -994,6 +1509,7 @@ export default function SettingsOverlay({
           message="Go back if you want to save your settings."
           cancelLabel="Go Back"
           confirmLabel="Discard & Continue"
+          primaryAction="cancel"
           onCancel={() => setPendingSection(null)}
           onConfirm={() => {
             const next = pendingSection;

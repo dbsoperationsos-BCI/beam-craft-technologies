@@ -35,7 +35,9 @@ test("a server-filtered table stops filtering the rows it was handed", () => {
 
 test("the register reports its filters and reads under them", () => {
   assert.match(PAGE, /onColumnFilters: setColumnFilters,/);
-  assert.match(PAGE, /getCandidates\(statusQueryFor\(statusFilter\), \{ offset: append \? offset : 0, appending: append, filters: appliedFilters \}\)/);
+  // The stage tab's, or every stage while the Board is open.
+  assert.match(PAGE, /const queryStatus = onBoard \? ALL_CANDIDATE_STATUSES : statusFilter;/);
+  assert.match(PAGE, /getCandidates\(statusQueryFor\(queryStatus\), \{ offset: append \? offset : 0, appending: append, filters: appliedFilters \}\)/);
 });
 
 test("the filters are debounced, and an unchanged set keeps its identity", () => {

@@ -62,8 +62,9 @@ test("the three pickers on the employee form all read it", () => {
 });
 
 test("the Active tab and the pickers cannot drift apart", () => {
-  // One list, read by both, so a fourth status added to the enum is considered once.
-  assert.match(PAGE, /\{ label: "Active", statuses: WORKING_STATUSES \}/);
+  // One list, read by both (`isWorking` reads WORKING_STATUSES), so a fourth status added to the enum
+  // is considered once. Whoever is leaving is still working, so Active holds them too.
+  assert.match(PAGE, /\{ label: "Active", filter: isWorking \}/);
   assert.doesNotMatch(PAGE, /statuses: \["Active", "in Training", "PIP"\]/);
 });
 

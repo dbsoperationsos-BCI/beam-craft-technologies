@@ -1,0 +1,197 @@
+{
+  "id": "event",
+  "version": 2,
+  "description": "What a wedding, newborn, family or other event shoot is photographed as. Each scene is a set of plain-English prompts the image model compares a photo against; the studio's words are the labels. A scene is a description, never a verdict: an intentional close-up of a baby's feet and an accidental frame of the floor can look alike, so the engine only calls a frame accidental when it is also technically poor. Changing a prompt means re-running backend/scripts/build-scene-assets.py. Version 2 (measured on the real shoots in the test project against hand labels: 71% of photos labelled right, from 48% with version 1) adds bride and groom portraits, family, friends & guests and emotional moments, names the stage as the reception stage, tightens the ceremony prompts and adds newborn close-ups to details.",
+  "calibration": {
+    "method": "Top scene at the confidence culling treats as sure (0.4), on 154 real photos of the test project (100 wedding, 54 newborn) labelled by hand. A scene is validated when it made at least 5 sure calls there and at least 80% were right. Only a validated scene counts toward decisions (a Target Count guarantee, the coverage line, a learned taste); every other scene is still shown as the AI's guess and can be filtered on. Re-measure on more shoots before validating another.",
+    "measuredOn": "2026-10-07",
+    "results": { "COUPLE": "36/38", "BRIDE_PORTRAIT": "16/18", "FAMILY": "8/8", "GROUP": "10/10", "DETAILS": "12/13", "KIDS": "24/30", "CEREMONY": "0/11", "GETTING_READY": "0/4", "GROOM_PORTRAIT": "0/3", "FOOD": "0/3", "STAGE": "2/4", "EMOTIONAL": "0/1", "PORTRAIT": "0/0", "CANDID": "0/0", "DANCE": "0/0", "DECOR": "0/0", "VENUE": "0/0" }
+  },
+  "scenes": [
+    {
+      "id": "GETTING_READY",
+      "label": "Getting ready",
+      "prompts": [
+        "a bride getting ready with makeup and hair",
+        "a groom getting dressed before a wedding",
+        "a woman having her makeup done"
+      ]
+    },
+    {
+      "id": "CEREMONY",
+      "label": "Ceremony",
+      "prompts": [
+        "a priest performing a wedding ritual with a bride and groom",
+        "a traditional wedding ritual around a sacred fire",
+        "a groom tying a sacred thread around the bride's neck",
+        "a couple exchanging garlands during the wedding ceremony",
+        "a bride and groom sitting in front of a priest and a holy fire"
+      ]
+    },
+    {
+      "id": "COUPLE",
+      "validated": true,
+      "label": "Couple portrait",
+      "prompts": [
+        "a portrait of a bride and groom posing together",
+        "a romantic photo of a couple",
+        "a couple holding hands"
+      ]
+    },
+    {
+      "id": "BRIDE_PORTRAIT",
+      "validated": true,
+      "label": "Bride portrait",
+      "prompts": [
+        "a portrait of a bride in a traditional wedding saree",
+        "a close-up portrait of a bride wearing bridal jewellery",
+        "a bride with jasmine flowers in her braided hair",
+        "the back of a bride showing her bridal hairstyle and flowers"
+      ]
+    },
+    {
+      "id": "GROOM_PORTRAIT",
+      "label": "Groom portrait",
+      "prompts": [
+        "a portrait of a groom in a sherwani",
+        "a groom posing alone in wedding clothes",
+        "a close-up portrait of a groom"
+      ]
+    },
+    {
+      "id": "PORTRAIT",
+      "label": "Portrait",
+      "prompts": [
+        "a portrait photo of one adult",
+        "a close-up portrait of a woman",
+        "a close-up portrait of a man"
+      ]
+    },
+    {
+      "id": "FAMILY",
+      "validated": true,
+      "label": "Family",
+      "prompts": [
+        "a bride and groom posing with their parents",
+        "a family portrait of parents and their children",
+        "parents holding their newborn baby",
+        "a mother cuddling her baby"
+      ]
+    },
+    {
+      "id": "GROUP",
+      "validated": true,
+      "label": "Friends & guests",
+      "prompts": [
+        "a group of friends posing together at a wedding",
+        "a large group photo of wedding guests",
+        "a group of young people smiling for a photo"
+      ]
+    },
+    {
+      "id": "CANDID",
+      "label": "Candid guests",
+      "prompts": [
+        "candid photo of guests talking and laughing",
+        "people sitting at an event",
+        "guests watching an event"
+      ]
+    },
+    {
+      "id": "EMOTIONAL",
+      "label": "Emotional moment",
+      "prompts": [
+        "a close-up of a person crying with tears on their face",
+        "a bride crying and hugging her mother at her farewell",
+        "family members wiping away tears at a wedding"
+      ]
+    },
+    {
+      "id": "DANCE",
+      "label": "Dance and party",
+      "prompts": [
+        "people dancing at a party",
+        "a dance floor with colourful lights",
+        "a sangeet dance performance"
+      ]
+    },
+    {
+      "id": "STAGE",
+      "label": "Reception stage",
+      "prompts": [
+        "guests greeting the bride and groom on a decorated reception stage",
+        "a wedding reception stage with the couple standing",
+        "people walking up to congratulate the couple on stage"
+      ]
+    },
+    {
+      "id": "DECOR",
+      "label": "Decor",
+      "prompts": [
+        "wedding decoration with flowers",
+        "a decorated empty venue",
+        "flower arrangements and lights"
+      ]
+    },
+    {
+      "id": "DETAILS",
+      "validated": true,
+      "label": "Details",
+      "prompts": [
+        "close-up of wedding rings",
+        "close-up of jewellery",
+        "close-up of henna on hands",
+        "close-up of shoes and accessories",
+        "close-up of a baby's tiny feet",
+        "close-up of a baby's hand",
+        "a macro detail shot",
+        "a close-up of a newborn baby's tiny feet",
+        "a close-up of a baby's tiny hand",
+        "a macro photo of a baby's lips or nose"
+      ]
+    },
+    {
+      "id": "FOOD",
+      "label": "Food",
+      "prompts": [
+        "food served at an event",
+        "a buffet table with dishes",
+        "a wedding cake",
+        "people eating a traditional meal served on banana leaves",
+        "guests eating lunch at a long dining table at a wedding"
+      ]
+    },
+    {
+      "id": "VENUE",
+      "label": "Venue and scenery",
+      "prompts": [
+        "the exterior of a venue building",
+        "a landscape view",
+        "an outdoor garden scene"
+      ]
+    },
+    {
+      "id": "KIDS",
+      "validated": true,
+      "label": "Kids and newborn",
+      "prompts": [
+        "children playing",
+        "a small child",
+        "a sleeping newborn baby",
+        "a newborn baby wrapped in a blanket"
+      ]
+    },
+    {
+      "id": "ACCIDENTAL",
+      "label": "Accidental frame",
+      "accidental": true,
+      "prompts": [
+        "a blurry accidental photo of the floor",
+        "a completely dark photo",
+        "an accidental photo of the ceiling",
+        "an out of focus photo of nothing",
+        "a photo taken by mistake"
+      ]
+    }
+  ]
+}

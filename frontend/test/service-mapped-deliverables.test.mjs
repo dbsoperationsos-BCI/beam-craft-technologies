@@ -2,16 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { lineSessionTimingMode, pricingForSave, pricingFormLines, pricingLineDeliverables, servicePriceForShoot, servicePricingRowForLine, servicePricingRowForShoot } from "../src/lib/servicePricing.mjs";
+import { lineSessionTimingMode, pricingForSave, pricingFormLines, pricingLineDeliverables, serviceDeliverables, servicePriceForShoot, servicePricingRowForLine, servicePricingRowForShoot } from "../src/lib/servicePricing.mjs";
 
 /*
- * A booking brings its own deliverables.
+ * A service brings its own deliverables.
  *
- * "Studio, Full Session, 8x12, ₹700" may be sold *with* an acrylic print of that size, and a studio
- * that has said so once should not add it to every quotation by hand. The mapping belongs to the
- * booking rather than to the service - the 12x18 line brings a 12x18 print and the 8x12 line does
- * not - so it rides on the pricing line, which is also what keeps it attached when the line is
- * edited.
+ * A studio that has said once that a service is sold *with* an acrylic print should not add it to
+ * every quotation by hand. The list is the service's own now - brought in whenever the service is
+ * added to a shoot, whatever its session - since Settings no longer splits a service into
+ * per-booking pricing lines. A service saved while the mapping rode on those lines reads as every
+ * variant they named. The pricing-line helpers below still stand for what those lines store.
  */
 
 const SERVICE = {
@@ -19,9 +19,9 @@ const SERVICE = {
   sizeEnabled: true,
   deliverableAdded: true,
   pricing: [
-    { shootType: "STUDIO", timingMode: "FULL_SESSION", duration: "10-12 Hours (Full)", size: "8x12", price: 700,
+    { shootType: "STUDIO", timingMode: "FULL_SESSION", duration: "8-10 Hours (Full)", size: "8x12", price: 700,
       deliverables: [{ deliverableId: "d1", brandId: "b1", variantId: "v8" }] },
-    { shootType: "STUDIO", timingMode: "FULL_SESSION", duration: "10-12 Hours (Full)", size: "12x18", price: 1400,
+    { shootType: "STUDIO", timingMode: "FULL_SESSION", duration: "8-10 Hours (Full)", size: "12x18", price: 1400,
       deliverables: [{ deliverableId: "d1", brandId: "b1", variantId: "v12" }, { deliverableId: "d2", brandId: "b2", variantId: "v20" }] },
   ],
 };
@@ -63,7 +63,7 @@ test("a mapping is three ids, and a half-written one is never stored", () => {
 });
 
 test("the mapping only survives a save where the service says it brings deliverables", () => {
-  const lines = [{ id: "l1", shootType: "STUDIO", timingMode: "FULL_SESSION", duration: "10-12 Hours (Full)", size: "8x12", price: "700",
+  const lines = [{ id: "l1", shootType: "STUDIO", timingMode: "FULL_SESSION", duration: "8-10 Hours (Full)", size: "8x12", price: "700",
     deliverables: [{ deliverableId: "d1", brandId: "b1", variantId: "v8" }] }];
   assert.deepEqual(pricingForSave(lines, true, true)[0].deliverables, [{ deliverableId: "d1", brandId: "b1", variantId: "v8" }]);
   // Answered No, the mapping is not stored at all rather than kept where no screen shows it.
@@ -96,7 +96,7 @@ test("the Services table reads in the dialog's own order, with Deliverable Added
   const start = SETTINGS.indexOf("const serviceColumns = useMemo(() => [");
   assert.ok(start > -1, "serviceColumns is not declared");
   const ids = [...SETTINGS.slice(start, SETTINGS.indexOf("], [", start)).matchAll(/\{ id: "([a-zA-Z]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(ids, ["name", "shootType", "sessionTiming", "duration", "size", "price", "deliverableAdded", "complimentary", "remarks"]);
+  assert.deepEqual(ids, ["name", "price", "deliverableAdded", "complimentary", "remarks"]);
   assert.match(SETTINGS, /deliverableAdded: row\.deliverableAdded === true \? "Yes" : "No",/);
 });
 
@@ -107,7 +107,7 @@ test("the deliverable picker is typed at, not scrolled through", () => {
    * only in the last few words of a long line, so finding one by eye means reading the same prefix
    * over and over. `searchable` on the shared `Dropdown` is what this already had an answer for.
    */
-  const start = DIALOG.indexOf('ariaLabel="Add a deliverable to this booking"');
+  const start = DIALOG.indexOf('ariaLabel="Add a deliverable to this service"');
   assert.ok(start > -1, "the deliverable picker is no longer labelled the way this test finds it");
   const picker = DIALOG.slice(DIALOG.lastIndexOf("<Dropdown", start), start);
   assert.match(picker, /\bsearchable\b/, "the deliverable picker cannot be typed at");
@@ -116,12 +116,16 @@ test("the deliverable picker is typed at, not scrolled through", () => {
   assert.match(picker, /mode="input"/);
 });
 
-test("a pricing line answers neither the question nor the note", () => {
-  // Both belong to the service; repeating them down every line reads as an answer about the line.
-  const start = SETTINGS.indexOf("const lineRowsOf = useCallback(");
-  const body = SETTINGS.slice(start, SETTINGS.indexOf("}, [labelOf, money]);", start));
-  assert.match(body, /deliverableAdded: "",/);
-  assert.match(body, /remarks: "",/);
+test("one list per service; a service saved per booking reads as every variant its lines named", () => {
+  const entry = (variantId) => ({ deliverableId: "d1", brandId: "b1", variantId });
+  // The service's own list wins, whatever its pricing lines still carry.
+  assert.deepEqual(serviceDeliverables({ deliverables: [entry("v1")], pricing: [{ deliverables: [entry("v9")] }] }), [entry("v1")]);
+  // An empty list is an answer: the service brings nothing.
+  assert.deepEqual(serviceDeliverables({ deliverables: [], pricing: [{ deliverables: [entry("v9")] }] }), []);
+  // Never saved with a list: every variant its lines named, each once.
+  assert.deepEqual(serviceDeliverables(SERVICE).map((item) => item.variantId), ["v8", "v12", "v20"]);
+  assert.deepEqual(serviceDeliverables({ pricing: [{ deliverables: [entry("v1")] }, { deliverables: [entry("v1"), { variantId: "half" }] }] }), [entry("v1")]);
+  assert.deepEqual(serviceDeliverables(null), []);
 });
 
 test("a service's Remarks is a note, written rather than chosen", () => {
@@ -138,15 +142,16 @@ test("a project's service line always keeps its remarks box", () => {
 
 test("the service dialog asks the question beside Remarks and Size", () => {
   assert.match(DIALOG, /<Dropdown\s*\n\s*label="Deliverable Added"/);
-  assert.match(DIALOG, /deliverableAdded: String\(service\?\.deliverableAdded === true\)/);
+  assert.match(DIALOG, /deliverableAdded: String\(source\?\.deliverableAdded === true\)/);
   assert.match(DIALOG, /deliverableAdded: bringsDeliverables,/);
-  // The list appears on a pricing row only once the service says it brings any.
-  assert.match(DIALOG, /\{bringsDeliverables && <div className="sm:col-span-full">/);
+  // The list appears only once the service says it brings any, and is sent only then.
+  assert.match(DIALOG, /\{bringsDeliverables && <fieldset /);
+  assert.match(DIALOG, /deliverables: bringsDeliverables \? form\.deliverables : \[\],/);
 });
 
-test("a booking cannot be given the same variant twice", () => {
-  assert.match(DIALOG, /const held = new Set\(\(line\.deliverables \|\| \[\]\)\.map\(pricingDeliverableKey\)\);/);
-  assert.match(DIALOG, /return deliverableOptions\.filter\(\(option\) => !held\.has\(/);
+test("a service cannot be given the same variant twice", () => {
+  assert.match(DIALOG, /const held = new Set\(form\.deliverables\.map\(pricingDeliverableKey\)\);/);
+  assert.match(DIALOG, /const addableOptions = deliverableOptions\.filter\(\(option\) => !held\.has\(/);
 });
 
 /*
@@ -198,11 +203,11 @@ test("the line's session is read off the option it names", () => {
   assert.equal(lineSessionTimingMode(definition, { sessionOptionId: "gone" }), null);
 });
 
-test("the quotation resolves the booking, then takes what it brings", () => {
+test("the quotation takes what the service brings, whatever its session", () => {
   assert.match(PANEL, /if \(definition\?\.deliverableAdded !== true\) continue;/);
-  assert.match(PANEL, /const line = servicePricingRowForLine\(definition, shoot, service\);/);
-  // The shoot-based resolver must not be what decides a booking's deliverables.
-  assert.doesNotMatch(PANEL, /servicePricingRowForShoot\(/);
+  assert.match(PANEL, /for \(const entry of serviceDeliverables\(definition\)\) \{/);
+  // No pricing line decides it any more.
+  assert.doesNotMatch(PANEL, /servicePricingRowForShoot\(|servicePricingRowForLine\(/);
   // Through the same call a hand-picked variant makes, so both produce the same row.
   assert.match(PANEL, /rows\.push\(deliverableRowFor\(shoot, deliverable, \{/);
   // And it says where it came from, so a saved quotation names the booking that brought it.
@@ -270,4 +275,79 @@ test("a brand's own deliverable list still carries its brands and variants", () 
 
 test("a mapping whose variant has since gone quietly brings nothing", () => {
   assert.match(PANEL, /if \(!deliverable \|\| !brand \|\| !variant\) continue;/);
+});
+
+test("the quotation offers every service on every shoot, and starts a new line on the shoot's session", () => {
+  const panel = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "components", "sales", "QuotationGeneratorPanel.js"), "utf8");
+  const section = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "components", "project-management", "ProjectServiceCreationSection.js"), "utf8");
+  // One rule in the shared section, so no screen can narrow services by shoot type again: Choose
+  // Services lists the whole catalogue, and only Choose Deliverables follows the shoot's type.
+  assert.match(section, /options=\{serviceDefinitions\}/);
+  assert.match(section, /emptyMessage="No services available"/);
+  assert.doesNotMatch(section, /servicesFollowShootType|servicesForShootType|for this shoot type/);
+  assert.doesNotMatch(panel, /servicesFollowShootType/);
+  assert.match(section, /deliverableVariantOptions\(deliverablesForShootType\(deliverableDefinitions, shoot\)/);
+  // The starting session is set once, where the row is made, before a package's or the
+  // calculator's own choice - never by an effect that could put it back over the person's.
+  // The whole function, however long its comments grow.
+  const rowFor = panel.slice(panel.indexOf("function serviceRowFor("), panel.indexOf("\n  }\n", panel.indexOf("function serviceRowFor(")));
+  assert.match(rowFor, /const sessionOptionId = defaultSessionOptionId\(definition, shoot\);/);
+  assert.ok(rowFor.indexOf("...(sessionOptionId ? { sessionOptionId } : {}),") < rowFor.indexOf("...extra,"));
+  // Set where the row is made; the only other reading is a shoot being edited, which moves a line
+  // still on its shoot's own session to the shoot's new one - never one changed by hand.
+  assert.equal((panel.match(/defaultSessionOptionId\(/g) || []).length, 3);
+  assert.match(panel, /const followed = \(row\.sessionOptionId \|\| ""\) === \(defaultSessionOptionId\(definition, before\) \|\| ""\);/);
+  // The dropdown lists from the same helper the default is chosen from.
+  assert.match(section, /const sessionOptions = serviceSessionOptions\(serviceDefinition\(row\)\);/);
+});
+
+test("Create Project and Edit Sale Details offer the quotation's services and start a line on the shoot's session", () => {
+  const read = (...parts) => fs.readFileSync(path.join(import.meta.dirname, "..", "src", "components", ...parts), "utf8");
+  const create = read("sales", "CreateProjectFormPanel.js");
+  const plan = read("project-management", "useProjectPlan.js");
+  // The same catalogue the Quotation Generator reads, through the same service call.
+  for (const source of [create, plan, read("sales", "QuotationGeneratorPanel.js")]) assert.match(source, /getProjectServiceDefinitions\(\)/);
+  // Creating: the pending line carries the quotation's starting session, which the create payload sends.
+  // The pending lines live in the shared hook Create Project (and Raise Request) hold them in.
+  const lines = read("project-management", "usePendingShootLines.js");
+  assert.match(create, /usePendingShootLines\(\{ serviceDefinitions, deliverableDefinitions \}\)/);
+  assert.match(create, /onAddService=\{shootsFromQuotation \? undefined : pendingLines\.addService\}/);
+  const pending = lines.slice(lines.indexOf("const addService = useCallback("), lines.indexOf("const addService = useCallback(") + 900);
+  assert.match(pending, /const sessionOptionId = defaultSessionOptionId\(definition, shoot\);/);
+  assert.match(pending, /\.\.\.\(sessionOptionId \? \{ sessionOptionId \} : \{\}\),/);
+  assert.match(lines, /sessionOptionId: sessionOptionId \|\| null,/);
+  assert.match(create, /services: \(servicesByShoot\[id\] \|\| \[\]\)\.map\(servicePayload\),/);
+  // Editing: the new allocation is created with it, and the server validates it against the service.
+  const add = plan.slice(plan.indexOf("async function addService("), plan.indexOf("async function addService(") + 900);
+  assert.match(add, /const sessionOptionId = defaultSessionOptionId\(definition, shoot\);/);
+  assert.match(add, /createProjectServiceAllocation\(projectId, shoot\.id, \{ serviceDefinitionId: definition\.id, \.\.\.\(sessionOptionId \? \{ sessionOptionId \} : \{\}\) \}\)/);
+});
+
+test("the Quotation Summary starts a new quotation at 0%, adds a Performance Cost, and takes up to three extra discounts", () => {
+  const panel = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "components", "sales", "QuotationGeneratorPanel.js"), "utf8");
+  // An edit reopens on the exact percentage in its payload, the column only for older payloads.
+  assert.match(panel, /savedDiscountOf\(initialPayload, initialQuotation \? finite\(initialPayload\.discount\) \?\? Number\(initialQuotation\.discount \|\| 0\) : draftDiscount \?\? 0\)/);
+  assert.ok(!/setDiscount\(Number\((response\.data|config\.brand)\.defaultDiscountPercent/.test(panel), "the Default Discount setting no longer pre-fills a quotation");
+  assert.match(panel, /aria-label="Discount amount in rupees"[^>]*prefix="₹"/, "the rupees are typed into too, beside the percentage");
+  // Order on screen: Service Cost, Performance Cost, Discount, Extra Discounts, Total.
+  const order = ["<span>Service Cost :</span>", ">Performance Cost +</Button>", /<span>Discount(?:<HelpTip text="[^"]*" \/>)?<\/span>/, ">Extra Discount +</Button>", "<span>Total Cost :</span>"].map((text) => (typeof text === "string" ? panel.indexOf(text) : panel.search(text)));
+  assert.ok(order.every((at) => at > 0));
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
+  assert.match(panel, /current\.length >= MAX_EXTRA_DISCOUNTS \? current : \[\.\.\.current, \{ id, reason: "", amount: "" \}\]/);
+  assert.match(panel, /\{extraDiscounts\.length < MAX_EXTRA_DISCOUNTS && <IconButton label="Add extra discount"/);
+  // One heading and the column names once; each row's × takes only that row.
+  assert.ok(!/Extra Discount \{index|>Remove<\/Button>/.test(panel), "no numbered titles and no Remove text");
+  assert.equal((panel.match(/<span>Reason<\/span>/g) || []).length, 1);
+  assert.match(panel, /<IconButton label="Remove extra discount"[^>]*onClick=\{\(\) => removeExtraDiscount\(entry\.id\)\}>/);
+  assert.match(panel, /<IconButton label="Remove performance cost"[^>]*onClick=\{removePerformanceCost\}>/);
+  assert.match(panel, /performanceCost: totals\.performanceCost,/);
+  assert.match(panel, /extraDiscounts: extraDiscounts\.map\(\(entry\) => \(\{ reason: entry\.reason\.trim\(\), amount:/);
+  assert.match(panel, /if \(extraDiscountError\) return `/, "too much is refused, not saved");
+  assert.match(panel, /if \(discountError\) return `/, "a discount in rupees above the cost is refused, not saved");
+});
+
+test("a quotation saved with one extra discount opens with it as the first of the list", () => {
+  const panel = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "components", "sales", "QuotationGeneratorPanel.js"), "utf8");
+  // The editor opens from the same reading the client's copy prints from.
+  assert.match(panel, /return extraDiscountsOf\(payload\)\.map\(\(entry, index\) => \(\{ id: `saved-\$\{index\}`/);
 });

@@ -153,15 +153,14 @@ const SOURCES = [
       { module: "SALES", feature: "Sales Manager" },
       { module: "PROJECT", feature: "Projects" },
     ],
-    // A project's client name lives on the reserved WhatsApp group name rather than on the
-    // project, which is why `projectClientNames` exists; the same fallback is applied here.
+    // A project's client is named by its WhatsApp group name, as every staff screen names it
+    // (`services/projectClientNames.js`).
     sql: `SELECT 'Project Management' AS \`source\`, p.\`event_id\` AS \`id\`,
-        COALESCE(NULLIF(TRIM(g.\`client_name\`), ''), p.\`whatsapp_group_name\`) AS \`name\`,
+        p.\`whatsapp_group_name\` AS \`name\`,
         p.\`client_main_number\` AS \`contact\`, ${PROJECT_VERTICAL_SQL} AS \`vertical\`,
         p.\`created_at\` AS \`recordedAt\`,
         'project' AS \`linkKind\`
       FROM \`sales_project\` p
-      LEFT JOIN \`sales_whatsapp_group_name\` g ON g.\`id\` = p.\`whatsapp_group_name_id\`
       WHERE p.\`deleted_at\` IS NULL AND ${hasNumber("p.`client_main_number`")}`,
   },
   {
@@ -202,7 +201,7 @@ const SOURCES = [
   {
     key: "paymentRequest",
     module: "ACCOUNTS",
-    feature: "Payment Request Approval",
+    feature: "Payment Request",
     // Vendor payments only. The other kinds of request are raised by an employee about
     // themselves, and that person is already in the directory through HR.
     sql: `SELECT 'Accounts' AS \`source\`, \`request_code\` AS \`id\`,
@@ -329,6 +328,8 @@ async function listContacts({ can, limit = DEFAULT_LIMIT } = {}) {
       // none. The column is still headed Verticals, because that is what a reader scanning the
       // column is reading, and one row's answer to it is one vertical.
       verticals: String(row.vertical || ""),
+      // When the record was made - the date the Board's trend counts.
+      recordedAt: row.recordedAt ? new Date(row.recordedAt).toISOString() : null,
       module: String(row.source || ""),
       // Which of this person's rows are the same person, for grouping on the client.
       contactKey: String(row.contactKey || ""),

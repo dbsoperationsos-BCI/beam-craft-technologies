@@ -55,7 +55,11 @@ test("both lists are maintained through the master data, and know where their va
   const blood = definitions["blood-groups"];
   assert.ok(blood, "blood groups are not a master-data resource, so Field Settings cannot edit them");
   assert.equal(blood.model, "bloodGroup");
-  assert.deepEqual(blood.usedBy, [{ model: "employee", field: "bloodGroup", match: "exact", label: "employee" }]);
+  // `idField` / `orText`: a rename rewrites the employee's text by the `blood_group_id` beside it
+  // (services/employeeReferences.js), falling back to the exact old spelling where the reference is
+  // NULL. Languages are several to a record and have junction rows instead, so the text is still
+  // rewritten entry by entry.
+  assert.deepEqual(blood.usedBy, [{ model: "employee", field: "bloodGroup", match: "exact", label: "employee", idField: "bloodGroupId", orText: true }]);
 
   const languages = definitions.languages;
   assert.equal(languages.model, "language");

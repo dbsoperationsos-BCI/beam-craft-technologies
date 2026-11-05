@@ -30,10 +30,12 @@ test("it sticks to the panel's own scroller, which is the only thing that scroll
   assert.match(PANEL, /<ReadOnlyFieldset canWrite=\{!readOnly\} reason=\{readOnlyReason\} className="contents">/);
 });
 
-test("the figures and the discount box are unchanged", () => {
+test("the figures are unchanged, and the discount box takes 0 to 15", () => {
   assert.match(PAGE, /<span>Service Cost :<\/span><span>\{currency\(subtotal\)\}<\/span>/);
   assert.match(PAGE, /<span>Total Cost :<\/span><span>\{currency\(total\)\}<\/span>/);
-  assert.match(PAGE, /input type="number" min="0" max="100" value=\{discount\} onChange=\{\(event\) => \{ setDiscountTouched\(true\); setDiscount\(Math\.min\(100, Number\(event\.target\.value \|\| 0\)\)\); \}\}/);
+  assert.match(PAGE, /<SharedTextField aria-label="Discount in %" type="number" inputMode="decimal" min="0" max=\{MAX_DISCOUNT_PERCENT\} step="any" suffix="%" value=\{discountPercentText\}/);
+  // Out of 100: anything more is held at 100, and a cleared box stays cleared while it is retyped.
+  assert.match(PAGE, /setDiscount\(source === DISCOUNT_SOURCES\.PERCENTAGE && Number\(typed\) > 100 \? "100" : typed\);/);
   // Additional Notes stays in the main column, before the summary.
   assert.ok(PAGE.indexOf('label="Additional Notes"') < PAGE.indexOf("Quotation Summary"));
 });

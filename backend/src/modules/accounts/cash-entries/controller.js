@@ -1,11 +1,17 @@
+const { withUserNames } = require("../../../services/userNames");
 const { z } = require("zod");
 const { paymentModes, modesWithTransactionId, modesWithAccount, modesWithDetails, FALLBACK_MODES, FALLBACK_MODES_WITH_TRANSACTION_ID, FALLBACK_MODES_WITH_ACCOUNT } = require("../../../services/paymentOptionLists");
-const { workingEmployeeStatuses } = require("../../../services/employeeOptionLists");
+const { workingEmployeeStatuses, listPhotoUrl } = require("../../../services/employeeOptionLists");
 const prisma = require("../../../config/db");
 const { attachFiles, removeDroppedFiles, fileUrls, discardUploads } = require("../../../services/uploadMetadata");
 const { receiptMessageFor } = require("./receiptMessage");
+const { ensureInvoiceToken, entryByInvoiceToken, invoiceUrl, TOKEN_PATTERN } = require("./invoiceLink");
+const { resolveProjectGroup, sendToProjectGroup } = require("../../sales/crd-documents/groupSend");
+const { receiptFor } = require("./receipt");
+const { renderReceiptPdf } = require("../../../services/paymentReceiptPdf");
 const { projectClientNames, clientNameOf } = require("../../../services/projectClientNames");
 const iamService = require("../../../services/iam.service");
+const clientPush = require("../../../services/clientPush");
 
 /*
  * The permission a branch on a cash entry is measured against.
@@ -15,9 +21,16 @@ const iamService = require("../../../services/iam.service");
  */
 const CASH_MANAGEMENT = { module: "ACCOUNTS", feature: "Cash Management", level: "READ_WRITE" };
 const dataScope = require("../../../services/dataScope.service");
+const { projectAccessWhere, readableProject } = require("../../../services/projectScope");
 const { lookups: referenceLookups } = require("../../../services/referenceMatchers");
 const { nextIdentifier } = require("../../../services/identifiers");
+const { everyChunk } = require("../../../services/wordChunks");
+const { PICKER_PAGE, searchPicker } = require("../../../services/pickerSearch");
+// An entry against a project in the Recycling Bin is kept - it is money that happened - but not listed.
+const { liveProjectWhere } = require("../../../services/projectScope");
 const { importTableRows, templateHeaders } = require("../../../services/tableImport");
+const { receivedIntoOptions, accountsByBranch } = require("../../../services/branchBankAccounts");
+const { parseDate: parseStatementDate } = require("../statement-import/parser");
 
 /**
  * Cash moving in and out: what it was, who it was with, how it moved, and who in the studio handled
@@ -45,11 +58,21 @@ const { importTableRows, templateHeaders } = require("../../../services/tableImp
  * what holds every other caller to naming a project.
  */
 
-const ENTRY_TYPES = ["Received", "Spent"];
+/*
+ * The third kind, **Transfer**, is the studio's own money moving from one branch's account to
+ * another's. It is one entry, not a Spent and a Received: it is filed in the books of the branch the
+ * money left (`branch`, as every entry is) and names the branch it landed in (`toBranchId`), with
+ * the account it left (`paidFromAccount`) and the account it reached (`receivedAccount`). It has no
+ * project, shoot or client, and it is neither income nor spend.
+ */
+const ENTRY_TYPES = ["Received", "Spent", "Transfer"];
+/** Where an entry came from - the Source column. */
+const ENTRY_SOURCES = ["Manual", "CSV Import", "PDF Import"];
 const RECEIVED_CATEGORIES = ["Advance", "Partial Payment", "Extras", "Final Settlement", "Advance Settlement"];
 /** Placeholder until Accounts settles its own spend list; changing this array is the whole change. */
 const SPENT_CATEGORIES = ["Vendor Payment", "Freelancer Payment", "Salary Advance", "Employee Expense", "Travel", "Equipment", "Office Expense", "Client Refund", "Other"];
-const CATEGORIES_BY_TYPE = { Received: RECEIVED_CATEGORIES, Spent: SPENT_CATEGORIES };
+const TRANSFER_CATEGORIES = ["Branch Transfer"];
+const CATEGORIES_BY_TYPE = { Received: RECEIVED_CATEGORIES, Spent: SPENT_CATEGORIES, Transfer: TRANSFER_CATEGORIES };
 /**
  * How the money moved, and what each way of moving it asks for.
  *
@@ -73,19 +96,18 @@ const MODES_WITH_ACCOUNT = FALLBACK_MODES_WITH_ACCOUNT;
 const PAYMENT_MODES = FALLBACK_MODES;
 // Money in and money out are two runs of numbers, not one: the studio reads a receipt book and a
 // payment book, and a shared sequence would leave gaps in both.
-const SCHEME_BY_TYPE = { Received: "CASH_RECEIVED", Spent: "CASH_SPENT" };
+const SCHEME_BY_TYPE = { Received: "CASH_RECEIVED", Spent: "CASH_SPENT", Transfer: "CASH_TRANSFER" };
 // The employment statuses that count as working here, read off the status list the studio
 // maintains in Settings → Field Settings rather than written out again. See
 // `services/employeeOptionLists`.
 /** How many projects and shoots the form's pickers are given, most recent first. */
-const LOOKUP_LIMIT = 200;
 /** Where the receipts live in the bucket, under the module that owns them like every other folder. */
 const PROOF_FOLDER = "accounts/cash-entries/proof";
 const MAX_PROOF_FILES = 5;
 
 const optionalText = (max) => z.string().trim().max(max).nullable().optional();
 
-const entrySchema = z.object({
+const entryFields = z.object({
   entryType: z.enum(ENTRY_TYPES),
   // Money in names a project, money out names a shoot; the one that does not belong to the
   // direction is dropped in `linkFields` rather than rejected, as `receivedAccount` and `paidTo`
@@ -108,6 +130,9 @@ const entrySchema = z.object({
   // field both were stripped here and the write failed on the column, as a 500, after the request
   // had been marked approved inside the same transaction.
   clientName: optionalText(191),
+  // A branch transfer's two ends, picked on the form. Ignored on every other entry.
+  fromBranchId: z.coerce.number().int().positive().nullable().optional(),
+  toBranchId: z.coerce.number().int().positive().nullable().optional(),
   /*
    * Checked against the payment mode list rather than a fixed set of six.
    *
@@ -132,7 +157,21 @@ const entrySchema = z.object({
   // under, and anything just picked arrives as an inline data URI. Which is which is sorted out in
   // `attachProof`, so the form does not have to tell them apart.
   paymentProof: z.array(z.string().min(1)).max(MAX_PROOF_FILES, `Attach at most ${MAX_PROOF_FILES} files`).nullable().optional(),
-}).superRefine(async (value, context) => {
+});
+
+/**
+ * The rules across fields, shared by every writer.
+ *
+ * `referencesOptional` is the cash-book import's: a spreadsheet row is history being brought in, and
+ * an old cash book often has no transaction ID, no account and no remark against a payment that
+ * plainly happened. The form asks for them because the person typing has the payment in front of
+ * them; an import keeps the row and leaves those three empty rather than refusing it.
+ *
+ * `spentPartiesOptional` is the import's too, for money out: an old cash book's expense line often
+ * says neither whom it was paid to nor who in the studio paid it, and the import keeps it with both
+ * left empty. Money received still names who took it.
+ */
+const entryRules = ({ referencesOptional = false, spentPartiesOptional = false, transfers = true } = {}) => async (value, context) => {
   const issue = (path, message) => context.addIssue({ code: "custom", path: [path], message });
   // Which modes ask for what is the list's own answer now, not three arrays written out here.
   const [withTransactionId, withAccount, withDetails] = await Promise.all([
@@ -142,29 +181,70 @@ const entrySchema = z.object({
   if (!(CATEGORIES_BY_TYPE[value.entryType] || []).includes(value.category)) {
     issue("category", `That category does not belong to a ${value.entryType.toLowerCase()} entry`);
   }
-  // A mode that says what it actually was is only meaningful once it does, the way an "Other"
-  // handler needs a name. Which modes those are is the list's answer.
-  if (withDetails.includes(value.paymentMode) && !value.paymentModeOther) {
-    issue("paymentModeOther", "Say what the payment mode was");
+  /*
+   * The **remark on the payment mode**, which is what `paymentModeOther` holds and what the form now
+   * calls it. A mode the studio marked as asking for one is a mode that says nothing by itself -
+   * "Other" - so the entry has to say what it actually was. Which modes those are is the list's own
+   * answer, not a set written out here.
+   *
+   * Not the entry's description: that is about the payment as a whole and stays optional. This one
+   * is about the mode alone, and is the only mandatory note on a cash entry.
+   */
+  if (!referencesOptional && withDetails.includes(value.paymentMode) && !value.paymentModeOther) {
+    issue("paymentModeOther", "Add a remark for this payment mode");
   }
-  if (withTransactionId.includes(value.paymentMode) && !value.transactionId) {
+  if (!referencesOptional && withTransactionId.includes(value.paymentMode) && !value.transactionId) {
     issue("transactionId", value.paymentMode === "UPI" ? "Enter the UPI transaction ID" : `Enter the ${value.paymentMode} reference number`);
   }
-  // Only the modes that move money through an account are asked for one; cash is asked for none.
-  if (withAccount.includes(value.paymentMode)) {
-    if (value.entryType === "Received" && !value.receivedAccount) issue("receivedAccount", "Enter the account the money went into");
-    if (value.entryType === "Spent" && !value.paidFromAccount) issue("paidFromAccount", "Enter the account the money was paid from");
+  const transfer = value.entryType === "Transfer";
+  // A cash book's spreadsheet has no From Branch or To Branch column, so a transfer is refused as
+  // a row rather than asked for fields the template cannot carry.
+  if (transfer && !transfers) {
+    issue("entryType", "A branch transfer cannot be imported. Record it from Add Entry.");
+    return;
   }
-  if (value.entryType === "Spent" && !value.paidTo) {
+  if (transfer) {
+    if (!value.fromBranchId) issue("fromBranchId", "Choose the branch the money left");
+    if (!value.toBranchId) issue("toBranchId", "Choose the branch the money went to");
+    if (value.fromBranchId && value.fromBranchId === value.toBranchId) issue("toBranchId", "A transfer goes to a different branch");
+  }
+  // Only the modes that move money through an account are asked for one; cash is asked for none. A
+  // transfer is asked for both ends.
+  if (!referencesOptional && withAccount.includes(value.paymentMode)) {
+    if ((value.entryType === "Received" || transfer) && !value.receivedAccount) issue("receivedAccount", "Enter the account the money went into");
+    if ((value.entryType === "Spent" || transfer) && !value.paidFromAccount) issue("paidFromAccount", "Enter the account the money was paid from");
+  }
+  if (value.entryType === "Spent" && !value.paidTo && !spentPartiesOptional) {
     issue("paidTo", "Enter who the payment went to");
   }
-  if (value.handlerIsOther && !value.handlerName) {
-    issue("handlerName", value.entryType === "Received" ? "Enter who received the money" : "Enter who paid the money out");
+  /*
+   * **Asked of everything except money received through a mode that carries a remark.**
+   *
+   * Which is "Other" out of the box: a payment that arrived by some arrangement the list does not
+   * name, where the remark above says what actually happened and the person filing it is the person
+   * it happened to - so naming a receiver asked the form to repeat what the login already says, on
+   * the form that books a project. Nothing is stored in its place, nobody having been asked.
+   *
+   * Every other mode asks as it always did, in both directions: money received by cash, UPI or a
+   * transfer still names who took it, and the studio's money leaving through somebody's hands - a
+   * thing to be accountable for - always names them.
+   */
+  const asksHandler = !(value.entryType === "Received" && withDetails.includes(value.paymentMode))
+    && !(value.entryType === "Spent" && spentPartiesOptional);
+  if (asksHandler) {
+    const received = value.entryType === "Received";
+    const who = received ? "received the money" : transfer ? "made the transfer" : "paid the money out";
+    if (value.handlerIsOther && !value.handlerName) issue("handlerName", `Enter who ${who}`);
+    if (!value.handlerIsOther && !value.handlerEmployeeId) issue("handlerEmployeeId", `Choose the employee who ${who}`);
   }
-  if (!value.handlerIsOther && !value.handlerEmployeeId) {
-    issue("handlerEmployeeId", value.entryType === "Received" ? "Choose the employee who received the money" : "Choose the employee who paid the money out");
-  }
-});
+};
+
+const entrySchema = entryFields.superRefine(entryRules());
+/**
+ * The import's: the transaction ID, the account and the mode's remark may be left empty, and so may
+ * money out's Paid To and Handled By.
+ */
+const importEntrySchema = entryFields.superRefine(entryRules({ referencesOptional: true, spentPartiesOptional: true, transfers: false }));
 
 /**
  * The same entry as a form fills it in, which must say what the money was against.
@@ -197,6 +277,21 @@ const listQuerySchema = z.object({
 function validationError(res, error) {
   return res.status(400).json({ message: "Validation failed", errors: error.flatten() });
 }
+
+/*
+ * "Settles payment" on a receipt: which of the project's scheduled payments it is, and whether it is
+ * all of what is pending (FULL) or part of it, the rest due on `pendingDueDate` (PARTIAL). Read by
+ * `scheduled-payments/service.js` `settleInTx`, required when needed because that module requires
+ * this one.
+ */
+const settlesSchema = z.object({
+  paymentScheduleId: z.string().trim().min(1, "Choose the scheduled payment this settles.").max(64),
+  mode: z.enum(["FULL", "PARTIAL"], { error: "Choose Full or Partial payment." }),
+  pendingDueDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "Choose the date the rest is due.").optional().nullable(),
+}).superRefine((value, context) => {
+  if (value.mode === "PARTIAL" && !value.pendingDueDate) context.addIssue({ code: "custom", path: ["pendingDueDate"], message: "Choose the date the rest is due." });
+});
+const scheduledPayments = () => require("../scheduled-payments/service");
 
 function handleCashEntryError(res, error, fallback) {
   if (error.fieldErrors) return res.status(400).json({ message: error.message, errors: error.fieldErrors });
@@ -246,7 +341,75 @@ const toProjectOption = (project, names) => project && {
   crmName: project.crmName,
 };
 
+/*
+ * The form's project and shoot pickers, **searched on the server**.
+ *
+ * `options` carried every live project and shoot capped at 200, and the picker filtered
+ * that list in the browser - so the cap was not a page but the limit of what an entry could be filed
+ * against, and ordered newest-first what it dropped was the oldest. This file already worked around
+ * it: `CashEntryFormPanel` puts an edited entry's own project and shoot back at the top of the list
+ * "because the server offers the most recent only". That workaround is the bug written down - it
+ * rescues the one record the form was opened on and nothing else, so an entry could be *read* against
+ * an old project but never *filed* against one.
+ *
+ * 200 of 640 projects and 200 of 986 shoots on the development database. See
+ * `services/pickerSearch.js` for the shape and why.
+ *
+ * Unlike the payment request's, the **shoot** search here takes a `projectId`: this form asks for the
+ * project first and narrows the shoots to it, which is the form's own design and not a cap.
+ */
+async function searchProjectOptions(req, res) {
+  try {
+    const { rows, total, capped } = await searchPicker(prisma.salesProject, {
+      search: String(req.query.search || "").trim(),
+      where: { deletedAt: null },
+      // The Event ID and the group name, which is what the "client name" on screen already is
+      // (`projectClientNames`): there is no separate column to search.
+      chunkIn: (chunk) => [{ eventId: { contains: chunk } }, { whatsappGroupName: { contains: chunk } }],
+      orderBy: [{ createdAt: "desc" }],
+      select: projectSelect,
+    });
+    const names = await projectClientNames(rows);
+    return res.json({ data: { projects: rows.map((project) => toProjectOption(project, names)), total, capped } });
+  } catch (error) { return handleCashEntryError(res, error, "Unable to search projects"); }
+}
+
+async function searchShootOptions(req, res) {
+  const projectId = String(req.query.projectId || "").trim();
+  try {
+    const { rows, total, capped } = await searchPicker(prisma.projectShoot, {
+      search: String(req.query.search || "").trim(),
+      where: { deletedAt: null, project: { deletedAt: null }, ...(projectId ? { projectId } : {}) },
+      chunkIn: (chunk) => [
+        { shootId: { contains: chunk } },
+        { shoot: { contains: chunk } },
+        { shootPlace: { contains: chunk } },
+        { project: { eventId: { contains: chunk } } },
+        { project: { whatsappGroupName: { contains: chunk } } },
+      ],
+      orderBy: [{ dateCreated: "desc" }, { shootId: "desc" }],
+      select: { id: true, shootId: true, shoot: true, dateCreated: true, shootPlace: true, district: true, state: true, project: { select: projectSelect } },
+    });
+    const names = await projectClientNames(rows.map((shoot) => shoot.project));
+    return res.json({
+      data: {
+        shoots: rows.map((shoot) => ({
+          id: shoot.id,
+          shootId: shoot.shootId,
+          shoot: shoot.shoot,
+          dateCreated: shoot.dateCreated,
+          place: [shoot.shootPlace, shoot.district, shoot.state].filter(Boolean).join(", "),
+          project: toProjectOption(shoot.project, names),
+        })),
+        total,
+        capped,
+      },
+    });
+  } catch (error) { return handleCashEntryError(res, error, "Unable to search shoots"); }
+}
+
 const include = {
+  toBranch: { select: { id: true, name: true } },
   handler: { select: { id: true, employeeId: true, employeeName: true, department: true, designation: true } },
   project: { select: { id: true, eventId: true } },
   shoot: { select: { id: true, shootId: true, shoot: true, dateCreated: true } },
@@ -262,10 +425,18 @@ const include = {
  */
 function toRow(entry) {
   const amount = entry.amount === null ? null : Number(entry.amount);
+  // The invoice token is the client's credential to their invoice: handed out by Share invoice
+  // (Read / Write) as a link, and never in a row a Read-only viewer is sent.
+  const { invoiceToken: _invoiceToken, ...fields } = entry;
   return {
-    ...entry,
+    ...fields,
     amount,
-    signedAmount: amount === null ? null : (entry.entryType === "Spent" ? -amount : amount),
+    // A transfer moves money between the studio's own branches, so it adds nothing to either total.
+    signedAmount: amount === null ? null : (entry.entryType === "Spent" ? -amount : entry.entryType === "Transfer" ? 0 : amount),
+    // Read through the link: a transfer keeps no text copy of where the money went.
+    toBranchName: entry.toBranch?.name || "",
+    // A received entry names nobody, so there is no code and no em dash standing in for one: the
+    // em dash belongs to a handler who is off the payroll, which is a different answer from "none".
     handlerEmployeeCode: entry.handler?.employeeId || (entry.handlerIsOther ? "—" : ""),
     handlerDepartment: entry.handler?.department || "",
     shootCode: entry.shoot?.shootId || "",
@@ -279,6 +450,35 @@ function toRow(entry) {
 }
 
 async function handlerFields(input) {
+  /*
+   * Money in **may** name nobody - a payment received through a mode that carries a remark is not
+   * asked - and then there is nothing to resolve and nothing to store: not an empty string, which
+   * would read as a receiver called "", and not the person filing it, which would be this table
+   * answering a question it was not asked.
+   *
+   * **No keys at all, rather than explicit nulls.** This runs on the way into an update as well as a
+   * create, and the form no longer sends a handler - so nulls here were written straight over the
+   * receiver an older receipt already held, losing it the first time anybody corrected an amount on
+   * it. Omitting the keys leaves those columns exactly as they are; on a create there is nothing to
+   * leave, so the row is written with the null the column allows and `handlerIsOther` false by
+   * default. Nothing else in `entryData` is conditional in this way, which is why it is said here.
+   *
+   * Only where nothing was given, though, rather than for every received entry. An approved payment
+   * request can file money *in* - a settlement where the studio spent less than it advanced, so the
+   * balance comes back - and it names who took it. Refusing to store what that path supplies would
+   * throw away the one receiver still being recorded, for a form rule it is not subject to. "Named
+   * by hand with no name" counts as nothing given: it would otherwise store a handler marked as
+   * being off the payroll whom nobody named, which reads as an em dash where a person should be.
+   */
+  /*
+   * And money out imported from a cash book that never said who paid it - the one way a spent entry
+   * reaches here with nobody named, the form and the schema asking for them everywhere else. Without
+   * this, an absent id went to `findFirst` as `id: undefined`, which matches the **first employee in
+   * the table**: somebody nobody named would have been recorded as having paid the money out.
+   */
+  if (!input.handlerEmployeeId && !input.handlerName) {
+    return {};
+  }
   if (input.handlerIsOther) {
     return { handlerEmployeeId: null, handlerName: input.handlerName, handlerIsOther: true };
   }
@@ -321,6 +521,7 @@ function badRequest(message) {
  * it may be filed against.
  */
 async function linkFields(input) {
+  if (input.entryType === "Transfer") return transferFields(input);
   const projectSelection = { id: true, whatsappGroupNameId: true, whatsappGroupName: true, sourceBranch: true };
   // Scoped: an entry may only be filed against a project this person can see. Refused as an invalid
   // choice rather than as a permission, so the reply says no more than the picker already did.
@@ -353,7 +554,7 @@ async function linkFields(input) {
     // is what the column needs, and refused here rather than at the database.
     const clientName = (await named(found)) || input.clientName || null;
     if (!clientName) throw badRequest("No client could be worked out for this entry. Name the client, or file it against a project.");
-    return { projectId, shootId, clientName, branch };
+    return { projectId, shootId, clientName, branch, toBranchId: null };
   };
 
   if (input.entryType === "Received" || !input.shootId) {
@@ -371,8 +572,36 @@ async function linkFields(input) {
   return filedAgainst(shoot.project, shoot.projectId, shoot.id);
 }
 
+/**
+ * What a branch transfer is filed under: the branch the money left, whose books it lands in, and the
+ * branch it went to. Both must be open branches; who may use them is checked by the writer, as the
+ * branch of every other entry is. No project, shoot or client - a transfer is the studio's own money.
+ */
+async function transferFields(input) {
+  const branches = await prisma.branch.findMany({
+    where: { id: { in: [input.fromBranchId, input.toBranchId] }, isActive: true },
+    select: { id: true, name: true },
+  });
+  const from = branches.find((branch) => branch.id === input.fromBranchId);
+  const to = branches.find((branch) => branch.id === input.toBranchId);
+  if (!from) throw badRequest("Select a valid branch the money left");
+  if (!to) throw badRequest("Select a valid branch the money went to");
+  // Each end's account must be one its own branch holds - the form offers no other, and the body is
+  // not trusted to have kept to it. Only checked where one was sent: cash names no account.
+  const accounts = new Map((await accountsByBranch()).map((branch) => [branch.id, branch.accounts]));
+  if (input.paidFromAccount && !(accounts.get(from.id) || []).includes(input.paidFromAccount)) {
+    throw badRequest(`Choose an account of ${from.name} for the account the money left`);
+  }
+  if (input.receivedAccount && !(accounts.get(to.id) || []).includes(input.receivedAccount)) {
+    throw badRequest(`Choose an account of ${to.name} for the account the money went into`);
+  }
+  // The id is the one picked, written as it is rather than matched back from the name.
+  return { projectId: null, shootId: null, clientName: null, branch: from.name, branchId: from.id, toBranchId: to.id };
+}
+
 async function entryData(input) {
   const isReceived = input.entryType === "Received";
+  const isTransfer = input.entryType === "Transfer";
   const [carriesTransactionId, carriesAccount] = await Promise.all([
     modesWithTransactionId().then((modes) => modes.includes(input.paymentMode)),
     modesWithAccount().then((modes) => modes.includes(input.paymentMode)),
@@ -386,12 +615,27 @@ async function entryData(input) {
     paymentMode: input.paymentMode,
     transactionId: carriesTransactionId ? input.transactionId : null,
     paymentModeOther: input.paymentMode === "Other" ? input.paymentModeOther : null,
-    receivedAccount: isReceived && carriesAccount ? input.receivedAccount : null,
+    // A transfer carries both ends; money in only where it landed, money out only where it left.
+    receivedAccount: (isReceived || isTransfer) && carriesAccount ? input.receivedAccount : null,
     paidFromAccount: !isReceived && carriesAccount ? input.paidFromAccount : null,
-    paidTo: isReceived ? null : input.paidTo,
+    paidTo: isReceived || isTransfer ? null : input.paidTo,
     description: input.description ?? null,
     ...(await handlerFields(input)),
   };
+}
+
+/**
+ * Whether the caller reaches every branch the entry names, for the cash book: its own branch, and on
+ * a transfer the branch the money went to as well. A transfer moves money into another branch's
+ * account, so it is not somebody's to record who could not record an entry there.
+ */
+async function canUseEntryBranches(actorId, data) {
+  // A transfer's own branch was picked by id, so it is checked by id; everything else by its name.
+  const ownBranch = data.branchId
+    ? await iamService.canUseBranchId(actorId, data.branchId, CASH_MANAGEMENT)
+    : await iamService.canUseBranchName(actorId, data.branch, CASH_MANAGEMENT);
+  if (!ownBranch) return false;
+  return !data.toBranchId || iamService.canUseBranchId(actorId, data.toBranchId, CASH_MANAGEMENT);
 }
 
 /** The branch reference beside the branch name an entry is filed under, by the backfill's rule. */
@@ -407,13 +651,40 @@ async function branchReference(branch) {
 const CASH_SCOPE_COLUMNS = { branch: "branchId", employee: "handlerEmployeeId", user: "createdBy" };
 const cashScope = (req) => dataScope.resolve({ userId: Number(req.user.id), module: req.permission.module, feature: req.permission.feature, columns: CASH_SCOPE_COLUMNS });
 
-/** One live entry the request may see, or null - out of scope reads as not found. */
-async function scopedEntry(req, id, select) {
+/**
+ * One live entry the request may see, or null - out of scope reads as not found.
+ *
+ * `throughProject`: also an entry filed against a project the caller sees on their board, whoever
+ * recorded it and whatever its branch. Somebody who holds Cash Management works a project's whole
+ * Payments tab - view, receipt, edit, share - not only the payments their own scope would list.
+ * Delete does not ask for it, and neither does the Accounts Manager list.
+ */
+async function scopedEntry(req, id, select, { throughProject = false } = {}) {
   const [scope, entry] = await Promise.all([
     cashScope(req),
-    prisma.cashEntry.findFirst({ where: { id, deletedAt: null }, ...(select ? { select: { ...select, branchId: true, handlerEmployeeId: true, createdBy: true } } : { include }) }),
+    prisma.cashEntry.findFirst({ where: { id, deletedAt: null, AND: [liveProjectWhere({ shoot: "shoot" })] }, ...(select ? { select: { ...select, branchId: true, handlerEmployeeId: true, createdBy: true, projectId: true } } : { include }) }),
   ]);
-  return entry && scope.allows(entry) ? entry : null;
+  if (!entry) return null;
+  if (scope.allows(entry)) return entry;
+  return throughProject && (await onVisibleProject(req, entry.projectId)) ? entry : null;
+}
+
+/**
+ * Whether the caller may settle `projectId`'s scheduled payments: a project Cash Management reaches
+ * for writing - what the Due tabs' Clear asks - or one on their board, as the Payments tab works it.
+ */
+async function maySettleFor(req, projectId) {
+  if (!projectId) return false;
+  const reached = await prisma.salesProject.findFirst({
+    where: { id: String(projectId), deletedAt: null, AND: [await projectAccessWhere({ userId: Number(req.user.id), permissions: req.permission, forWrite: true })] },
+    select: { id: true },
+  });
+  return Boolean(reached) || onVisibleProject(req, projectId);
+}
+
+/** Whether `projectId` is a live project the caller sees on their board - the Payments tab's own rule. */
+async function onVisibleProject(req, projectId) {
+  return Boolean(projectId && (await readableProject({ userId: Number(req.user.id), projectId })));
 }
 
 async function listEntries(req, res) {
@@ -425,25 +696,26 @@ async function listEntries(req, res) {
     const data = await prisma.cashEntry.findMany({
       where: {
         deletedAt: null,
-        AND: [scope.where],
-        ...(entryType ? { entryType } : {}),
-        ...(category ? { category } : {}),
-        ...(search ? { OR: [
-          { clientName: { contains: search } },
-          { entryId: { contains: search } },
-          { paidTo: { contains: search } },
+        // Word Chunk Search: every word typed, any order - beside the scope, never replacing it.
+        AND: [scope.where, liveProjectWhere({ shoot: "shoot" }), ...everyChunk(search, (chunk) => ({ OR: [
+          { clientName: { contains: chunk } },
+          { entryId: { contains: chunk } },
+          { paidTo: { contains: chunk } },
           // Searched by the identifiers the entry was filed under, which is how Accounts finds what
           // a shoot cost or what came in against a project. The description carries the code of the
           // payment request an approval wrote the entry for, so the two can be found from each other.
-          { shoot: { shootId: { contains: search } } },
-          { project: { eventId: { contains: search } } },
-          { description: { contains: search } },
-        ] } : {}),
+          { shoot: { shootId: { contains: chunk } } },
+          { project: { eventId: { contains: chunk } } },
+          { description: { contains: chunk } },
+        ] }))],
+        ...(entryType ? { entryType } : {}),
+        ...(category ? { category } : {}),
       },
       orderBy: [{ entryDate: "desc" }, { createdAt: "desc" }],
       include,
     });
-    return res.json({ data: data.map(toRow) });
+    // Who recorded and last changed each entry, by name (`services/userNames`).
+    return res.json({ data: await withUserNames(data.map(toRow)) });
   } catch (error) { return handleCashEntryError(res, error, "Unable to load cash entries"); }
 }
 
@@ -451,54 +723,89 @@ async function getEntry(req, res) {
   const id = parseId(req, res);
   if (!id) return;
   try {
-    const entry = await scopedEntry(req, id);
+    const entry = await scopedEntry(req, id, null, { throughProject: true });
     if (!entry) return res.status(404).json({ message: "Cash entry not found" });
     return res.json({ data: toRow(entry) });
   } catch (error) { return handleCashEntryError(res, error, "Unable to load this cash entry"); }
 }
 
 /**
- * Everything the form's dropdowns are drawn from, in one request rather than five. No branches: the
- * form no longer asks for one, since an entry's branch is the Source Branch of the project it names.
+ * One cash received entry's invoice, as a PDF - the Payments tab's download. Scoped like
+ * `getEntry`, so a receipt is printed only for an entry its reader may already open; money spent has
+ * none. Named by the entry's own number (RCP-000123), which is the receipt's number.
+ */
+async function downloadReceipt(req, res) {
+  const id = parseId(req, res);
+  if (!id) return;
+  try {
+    const entry = await scopedEntry(req, id, null, { throughProject: true });
+    if (!entry) return res.status(404).json({ message: "Cash entry not found" });
+    const receipt = await receiptFor(entry);
+    if (!receipt) return res.status(400).json({ message: "Only money received has an invoice." });
+    const pdf = await renderReceiptPdf(receipt);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="Invoice-${String(entry.entryId).replace(/[^A-Za-z0-9-]/g, "")}.pdf"`);
+    res.setHeader("Content-Length", pdf.length);
+    return res.end(pdf);
+  } catch (error) { return handleCashEntryError(res, error, "The invoice could not be prepared. Try again in a moment."); }
+}
+
+/**
+ * Everything the form's dropdowns are drawn from, in one request rather than five. Money in and out
+ * are not asked for a branch - their branch is the Source Branch of the project they name - so the
+ * branches offered are a transfer's two ends alone.
  * The account names are the studio's own, kept in Settings, which keeps a typo from quietly becoming
  * a second account.
  *
  * Projects and shoots carry the details the form fills in from them, so choosing one costs no
- * further request. Both are the most recent `LOOKUP_LIMIT`, the same cut Client Storage's shoot
- * picker takes, and the dropdowns search within that.
+ * further request. Both are a **page** - the most recent `PICKER_PAGE` - for their pickers to open
+ * on; typing searches every one of them through `/projects` and `/shoots`. They used to be the most
+ * recent 200 and the picker filtered within that, which made the cap the limit of what an entry
+ * could be filed against rather than the limit of what it opened showing.
  */
 async function options(req, res) {
   try {
-    const [employees, accounts, projects, shoots] = await Promise.all([
+    const [employees, accounts, projects, shoots, branchAccounts, reachable] = await Promise.all([
       prisma.employee.findMany({
         where: { archivedAt: null, employmentStatus: { in: await workingEmployeeStatuses() } },
         orderBy: { employeeName: "asc" },
-        select: { id: true, employeeId: true, employeeName: true, department: true, designation: true },
+        select: { id: true, employeeId: true, employeeName: true, department: true, designation: true, profilePhotoUrl: true },
       }),
-      prisma.bankAccount.findMany({ where: { isActive: true }, orderBy: { name: "asc" }, select: { name: true } }),
+      /*
+       * The studio's accounts, from the branch register - the one place they are kept since the
+       * Accounts module's own bank-account list was retired. The label is the value stored on the
+       * record, so it is built in `services/branchBankAccounts.js` and nowhere else.
+       */
+      receivedIntoOptions(),
       // Every project, whoever they belong to. A picker exists to link one record to another, and
       // the person booking a cash entry against a wedding is often not on that wedding - narrowing
       // it offers them nothing to file against. What is narrowed is the list of entries itself.
       prisma.salesProject.findMany({
         where: { deletedAt: null },
         orderBy: { createdAt: "desc" },
-        take: LOOKUP_LIMIT,
+        take: PICKER_PAGE,
         select: projectSelect,
       }),
       prisma.projectShoot.findMany({
-        where: { deletedAt: null },
+        where: { deletedAt: null, project: { deletedAt: null } },
         orderBy: { dateCreated: "desc" },
-        take: LOOKUP_LIMIT,
+        take: PICKER_PAGE,
         select: { id: true, shootId: true, shoot: true, dateCreated: true, shootPlace: true, district: true, state: true, project: { select: projectSelect } },
       }),
+      accountsByBranch(),
+      // A transfer's two ends are picked, so they are offered from the branches this person may
+      // record cash against - the same reach the save is checked on.
+      iamService.reachableBranches(Number(req.user.id), CASH_MANAGEMENT),
     ]);
+    const reachableIds = new Set(reachable.map((branch) => branch.id));
     const names = await projectClientNames([...projects, ...shoots.map((shoot) => shoot.project)]);
     return res.json({
       data: {
-        employees,
+        employees: employees.map((row) => ({ ...row, profilePhotoUrl: listPhotoUrl(row.profilePhotoUrl) })),
         // One list for both directions: an account the studio owns is the same account whether
         // money landed in it or left it.
-        accounts: accounts.map((account) => account.name),
+        // Already labels, built where the stored value is - see `receivedIntoOptions`.
+        accounts,
         projects: projects.map((project) => toProjectOption(project, names)),
         shoots: shoots.map((shoot) => ({
           id: shoot.id,
@@ -508,6 +815,9 @@ async function options(req, res) {
           place: [shoot.shootPlace, shoot.district, shoot.state].filter(Boolean).join(", "),
           project: toProjectOption(shoot.project, names),
         })),
+        // The branches a transfer can run between, each with its own accounts, so the form offers the
+        // account the money left from the branch it left and the account it reached from the other.
+        branches: branchAccounts.filter((branch) => reachableIds.has(branch.id)),
         entryTypes: ENTRY_TYPES,
         categoriesByType: CATEGORIES_BY_TYPE,
         paymentModes: await paymentModes(),
@@ -526,7 +836,7 @@ async function options(req, res) {
  * both land or neither does. `schema` is the one thing the two callers differ on: a form must name
  * the project the branch is read from, an approval cannot always.
  */
-async function recordCashEntry(body, actorId, client = prisma, { enforceBranchReach = false, schema = entrySchema } = {}) {
+async function recordCashEntry(body, actorId, client = prisma, { enforceBranchReach = false, schema = entrySchema, source = "Manual", proof: stored } = {}) {
   // Async because the payment-mode rules ask the list: which modes exist, and which of them ask
   // for a reference, an account or a line saying what the payment actually was.
   const parsed = await schema.safeParseAsync(body);
@@ -538,16 +848,28 @@ async function recordCashEntry(body, actorId, client = prisma, { enforceBranchRe
   // this person's roles reach only once it has been worked out. Not applied when an approval writes
   // the entry: that entry's branch is the one on the request being approved, which was itself
   // checked when it was raised.
-  if (enforceBranchReach && !(await iamService.canUseBranchName(actorId, data.branch, CASH_MANAGEMENT))) {
+  if (enforceBranchReach && !(await canUseEntryBranches(actorId, data))) {
     throw Object.assign(new Error("You cannot record an entry against that branch."), { status: 403 });
   }
-  const { proof, uploads } = await attachProof(parsed.data.paymentProof, null, actorId);
+  /*
+   * `stored` is a proof already uploaded by the caller, attached rather than uploaded again.
+   *
+   * One payment can be several entries — an approved payment request is one row per shoot it was
+   * spent on — and the proof is the one payment's. Uploaded per entry, `storeImage` ran once per
+   * row for the same file, and a row that then failed left the earlier rows' files in the bucket
+   * with nothing pointing at them, since no database rollback reaches storage.
+   */
+  const { proof, uploads } = stored === undefined
+    ? await attachProof(parsed.data.paymentProof, null, actorId)
+    : { proof: stored, uploads: [] };
   try {
     return await client.cashEntry.create({
       data: {
         ...data,
-        ...(await branchReference(data.branch)),
+        ...(data.branchId ? {} : await branchReference(data.branch)),
         paymentProof: proof,
+        // Set by the writer, never read off the body: a form says Manual, the importers say which.
+        source: ENTRY_SOURCES.includes(source) ? source : "Manual",
         entryId: await nextEntryId(
           parsed.data.entryType,
           { branch: data.branch, vertical: await verticalForEntry(data.projectId, client) },
@@ -568,12 +890,13 @@ async function recordCashEntry(body, actorId, client = prisma, { enforceBranchRe
 /*
  * ── Importing cash entries from a spreadsheet ─────────────────────────────────────────────────
  *
- * The columns a cash book actually has. Two of them need saying:
+ * The columns a cash book actually has. Three of them need saying:
  *
- *   * **Branch** is required here and is asked for by no form. An entry's branch is normally the
- *     Source Branch of the project it is filed against, and a spreadsheet does not carry a project's
- *     database id - so an imported entry names its branch directly. `linkFields` already accepts
- *     that as the way in for a writer with no project to read one from.
+ *   * **Client Name** is the project's WhatsApp group name, written in full, and it is what files the
+ *     row against its project - see `importProjectFor`. **Event ID** says which project when two share
+ *     a group name, and wins whenever it is given.
+ *   * **Branch** is only for a row filed against no project (money out on general lines): a row with
+ *     a project takes the project's Source Branch, as the form does.
  *   * **Handled By** is a person's name. The form picks an employee from a list; a spreadsheet
  *     writes a name, so it is matched to one active employee where exactly one matches and recorded
  *     as somebody outside the staff list where none does.
@@ -583,16 +906,24 @@ const CASH_ENTRY_IMPORT_COLUMNS = [
   { field: "entryDate", label: "Entry Date", required: true },
   { field: "category", label: "Category", required: true },
   { field: "amount", label: "Amount", required: true },
-  { field: "branch", label: "Branch", required: true },
+  { field: "branch", label: "Branch" },
   { field: "paymentMode", label: "Payment Mode", required: true },
   { field: "clientName", label: "Client Name" },
+  { field: "eventId", label: "Event ID" },
   { field: "paidTo", label: "Paid To" },
   { field: "transactionId", label: "Transaction ID" },
-  { field: "paymentModeOther", label: "Payment Mode Details" },
+  // Renamed to Remarks, which is what the form asks for: a remark about the payment mode, as
+  // against the Description below it, which is about the payment. The old heading still reads, so a
+  // spreadsheet the studio saved before the rename imports exactly as it did.
+  { field: "paymentModeOther", label: "Remarks", aliases: ["Payment Mode Details"] },
   { field: "receivedAccount", label: "Received Account" },
   { field: "paidFromAccount", label: "Paid From Account" },
   { field: "handlerName", label: "Handled By" },
   { field: "description", label: "Description" },
+  // Which of the project's open scheduled payments a receipt settles, by its category ("Advance"),
+  // and - for part of it - the day the rest is due. Blank: the receipt is not tied to the schedule.
+  { field: "scheduledPayment", label: "Scheduled Payment" },
+  { field: "balanceDueDate", label: "Balance Due Date" },
 ];
 
 /**
@@ -604,14 +935,117 @@ const CASH_ENTRY_IMPORT_COLUMNS = [
  */
 async function resolveImportHandler(handlerName) {
   const name = String(handlerName || "").trim();
-  if (!name) return { handlerName: "", handlerIsOther: true };
+  // Unknown rather than a handler called "" - the column says null now, and `""` never means none.
+  if (!name) return { handlerEmployeeId: null, handlerName: null, handlerIsOther: false };
   const matches = await prisma.employee.findMany({
     where: { employeeName: name, employmentStatus: { in: await workingEmployeeStatuses() } },
     select: { id: true, employeeName: true },
     take: 2,
   });
   if (matches.length === 1) return { handlerEmployeeId: matches[0].id, handlerName: matches[0].employeeName, handlerIsOther: false };
-  return { handlerName: name, handlerIsOther: true };
+  return { handlerEmployeeId: null, handlerName: name, handlerIsOther: true };
+}
+
+/** A group name compared the way people type it: case and spacing do not matter. */
+const sameName = (value) => String(value || "").replace(/\s+/g, " ").trim().toUpperCase();
+
+/** Every live project by Event ID and by WhatsApp group name, read once for an import. */
+async function importProjectLookup() {
+  const projects = await prisma.salesProject.findMany({
+    where: { deletedAt: null },
+    select: { id: true, eventId: true, whatsappGroupName: true },
+  });
+  const byEventId = new Map(projects.map((project) => [sameName(project.eventId), project]));
+  const byName = new Map();
+  for (const project of projects) {
+    const key = sameName(project.whatsappGroupName);
+    byName.set(key, [...(byName.get(key) || []), project]);
+  }
+  return { byEventId, byName };
+}
+
+/**
+ * The project an imported row is filed against.
+ *
+ * **Event ID** first, when the row has one: it names one project and nothing else. Otherwise the
+ * **Client Name**, which is the project's WhatsApp group name - the name every staff screen shows
+ * for it - written in full. Exactly one project with that name files the row against it; two
+ * projects sharing one name, or none having it, is not guessed at. Money in is always for a project,
+ * so such a row is refused with what to put right; money out may belong to none and goes in unlinked,
+ * on the Branch it names.
+ */
+function importProjectFor(input, { byEventId, byName }) {
+  const eventId = String(input.eventId || "").trim();
+  if (eventId) {
+    const project = byEventId.get(sameName(eventId));
+    if (!project) throw badRequest(`No project has the Event ID ${eventId}.`);
+    return project;
+  }
+  const name = String(input.clientName || "").trim();
+  const received = input.entryType === "Received";
+  if (!name) {
+    if (received) throw badRequest("Name the project: its WhatsApp group name in Client Name, or its Event ID.");
+    return null;
+  }
+  const matches = byName.get(sameName(name)) || [];
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw badRequest(`"${name}" is the WhatsApp group of ${matches.length} projects (${matches.map((project) => project.eventId).join(", ")}). Add the Event ID to say which.`);
+  }
+  if (received) throw badRequest(`No project has the WhatsApp group "${name}". Write the group name exactly as the project shows it, or add its Event ID.`);
+  return null;
+}
+
+/*
+ * An imported date, read day first. A spreadsheet's "05/10/2026" is the 5th of October here; handed
+ * to `Date` as it was, it was read the American way as the 10th of May, "26/10/2026" was refused,
+ * and "5 Oct 2026" landed on the 4th in UTC. The PDF import's reader, which knows Indian dates, turns
+ * it into a bare YYYY-MM-DD first; anything it cannot read goes through unchanged and is refused by
+ * the schema as before.
+ */
+const importDate = (value) => parseStatementDate(String(value ?? ""))?.iso || value;
+
+/**
+ * The row as the cash entry schema reads it, with the date read day first, the Handled By name
+ * already turned into the employee it names, and the Event ID kept - the schema has no Event ID of
+ * its own and would drop it before the project is looked up.
+ *
+ * The handler has to be worked out **before** the check, not after it: the schema asks for an
+ * employee or a name marked as nobody on the staff, and a row carries only the name. Checked as it
+ * came, every row except one paid by "Other" was refused as naming no employee, Handled By or not.
+ */
+const importSchema = {
+  async safeParseAsync(record) {
+    const parsed = await importEntrySchema.safeParseAsync({
+      ...record,
+      entryDate: importDate(record.entryDate),
+      ...(await resolveImportHandler(record.handlerName)),
+    });
+    if (!parsed.success) return parsed;
+    return {
+      success: true,
+      data: {
+        ...parsed.data,
+        eventId: record.eventId || null,
+        scheduledPayment: String(record.scheduledPayment || "").trim() || null,
+        balanceDueDate: String(record.balanceDueDate || "").trim() ? importDate(record.balanceDueDate) : null,
+      },
+    };
+  },
+};
+
+/**
+ * The open scheduled payment an imported receipt names by its category - "Advance", "Final
+ * Settlement" - the one due first where there are several (a split's remainder shares its name).
+ * None open by that name is refused with the payments that are, so the row can be put right.
+ */
+async function importScheduledPaymentFor(project, category) {
+  const open = (await scheduledPayments().projectSchedule(project.id)).filter((payment) => payment.status !== "Cleared" && payment.pending > 0);
+  const named = open.filter((payment) => sameName(payment.category) === sameName(category))
+    .sort((a, b) => String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999")));
+  if (named.length) return named[0].id;
+  const offered = open.map((payment) => payment.category).join(", ");
+  throw badRequest(`${project.eventId} has no open scheduled payment "${category}".${offered ? ` Open: ${offered}.` : " Nothing is still to be received."}`);
 }
 
 async function importTemplate(req, res) {
@@ -620,6 +1054,8 @@ async function importTemplate(req, res) {
 
 async function importEntries(req, res) {
   const actorId = Number(req.user.id);
+  // Read on the first row that needs it, once for the whole file.
+  let projects = null;
   try {
     const data = await importTableRows({
       headers: req.body?.headers,
@@ -629,15 +1065,28 @@ async function importEntries(req, res) {
       // Validated here so a refusal names the column the studio is looking at; `recordCashEntry`
       // validates again on its own terms, which is what keeps an imported entry identical to a
       // typed one - same identifier counter, same branch check, same links.
-      schema: entrySchema,
-      create: async (input) => {
+      schema: importSchema,
+      create: async ({ eventId, scheduledPayment, balanceDueDate, ...input }) => {
+        projects ||= await importProjectLookup();
+        const project = importProjectFor({ ...input, eventId }, projects);
+        if (scheduledPayment) {
+          if (input.entryType !== "Received" || !project) throw badRequest("Only money received for a project settles a Scheduled Payment.");
+          if (!(await maySettleFor(req, project.id))) throw badRequest(`${project.eventId} is not a project you can record its scheduled payments for.`);
+          const paymentScheduleId = await importScheduledPaymentFor(project, scheduledPayment);
+          const settles = { mode: balanceDueDate ? "PARTIAL" : "FULL", pendingDueDate: balanceDueDate, projectId: project.id };
+          await prisma.$transaction((tx) => scheduledPayments().settleInTx(tx, paymentScheduleId, settles, { ...input, projectId: project.id }, actorId, { source: "CSV Import", schema: importEntrySchema }));
+          return;
+        }
         await recordCashEntry(
-          { ...input, ...(await resolveImportHandler(input.handlerName)) },
+          // The project's id files it; its client and branch are then read off the project by
+          // `linkFields`, exactly as for an entry made in the form.
+          // The handler was worked out in `importSchema`, before the row was checked.
+          { ...input, projectId: project?.id || null },
           actorId,
           prisma,
           // The person's own branch reach, row by row: an import must not be a way to file an entry
           // against a branch this person could not choose on the form.
-          { enforceBranchReach: true },
+          { enforceBranchReach: true, source: "CSV Import", schema: importEntrySchema },
         );
       },
     });
@@ -651,7 +1100,24 @@ async function importEntries(req, res) {
 async function createEntry(req, res) {
   try {
     const actorId = Number(req.user.id) || null;
-    const created = await prisma.$transaction((tx) => recordCashEntry(req.body, actorId, tx, { enforceBranchReach: true, schema: formEntrySchema }));
+    // A payment recorded from Import from PDF goes through this same form, and says so; nothing
+    // else a body says can make an entry anything but Manual.
+    const source = req.body?.source === "PDF Import" ? "PDF Import" : "Manual";
+    const { settles: settlesBody, ...body } = req.body || {};
+    const settles = settlesBody ? settlesSchema.safeParse(settlesBody) : null;
+    if (settles && !settles.success) return validationError(res, settles.error);
+    if (settles && body.entryType !== "Received") return res.status(400).json({ message: "Only money received settles a scheduled payment." });
+    if (settles && !(await maySettleFor(req, body.projectId))) return res.status(404).json({ message: "That project could not be found." });
+    /*
+     * "Settles payment": money received against one of the project's scheduled payments goes through
+     * the Due tab's own rule (`settleInTx`) - a full payment clears it, a partial one splits the rest
+     * off with its due date - in the same transaction as the entry, so neither is kept without the other.
+     */
+    const created = await prisma.$transaction((tx) => (settles
+      ? scheduledPayments().settleInTx(tx, settles.data.paymentScheduleId, { ...settles.data, projectId: body.projectId || null }, body, actorId, { schema: formEntrySchema, source })
+      : recordCashEntry(body, actorId, tx, { enforceBranchReach: true, schema: formEntrySchema, source })));
+    // Money received on a project: the client's phone hears of it (after the save, never holding it up).
+    clientPush.notifyPaymentReceived(created);
     /*
      * The receipt to send the client, filled in and handed back with the entry.
      *
@@ -664,13 +1130,10 @@ async function createEntry(req, res) {
      * Outside the transaction, and never fatal: the entry is recorded either way, and a receipt
      * that cannot be built must not turn a saved payment into an error.
      */
-    let receiptMessage = null;
-    try {
-      receiptMessage = await receiptMessageFor(await entryForReceipt(created.id));
-    } catch (messageError) {
-      console.error("Unable to build the receipt message for this cash entry:", messageError.message);
-    }
-    return res.status(201).json({ data: toRow(created), receiptMessage });
+    const { receiptMessage, invoiceLink } = await receiptWithLink(created.id);
+    // Typed entries only: an imported statement's rows are history, not a payment just taken.
+    if (source === "Manual") queueReceiptToGroup(created, receiptMessage);
+    return res.status(201).json({ data: toRow(created), receiptMessage, invoiceLink });
   } catch (error) { return handleCashEntryError(res, error, "Unable to record this cash entry"); }
 }
 
@@ -679,6 +1142,38 @@ const entryForReceipt = (id) => prisma.cashEntry.findUnique({
   where: { id },
   include: { shoot: { select: { shoot: true } }, project: { select: { eventId: true } } },
 });
+
+/**
+ * The receipt for money received, with its invoice link - made now, so the message sent is the one
+ * to keep. Never fatal: a receipt that cannot be built must not turn a saved payment into an error.
+ */
+async function receiptWithLink(entryId) {
+  try {
+    const token = await ensureInvoiceToken(entryId);
+    const invoiceLink = token ? invoiceUrl(token) : null;
+    return { receiptMessage: await receiptMessageFor(await entryForReceipt(entryId), prisma, { invoiceLink }), invoiceLink };
+  } catch (messageError) {
+    console.error("Unable to build the receipt message for this cash entry:", messageError.message);
+    return { receiptMessage: null, invoiceLink: null };
+  }
+}
+
+/**
+ * Money received on a project: its receipt into the project's WhatsApp group, from Settings → Project
+ * Management → Payment reminder's sender, after the save has answered. Add Entry and a scheduled
+ * payment's Clear and Part payment all come here. Required here, not at the top: that module reaches
+ * back into Accounts' scheduled payments, which require this file.
+ */
+function queueReceiptToGroup(created, receiptMessage) {
+  if (!receiptMessage?.body || !created?.projectId || created.entryType !== "Received") return;
+  require("../../settings/payment-reminder/receivedMessage").sendReceivedMessageLater(created.id, receiptMessage.body);
+}
+
+/** The same, building the receipt first - for a save that does not hand the receipt back. */
+async function sendReceiptToGroup(created) {
+  if (!created?.projectId || created.entryType !== "Received") return;
+  queueReceiptToGroup(created, (await receiptWithLink(created.id)).receiptMessage);
+}
 
 /**
  * An entry keeps the direction it was recorded in. Its identifier carries that direction and its
@@ -691,16 +1186,27 @@ async function updateEntry(req, res) {
   const parsed = await formEntrySchema.safeParseAsync(req.body);
   if (!parsed.success) return validationError(res, parsed.error);
   try {
-    const existing = await scopedEntry(req, id, { id: true, entryType: true, paymentProof: true });
+    const existing = await scopedEntry(req, id, { id: true, entryType: true, branch: true, amount: true, paymentScheduleId: true, paymentProof: true }, { throughProject: true });
     if (!existing) return res.status(404).json({ message: "Cash entry not found" });
     if (existing.entryType !== parsed.data.entryType) {
       return res.status(400).json({ message: "An entry cannot change direction. Remove it and record a new one." });
     }
     const actorId = Number(req.user.id) || null;
     const data = await entryData(parsed.data);
+    // A receipt that settled a scheduled payment keeps its amount and project: changing either would
+    // undo a clear or a split behind the schedule's back. Deleting it reopens the payment instead.
+    if (existing.paymentScheduleId && (Number(data.amount) !== Number(existing.amount) || data.projectId !== existing.projectId)) {
+      return res.status(400).json({ message: "This payment settles a scheduled payment, so its amount and project cannot change. Delete it and record it again." });
+    }
     // Checked on the branch the chosen project puts the entry in, which is what re-filing it against
     // a different project can move — the field it used to be checked on is no longer asked for.
-    if (!(await iamService.canUseBranchName(actorId, data.branch, CASH_MANAGEMENT))) {
+    // A payment kept on the project it was reached through, in the branch it is already filed under,
+    // stays that project's - whatever the branch. Moving it to another branch is still checked.
+    const keptOnVisibleProject = existing.entryType !== "Transfer"
+      && data.projectId && data.projectId === existing.projectId
+      && data.branch === existing.branch
+      && (await onVisibleProject(req, data.projectId));
+    if (!keptOnVisibleProject && !(await canUseEntryBranches(actorId, data))) {
       return res.status(403).json({ message: "You cannot record an entry against that branch." });
     }
     const { proof, uploads } = await attachProof(parsed.data.paymentProof, existing.paymentProof, actorId);
@@ -708,7 +1214,7 @@ async function updateEntry(req, res) {
     try {
       updated = await prisma.cashEntry.update({
         where: { id },
-        data: { ...data, ...(await branchReference(data.branch)), paymentProof: proof, updatedBy: actorId },
+        data: { ...data, ...(data.branchId ? {} : await branchReference(data.branch)), paymentProof: proof, updatedBy: actorId },
         include,
       });
     } catch (error) {
@@ -749,11 +1255,131 @@ async function deleteEntry(req, res) {
   } catch (error) { return handleCashEntryError(res, error, "Unable to remove this cash entry"); }
 }
 
-module.exports = {
+/**
+ * Share invoice: the receipt message for one payment received, with its client invoice link - made
+ * the first time it is asked for, then the same link every time. A write, so Cash Management Read /
+ * Write: it hands the invoice out of the studio.
+ */
+async function shareInvoice(req, res) {
+  const id = parseId(req, res);
+  if (!id) return;
+  try {
+    const entry = await scopedEntry(req, id, null, { throughProject: true });
+    if (!entry) return res.status(404).json({ message: "Cash entry not found" });
+    if (entry.entryType !== "Received") return res.status(400).json({ message: "Only money received has an invoice." });
+    const token = await ensureInvoiceToken(entry.id);
+    if (!token) return res.status(404).json({ message: "Cash entry not found" });
+    const invoiceLink = invoiceUrl(token);
+    const message = await receiptMessageFor(await entryForReceipt(entry.id), prisma, { invoiceLink });
+    return res.json({ data: { entryId: entry.entryId, projectId: entry.projectId || null, invoiceLink, message } });
+  } catch (error) { return handleCashEntryError(res, error, "Unable to prepare the invoice link."); }
+}
+
+/** The live project a payment was received for, as the group send reads it - or a 422 saying why there is none. */
+async function receiptProject(req, id) {
+  const entry = await scopedEntry(req, id, null, { throughProject: true });
+  if (!entry) throw Object.assign(new Error("Cash entry not found"), { status: 404 });
+  if (entry.entryType !== "Received") throw Object.assign(new Error("Only money received has an invoice."), { status: 400 });
+  const project = entry.projectId
+    ? await prisma.salesProject.findFirst({ where: { id: entry.projectId, deletedAt: null }, select: { id: true, whatsappGroupName: true } })
+    : null;
+  if (!project) throw Object.assign(new Error("This payment has no project, so there is no WhatsApp group to send to. Copy the message instead."), { status: 422 });
+  return { entry, project };
+}
+
+/** Share invoice, before anything is sent: which WhatsApp group Send would use (`crd-documents/groupSend.js`). */
+async function invoiceGroup(req, res) {
+  const id = parseId(req, res);
+  if (!id) return;
+  try {
+    const { project } = await receiptProject(req, id);
+    return res.json({ data: await resolveProjectGroup(project, req.user.id) });
+  } catch (error) { return handleCashEntryError(res, error, "Unable to find the project's WhatsApp group."); }
+}
+
+const groupMessageSchema = z.object({ message: z.string().trim().min(1).max(4096) });
+
+/**
+ * Share invoice → Send: the message as the dialog's box holds it, into the project's own WhatsApp
+ * group from the sender's own WhatsApp - one message, sent because a person pressed Send.
+ */
+async function sendInvoiceToGroup(req, res) {
+  const id = parseId(req, res);
+  if (!id) return;
+  const parsed = groupMessageSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ message: "Write the message to send.", errors: parsed.error.flatten() });
+  try {
+    const { entry, project } = await receiptProject(req, id);
+    // What goes into the client's group is this payment's receipt: the box may be reworded, but it
+    // must still carry this entry's own invoice link.
+    const token = await ensureInvoiceToken(entry.id);
+    if (!token || !parsed.data.message.includes(invoiceUrl(token))) return res.status(400).json({ message: "Keep this payment's invoice link in the message." });
+    const result = await sendToProjectGroup(project, req.user.id, parsed.data.message, {
+      purpose: { trigger: "CASH_RECEIPT_INVOICE", eventRef: `cash-receipt:${entry.id}`, logTag: "cash-receipt", what: `receipt ${entry.entryId}` },
+    });
+    return res.json({ data: result, message: result.groupSubject ? `Sent to the WhatsApp group "${result.groupSubject}".` : "Sent to the project's WhatsApp group." });
+  } catch (error) { return handleCashEntryError(res, error, "Unable to send the receipt to the WhatsApp group."); }
+}
+
+/*
+ * The client's side, unauthenticated: the token is the credential (`invoiceLink.js`). A miss is
+ * marked for the public-link limiter, which counts misses only. A failure says only that it failed -
+ * never the error itself, which is the server's to read in its log.
+ */
+function publicFailure(res, error, message) {
+  console.error(`[public-invoice] ${message}`, error);
+  return res.status(500).json({ message });
+}
+
+async function publicInvoice(req, res) {
+  try {
+    const entry = await entryByInvoiceToken(req.params.token, include);
+    if (!entry) { res.locals.linkMiss = true; return res.status(404).json({ message: "Invoice not found." }); }
+    const receipt = await receiptFor(entry);
+    return res.json({ data: { number: receipt.payment.number, date: receipt.payment.date, amount: receipt.payment.amount, clientName: receipt.client.name, studioName: receipt.studio.name, logoUrl: receipt.studio.logoUrl } });
+  } catch (error) { return publicFailure(res, error, "Unable to load this invoice."); }
+}
+
+async function publicInvoicePdf(req, res) {
+  try {
+    const entry = await entryByInvoiceToken(req.params.token, include);
+    if (!entry) {
+      res.locals.linkMiss = true;
+      // The client's link now comes straight here, so a dead one goes back to the page that says so.
+      if (TOKEN_PATTERN.test(String(req.params.token || "")) && req.accepts(["html", "json"]) === "html") return res.redirect(303, `${invoiceUrl(req.params.token)}?unavailable=1`);
+      return res.status(404).json({ message: "Invoice not found." });
+    }
+    const pdf = await renderReceiptPdf(await receiptFor(entry));
+    res.setHeader("Content-Type", "application/pdf");
+    // Inline, so the link opens the invoice to read; the viewer's own download saves it.
+    res.setHeader("Content-Disposition", `inline; filename="Invoice-${String(entry.entryId).replace(/[^A-Za-z0-9-]/g, "")}.pdf"`);
+    res.setHeader("Content-Length", pdf.length);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    return res.end(pdf);
+  } catch (error) { return publicFailure(res, error, "The invoice could not be prepared. Try again in a moment."); }
+}
+
+module.exports = { settlesSchema, sendReceiptToGroup, searchProjectOptions, searchShootOptions,
+  // For tests: who an entry records as having handled the money is the rule this change turned on,
+  // and the import columns are where one heading claimed by two columns would show up. Both are
+  // exercised rather than only read - see `test/cash-entry-receiver-retired.test.js`.
+  handlerFields,
+  CASH_ENTRY_IMPORT_COLUMNS,
+  importProjectFor,
+  importDate,
+  importSchema,
   // Exported so a test names the same columns the screen does, rather than a copy that can drift.
   CASH_SCOPE_COLUMNS,
   listEntries,
   getEntry,
+  downloadReceipt,
+  shareInvoice,
+  invoiceGroup,
+  sendInvoiceToGroup,
+  publicInvoice,
+  publicInvoicePdf,
   options,
   createEntry,
   importTemplate,
@@ -762,11 +1388,17 @@ module.exports = {
   deleteEntry,
   deleteEntryRecord,
   ENTRY_TYPES,
+  ENTRY_SOURCES,
+  importEntrySchema,
+  entrySchema,
+  transferFields,
   CATEGORIES_BY_TYPE,
   PAYMENT_MODES,
   MODES_WITH_TRANSACTION_ID,
   MODES_WITH_ACCOUNT,
   recordCashEntry,
+  // So a caller writing several entries for one payment stores its proof once and attaches it.
+  attachProof,
   formEntrySchema,
   // Exported so the project advance answers a refused entry the same way this screen does -
   // `fieldErrors` before `status`, or the field that was wrong is never named.

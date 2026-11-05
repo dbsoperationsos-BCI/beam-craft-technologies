@@ -1,7 +1,9 @@
 "use client";
 
+import HelpTip from "./HelpTip";
 import { useId, useState } from "react";
 import Image from "next/image";
+import { ViewableImage } from "@/components/shared/ImageViewer";
 import { compressImageFile } from "@/lib/imageCompression";
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
@@ -33,6 +35,8 @@ export default function ImageUploadField({
   value,
   onChange,
   error,
+  // A grey line under the field saying what the picture is used for; the error replaces it.
+  helperText = "",
   className = "",
   disabled = false,
   /*
@@ -67,6 +71,16 @@ export default function ImageUploadField({
    * thousand pixels wide: that caller asks for more. The server re-compresses to its own ceiling.
    */
   compress = null,
+  /*
+   * Told the file a pick came from once it has been accepted, for a surface that names it - a
+   * watermark preset shows which logo file it holds. Nothing is told about a refused pick.
+   */
+  onFileChosen = null,
+  /*
+   * How the picked picture sits in its square: `cover` fills it (a photo), `contain` shows all of it
+   * (a logo, whose edges are the point).
+   */
+  previewFit = "cover",
 }) {
   // The hint says the limit the field actually enforces: a caller raising `maxBytes` must not be
   // left with a caption still promising 5 MB.
@@ -90,9 +104,10 @@ export default function ImageUploadField({
     // Still reported upward for any caller that does want it — it just is no longer the only route.
     onChange(null, message);
   }
-  function accept(dataUrl) {
+  function accept(dataUrl, file) {
     setFailure("");
     onChange(dataUrl, "");
+    if (file) onFileChosen?.(file);
   }
 
   async function selectImage(event) {
@@ -110,7 +125,7 @@ export default function ImageUploadField({
     }
     // Named as untouchable by the caller, or a vector, which has no pixels to resample anyway.
     if (rawTypes?.includes(type) || type === VECTOR_TYPE) {
-      try { accept(await readAsDataUrl(file)); }
+      try { accept(await readAsDataUrl(file), file); }
       catch { refuse("Unable to read the selected image."); }
       return;
     }
@@ -120,7 +135,7 @@ export default function ImageUploadField({
     }
     try {
       const compressed = await compressImageFile(file, compress || {});
-      accept(compressed.dataUrl);
+      accept(compressed.dataUrl, file);
     } catch {
       refuse("Unable to read the selected image — it may be damaged, or in a format this browser cannot open.");
     }
@@ -131,19 +146,23 @@ export default function ImageUploadField({
 
   return (
     <div className={`block text-[11px] font-semibold text-slate-600 sm:text-xs ${className}`}>
-      <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</span>
+      <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}<HelpTip text={helperText} /></span>
       <div className="mt-1.5 flex flex-wrap items-center gap-3">
         {value ? (
-          <Image
-            src={value}
-            alt={label ? `Selected ${String(label).toLowerCase()}` : "Selected image"}
-            width={80}
-            height={80}
-            unoptimized
-            className="h-20 w-20 rounded-lg border border-slate-200 object-cover"
-          />
+          // The preview opens full size in the viewer.
+          <ViewableImage images={[value]} label={label ? `View ${String(label).toLowerCase()}` : "View image"} className="rounded-lg">
+            <Image
+              src={value}
+              alt={label ? `Selected ${String(label).toLowerCase()}` : "Selected image"}
+              width={80}
+              height={80}
+              unoptimized
+              className={`h-20 w-20 rounded-lg border border-slate-200 ${previewFit === "contain" ? "bg-slate-50 object-contain p-1" : "object-cover"}`}
+            />
+          </ViewableImage>
         ) : (
-          <div className="flex h-20 w-20 items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 px-2 text-center text-[11px] font-normal text-slate-400">
+          // Red while an error stands - a required photo left out was only a line of text before.
+          <div aria-invalid={shown ? true : undefined} className={`flex h-20 w-20 items-center justify-center rounded-lg border border-dashed px-2 text-center text-[11px] font-normal ${shown ? "border-red-400 bg-red-50 text-red-500" : "border-slate-300 bg-slate-50 text-slate-400"}`}>
             No photo
           </div>
         )}

@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 
-import { effectiveFreezeCount, reorderColumnOrder, slugify, tableLayoutKey, weaveColumnOrder } from "../src/components/data-table/tableLayout.js";
+import { EXPAND_COLUMN_ID, SELECT_COLUMN_ID, effectiveFreezeCount, reorderColumnOrder, slugify, tableLayoutKey, weaveColumnOrder } from "../src/components/data-table/tableLayout.js";
 
 /*
  * How a table's arrangement is named, and how a remembered one is laid back over the table.
@@ -57,6 +59,14 @@ test("a column added since the layout was saved lands after the ones it names", 
   // the saved order predates. It must appear, and it must not be put at the front of an
   // arrangement somebody chose on purpose.
   assert.deepEqual(ids(columns("a", "b", "c"), ["c", "a"]), ["c", "a", "b"]);
+});
+
+test("a column added since lands beside the column it follows in the table, not at the far end", () => {
+  // Payroll's extra Earnings column, declared after Incentive: it must stay in the Earnings band of a
+  // layout somebody dragged, not land past the Payment columns.
+  assert.deepEqual(ids(columns("base", "incentive", "travel", "total", "net"), ["incentive", "base", "total", "net"]), ["incentive", "travel", "base", "total", "net"]);
+  // One with nothing before it still goes after the rest rather than to the front.
+  assert.deepEqual(ids(columns("first", "a", "b"), ["b", "a"]), ["b", "a", "first"]);
 });
 
 test("a column the table no longer has is ignored rather than leaving a hole", () => {
@@ -177,4 +187,23 @@ test("an order that is not an array is treated as no order at all", () => {
   // It arrives from the server, so it can be anything an older release or a stale cache left.
   assert.deepEqual(reorderColumnOrder(undefined, "a", "b", "after"), []);
   assert.deepEqual(reorderColumnOrder(null, "a", "b", "after"), []);
+});
+
+/*
+ * The tick-box column is pinned whatever Freeze Columns says - with nothing frozen as well - so the
+ * selection never scrolls out of reach. Freeze Columns itself still counts only the data columns.
+ */
+test("the tick-box column is always pinned, separately from Freeze Columns", () => {
+  const selectable = [{ id: SELECT_COLUMN_ID }, { id: "name" }, { id: "phone" }];
+  assert.equal(effectiveFreezeCount(selectable, 0), 1, "nothing frozen still pins the tick box");
+  assert.equal(effectiveFreezeCount(selectable, 1), 2, "freeze 1 pins the tick box and the first data column");
+  const both = [{ id: SELECT_COLUMN_ID }, { id: EXPAND_COLUMN_ID }, { id: "name" }];
+  assert.equal(effectiveFreezeCount(both, 0), 1, "only the tick box - the chevron waits for a freeze");
+  assert.equal(effectiveFreezeCount(both, 1), 3);
+  assert.equal(effectiveFreezeCount([{ id: "name" }], 0), 0, "a table with no tick box pins nothing");
+});
+
+test("the tick box pinned on its own wears no frozen-column divider", () => {
+  const table = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "components", "data-table", "DataTable.js"), "utf8");
+  assert.match(table, /boxShadow: frozen && index === effectiveFreezeCount - 1 && column\.id !== SELECT_COLUMN_ID \?/);
 });

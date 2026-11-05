@@ -22,6 +22,18 @@ export function deliverableAnswerText(value) {
   return String(value).trim();
 }
 
+/**
+ * The note a service or deliverable carries in Settings (its Remarks box, stored as `remarksEnabled`),
+ * as the words a new quotation line starts its own Remarks with - or "" where there is none.
+ *
+ * The column used to be a Yes/No switch, so a bare "Yes" or "No" (or the booleans it was once) is an
+ * old answer and not a note: copied onto every line it would read as a remark nobody wrote.
+ */
+export function settingsNoteOf(value) {
+  const words = deliverableAnswerText(value);
+  return /^(yes|no)$/i.test(words) ? "" : words;
+}
+
 /** Whether anything was answered at all - blank is a real state, and it is not No. */
 export function deliverableAnswered(value) {
   return deliverableAnswerText(value) !== "";

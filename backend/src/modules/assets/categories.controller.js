@@ -1,4 +1,5 @@
 const prisma = require("../../config/db");
+const { everyChunk } = require("../../services/wordChunks");
 
 function buildTree(rows, parentId = null) {
   return rows.filter((row) => row.parentId === parentId).map((row) => ({ ...row, children: buildTree(rows, row.id) }));
@@ -8,7 +9,7 @@ const handler = (work) => async (req, res) => {
   try { res.json({ data: await work(req) }); }
   catch (error) { console.error("Asset category error:", error); res.status(500).json({ message: "Unable to load asset categories." }); }
 };
-const filters = (req) => ({ ...(req.query.level && { level: Number(req.query.level) }), ...(req.query.parentId && { parentId: req.query.parentId }), ...(req.query.moduleType && { moduleType: req.query.moduleType }), ...(req.query.isActive !== "false" && { isActive: true }), ...(req.query.search && { name: { contains: req.query.search } }) });
+const filters = (req) => ({ ...(req.query.level && { level: Number(req.query.level) }), ...(req.query.parentId && { parentId: req.query.parentId }), ...(req.query.moduleType && { moduleType: req.query.moduleType }), ...(req.query.isActive !== "false" && { isActive: true }), /* Word Chunk Search: every word typed, any order. */ ...(req.query.search && { AND: everyChunk(req.query.search, (chunk) => ({ name: { contains: chunk } })) }) });
 exports.list = handler((req) => prisma.assetCategory.findMany({ where: filters(req), orderBy: [{ sortOrder: "asc" }, { name: "asc" }], include: withCounts }));
 exports.children = handler((req) => prisma.assetCategory.findMany({ where: { parentId: req.params.categoryId, isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }], include: withCounts }));
 exports.tree = handler(async () => buildTree(await prisma.assetCategory.findMany({ where: { isActive: true }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }], include: withCounts })));

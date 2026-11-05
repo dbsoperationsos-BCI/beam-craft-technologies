@@ -303,6 +303,9 @@ test("the assistant's asset reads are narrowed by the same rule", async () => {
   await withGrant(F.me, [], async (scope) => {
     const found = await assetRead.searchAssets({ search: `TDS-${STAMP}`, limit: 50, scope });
     assert.deepEqual(found.items.map((item) => item.assetCode.replace(`TDS-${STAMP}-`, "")).sort(), ["br1-grandchild", "br1-mine", "br1-report", "br2-i-manage", "br2-mine", "br2-report"]);
+    // Word Chunk Search: the name's word before the code still finds it, still inside the rule.
+    const reversed = await assetRead.searchAssets({ search: `mine TDS-${STAMP}-br1`, limit: 50, scope });
+    assert.deepEqual(reversed.items.map((item) => item.assetCode.replace(`TDS-${STAMP}-`, "")), ["br1-mine"]);
     const own = await assetRead.getAssetSummary({ scope });
     const all = await assetRead.getAssetSummary({ scope: await resolveFor(F.superAdmin) });
     assert.ok(all.total > own.total, "the summary hides what the list hides");
@@ -316,7 +319,8 @@ test("every asset endpoint reads through the rule, and none through an unscoped 
   const controller = read("modules", "assets", "assets.controller.js");
   assert.doesNotMatch(controller, /activeAsset\(/, "an unscoped fetch-by-id survives in the assets controller");
   assert.doesNotMatch(controller, /prisma\.asset\.findUnique\(\{ where: \{ id: assetId \} \}\)/, "changeStatus reads the asset without the rule");
-  assert.match(controller, /AND: \[scope\.where\]/, "the list must carry the rule where nothing in the query can replace it");
+  // First in the AND, with the search's words (Word Chunk Search) after it.
+  assert.match(controller, /AND: \[scope\.where[,\]]/, "the list must carry the rule where nothing in the query can replace it");
   assert.equal((controller.match(/await scopedAsset\(req, assetId\)/g) || []).length, 4, "custody, update, delete and status each go through scopedAsset");
   const inspections = read("modules", "assets", "inspections.controller.js");
   assert.equal((inspections.match(/findScopedAsset\(req, assetId/g) || []).length, 2, "both inspection endpoints read the asset through the rule");

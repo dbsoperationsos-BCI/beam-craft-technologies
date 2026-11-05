@@ -1,5 +1,7 @@
 "use client";
 import { useState } from "react";
+import Button from "@/components/shared/Button";
+import MissingOriginalsDialog from "./MissingOriginalsDialog";
 import { getSelectedManifest, markSelectedOriginalsDownloaded } from "@/services/image-selection/image-selection.service";
 import {
   openProjectStorage,
@@ -41,9 +43,12 @@ export default function DownloadSelectedButton({ projectId, projectName, folder 
   // True once a download has found that this browser holds no grant for the project's photos, which
   // is the one failure the studio can clear itself.
   const [needsSource, setNeedsSource] = useState(false);
+  // The originals the last download could not find, each with where its record says it lives.
+  const [missingList, setMissingList] = useState([]);
+  const [showMissing, setShowMissing] = useState(false);
 
   async function start() {
-    setMessage(""); setState("fetching");
+    setMessage(""); setMissingList([]); setShowMissing(false); setState("fetching");
     if (!projectId) { console.error("Cannot download selected images: missing project ID."); setState("error"); setMessage("Missing project ID. Reload the project and try again."); return; }
 
     // Both folders are opened before anything is fetched: a permission prompt only works while the
@@ -70,7 +75,9 @@ export default function DownloadSelectedButton({ projectId, projectName, folder 
     }
 
     let manifest;
-    try { const response = await getSelectedManifest(projectId, folder?.id); manifest = response.data; }
+    // The selection state this list is, as the server read it - what a complete run has downloaded.
+    let selectionAsOf = null;
+    try { const response = await getSelectedManifest(projectId, folder?.id); manifest = response.data; selectionAsOf = response.asOf || null; }
     catch (error) { setState("error"); setMessage(error.message || "Unable to load the selected photos list."); return; }
     if (!Array.isArray(manifest) || !manifest.length) { setState("error"); setMessage(folder ? `No photos have been selected for ${folder.name} yet.` : "No photos have been selected by the client yet."); return; }
 
@@ -99,7 +106,7 @@ export default function DownloadSelectedButton({ projectId, projectName, folder 
         // A missing photo still advances the bar by every copy it would have written, so the count
         // always reaches its total instead of stalling short of it.
         try { file = await readSourceFile(source.handle, image.originalPath); }
-        catch { missing.push(image.fileName); setProgress((prev) => ({ ...prev, done: prev.done + image.trails.length })); continue; }
+        catch { missing.push({ fileName: image.fileName, path: `${source.stored?.name || "photo folder"}/${image.originalPath}` }); setProgress((prev) => ({ ...prev, done: prev.done + image.trails.length })); continue; }
         for (const subPath of image.trails) {
           // No module folder: the selection item is the first thing under the project, so the tree
           // reads Project ▸ Selection item ▸ Shoot ▸ Folder.
@@ -113,13 +120,23 @@ export default function DownloadSelectedButton({ projectId, projectName, folder 
       // would be built into an archive that is then never written.
       const archived = await storage.finish();
       setState(missing.length ? "error" : "done");
-      // A complete run is a download, and the dashboard's "Downloaded" card reads the stamp this
-      // leaves. Best effort: a role that may download but not write is refused the stamp, and a
-      // refused stamp is not a failed download, so nothing here reports it.
-      if (!missing.length && saved > 0) markSelectedOriginalsDownloaded(projectId).catch(() => {});
+      /*
+       * A complete run is a download: it is recorded against the selection state the run saved, and
+       * the dashboard's Yet to Download and Downloaded read that record. A run with photos missing is
+       * not complete and records nothing, so the project stays on Yet to Download to be run again.
+       * The record is the project's own state on the server, so it holds across a refresh and on
+       * every computer. Where it cannot be written - a role that may download but not change the
+       * project - the photos are still saved, and the message says why the project stays listed.
+       */
+      let notRecorded = "";
+      if (!missing.length && saved > 0) {
+        try { await markSelectedOriginalsDownloaded(projectId, selectionAsOf, folder?.id || null); }
+        catch { notRecorded = " The download could not be recorded, so this project stays on Yet to Download."; }
+      }
       const count = `${saved} original-quality photo${saved === 1 ? "" : "s"}`;
       if (missing.length) {
-        setMessage(`Saved ${count}. ${missing.length} could not be found in "${source.stored?.name || "the photo folder"}": ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? "…" : ""}`);
+        setMessage(`Saved ${count}. ${missing.length} original${missing.length === 1 ? " was" : "s were"} not found in "${source.stored?.name || "the photo folder"}".`);
+        setMissingList(missing);
         // A saved folder can be readable but still be the wrong location for these masters.
         // Offer the picker again so it can be replaced without clearing browser data.
         setNeedsSource(supportsFolderSelection());
@@ -128,13 +145,13 @@ export default function DownloadSelectedButton({ projectId, projectName, folder 
       if (archived) {
         // Named rather than described: the studio has to find this file in Downloads, and the whole
         // point of the archive is that the folders they expect are inside it.
-        setMessage(`Saved ${count} into "${archived.path}" in your Downloads folder. Choose a Target Download Path in Settings to save them straight into folders instead.`);
+        setMessage(`Saved ${count} into "${archived.path}" in your Downloads folder. Choose a Target Download Path in Settings to save them straight into folders instead.${notRecorded}`);
         return;
       }
       const destination = resolveProjectPath({ folderName: storage.folderName, projectName: storage.projectFolderName || projectName }).path;
       setMessage(storage.available
-        ? `Saved ${count} into ${destination}.`
-        : `Saved ${count}. ${storageReasonMessage(storage.reason, storage.folderName)}`);
+        ? `Saved ${count} into ${destination}.${notRecorded}`
+        : `Saved ${count}. ${storageReasonMessage(storage.reason, storage.folderName)}${notRecorded}`);
     } catch (error) {
       setState("error");
       // A permission or disk error stops the run, but everything written before it is still there.
@@ -167,9 +184,11 @@ export default function DownloadSelectedButton({ projectId, projectName, folder 
     // Laid out in a row so it fits inside the single-line workspace header without the
     // status text pushing the bar taller than it is allowed to be.
     <div className="inline-flex max-w-full items-center gap-2">
-      {message && <span title={message} className={`truncate text-[10px] ${state === "error" ? "text-red-600" : "text-slate-500"}`}>{message}</span>}
+      {message && <span role="status" title={message} className={`truncate text-[10px] ${state === "error" ? "text-red-600" : "text-slate-500"}`}>{message}</span>}
       {!supportsFolderSelection() && state === "idle" && !message && <span className="truncate text-[10px] text-slate-400">Files will go to Downloads.</span>}
-      {needsSource && (
+      {missingList.length > 0 && <Button variant="secondary" size="sm" className="shrink-0" onClick={() => setShowMissing(true)} aria-label={`View missing originals (${missingList.length})`}>View Missing</Button>}
+      {showMissing && <MissingOriginalsDialog items={missingList} onClose={() => setShowMissing(false)} onLocate={needsSource ? () => { setShowMissing(false); locate(); } : null} />}
+      {needsSource && !missingList.length && (
         <button type="button" onClick={locate} className="h-8 shrink-0 rounded-md border border-emerald-600 bg-white px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50">
           Locate Photo Folder
         </button>

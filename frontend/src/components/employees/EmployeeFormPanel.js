@@ -1,5 +1,6 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useEffect, useMemo, useState } from "react";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
 import SchemaFormSection from "@/components/schema-form/SchemaFormSection";
@@ -15,26 +16,31 @@ import SharedSearchableMultiSelect from "@/components/shared/SearchableMultiSele
 import SharedMultiSelectField from "@/components/shared/MultiSelectField";
 import SharedSelectableOption from "@/components/shared/SelectableOption";
 import SharedTextField from "@/components/shared/TextField";
+import SharedTextAreaField from "@/components/shared/TextAreaField";
 import PhoneField from "@/components/shared/PhoneField";
 import FloatingNotice from "@/components/shared/FloatingNotice";
 import RepeatableDetailsField, { withRowKey } from "@/components/shared/RepeatableDetailsField";
 import { getMasterData } from "@/services/hrm/master-data.service";
+import { getPayslipDetailsSetting, updateEmployee } from "@/services/hrm/employees.service";
+import { getBuiltInPayslipItems, getPayslipFields } from "@/services/hrm/payslipFields.service";
 import { bloodGroupOptions, departmentOptions, designationOptions, emergencyContactRelationshipOptions, employeeOptionResources, genderOptions, isMarried, languageOptions, maritalStatusOptions, skillOptions, verticalOptions, workLocationOptions, workTypeOptions } from "@/constants/employeeOptions";
 import { detailListErrors, employeeDetailLists, filledDetailRows } from "@/constants/employeeDetailFields";
 import { accountSections, credentialSections, credentialSummary } from "@/constants/employeeCredentialConfig";
 import { dateOfBirthError, fieldError, fieldFormatByName, latestDateOfBirth } from "@/constants/fieldValidation";
-import { reviewPayload, reviewTotals } from "@/constants/employeeReviewConfig";
-import { defaultNextReviewDate, heldReviews, scheduledReview, syncedNextReviewDate } from "@/lib/employeeReviewSchedule.mjs";
+import { isSpotReview, reviewPayload, reviewTotals } from "@/constants/employeeReviewConfig";
+import { defaultNextReviewDate, scheduledReview, syncedNextReviewDate } from "@/lib/employeeReviewSchedule.mjs";
 // The record keeps one name; this is the one rule for taking it apart, shared with the login
 // username so a person's record and their sign-in name cannot disagree about where it splits.
 import { splitEmployeeName as splitName } from "@/lib/employeeName.mjs";
-import Tabs from "@/components/ui/Tabs";
+import { PAYSLIP_PERSONAL_FIELDS, RESIDENTIAL_STATUSES, payslipPersonalForm, payslipPersonalKey, payslipPersonalPayload } from "@/lib/payslipEmployeeDetails.mjs";
+import { PAYSLIP_INPUT_TYPES as PAYSLIP_INPUT_TYPE_LIST } from "@/lib/payslipTemplate.mjs";
 import Dialog from "@/components/ui/Dialog";
 import Button from "@/components/shared/Button";
 import { workingEmployees } from "@/lib/employmentStatus.mjs";
 import { isFieldRequired, isSuperAdminSubject } from "@/lib/employeeRequiredFields.mjs";
+import { markedFieldsMessage } from "@/lib/formErrors.mjs";
 import AddReviewDialog from "./AddReviewDialog";
-import EmployeeReviewList from "./EmployeeReviewList";
+import EmployeeReviewTimeline from "./EmployeeReviewTimeline";
 import useCredentialForm from "./useCredentialForm";
 
 /**
@@ -121,7 +127,7 @@ const sectionLinks = [
 ];
 
 /*
- * Reviews are an Edit-only section, and the rail says so.
+ * Reviews are an Edit-only page, and the rail says so.
  *
  * Adding somebody and reviewing their onboarding submission are both about taking a person on;
  * neither is a moment at which they have salary reviews to record, and the empty list with its
@@ -129,8 +135,43 @@ const sectionLinks = [
  * needs is the one date — Next Review Date, in Personal Details, six months from joining — and that
  * is what it now asks for. The list appears once there is a record to keep one against.
  */
-const editOnlySectionLinks = [...sectionLinks, ["reviews", "Reviews"]];
-const sectionLinksFor = (mode) => (mode === "edit" ? editOnlySectionLinks : sectionLinks);
+const REVIEWS_PAGE = "reviews";
+
+/*
+ * Payslip Details: an Edit-only page after Employee Preference, for what the employee's payslip
+ * prints about them. Its two headings are in place; what goes under them comes later.
+ */
+const PAYSLIP_PAGE = "payslip";
+// One section, Payslip Info: the personal details and the PF details together.
+const payslipSectionLinks = [["payslip-info", "Payslip Info"]];
+// What PF Details asks: the payslip's PF and ESI numbers, typed by HR - nothing else on the record has them.
+const payslipPfFields = [["pfNumber", "PF No.", "pfNumber"], ["uanNumber", "UAN", "uan"], ["epsNumber", "EPS No.", "pfNumber"], ["esiNumber", "ESI No.", "esi"]];
+/*
+ * What the Payslip Details page requires before it saves: every Personal Detail and Residential Status
+ * always, and the four PF details when the payslip carries them (`withPf`) - with personal details
+ * only they are not asked for, and their fields are disabled.
+ */
+// Personal Details: typed here by HR, each required when saving from this page - nothing is filled in from the record.
+const payslipPersonalFields = PAYSLIP_PERSONAL_FIELDS.map(([name, label, type]) => [payslipPersonalKey(name), label, type]);
+// Only what Edit Payslip lists and has on (`listed`, by the item's own label) is asked for.
+const payslipRequiredFields = (withPf, listed) => [
+  ...payslipPersonalFields.filter(([, label]) => listed.has(label)).map(([key, label, type]) => [key, label, type, true]),
+  ...(listed.has("Residential Status") ? [["residentialStatus", "Residential Status", "select", true]] : []),
+  ...(withPf ? payslipPfFields.filter(([, label]) => listed.has(label)).map(([key, label, type]) => [key, label, type, true]) : []),
+];
+const payslipSectionByField = {
+  residentialStatus: "payslip-info",
+  ...Object.fromEntries(payslipPersonalFields.map(([key]) => [key, "payslip-info"])),
+  ...Object.fromEntries(payslipPfFields.map(([key]) => [key, "payslip-info"])),
+};
+/*
+ * The details added in Settings → Payroll rules → Edit Payslip, asked for beside the built-in ones:
+ * each answer held on the form under its own key (`payslipKey`) and sent as `payslipValues`. Personal
+ * ones are always required; PF ones when the payslip carries the PF details - disabled otherwise.
+ */
+const payslipKey = (id) => `payslip_${id}`;
+const PAYSLIP_INPUT_TYPES = Object.fromEntries(PAYSLIP_INPUT_TYPE_LIST.map((type) => [type.value, type.input]));
+const addedPayslipFields = (fields, withPf) => fields.map((field) => [payslipKey(field.id), field.label, PAYSLIP_INPUT_TYPES[field.inputType] || "text", field.section === "PERSONAL" || withPf]);
 
 /*
  * Onboarding is two pages under one rail, not two panels: Review Employee Details, then Login
@@ -142,7 +183,7 @@ const sectionLinksFor = (mode) => (mode === "edit" ? editOnlySectionLinks : sect
  */
 const onboardingPageLinks = [
   ["review", "Review Employee Details", sectionLinks],
-  ["credentials", "Login Credentials", [[employmentSection.id, employmentSection.title], ...credentialSections.map((section) => [section.id, section.title])]],
+  ["credentials", "Employee Preference", [[employmentSection.id, employmentSection.title], ...credentialSections.map((section) => [section.id, section.title])]],
 ];
 
 /*
@@ -156,17 +197,25 @@ const onboardingPageLinks = [
  * and the roles, cover and leave approval recorded beside their login could be read nowhere on the
  * screen that owns the person. The page itself decides which of its two jobs it is doing.
  */
+/*
+ * Reviews is a page of its own, last, the way Employee Preference is one: the salary history is a
+ * different thing to look at from the record, and it was the last heading of a long page where
+ * nobody found it. One entry rather than a group of one, since the page has one heading.
+ */
 const editPageLinks = [
-  ["review", "Employee Details", editOnlySectionLinks],
-  ["credentials", "Login Credentials", [[employmentSection.id, employmentSection.title], ...credentialSections.map((section) => [section.id, section.title])]],
+  ["review", "Employee Details", sectionLinks],
+  ["credentials", "Employee Preference", [[employmentSection.id, employmentSection.title], ...credentialSections.map((section) => [section.id, section.title])]],
+  // One entry rather than a group of one, as Reviews is: the page has the one heading, Payslip Info.
+  payslipSectionLinks[0],
+  [REVIEWS_PAGE, "Reviews"],
 ];
 const pageLinksFor = (mode) => (mode === "edit" ? editPageLinks : onboardingPageLinks);
 
 /** Which of the two pages a rail entry belongs to. Only children are ever selectable. */
-// Read from the longer list, so Edit's own Reviews section is not mistaken for a credentials one.
-const reviewSectionIds = new Set(editOnlySectionLinks.map(([id]) => id));
-const pageForSection = (id) => (reviewSectionIds.has(id) ? "review" : "credentials");
-const firstSectionOf = (pageId) => (pageId === "credentials" ? employmentSection.id : sectionLinks[0]?.[0]);
+const reviewSectionIds = new Set(sectionLinks.map(([id]) => id));
+const payslipSectionIds = new Set(payslipSectionLinks.map(([id]) => id));
+const pageForSection = (id) => (id === REVIEWS_PAGE ? REVIEWS_PAGE : payslipSectionIds.has(id) ? PAYSLIP_PAGE : reviewSectionIds.has(id) ? "review" : "credentials");
+const firstSectionOf = (pageId) => (pageId === "credentials" ? employmentSection.id : pageId === REVIEWS_PAGE ? REVIEWS_PAGE : pageId === PAYSLIP_PAGE ? payslipSectionLinks[0][0] : sectionLinks[0]?.[0]);
 
 /**
  * Put the chosen heading at the top of the reader's view.
@@ -191,7 +240,7 @@ const sections = [
      * last day that still leaves them that age — a function, not a value, because this list is
      * built once at import and the boundary moves every midnight.
      */
-    ["firstName", "First Name", "text", true], ["lastName", "Last Name", "text", true], ["gender", "Gender", "select", true, genderOptions], ["dateOfBirth", "Date of Birth", "date", false, undefined, () => ({ restriction: "future", maxDate: latestDateOfBirth() })], ["contactNumber", "Mobile Number", "phone", true], ["emailId", "Personal Email ID", "email", true], ["workType", "Work Type", "select", false, workTypeOptions], ["bloodGroup", "Blood Group", "select", true, bloodGroupOptions],
+    ["firstName", "First Name", "text", true], ["lastName", "Last Name", "text", true], ["gender", "Gender", "select", true, genderOptions], ["dateOfBirth", "Date of Birth", "date", false, undefined, () => ({ restriction: "future", maxDate: latestDateOfBirth() })], ["contactNumber", "Mobile Number", "phone", true], ["companyGivenNumber", "Company Given Number", "phone", false], ["emailId", "Personal Email ID", "email", true], ["workType", "Work Type", "select", false, workTypeOptions], ["bloodGroup", "Blood Group", "select", true, bloodGroupOptions],
 
     ["currentAddress", "Current Address", "textarea", true], ["sameAsCurrent", "Permanent address is the same as the current address", "sameAddress"], ["permanentAddress", "Permanent Address", "textarea", true],
     // Both tick-lists are tall, so they follow a full-width field: whatever is added above them, the
@@ -227,6 +276,80 @@ const sections = [
   ] },
 ];
 
+/*
+ * The ⓘ help beside each field's label, by field key. Kept beside the section lists rather than in
+ * their tuples, which are positional and would need a slot for it in every row.
+ */
+const fieldHelp = {
+  firstName: "Their given name, spelled as on their ID card.",
+  lastName: "Their family name or initial, spelled as on their ID card.",
+  gender: "As the employee identifies, kept on their record.",
+  dateOfBirth: "As on their ID; the studio takes nobody under eighteen.",
+  contactNumber: "Their own mobile number, where the studio reaches them.",
+  companyGivenNumber: "The studio phone number given to them for work, if any.",
+  emailId: "Their own email address, not the studio one, for personal messages.",
+  workType: "Whether they are full time, part time, a trainee or an intern.",
+  bloodGroup: "Kept on record in case of a medical emergency.",
+  currentAddress: "Where they live now, with house number, street, city and PIN code.",
+  sameAsCurrent: "Tick to copy the current address into the permanent address.",
+  permanentAddress: "Their home address as on their ID, if different from where they live now.",
+  skills: "Tick the work they can do, such as photography, editing or album designing.",
+  languagesKnown: "Tick every language they can speak, kept on their record.",
+  fatherName: "Their father's full name, as on their ID.",
+  fatherOccupation: "What their father does for a living.",
+  motherName: "Their mother's full name, as on their ID.",
+  motherOccupation: "What their mother does for a living.",
+  maritalStatus: "Choosing Married asks for the spouse, anniversary and children.",
+  spouseName: "Their husband's or wife's full name.",
+  weddingAnniversary: "Their wedding date, so the studio can wish them.",
+  aadharCardNumber: "The twelve-digit number on their Aadhaar card.",
+  panCardNumber: "The ten-character number on their PAN card, used for tax.",
+  profilePhotoUrl: "A clear face photo, shown on their employee record.",
+  aadharCardImageUrl: "A clear photo of the Aadhaar card, front side.",
+  panCardImageUrl: "A clear photo of the PAN card.",
+  bankName: "The bank their salary is paid into.",
+  bankLocation: "The branch or city of their bank account.",
+  accountNumber: "The salary account number, digits only.",
+  ifscCode: "The eleven-character code of their bank branch, from the passbook or cheque.",
+  emergencyContactName: "Who the studio should call if something happens to them.",
+  emergencyContactNumber: "The phone number to call in an emergency.",
+  emergencyContactRelationship: "How that person is related to them; pick one or type your own.",
+  reference1PersonName: "Someone who knows their work, such as a past employer.",
+  reference1PersonPhone: "The phone number to reach the first reference.",
+  reference1PersonAddress: "Where the first reference lives or works, if known.",
+  reference2PersonName: "A second person who knows their work, if any.",
+  reference2PersonPhone: "The phone number to reach the second reference.",
+  reference2PersonAddress: "Where the second reference lives or works, if known.",
+  nominee1PersonName: "The person they name as nominee for their benefits.",
+  nominee1PersonPhone: "The phone number to reach the first nominee.",
+  nominee2PersonName: "A second nominee, if they want one.",
+  nominee2PersonPhone: "The phone number to reach the second nominee.",
+  designation: "Their job title at the studio.",
+  department: "The teams they work in; pick more than one if needed.",
+  reportsToEmployeeId: "The manager this employee reports to at work.",
+  vertical: "The studio team or brand they work under.",
+  workBaseLocation: "The office they are hired for and normally belong to.",
+  currentWorkLocation: "Where they are working at present, if not their base.",
+  joiningSalary: "Their salary when they join; review increments add to it.",
+  referredByEmployeeId: "The employee who referred them, who is paid the referral bonus.",
+  dateOfJoining: "Their first working day; the next review date is set six months on.",
+  nextReviewDate: "When their next salary review is due.",
+  residentialStatus: "Their residential status for tax, printed on the payslip.",
+  pfNumber: "Their PF account number, printed on the payslip.",
+  uanNumber: "Their twelve-digit Universal Account Number for PF, printed on the payslip.",
+  epsNumber: "Their pension scheme number, printed on the payslip.",
+  esiNumber: "Their ESI insurance number, printed on the payslip.",
+  [payslipPersonalKey("empCode")]: "The employee code printed on the payslip, exactly as typed.",
+  [payslipPersonalKey("empName")]: "Their name as the payslip should print it.",
+  [payslipPersonalKey("department")]: "The department the payslip should print.",
+  [payslipPersonalKey("designation")]: "The designation the payslip should print.",
+  [payslipPersonalKey("location")]: "The work location the payslip should print.",
+  [payslipPersonalKey("dateOfBirth")]: "The date of birth the payslip should print.",
+  [payslipPersonalKey("dateOfJoining")]: "The joining date the payslip should print.",
+  [payslipPersonalKey("pan")]: "The PAN number the payslip should print.",
+  [payslipPersonalKey("bankAccount")]: "The bank account number the payslip should print.",
+};
+
 /** Every field the record form holds, wherever it is drawn. Validation and the labels read this. */
 const allSections = [...sections, employmentSection];
 
@@ -235,18 +358,14 @@ const allSections = [...sections, employmentSection];
 // make that round trip in the same shape they arrived in. The ten numbered increment dates were
 // here for the same reason and are gone with the columns - a salary review is a row of its own now.
 const dateFields = new Set(["dateOfBirth", "dateOfJoining", "dateOfRelieving", "lastReviewDate", "nextReviewDate", "weddingAnniversary"]);
-const phoneFields = new Set(["contactNumber", "emergencyContactNumber", "reference1PersonPhone", "reference2PersonPhone", "nominee1PersonPhone", "nominee2PersonPhone"]);
+const phoneFields = new Set(["contactNumber", "companyGivenNumber", "emergencyContactNumber", "reference1PersonPhone", "reference2PersonPhone", "nominee1PersonPhone", "nominee2PersonPhone"]);
 
 /*
- * What each field is called, and which heading it sits under.
- *
- * Both read off the same section list the form is drawn from, so a field renamed is renamed in the
- * complaint about it too. This is what lets Save say "Permanent Address" rather than the key, and
- * what lets it put the first outstanding field in front of the reader — on a form eight headings
+ * Which heading each field sits under, read off the same section list the form is drawn from. This
+ * is what lets Save put the first outstanding field in front of the reader — on a form eight headings
  * long, a mark two thousand pixels down the page is a form that says no and never says why.
  */
-const labelByField = Object.fromEntries(allSections.flatMap((section) => section.fields.map(([key, label]) => [key, label])));
-const sectionByField = Object.fromEntries(allSections.flatMap((section) => section.fields.map(([key]) => [key, section.id])));
+const sectionByField = { ...Object.fromEntries(allSections.flatMap((section) => section.fields.map(([key]) => [key, section.id]))), ...payslipSectionByField };
 
 function parsePhone(value) {
   const raw = String(value || "").trim();
@@ -310,6 +429,10 @@ function emptyForm(employee) {
     // permanent address the candidate copied from the current one arrives here checked, the way
     // they filled it in, rather than as two coincidentally equal boxes.
     sameAsCurrent: Boolean(String(employee.currentAddress || "").trim()) && employee.currentAddress === employee.permanentAddress,
+    // Personal Details as HR typed them, each under its own key - empty where nothing is typed yet.
+    ...payslipPersonalForm(employee.payslipPersonalDetails),
+    // The answers to the added payslip details, each under its own key.
+    ...Object.fromEntries((employee.payslipValues || []).map((answer) => [payslipKey(answer.fieldId), answer.value])),
     reviews: (employee.reviews || []).map(withReviewKey),
     // Keyed the way the reviews are, and for the same reason: a row the form adds has no id yet,
     // and removing one from the middle of a list by index moves every row below it.
@@ -341,29 +464,14 @@ function getMissingRequiredFields(form, fields, context = {}) {
 }
 
 /**
- * What Save says when it will not save, in the words on the fields.
+ * What Save says when it will not save: how many fields are marked, missing and malformed alike.
  *
- * It said "Fill in the required fields" whatever was wrong, which is a lie in two of the three
- * cases it covered: a well-formed record with a mistyped PAN, or a half-finished qualification row,
- * is not a record missing an answer — and somebody who has just filled in every field with a star
- * against it reads that sentence as the form being broken. Missing and malformed are now told
- * apart and named, capped at three each so the notice stays one line rather than a list of
- * everything, with the fields themselves carrying the rest.
+ * It used to name them ("Fill in Designation, Department and 2 more; check PAN."), which made the
+ * reader match names to boxes by hand. Each field now says its own problem under itself, and the
+ * scroll goes to the first, so the top says only how many there are.
  */
 function describeProblems(missing, invalid) {
-  const name = (key) => labelByField[key] || key;
-  const say = (keys) => {
-    const shown = keys.slice(0, 3).map(name).join(", ");
-    return keys.length > 3 ? `${shown} and ${keys.length - 3} more` : shown;
-  };
-  const malformed = Object.keys(invalid);
-  const parts = [];
-  if (missing.length) parts.push(`fill in ${say(missing)}`);
-  // The repeating lists complain per row, so they are named as somewhere to look rather than as a
-  // value to correct — the row's own message says which cell it is.
-  if (malformed.length) parts.push(`check ${say(malformed)}`);
-  if (!parts.length) return "";
-  return `${parts.join("; ")}.`.replace(/^./, (first) => first.toUpperCase());
+  return markedFieldsMessage(new Set([...missing, ...Object.keys(invalid)]).size);
 }
 
 /**
@@ -409,7 +517,7 @@ function hasFormChanged(form, originalForm) {
   return [...keys].some((key) => key !== "sameAsCurrent" && (form[key] ?? "") !== (originalForm[key] ?? ""));
 }
 
-export default function EmployeeFormPanel({ employee, employees = [], mode, onClose, onBack, backAriaLabel, onSave, onApprove, onSendBack, saving, error, savedForCredentials, onCredentialsCreated , onCredentialsUpdated, onSaveDetails}) {
+export default function EmployeeFormPanel({ employee, employees = [], mode, onClose, onBack, backAriaLabel, onSave, onApprove, onSendBack, saving, error, savedForCredentials, onCredentialsCreated , onCredentialsUpdated, onSaveDetails, autoOpenReview = false}) {
   // Whether this instance can ever reach a Login Credentials page at all - only Add and Review, an
   // employee already Active having nothing left to onboard onto.
   const onboards = mode !== "edit";
@@ -452,7 +560,9 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
    * `savedForCredentials` is; an Edit is already looking at one.
    */
   const credentialSubject = mode === "edit" ? employee : savedForCredentials;
-  const credentialForm = useCredentialForm(credentialSubject, employees, onCredentialsCreated, { manage: mode === "edit", onUpdated: onCredentialsUpdated });
+  // `departmentSignal`: the live department, so the credentials page's WhatsApp Groups re-reads when
+  // Employment Details changes it. That field saves on the spot; this is what tells the other page.
+  const credentialForm = useCredentialForm(credentialSubject, employees, onCredentialsCreated, { manage: mode === "edit", onUpdated: onCredentialsUpdated, departmentSignal: form.department || "" });
 
   /*
    * Whether this person is a Super Admin, which is what excuses them from Reports To.
@@ -488,7 +598,9 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
     return () => { live = false; };
   }, []);
   const title = twoPage && page === "credentials"
-    ? "Login Credentials"
+    ? "Employee Preference"
+    : page === REVIEWS_PAGE ? "Reviews"
+    : page === PAYSLIP_PAGE ? "Payslip Info"
     : mode === "review" ? "Review Employee Details" : employee ? "Edit Employee Details" : "Employee Registration Details";
   /*
    * The fields Save is allowed to complain about: the ones on the page being saved.
@@ -503,9 +615,37 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
    * credentials page asks for Employment Details. Nothing is skipped by the split - the employment
    * fields are still required, and the press that writes them is the one that now checks them.
    */
+  /*
+   * Whether the payslip carries the PF details (Settings → Template Settings) - read for an Edit,
+   * the only form with a Payslip Details page. Both until it answers, so nothing is waved through.
+   */
+  const [payslipWithPf, setPayslipWithPf] = useState(true);
+  // The details added in Settings → Payroll rules → Edit Payslip, still offered.
+  const [payslipFields, setPayslipFields] = useState([]);
+  // The payslip's own items Edit Payslip lists and has on, by label - the only ones asked for here.
+  const [payslipListed, setPayslipListed] = useState(() => new Set());
+  useEffect(() => {
+    if (mode !== "edit") return undefined;
+    let live = true;
+    getPayslipDetailsSetting()
+      .then((response) => { if (live) setPayslipWithPf(response?.data?.details !== "PERSONAL"); })
+      .catch(() => {});
+    getPayslipFields({ active: true })
+      // Only those on in Edit Payslip - one turned off is not printed, so it is not asked for.
+      .then((response) => { if (live) setPayslipFields((response?.data || []).filter((field) => field.shownOnPayslip !== false)); })
+      .catch(() => {});
+    getBuiltInPayslipItems()
+      .then((response) => { if (live) setPayslipListed(new Set((response?.data || []).filter((item) => item.shown && !item.deleted).map((item) => item.label))); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [mode]);
+  // The page being saved decides what is checked: Payslip Details adds its own required fields to the record's.
   const fields = useMemo(
-    () => (twoPage && page === "credentials" ? employmentSection.fields : sections.flatMap((section) => section.fields)),
-    [page, twoPage],
+    () => (twoPage && page === "credentials"
+      ? employmentSection.fields
+      // Each field once - Payslip Details' requirement, where it adds one, over the record's own.
+      : [...new Map([...sections.flatMap((section) => section.fields), ...(mode === "edit" && page === PAYSLIP_PAGE ? [...payslipRequiredFields(payslipWithPf, payslipListed), ...addedPayslipFields(payslipFields, payslipWithPf)] : [])].map((field) => [field[0], field])).values()]),
+    [mode, page, payslipFields, payslipListed, payslipWithPf, twoPage],
   );
   /**
    * Who this employee can be pointed at as their reporting person.
@@ -519,7 +659,7 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
    */
   const reportingOptions = useMemo(() => workingEmployees(employees)
     .filter((candidate) => candidate.id !== employee?.id)
-    .map((candidate) => ({ label: candidate.employeeId ? `${candidate.employeeName} (${candidate.employeeId})` : candidate.employeeName, value: String(candidate.id) })), [employees, employee?.id]);
+    .map((candidate) => ({ label: candidate.employeeId ? `${candidate.employeeName} (${candidate.employeeId})` : candidate.employeeName, value: String(candidate.id), avatar: avatarOf(candidate) })), [employees, employee?.id]);
   const validation = useMemo(() => ({ missing: getMissingRequiredFields(form, fields, requiredContext), invalid: getInvalidFields(form) }), [fields, form, requiredContext]);
   /**
    * Whether anything is still standing between this record and being saved.
@@ -548,7 +688,26 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
    * correction to the joining date on an onboarding form should move the review; a joining date
    * corrected after HR has set a review date of their own should not take it away from them.
    */
+  /*
+   * Department is saved the moment it changes, on an employee who already exists.
+   *
+   * It is the one field on this form another screen reads **before** Save: the credentials page's
+   * WhatsApp Groups offers the groups of the employee's departments, and those come from the saved
+   * record. Picked here and left unsaved, that box sat empty while somebody had visibly chosen
+   * departments a moment earlier - and nothing on either screen said why.
+   *
+   * Only this field, and only on an edit: a new employee has no id to save against, and their
+   * departments go in with the rest when the form is saved. A failure is deliberately quiet - the
+   * form's own Save is still coming and will write it again - so a WhatsApp list that has not caught
+   * up is never a reason to interrupt somebody filling in an employee.
+   */
+  function saveDepartmentNow(value) {
+    if (!employee?.id) return;
+    void updateEmployee(employee.id, { department: value }).catch(() => {});
+  }
+
   function update(key, value) {
+    if (key === "department") saveDepartmentNow(value);
     setForm((current) => ({
       ...current,
       [key]: value,
@@ -570,35 +729,36 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
 
   const [reviewDialog, setReviewDialog] = useState(null);
   // Opens on Upcoming: the list is read to find the next review far more often than to read history.
-  /*
-   * Which half of the review section opens: the recorded reviews where there are any.
-   *
-   * It always opened on Upcoming, which is the *scheduled date* and never a review row. So somebody
-   * who recorded a review, saved, and came back landed on a card showing a date and no sign of what
-   * they had entered — the review was saved, and filed one tab away. "It is not shown after I
-   * reload" is what that looks like from the outside.
-   *
-   * Read once, when the panel opens, so it is a starting place rather than a tab that moves itself
-   * under somebody who has chosen the other one.
-   */
-  const [reviewTab, setReviewTab] = useState(() => (employee?.reviews?.length ? "past" : "upcoming"));
   const reviews = form.reviews || [];
   /*
-   * A schedule and a history, which are two different things rather than two halves of one list.
-   *
-   * `upcoming` is the one date nobody has acted on yet — the employee's own Next Review Date, which
-   * follows the latest review or six months from joining. `past` is the reviews actually held. A
-   * review row can never be upcoming: it records an appraisal that happened, and the dialog that
-   * creates one refuses a future date.
+   * The one date nobody has acted on yet — the employee's own Next Review Date, which follows the
+   * latest review or six months from joining. The timeline draws it at its foot.
    *
    * Recomputed per render rather than memoised, because "upcoming" is measured against today and a
    * panel left open across midnight would otherwise keep showing yesterday's answer.
    */
   const upcoming = scheduledReview(form.nextReviewDate);
-  const past = heldReviews(reviews);
-  // The same figures the server will store, shown before it saves so the effect of a review is
-  // visible while it is being entered.
-  const totals = reviewTotals(reviews, form.joiningSalary);
+  /*
+   * "Start Review", from the repository row menu: the panel opens the same dialog "Record this
+   * review" does, on its own, instead of leaving the reader to find Reviews and press it themselves
+   * — the row menu already said what it was asked for.
+   *
+   * Runs once, on mount, so the dialog does not reopen itself if the reader closes it and keeps
+   * working in the rest of the form. There is nothing to open when `upcoming` is empty — nobody
+   * offers Start Review on a row with no Next Review Date to be overdue in the first place, but the
+   * panel can also be reached directly, so it checks rather than assumes.
+   */
+  useEffect(() => {
+    // `"add"` (the row's Add Review) opens whether or not a review is due; Start Review only when one is.
+    if (mode !== "edit" || !autoOpenReview || (autoOpenReview !== "add" && !upcoming)) return;
+    // A one-time bootstrap off `autoOpenReview`, not a value this effect keeps in sync with
+    // anything that changes afterwards — see the note above.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    goToSection("reviews");
+    // Start Review records the review that is due (cyclic, on its date); Add Review opens on a spot one.
+    setReviewDialog({ review: null, ...(autoOpenReview !== "add" && upcoming ? { prefill: { reviewDate: upcoming.dueOn } } : {}) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /*
    * The other direction of the same rule: once reviews exist, the employee's Next Review Date is the
@@ -610,12 +770,13 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
    * review deleted it falls back to six months from joining, which is where an employee with no
    * review history stands.
    */
+  // Only cyclic reviews set the schedule; with none, the date stands as it was (or six months from joining).
   const withReviewSchedule = (current, reviews) => ({
     ...current,
     reviews,
-    nextReviewDate: reviews.length
+    nextReviewDate: reviews.some((review) => !isSpotReview(review))
       ? (reviewTotals(reviews, current.joiningSalary).nextReviewDate || "")
-      : defaultNextReviewDate(current.dateOfJoining),
+      : (current.nextReviewDate || defaultNextReviewDate(current.dateOfJoining)),
   });
 
   function saveReviews(rows) {
@@ -626,17 +787,6 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
         : [...list, ...rows.map(withReviewKey)];
       return withReviewSchedule(current, next);
     });
-    /*
-     * Show what was just recorded.
-     *
-     * The section can be sitting on Upcoming — a scheduled *date*, never a review row — and a review
-     * saved from there landed in the list behind the other tab, leaving the reader looking at the
-     * screen they were already looking at with only a count quietly incremented to say anything had
-     * happened. It read as a dialog that did nothing, which is why reviews were then abandoned
-     * unsaved: the panel's own Update is what writes them, and nobody presses Update on work they
-     * think was thrown away.
-     */
-    setReviewTab("past");
     setReviewDialog(null);
   }
 
@@ -645,11 +795,18 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
   }
 
   function buildPayload() {
-    // Named rather than counted: the fields carry the detail where they sit, and this says which
-    // ones to go to — on a form this long, "something is wrong" is not somewhere to look.
+    // Counted: the fields carry the detail where they sit, and the scroll goes to the first.
     if (hasProblems) return { error: describeProblems(validation.missing, validation.invalid) };
     const entries = Object.entries(form)
-      .filter(([key]) => key !== "sameAsCurrent" && !(mode === "add" && key === "employeeId"))
+      // Read-only everywhere it's shown, and the server never writes it back on an edit either — so
+      // it is never sent. Sending it back unchanged used to fail validation on any employee whose
+      // stored id predates the current `DBS-<n>` format (seed and legacy rows), refusing an edit
+      // that touched nothing about the id.
+      .filter(([key]) => key !== "sameAsCurrent" && key !== "employeeId")
+      // The added payslip details go as one `payslipValues` below, never as columns.
+      .filter(([key]) => key !== "payslipValues" && !key.startsWith("payslip_"))
+      // Personal Details go as one `payslipPersonalDetails` below, never as columns.
+      .filter(([key]) => key !== "payslipPersonalDetails" && !key.startsWith("payslipPersonal_"))
       // Sent below in the shape the record stores, without the keys the field tells rows apart by.
       .filter(([key]) => !Object.keys(employeeDetailLists).includes(key))
       // The record has one name column, and the two halves the form asks for are not fields on it.
@@ -666,6 +823,9 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
       .map(([key, value]) => [key, isFieldVisible(key, form) ? (value === "" ? null : value) : null]);
     const payload = Object.fromEntries(entries);
     payload.employeeName = `${form.firstName || ""} ${form.lastName || ""}`.trim();
+    // Every added payslip detail's answer - "" clears one - only where Payslip Details is on the form.
+    if (mode === "edit") payload.payslipPersonalDetails = payslipPersonalPayload(form);
+    if (mode === "edit" && payslipFields.length) payload.payslipValues = Object.fromEntries(payslipFields.map((field) => [field.id, String(form[payslipKey(field.id)] ?? "")]));
     // Through the shared shape, so an amount nobody typed reaches the server as null rather than as
     // `Number("")` — which is 0, and a real increment of zero once it is stored.
     payload.reviews = reviews.map(reviewPayload);
@@ -687,7 +847,8 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
   function showFirstProblem() {
     setShowProblems(true);
     const first = validation.missing[0] || Object.keys(validation.invalid)[0];
-    const sectionId = first && sectionByField[first];
+    const added = payslipFields.find((field) => payslipKey(field.id) === first);
+    const sectionId = first && (sectionByField[first] || (added && "payslip-info"));
     if (!sectionId) return;
     /*
      * Through `goToSection`, so the page changes with the section.
@@ -712,6 +873,9 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
     onApprove(result.payload || null, result.error);
   }
   const onCredentialsPage = twoPage && page === "credentials";
+  // Edit only: the rail offers the page nowhere else.
+  const onReviewsPage = mode === "edit" && page === REVIEWS_PAGE;
+  const onPayslipPage = mode === "edit" && page === PAYSLIP_PAGE;
 
   /*
    * What would be lost by closing, and the question that gets asked before it is.
@@ -782,6 +946,8 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
       if (!recordDirty) { onClose(); return; }
       // The same save the review footer's own Save Draft makes - the record is kept and the
       // submission stays under review - and the caller closes the panel on the strength of it.
+      // Marked and shown as the main Save does, so Payslip Info's required fields say so too.
+      if (hasProblems) showFirstProblem();
       const result = buildPayload();
       await onSave(result.payload || null, result.error);
     } finally {
@@ -793,6 +959,8 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
    * which page is open when it fires, the same way the footer below already has to.
    */
   async function handleSubmit(event) {
+    // Reviews are saved one at a time from their own dialog, so this page has nothing to submit.
+    if (onReviewsPage || onPayslipPage) { event.preventDefault(); return; }
     if (!onCredentialsPage) { submit(event); return; }
     event.preventDefault();
     /*
@@ -813,9 +981,9 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
      * stays live and says what is missing, because a dead button cannot explain itself.
      */
     if (hasProblems) {
-      // Named, not counted, and said out loud - the same sentence Review Employee Details refuses
-      // with. The marks and the scroll answer "where"; on a page whose fields are mostly filled in
-      // already, a press that silently moves the view is easy to read as a press that did nothing.
+      // Said out loud - the same line Review Employee Details refuses with. The marks and the scroll
+      // answer "where"; on a page whose fields are mostly filled in already, a press that silently
+      // moves the view is easy to read as a press that did nothing.
       credentialForm.showError(describeProblems(validation.missing, validation.invalid));
       showFirstProblem();
       return;
@@ -870,7 +1038,7 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
    * three blue buttons would have said all three were the thing to press.
    */
   const reviewFooter = <>
-    <button type="button" onClick={onClose} className="mr-auto min-h-10 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 max-sm:w-full max-sm:mr-0">{closeLabel}</button>
+    <button type="button" onClick={onClose} className="min-h-10 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 max-sm:w-full">{closeLabel}</button>
     <button disabled={!canSave} className={isReview
       ? "min-h-10 rounded-md border border-slate-300 px-5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400 max-sm:flex-1"
       : "min-h-10 rounded-md px-5 py-2 text-sm font-medium max-sm:flex-1 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 enabled:bg-blue-600 enabled:text-white enabled:hover:bg-blue-700"}>
@@ -879,8 +1047,21 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
     {isReview && onSendBack && employee?.hasOnboardingSubmission && <button type="button" disabled={saving} onClick={() => onSendBack(employee)} className="min-h-10 rounded-md border border-amber-300 bg-amber-50 px-5 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-60 max-sm:flex-1">Send Back</button>}
     {isReview && <button type="button" disabled={saving} onClick={approve} className="min-h-10 rounded-md bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60 max-sm:flex-1">Approve &amp; Next</button>}
   </>;
+  /*
+   * Nothing on the Reviews page is its own to save - each review is written from its own dialog the
+   * moment it is pressed - but Employee Details or Employee Preference can still be sitting on an
+   * edit made before the reader switched pages, same as if they had never left. Save here is that
+   * same save, `saveDraftAndClose` - the one the unsaved-work dialog's own Save/Save draft button
+   * already makes - so leaving from Reviews cannot quietly lose it. Discard says what it does and
+   * acts on it directly, the way the credentials page's own Discard changes does, rather than
+   * asking "are you sure" a second time after the button already named the answer.
+   */
+  const reviewsFooter = <>
+    <button type="button" onClick={onClose} className="min-h-10 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 max-sm:w-full">Discard</button>
+    <button type="button" disabled={!hasUnsavedWork || savingDraft} onClick={() => void saveDraftAndClose()} className="min-h-10 rounded-md px-5 py-2 text-sm font-medium max-sm:flex-1 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 enabled:bg-blue-600 enabled:text-white enabled:hover:bg-blue-700">{savingDraft ? "Saving..." : "Save"}</button>
+  </>;
   const credentialsFooter = credentialForm.result
-    ? <button type="button" onClick={onClose} className="ml-auto min-h-10 rounded-md bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 max-sm:w-full">Close</button>
+    ? <button type="button" onClick={onClose} className="min-h-10 rounded-md bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 max-sm:w-full">Close</button>
     : <>
       {/*
         * "Back to the details" while nothing is saved yet: this page was opened to be read, and
@@ -892,7 +1073,7 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
         * dropping it: the panel's own × still closes the page, the employee is already saved by
         * then, and the ⋮ on their row opens this same form whenever the login is picked up again.
         */}
-      {!credentialForm.ready && <button type="button" onClick={() => goToSection(firstSectionOf("review"))} className="mr-auto min-h-10 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 max-sm:w-full max-sm:mr-0">Back to details</button>}
+      {!credentialForm.ready && <button type="button" onClick={() => goToSection(firstSectionOf("review"))} className="min-h-10 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 max-sm:w-full">Back to details</button>}
       {/*
         * The same pair Review Employee Details ends on, because this page holds the same kind of
         * unfinished work: what has been chosen, with nowhere to live until the account is created.
@@ -903,7 +1084,7 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
         */}
       {/* Nothing to keep as a draft once the account exists: the page saves or it does not. */}
       {credentialForm.ready && !credentialForm.managing && <>
-        <button type="button" onClick={onClose} className="mr-auto min-h-10 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 max-sm:w-full max-sm:mr-0">Discard changes</button>
+        <button type="button" onClick={onClose} className="min-h-10 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 max-sm:w-full">Discard changes</button>
         {/* Enabled only where there is something to keep: a page still reading exactly as it was
             proposed has nothing to save, and a button offering to save it says otherwise. */}
         <button type="button" disabled={!credentialForm.dirty || credentialForm.saving || credentialForm.loading} onClick={() => void credentialForm.saveDraft()} className="min-h-10 rounded-md border border-slate-300 px-5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400 max-sm:flex-1">Save Draft</button>
@@ -912,17 +1093,16 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
           sequence: this is not something the reader may never do, it is something there is not yet
           anybody to do it for. `submit` already refuses when nothing is saved, which left the
           button looking live and answering with nothing at all. */}
-      {/* `ml-auto` because it is now the only button in the footer once the employee is saved, and
-          the footer is a plain flex row - without it the one thing to press would sit at the left
-          edge, where no other panel in the application puts its primary action. */}
-      <button disabled={!credentialForm.ready || credentialForm.saving || credentialForm.loading} className="ml-auto min-h-10 rounded-md px-5 py-2 text-sm font-medium max-sm:flex-1 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 enabled:bg-blue-600 enabled:text-white enabled:hover:bg-blue-700">{credentialForm.managing ? (credentialForm.saving ? "Saving..." : recordDirty ? "Save All Changes" : "Save Changes") : (credentialForm.saving ? "Creating..." : "Create User & Send Email")}</button>
+      <button disabled={!credentialForm.ready || credentialForm.saving || credentialForm.loading} className="min-h-10 rounded-md px-5 py-2 text-sm font-medium max-sm:flex-1 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 enabled:bg-blue-600 enabled:text-white enabled:hover:bg-blue-700">{credentialForm.managing ? (credentialForm.saving ? "Saving..." : recordDirty ? "Save All Changes" : "Save Changes") : (credentialForm.saving ? "Creating..." : "Create User & Send Email")}</button>
     </>;
   return (<>
     <SchemaFormPanel
       title={title}
       description={onCredentialsPage
         ? "The account this employee signs in with, what it may do, and who covers for them."
-        : "Create a complete employee record for DBS operations."}
+        : onReviewsPage ? "Salary reviews recorded against this employee."
+        : onPayslipPage ? "What this employee's payslip shows about them."
+          : "Create a complete employee record for DBS operations."}
       sections={pageLinksFor(mode)}
       activeSectionId={activeSection}
       onSectionSelect={goToSection}
@@ -935,63 +1115,51 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
       error={onCredentialsPage ? credentialForm.error : error}
       loading={onCredentialsPage && credentialForm.loading}
       loadingLabel="Loading branches and roles..."
-      footer={onCredentialsPage ? credentialsFooter : reviewFooter}
+      footer={onCredentialsPage ? credentialsFooter : onReviewsPage || onPayslipPage ? reviewsFooter : reviewFooter}
     >
-      {!onCredentialsPage && <>
-        {sections.map((section) => <SchemaFormSection id={section.id} key={section.id} title={section.title}><div className="grid gap-4 md:grid-cols-2">{section.fields.filter(([key]) => isFieldVisible(key, form)).map(([key, label, type = "text", required, options, props]) => <FormField key={key} label={label} field={key} type={type} required={isFieldRequired(key, required, requiredContext)} error={fieldErrors[key]} options={managedOptions[key] || (["reportsToEmployeeId", "referredByEmployeeId"].includes(key) ? reportingOptions : options)} props={props} value={form[key]} onChange={update} onCopyAddress={copyAddress} disabled={key === "nextReviewDate" && reviews.length > 0} />)}</div></SchemaFormSection>)}
+      {!onCredentialsPage && !onReviewsPage && !onPayslipPage && sections.map((section) => <SchemaFormSection id={section.id} key={section.id} title={section.title}><div className="grid gap-4 md:grid-cols-2">{section.fields.filter(([key]) => isFieldVisible(key, form)).map(([key, label, type = "text", required, options, props]) => <FormField key={key} label={label} helperText={fieldHelp[key]} field={key} type={type} required={isFieldRequired(key, required, requiredContext)} error={fieldErrors[key]} options={managedOptions[key] || (["reportsToEmployeeId", "referredByEmployeeId"].includes(key) ? reportingOptions : options)} props={props} value={form[key]} onChange={update} onCopyAddress={copyAddress} disabled={key === "nextReviewDate" && reviews.length > 0} />)}</div></SchemaFormSection>)}
 
-        {/* Edit only. Adding a person and reviewing their onboarding are not moments at which they
-            have salary reviews; onboarding answers the one date it does need — Next Review Date, in
-            Personal Details — and the history appears once there is a record to keep one against. */}
-        {mode === "edit" && <SchemaFormSection id="reviews" title="Reviews">
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="font-semibold text-slate-800">Review List</h3>
-              <p className="text-sm text-slate-600">Salary reviews recorded against this employee</p>
-            </div>
-            <button type="button" onClick={() => setReviewDialog({ review: null })} className="min-h-10 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">+ Add Review</button>
-          </div>
-          {/* Two questions, not one list: the date the next review falls due, and the reviews that
-              have been recorded. The counts sit on the tabs so neither has to be opened to know
-              whether it holds anything.
-
-              Past leads only in name: the section opens on whichever tab has something to show, so
-              a review just recorded is not filed one tab away from the person who recorded it. */}
-          <Tabs
-            tabs={[{ id: "upcoming", label: "Upcoming", count: upcoming ? 1 : 0 }, { id: "past", label: "Past", count: past.length }]}
-            value={reviewTab}
-            onChange={setReviewTab}
-            size="sm"
-            ariaLabel="Review list"
+      {/* Edit only, and a page of its own. Adding a person and reviewing their onboarding are not
+          moments at which they have salary reviews; onboarding answers the one date it does need —
+          Next Review Date, in Personal Details — and the history appears once there is a record to
+          keep one against. */}
+      {onReviewsPage && <>
+        <SchemaFormSection id="reviews" title="Reviews">
+          {/* A timeline rather than tabs over a table: the joining salary, every review in the order
+              it happened with the salary it left them on, and the next review waiting at the foot.
+              Mark review opens the same dialog Add Review does, with the due date already in it. */}
+          <EmployeeReviewTimeline
+            reviews={reviews}
+            // A client's Appreciation (Shine) and Not Satisfied (Shadow), read with the record.
+            clientFeedback={employee?.clientFeedback || []}
+            joiningDate={form.dateOfJoining}
+            joiningSalary={form.joiningSalary}
+            upcoming={upcoming}
+            onAdd={() => setReviewDialog({ review: null })}
+            onMark={() => setReviewDialog({ review: null, prefill: { reviewDate: upcoming.dueOn } })}
+            onEdit={(review) => setReviewDialog({ review })}
+            onDelete={deleteReview}
           />
-          <div className="mt-4">
-            {reviewTab === "upcoming"
-              ? (upcoming
-                /* The one review that has not happened. Recording it opens the same dialog the list
-                   does, with the due date already in it — which is the only sense in which this is
-                   a row: it is a date waiting to become one. */
-                ? <div className={`flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${upcoming.overdue ? "border-amber-300 bg-amber-50" : "border-slate-200 bg-white"}`}>
-                  <div className="min-w-0">
-                    <p className="font-semibold text-slate-800">{formatListDate(upcoming.dueOn)}</p>
-                    <p className="mt-1 text-xs text-slate-500">{upcoming.overdue ? "This review was due and has not been recorded." : reviews.length ? "Six months after the last review." : "Six months after the joining date."}</p>
-                  </div>
-                  <button type="button" onClick={() => setReviewDialog({ review: null, prefill: { reviewDate: upcoming.dueOn } })} className="min-h-9 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-100">Record this review</button>
-                </div>
-                : <p className="rounded-md border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">No review is scheduled. Set a Next Review Date in Personal Details.</p>)
-              : <EmployeeReviewList
-                reviews={past}
-                emptyText="No reviews have been held yet."
-                onEdit={(review) => setReviewDialog({ review })}
-                onDelete={deleteReview}
-              />}
+        </SchemaFormSection>
+      </>}
+      {/*
+        Edit only. Payslip Info is what the payslip prints about the employee - the personal details
+        and then the PF details, in one section - typed here by HR and printed as typed; nothing is
+        filled in from the rest of the record. Residential Status is saved with the record.
+      */}
+      {onPayslipPage && <>
+        <SchemaFormSection id="payslip-info" title="Payslip Info">
+          <p className="mb-4 text-xs text-slate-500 sm:text-sm">Typed by HR. The payslip prints these as typed here.{payslipWithPf ? "" : " The PF details are off - the payslip carries the personal details only."}</p>
+          <div className="grid gap-4 md:grid-cols-2">
+            {payslipPersonalFields.filter(([, label]) => payslipListed.has(label)).map(([key, label, type]) => <FormField key={key} label={label} helperText={fieldHelp[key]} field={key} type={type} required error={fieldErrors[key]} value={form[key]} onChange={update} />)}
+            {payslipListed.has("Residential Status") && <FormField label="Residential Status" helperText={fieldHelp.residentialStatus} field="residentialStatus" type="select" required error={fieldErrors.residentialStatus} options={RESIDENTIAL_STATUSES} value={form.residentialStatus} onChange={update} />}
+            {/* Added in Settings → Payroll rules → Edit Payslip. */}
+            {payslipFields.filter((field) => field.section === "PERSONAL").map((field) => <FormField key={field.id} label={field.label} helperText="Printed on the payslip exactly as typed here." field={payslipKey(field.id)} type={PAYSLIP_INPUT_TYPES[field.inputType] || "text"} options={field.options} required error={fieldErrors[payslipKey(field.id)]} value={form[payslipKey(field.id)]} onChange={update} />)}
+            {/* The PF details, after the personal ones - required when the payslip carries them, disabled otherwise. */}
+            {payslipPfFields.filter(([, label]) => payslipListed.has(label)).map(([key, label, type]) => <FormField key={key} label={label} helperText={fieldHelp[key]} field={key} type={type} required={payslipWithPf} disabled={!payslipWithPf} error={fieldErrors[key]} value={form[key]} onChange={update} />)}
+            {payslipFields.filter((field) => field.section === "PF").map((field) => <FormField key={field.id} label={field.label} helperText="Printed on the payslip exactly as typed here." field={payslipKey(field.id)} type={PAYSLIP_INPUT_TYPES[field.inputType] || "text"} options={field.options} required={payslipWithPf} disabled={!payslipWithPf} error={fieldErrors[payslipKey(field.id)]} value={form[payslipKey(field.id)]} onChange={update} />)}
           </div>
-          {reviews.length > 0 && <dl className="mt-4 grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm sm:grid-cols-4">
-            {[["Total Increment", formatMoney(totals.totalIncrement)], ["Total Salary", formatMoney(totals.totalSalary)], ["Last Review Date", formatListDate(totals.lastReviewDate)], ["Next Review Date", formatListDate(totals.nextReviewDate)]].map(([label, value]) => <div key={label}>
-              <dt className="font-medium text-slate-500">{label}</dt>
-              <dd className="mt-1 font-semibold text-slate-800">{value}</dd>
-            </div>)}
-          </dl>}
-        </SchemaFormSection>}
+        </SchemaFormSection>
       </>}
       {/* Reachable on purpose now: the rail opens this page whenever it is asked to, so somebody
           can read what the login step will want before committing the details above. There is no
@@ -1020,6 +1188,7 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
             {employmentSection.fields.map(([key, label, type = "text", required, options, props]) => <FormField
               key={key}
               label={label}
+              helperText={fieldHelp[key]}
               field={key}
               type={type}
               required={isFieldRequired(key, required, requiredContext)}
@@ -1046,7 +1215,7 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
         <SchemaFormSectionsBody sections={credentialForm.managing ? accountSections : credentialSections} values={credentialForm.values} onChange={credentialForm.change} errors={credentialForm.errors} context={credentialForm.context} />
       </>)}
     </SchemaFormPanel>
-    {reviewDialog && <AddReviewDialog initialReview={reviewDialog.review} prefill={reviewDialog.prefill} existingReviews={reviews} onClose={() => setReviewDialog(null)} onSave={saveReviews} />}
+    {reviewDialog && <AddReviewDialog initialReview={reviewDialog.review} prefill={reviewDialog.prefill} existingReviews={reviews} joiningSalary={form.joiningSalary} scheduledDate={form.nextReviewDate} onClose={() => setReviewDialog(null)} onSave={saveReviews} />}
     {/*
       * Three answers, because closing a half-finished page is a three-answer question and the
       * usual two-button confirmation can only ask it badly. **Save draft** keeps the work and
@@ -1072,7 +1241,7 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
               ? "This employee has been filled in but not saved. Saving adds them to the register; anything still required will be named rather than saved."
               : "The reviewed details have been changed. Saving keeps them as a draft; the submission stays under review and nobody is approved.")
           : credentialForm.managing
-            ? "The roles, cover and leave approval on the Login Credentials page have been changed. There is no draft behind a login that already exists — leaving now discards them, and Save Changes on that page is what keeps them."
+            ? "The roles, cover and leave approval on the Employee Preference page have been changed. There is no draft behind a login that already exists — leaving now discards them, and Save Changes on that page is what keeps them."
             : "The login credentials page has been filled in. Saving keeps it as a draft — no account is created and no email is sent until Create User & Send Email."}
       size="sm"
       // Over the panel it is asking about, the way the review dialog beside it already is: a plain
@@ -1081,8 +1250,14 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
       busy={savingDraft}
       onClose={() => setCloseRequested(false)}
       footer={<>
-        <Button type="button" className="mr-auto max-sm:mr-0 max-sm:flex-1" disabled={savingDraft} onClick={() => { setCloseRequested(false); onClose(); }}>Discard</Button>
-        <Button type="button" className="max-sm:flex-1" disabled={savingDraft} onClick={() => setCloseRequested(false)}>Keep editing</Button>
+        <Button type="button" variant="secondary" className="max-sm:flex-1" disabled={savingDraft} onClick={() => { setCloseRequested(false); onClose(); }}>Discard</Button>
+        {/* Primary only where it is the one forward-moving button in the footer: with Save draft
+            offered as well, two buttons of equal weight leaves a first-time user unable to tell
+            which is recommended - and Keep editing does not need the emphasis to compete for
+            attention anyway, since it is also what the × and Escape already do (see the note
+            above). Without Save draft, Keep editing is the only positive answer left and carries
+            the weight alone. */}
+        <Button type="button" variant={(recordDirty || credentialsDraftable) ? "secondary" : "primary"} className="max-sm:flex-1" disabled={savingDraft} onClick={() => setCloseRequested(false)}>Keep editing</Button>
         {/* "Save draft" is the right word where the work stays a draft — a submission still under
             review, a login credentials page with no account behind it yet. Editing an employee is
             not a draft of anything: it writes the record.
@@ -1098,12 +1273,6 @@ export default function EmployeeFormPanel({ employee, employees = [], mode, onCl
   );
 }
 
-const formatMoney = (value) => value === null || value === undefined || value === "" ? "—" : new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(Number(value));
-const formatListDate = (value) => {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat("en-GB", { dateStyle: "medium" }).format(date);
-};
 
 
 /** The record keeps these as one comma-separated string, so the ticked list is joined back up. */
@@ -1119,7 +1288,7 @@ const formatListDate = (value) => {
  * So this one is the portalled kind: a trigger the size of every other control, opening its list
  * over the form the way `Dropdown` does - the same shape the Roles picker beside it has.
  */
-function CompactMultiSelectField({ label, field, options, value, onChange, required = false, error = "" }) {
+function CompactMultiSelectField({ label, helperText = "", field, options, value, onChange, required = false, error = "" }) {
   const safeOptions = Array.isArray(options) ? options.filter((option) => typeof option === "string") : [];
   const selected = Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
   // Something already chosen that has since left the list is still shown, so it can be seen and
@@ -1127,6 +1296,7 @@ function CompactMultiSelectField({ label, field, options, value, onChange, requi
   const listedOptions = [...safeOptions, ...selected.filter((item) => !safeOptions.includes(item))];
   return <SharedMultiSelectField
     label={label}
+    helperText={helperText}
     // Threaded through, not defaulted: `SharedMultiSelectField` already draws the rose asterisk, and
     // this wrapper simply was not passing it - so Department was required on save and unmarked on
     // screen, which reads as the form refusing an answer it never asked for.
@@ -1143,7 +1313,7 @@ function CompactMultiSelectField({ label, field, options, value, onChange, requi
   />;
 }
 
-function MultiSelectField({ label, field, options, value, onChange, required = false, error = "" }) {
+function MultiSelectField({ label, helperText = "", field, options, value, onChange, required = false, error = "" }) {
   const safeOptions = Array.isArray(options) ? options.filter((option) => typeof option === "string") : [];
   const selected = Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
   const noun = label.toLocaleLowerCase();
@@ -1151,7 +1321,10 @@ function MultiSelectField({ label, field, options, value, onChange, required = f
   // seen and unticked rather than sitting invisibly on the record.
   const listedOptions = [...safeOptions, ...selected.filter((item) => !safeOptions.includes(item))];
   return <SharedSearchableMultiSelect
+    // The full width, one below the other: side by side, each long tick-list had half the form.
+    className="md:col-span-2"
     label={label}
+    helperText={helperText}
     required={required}
     // Optional today, and threaded anyway: the sibling wrapper above went years marking nothing
     // because this one line was missing, and the field that needs it is only ever one config edit
@@ -1176,11 +1349,12 @@ function MultiSelectField({ label, field, options, value, onChange, required = f
  * answer; **Replace photo** is, and it is the same single click. This panel is both the Add
  * Employee form and the one HR reviews an Onboarding Pending submission on, so it covers both.
  */
-function ImageField({ label, field, value, onChange }) {
+function ImageField({ label, helperText = "", field, value, onChange }) {
   const [error, setError] = useState("");
   return <SharedImageUploadField
     removable={false}
     label={label}
+    helperText={helperText}
     value={value || null}
     error={error}
     onChange={(nextValue, nextError) => {
@@ -1196,30 +1370,33 @@ function normalizeFieldInput(type, value) {
   if (type === "pan") return raw.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 10);
   if (type === "ifsc") return raw.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 11);
   if (type === "accountNumber") return raw.replace(/\D/g, "").slice(0, 18);
+  if (type === "uan") return raw.replace(/\D/g, "").slice(0, 12);
+  if (type === "esi") return raw.replace(/\D/g, "").slice(0, 17);
+  if (type === "pfNumber") return raw.replace(/[^a-z0-9/]/gi, "").toUpperCase().slice(0, 30);
   return value;
 }
 
-function FormField({ label, field, type, required, error, options, props, value, onChange, onCopyAddress, readOnly, disabled = false }) {
+function FormField({ label, helperText = "", field, type, required, error, options, props, value, onChange, onCopyAddress, readOnly, disabled = false }) {
   // The same shared checkbox the public onboarding form uses for this, rather than bare markup.
-  if (type === "sameAddress") return <SharedSelectableOption className="md:col-span-2" label={label} checked={Boolean(value)} onCheckedChange={onCopyAddress} />;
+  if (type === "sameAddress") return <SharedSelectableOption className="md:col-span-2" label={label} helperText={helperText} checked={Boolean(value)} onCheckedChange={onCopyAddress} />;
   // The same lists the public onboarding form draws, from the same descriptions, so a candidate's
   // answers stay editable here. The error is the row-keyed object `detailListErrors()` builds
   // rather than a single message: a problem belongs on the row, and on the field within it.
   if (type === "detailList") return <RepeatableDetailsField className="md:col-span-2" {...employeeDetailLists[field].props} value={value} errors={error && typeof error === "object" ? error : {}} onChange={(next) => onChange(field, next)} />;
   const inputClass = "mt-2 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100";
-  if (type === "phone") return <PhoneField label={label} field={field} required={required} error={error} value={value} onChange={onChange} />;
-  if (type === "multiselect") return <MultiSelectField label={label} field={field} required={required} error={error} options={options} value={value} onChange={onChange} />;
-  if (type === "multiselectCompact") return <CompactMultiSelectField label={label} field={field} required={required} error={error} options={options} value={value} onChange={onChange} />;
+  if (type === "phone") return <PhoneField label={label} helperText={helperText} field={field} required={required} error={error} value={value} onChange={onChange} />;
+  if (type === "multiselect") return <MultiSelectField label={label} helperText={helperText} field={field} required={required} error={error} options={options} value={value} onChange={onChange} />;
+  if (type === "multiselectCompact") return <CompactMultiSelectField label={label} helperText={helperText} field={field} required={required} error={error} options={options} value={value} onChange={onChange} />;
   // `select` filters its options down to plain strings and stores the label as the value, which is
   // right for a designation and wrong for a person: what is saved here is an employee id. The
   // options arrive as { label, value } pairs already and are passed straight through.
   // `clearable` on the optional ones: a person named by mistake has to be removable, and until
   // this the menu could only swap them for somebody else. Clearing Referred By is what removes the
   // referral itself — see `syncEmployeeReferral` on the endpoint.
-  if (type === "employeeRef") return <SharedDropdown mode="input" label={label} required={required} clearable={!required} error={error} placeholder="Select" value={value == null ? "" : String(value)} onChange={(nextValue) => onChange(field, nextValue)} options={Array.isArray(options) ? options : []} {...(typeof props === "function" ? props() : props || {})} />;
-  if (type === "image") return <ImageField label={label} field={field} value={value} onChange={onChange} />;
+  if (type === "employeeRef") return <SharedDropdown mode="input" label={label} helperText={helperText} required={required} clearable={!required} error={error} placeholder="Select" value={value == null ? "" : String(value)} onChange={(nextValue) => onChange(field, nextValue)} options={Array.isArray(options) ? options : []} {...(typeof props === "function" ? props() : props || {})} />;
+  if (type === "image") return <ImageField label={label} helperText={helperText} field={field} value={value} onChange={onChange} />;
   const safeOptions = Array.isArray(options) ? options.filter((option) => typeof option === "string") : [];
-  const normalizedValue = ["aadhar", "pan", "ifsc", "accountNumber"].includes(type) ? normalizeFieldInput(type, value) : value || "";
+  const normalizedValue = ["aadhar", "pan", "ifsc", "accountNumber", "uan", "esi", "pfNumber"].includes(type) ? normalizeFieldInput(type, value) : value || "";
   const selectOptions = safeOptions.includes(value) || !value ? safeOptions : [...safeOptions, value];
   /*
    * `disabled` on a date is for a value the form works out rather than asks for — Next Review Date
@@ -1230,19 +1407,20 @@ function FormField({ label, field, type, required, error, options, props, value,
    * A date field's bounds travel with it in the section list, and are read here rather than there
    * because "eighteen years ago" moves every midnight and that list is built once, at import.
    */
-  if (type === "date") return <SharedDateField label={label} required={required} error={error} disabled={disabled} value={normalizedValue} onChange={(nextValue) => onChange(field, nextValue)} {...(typeof props === "function" ? props() : props || {})} />;
+  if (type === "date") return <SharedDateField label={label} helperText={helperText} required={required} error={error} disabled={disabled} value={normalizedValue} onChange={(nextValue) => onChange(field, nextValue)} {...(typeof props === "function" ? props() : props || {})} />;
   /*
    * `combobox` is a `select` whose list is a suggestion rather than a rule - pick one of the common
    * answers, or type one nobody listed. `selectOptions` still carries a stored value that is not on
    * the list, which costs nothing here and keeps the two branches reading the same.
    */
-  if (type === "combobox") return <SharedComboBoxField label={label} required={required} error={error} value={normalizedValue} onChange={(nextValue) => onChange(field, nextValue)} options={selectOptions} />;
+  if (type === "combobox") return <SharedComboBoxField label={label} helperText={helperText} required={required} error={error} value={normalizedValue} onChange={(nextValue) => onChange(field, nextValue)} options={selectOptions} />;
   /*
    * A field's own `props` reach the control, which is how `searchable` is set on the few lists long
    * enough to want typing at - the designations, the branches, the employees - without putting a
    * search box over Gender and Blood Group, which are three answers each.
    */
-  if (type === "select") return <SharedDropdown mode="input" label={label} required={required} clearable={!required} error={error} placeholder="Select" value={normalizedValue} onChange={(nextValue) => onChange(field, nextValue)} options={selectOptions.map((option) => ({ label: option, value: option }))} {...(typeof props === "function" ? props() : props || {})} />;
-  if (type !== "textarea" && type !== "checkbox") return <SharedTextField label={label} required={required} error={error} type={type === "employeeId" || type === "aadhar" || type === "pan" || type === "ifsc" || type === "accountNumber" ? "text" : type} inputMode={type === "accountNumber" ? "numeric" : undefined} maxLength={type === "accountNumber" ? 18 : undefined} readOnly={readOnly} placeholder={type === "employeeId" ? "Auto-generated on save" : undefined} value={normalizedValue} onChange={(event) => onChange(field, normalizeFieldInput(type, event.target.value))} inputClassName={readOnly ? "bg-slate-50 text-slate-500" : ""} />;
-  return <label className={type === "textarea" ? "md:col-span-2 text-sm font-medium text-slate-700" : "text-sm font-medium text-slate-700"}>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}{error && <span className="ml-1 text-xs font-normal text-red-600">{error}</span>}{type === "textarea" ? <textarea value={value || ""} onChange={(event) => onChange(field, event.target.value)} className={`${inputClass} min-h-24`} /> : type === "select" ? <select value={value || ""} onChange={(event) => onChange(field, event.target.value)} className={inputClass}><option value="">Select</option>{selectOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select> : type === "checkbox" ? <span className="mt-2 flex items-center gap-2 text-sm font-normal"><input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(field, event.target.checked)} />Yes</span> : <input type={type === "employeeId" || type === "aadhar" || type === "pan" || type === "ifsc" || type === "accountNumber" ? "text" : type} inputMode={type === "accountNumber" ? "numeric" : undefined} maxLength={type === "accountNumber" ? 18 : undefined} readOnly={readOnly} placeholder={type === "employeeId" ? "Auto-generated on save" : undefined} value={normalizedValue} onChange={(event) => onChange(field, normalizeFieldInput(type, event.target.value))} className={`${inputClass} ${readOnly ? "bg-slate-50 text-slate-500" : ""}`} />}</label>;
+  if (type === "select") return <SharedDropdown mode="input" label={label} helperText={helperText} required={required} clearable={!required} error={error} placeholder="Select" value={normalizedValue} onChange={(nextValue) => onChange(field, nextValue)} options={selectOptions.map((option) => ({ label: option, value: option }))} {...(typeof props === "function" ? props() : props || {})} />;
+  if (type !== "textarea" && type !== "checkbox") return <SharedTextField label={label} helperText={helperText} required={required} error={error} disabled={disabled} type={["employeeId", "aadhar", "pan", "ifsc", "accountNumber", "uan", "esi", "pfNumber"].includes(type) ? "text" : type} inputMode={["accountNumber", "uan", "esi"].includes(type) ? "numeric" : undefined} maxLength={{ accountNumber: 18, uan: 12, esi: 17, pfNumber: 30 }[type]} readOnly={readOnly} placeholder={type === "employeeId" ? "Auto-generated on save" : undefined} value={normalizedValue} onChange={(event) => onChange(field, normalizeFieldInput(type, event.target.value))} inputClassName={readOnly ? "bg-slate-50 text-slate-500" : ""} />;
+  if (type === "textarea") return <SharedTextAreaField className="md:col-span-2" inputClassName="min-h-24" label={label} helperText={helperText} required={required} error={error} value={value || ""} onChange={(event) => onChange(field, event.target.value)} />;
+  return <label className="text-sm font-medium text-slate-700">{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}{error && <span className="ml-1 text-xs font-normal text-red-600">{error}</span>}{type === "select" ? <select value={value || ""} onChange={(event) => onChange(field, event.target.value)} className={inputClass}><option value="">Select</option>{selectOptions.map((option) => <option key={option} value={option}>{option}</option>)}</select> : type === "checkbox" ? <span className="mt-2 flex items-center gap-2 text-sm font-normal"><input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(field, event.target.checked)} />Yes</span> : <input type={type === "employeeId" || type === "aadhar" || type === "pan" || type === "ifsc" || type === "accountNumber" ? "text" : type} inputMode={type === "accountNumber" ? "numeric" : undefined} maxLength={type === "accountNumber" ? 18 : undefined} readOnly={readOnly} placeholder={type === "employeeId" ? "Auto-generated on save" : undefined} value={normalizedValue} onChange={(event) => onChange(field, normalizeFieldInput(type, event.target.value))} className={`${inputClass} ${readOnly ? "bg-slate-50 text-slate-500" : ""}`} />}</label>;
 }

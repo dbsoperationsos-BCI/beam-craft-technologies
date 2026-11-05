@@ -35,10 +35,16 @@ export default function StudioBrandingPanel({ unsavedRef, onNotice, onError }) {
   const [studioName, setStudioName] = useState("");
   // What the credentials email calls this system; see the field below.
   const [loginCredentialName, setLoginCredentialName] = useState("");
+  /*
+   * One Global Logo and one tab mark per appearance. Each slot shows only what was uploaded into
+   * it: a light mark that is standing in for the dark theme is not a dark mark, and showing it
+   * here would say it was. Which mark a surface actually wears is decided where it is drawn - see
+   * `logoFor` and `faviconFor`.
+   */
   const [galleryLogoUrl, setGalleryLogoUrl] = useState("");
-  // One tab mark per tab theme. Each slot shows only what was uploaded into it: a light mark that
-  // is standing in for the dark tab is not a dark mark, and showing it here would say it was.
+  const [galleryLogoDarkUrl, setGalleryLogoDarkUrl] = useState("");
   const [faviconUrl, setFaviconUrl] = useState("");
+  const [faviconDarkUrl, setFaviconDarkUrl] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -51,7 +57,9 @@ export default function StudioBrandingPanel({ unsavedRef, onNotice, onError }) {
       setStudioName(next.studioName || "");
       setLoginCredentialName(next.loginCredentialName || "");
       setGalleryLogoUrl(next.galleryLogoUrl || "");
+      setGalleryLogoDarkUrl(next.galleryLogoDarkUrl || "");
       setFaviconUrl(next.faviconUrl || "");
+      setFaviconDarkUrl(next.faviconDarkUrl || "");
       setError("");
     } catch (requestError) {
       setError(requestError.message || "Unable to load Global Logo settings.");
@@ -68,7 +76,8 @@ export default function StudioBrandingPanel({ unsavedRef, onNotice, onError }) {
   // Whether the form now differs from the record it read. Save is offered only while it does: an
   // untouched form has nothing to write, and a Save that could be pressed on one wrote an empty
   // name and no logo over the studio's - "Global Logo saved." with nothing saved.
-  const dirty = hasBrandingChanges(settings, { studioName, loginCredentialName, galleryLogoUrl, faviconUrl });
+  const draft = { studioName, loginCredentialName, galleryLogoUrl, galleryLogoDarkUrl, faviconUrl, faviconDarkUrl };
+  const dirty = hasBrandingChanges(settings, draft);
 
   /*
    * What Settings asks before it lets this panel go.
@@ -98,7 +107,7 @@ export default function StudioBrandingPanel({ unsavedRef, onNotice, onError }) {
     const name = studioName.trim();
     // Decided before the save, from the edit itself: afterwards the record and the form agree, and
     // there would be nothing left to tell a name-only save from a logo-only one.
-    const notice = brandingSavedNotice(settings, { studioName, loginCredentialName, galleryLogoUrl, faviconUrl });
+    const notice = brandingSavedNotice(settings, draft);
 
     setSaving(true);
     setError("");
@@ -114,14 +123,18 @@ export default function StudioBrandingPanel({ unsavedRef, onNotice, onError }) {
         studioName: name,
         loginCredentialName: loginCredentialName.trim() || null,
         galleryLogoUrl: galleryLogoUrl || null,
+        galleryLogoDarkUrl: galleryLogoDarkUrl || null,
         faviconUrl: faviconUrl || null,
+        faviconDarkUrl: faviconDarkUrl || null,
       });
       const saved = response?.data || {};
       setSettings(saved);
       setStudioName(saved.studioName || "");
       setLoginCredentialName(saved.loginCredentialName || "");
       setGalleryLogoUrl(saved.galleryLogoUrl || "");
+      setGalleryLogoDarkUrl(saved.galleryLogoDarkUrl || "");
       setFaviconUrl(saved.faviconUrl || "");
+      setFaviconDarkUrl(saved.faviconDarkUrl || "");
       // The top bar reads the branding once per page; hand it the saved values so the new mark
       // and name appear now rather than after a reload.
       // The top bar reads the branding once per page and `StudioFavicon` reads the same answer, so
@@ -132,7 +145,9 @@ export default function StudioBrandingPanel({ unsavedRef, onNotice, onError }) {
         // domain saved here has to reach an onboarding already open, not wait for a reload.
         loginCredentialName: saved.loginCredentialName || null,
         galleryLogoUrl: saved.galleryLogoUrl || null,
+        galleryLogoDarkUrl: saved.galleryLogoDarkUrl || null,
         faviconUrl: saved.faviconUrl || null,
+        faviconDarkUrl: saved.faviconDarkUrl || null,
       });
       onNotice?.(notice);
     } catch (requestError) {
@@ -156,6 +171,7 @@ export default function StudioBrandingPanel({ unsavedRef, onNotice, onError }) {
       // written beside the logo at all - see `brandNameFor`.
       placeholder="Your studio name"
       maxLength={191}
+      helperText="Shown beside the logo; leave empty to show the logo alone."
       disabled={saving}
       error=""
       onChange={(event) => { setStudioName(event.target.value); setError(""); }}
@@ -171,36 +187,66 @@ export default function StudioBrandingPanel({ unsavedRef, onNotice, onError }) {
       value={loginCredentialName}
       placeholder={`Your login domain, e.g. ${FALLBACK_LOGIN_EMAIL_DOMAIN}`}
       maxLength={120}
+      // Said where it is typed rather than left to be discovered on an account: the address is
+      // built here, and the only place it is otherwise visible is an onboarding's credentials page.
+      helperText={`Employee logins are issued at this domain — ${loginEmailPreview}. It also names this system in the email carrying those credentials.`}
       disabled={saving}
       error=""
       onChange={(event) => { setLoginCredentialName(event.target.value); setError(""); }}
     />
-    {/* Said where it is typed rather than left to be discovered on an account: the address is built
-        here, and the only place it is otherwise visible is the credentials page of an onboarding. */}
-    <p className="-mt-3 text-[11px] text-slate-500">
-      Employee logins are issued at this domain — {loginEmailPreview}. It also names this system in
-      the email carrying those credentials.
-    </p>
-    <ImageUploadField
-      label="Global Logo"
-      value={galleryLogoUrl}
-      disabled={saving}
-      onChange={(value) => { setGalleryLogoUrl(value || ""); setError(""); }}
-    />
-    {/* The browser tab. One mark, worn on every tab whatever the browser's strip: an icon with a
-        background of its own reads correctly either way. Left empty, the tab wears the bundled
-        mark, which is the one thing here still drawn per theme. The file is sent exactly as it was
-        picked: a favicon is a few kilobytes, and re-encoding it would only cost it its sharpness. */}
-    <ImageUploadField
-      label="Favicon"
-      value={faviconUrl}
-      disabled={saving}
-      accept={FAVICON_ACCEPT}
-      acceptLabel="PNG or SVG up to 5 MB. Shown on light and dark browser tabs."
-      maxBytes={MAX_FAVICON_BYTES}
-      rawTypes={["image/png"]}
-      onChange={(value) => { setFaviconUrl(value || ""); setError(""); }}
-    />
+    {/*
+      * The Global Logo, once per appearance. The light one is what every white surface shows - the
+      * sign-in page in the light theme, a quotation, a PDF, a client gallery - and the dark one is
+      * what the top bar and the sign-in page wear in the two dark themes. Upload one and the other
+      * appearance borrows it (the dark bar inverts a borrowed light mark so it reads); upload both
+      * and each appearance wears its own. Side by side above `sm`, one under the other on a phone.
+      */}
+    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+      <ImageUploadField
+        label="Global Logo — Light Mode"
+        helperText="Used on every white surface, including quotations and PDFs. Leave it empty and the dark-mode logo is used in its place."
+        value={galleryLogoUrl}
+        disabled={saving}
+        onChange={(value) => { setGalleryLogoUrl(value || ""); setError(""); }}
+      />
+      <ImageUploadField
+        label="Global Logo — Dark Mode"
+        helperText="Used on dark backgrounds, such as a client gallery in dark mode. Leave it empty and the light-mode logo is used in its place."
+        value={galleryLogoDarkUrl}
+        disabled={saving}
+        onChange={(value) => { setGalleryLogoDarkUrl(value || ""); setError(""); }}
+      />
+    </div>
+    {/* The browser tab, once per tab strip - the browser's own light or dark setting, not the
+        application's theme, because the strip is what the mark is drawn on. A mark with a ground
+        of its own reads on both strips and need only be uploaded once; a bare mark needs a version
+        for each. Left empty, the tab wears the other strip's mark, then the bundled one. The file
+        is sent exactly as it was picked: a favicon is a few kilobytes, and re-encoding it would
+        only cost it its sharpness. */}
+    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+      <ImageUploadField
+        label="Favicon — Light Mode"
+        helperText="The browser picks this mark from its own light or dark setting. Leave it empty and the dark-mode mark is used on both."
+        value={faviconUrl}
+        disabled={saving}
+        accept={FAVICON_ACCEPT}
+        acceptLabel="PNG or SVG up to 5 MB. Shown on light browser tabs."
+        maxBytes={MAX_FAVICON_BYTES}
+        rawTypes={["image/png"]}
+        onChange={(value) => { setFaviconUrl(value || ""); setError(""); }}
+      />
+      <ImageUploadField
+        label="Favicon — Dark Mode"
+        helperText="The browser picks this mark from its own light or dark setting. Leave it empty and the light-mode mark is used on both."
+        value={faviconDarkUrl}
+        disabled={saving}
+        accept={FAVICON_ACCEPT}
+        acceptLabel="PNG or SVG up to 5 MB. Shown on dark browser tabs."
+        maxBytes={MAX_FAVICON_BYTES}
+        rawTypes={["image/png"]}
+        onChange={(value) => { setFaviconDarkUrl(value || ""); setError(""); }}
+      />
+    </div>
     {error && <p role="alert" className="text-xs text-red-600 sm:text-sm">{error}</p>}
     <div className="flex justify-end border-t border-slate-200 pt-4">
       <Button type="button" variant="primary" disabled={saving || !dirty} onClick={() => void save()}>

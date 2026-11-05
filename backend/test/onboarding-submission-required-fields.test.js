@@ -128,6 +128,20 @@ test("a married candidate with no children can still finish theirs", async () =>
   assert.ok(result.success, `a married submission with no children was refused: ${JSON.stringify(result.error?.issues)}`);
 });
 
+test("Company Given Number is optional - most candidates do not have one yet", async () => {
+  const submission = completeSubmission();
+  delete submission.companyGivenNumber;
+  const result = await onboardingSubmissionSchema.safeParseAsync(submission);
+  assert.ok(result.success, `a submission with no company given number was refused: ${JSON.stringify(result.error?.issues)}`);
+});
+
+test("Company Given Number is still validated as a phone number when one is given", async () => {
+  const submission = { ...completeSubmission(), companyGivenNumber: "not a phone number" };
+  const result = await onboardingSubmissionSchema.safeParseAsync(submission);
+  assert.equal(result.success, false, "an invalid company given number was accepted");
+  assert.ok(result.error.issues.some((issue) => issue.path[0] === "companyGivenNumber"));
+});
+
 test("a married candidate is still asked for the two fields the form only shows them", async () => {
   // Unchanged by making the rest of the form required, and worth holding: these two are the one
   // pair whose requirement depends on another answer rather than on the field itself.

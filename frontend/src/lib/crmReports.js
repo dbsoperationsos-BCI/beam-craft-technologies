@@ -352,7 +352,7 @@ export const REPORTS = [
   {
     id: "application-usage",
     label: "Application Usage",
-    emptyMessage: "Nobody changed a lead in this range.",
+    emptyMessage: "Nobody used the application in this range.",
     columns: [
       { id: "employee", label: "Employee", value: (row) => row.employee, width: 200 },
       // What they did, rather than how often they signed in: opening the page is not using it.
@@ -370,10 +370,15 @@ export const REPORTS = [
       /*
        * Time signed in and idle, beside the time actually spent working.
        *
-       * A stretch of use ends when somebody stops touching anything for the usage timeout - set in
-       * Settings, Application Monitoring - and a new one begins when they come back. The gaps
-       * between a day's stretches are this figure. Summed per day rather than across the range, or
-       * every night and weekend between the first day and the last would be counted as idle.
+       * Signed in is what the sign-in and sign-out lines say: a day's session runs from its Login to
+       * its Logout, or - since the browser's Sign out tells the server nothing - to the end of the
+       * studio day, 23:59:59 in Asia/Kolkata. Less the time actually used, which is the stretches:
+       * a stretch ends when somebody stops touching anything for the usage timeout (Settings,
+       * Application Monitoring) and a new one begins when they come back. A day with no sign-in
+       * line - before the audit log, past its retention, or a session carried over from an earlier
+       * day - falls back to the span of its use, first stretch to last. Summed per day rather than
+       * across the range, or every night and weekend between the first day and the last would be
+       * counted as idle.
        *
        * Sorted on the seconds like Usage beside it, so "46m" files below "2h 53m" rather than above
        * it on the alphabet.

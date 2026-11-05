@@ -1,7 +1,11 @@
 "use client";
 
+import HelpTip from "@/components/shared/HelpTip";
+import { detailHelpFor } from "@/constants/detailHelp";
 import { useState } from "react";
 import Image from "next/image";
+import { ViewableImage } from "@/components/shared/ImageViewer";
+import LockIcon from "@/components/ui/LockIcon";
 
 /**
  * One record, read only, drawn from the same `sections` a module already describes its info panel
@@ -21,6 +25,11 @@ import Image from "next/image";
  * - `rows` is the full-screen `SchemaFormPanel` a row opens on double-click. That panel already
  *   heads each section and lists them in its rail, so this draws no heading of its own — only the
  *   fields, two abreast, with the label beside its value the way a filled-in form reads back.
+ *
+ * A section can be **locked** - `{ title, locked: "why", fields: [] }` - for a part of the record
+ * that exists in name but is not open yet. It is never dropped as empty, so the reader sees what is
+ * coming: the panel draws its title, a lock and the reason; the full view lists it in its rail, shut,
+ * and draws nothing of it (`RecordViewPanel` passes it on as a disabled section).
  *
  * The variant is picked by name rather than passed in as classes, so the two layouts cannot drift
  * into each other. Everything else — which fields exist, what each value reads like — is shared, so
@@ -59,15 +68,20 @@ function displayValue(value, type, formatters) {
 }
 
 /** Shows four images and keeps the rest behind a button, so a long list cannot bury the fields under it. */
-function RecordGallery({ images, columnsClass = "grid-cols-2", limit = 4 }) {
+function RecordGallery({ images, label = "", columnsClass = "grid-cols-2", limit = 4 }) {
   const [showAll, setShowAll] = useState(false);
   const visibleImages = showAll ? images : images.slice(0, limit);
+  // The viewer's title names the field: "Profile Photo", or "Bills 2" where there are several.
+  const named = images.map((src, index) => ({ src, name: label ? (images.length > 1 ? `${label} ${index + 1}` : label) : "" }));
 
   return <>
     <div className={`mt-1.5 grid gap-2 ${columnsClass}`}>
-      {visibleImages.map((source, index) => <div key={`${source.slice(0, 32)}-${index}`} className="relative aspect-square overflow-hidden rounded-lg bg-slate-100">
-        <Image src={source} alt={`Image ${index + 1}`} fill unoptimized sizes="160px" className="object-cover" />
-      </div>)}
+      {/* Each opens the viewer among all of this gallery's images, the hidden ones included. */}
+      {visibleImages.map((source, index) => <ViewableImage key={`${source.slice(0, 32)}-${index}`} images={named} index={index} label={`View image ${index + 1} of ${images.length}`} className="w-full overflow-hidden rounded-lg">
+        <div className="relative aspect-square overflow-hidden rounded-lg bg-slate-100">
+          <Image src={source} alt={`Image ${index + 1}`} fill unoptimized sizes="160px" className="object-cover" />
+        </div>
+      </ViewableImage>)}
     </div>
     {!showAll && images.length > limit && <button type="button" onClick={() => setShowAll(true)} className="mt-3 rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50">Show more images</button>}
   </>;
@@ -100,7 +114,7 @@ const visibleFields = (entity, section, hideEmpty) => section.fields.filter((fie
  * cannot end up with a heading over nothing.
  */
 export const sectionsWithContent = (entity, sections = [], hideEmpty = false) => (entity
-  ? sections.filter((section) => visibleFields(entity, section, hideEmpty).length)
+  ? sections.filter((section) => section.locked || visibleFields(entity, section, hideEmpty).length)
   : []);
 
 /**
@@ -125,10 +139,19 @@ const isBlock = (type, content) => type === "gallery" || typeof content === "obj
  * rail, where they are navigation rather than noise.
  */
 function PanelSections({ entity, sections, formatters, hideEmpty }) {
-  const fields = sections.flatMap((section) => visibleFields(entity, section, hideEmpty).map((field) => [section.title, ...field]));
+  // A locked section has no fields, so it takes one line of its own - the section itself, marked as
+  // such rather than dressed up as a field - with its title and why it is shut.
+  const fields = sections.flatMap((section) => (section.locked
+    ? [{ lockedSection: section }]
+    : visibleFields(entity, section, hideEmpty).map((field) => [section.title, ...field])));
   if (!fields.length) return null;
   return <dl className="space-y-2.5">
-    {fields.map(([sectionTitle, key, label, type]) => {
+    {fields.map((entry) => {
+      if (entry.lockedSection) return <div key={`${entry.lockedSection.title}-locked`}>
+        <dt className="flex items-center gap-1.5 text-[13px] font-semibold text-slate-700"><LockIcon className="h-3.5 w-3.5 text-slate-500" />{entry.lockedSection.title}</dt>
+        <dd className="mt-[3px] text-[15px] leading-6 text-slate-500">{entry.lockedSection.locked}</dd>
+      </div>;
+      const [sectionTitle, key, label, type] = entry;
       const content = type === "gallery" ? null : displayValue(entity[key], type, formatters);
       // A formatter that lists one shoot per line — and anything declared multiline — keeps its
       // line breaks, which would otherwise collapse into a single run of text.
@@ -136,9 +159,9 @@ function PanelSections({ entity, sections, formatters, hideEmpty }) {
       // Two sections may share a label ("Remarks" under both shoot and post-production), so the
       // section is part of the key even though it no longer draws.
       return <div key={`${sectionTitle}-${key}-${label}`}>
-        <dt className="text-[13px] font-semibold text-slate-700">{label}</dt>
+        <dt className="flex items-center text-[13px] font-semibold text-slate-700">{label}<HelpTip text={detailHelpFor(sectionTitle, key)} /></dt>
         <dd className={`mt-[3px] break-words text-[15px] leading-6 text-slate-600 ${preserveBreaks ? "whitespace-pre-wrap" : ""}`}>
-          {type === "gallery" ? <RecordGallery key={key} images={imageList(entity[key])} /> : content}
+          {type === "gallery" ? <RecordGallery key={key} images={imageList(entity[key])} label={label} /> : content}
         </dd>
       </div>;
     })}
@@ -158,13 +181,13 @@ function RowSections({ entity, sections, formatters, hideEmpty }) {
         // enough to sit next to a table without crushing it.
         if (isBlock(type, content)) return <div key={`${key}-${label}`} className="md:col-span-2">
           {/* A label that only repeats the section heading above it is left off — "Bills / Bills". */}
-          {label !== section.title && <dt className="mb-2 text-xs font-medium text-slate-500">{label}</dt>}
+          {label !== section.title && <dt className="mb-2 flex items-center text-xs font-medium text-slate-500">{label}<HelpTip text={detailHelpFor(section.title, key)} /></dt>}
           <dd>{type === "gallery"
-            ? <RecordGallery key={key} images={imageList(entity[key])} columnsClass="grid-cols-3 sm:grid-cols-4 lg:grid-cols-6" limit={6} />
+            ? <RecordGallery key={key} images={imageList(entity[key])} label={label} columnsClass="grid-cols-3 sm:grid-cols-4 lg:grid-cols-6" limit={6} />
             : content}</dd>
         </div>;
         return <div key={`${key}-${label}`} className="min-w-0 border-b border-slate-100 pb-3">
-          <dt className="text-xs text-slate-500">{label}</dt>
+          <dt className="flex items-center text-xs text-slate-500">{label}<HelpTip text={detailHelpFor(section.title, key)} /></dt>
           <dd className={`mt-1 break-words font-medium text-slate-800 ${preserveBreaks ? "whitespace-pre-wrap" : ""}`}>{content}</dd>
         </div>;
       })}

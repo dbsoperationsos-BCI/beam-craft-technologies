@@ -1,4 +1,5 @@
 const repository = require("./repository");
+const { expiredLinkError } = require("../../../services/expiredLink");
 const { createAlbumProofService, clientLabel } = require("./service");
 const { storedPath, parsePath } = require("./paint");
 const security = require("./security");
@@ -230,9 +231,11 @@ function createAlbumClientService(repo = repository, dependencies = {}) {
   async function resolve(token) {
     const publication = await findByUrlKey(token);
     if (!publication || publication.revokedAt) throw unavailable();
-    if (publication.expiresAt && publication.expiresAt <= new Date()) throw httpError(410, "This proof link has expired. Please contact the studio for a new link.");
     const album = publication.album;
     if (!album || album.deletedAt || album.archivedAt) throw unavailable();
+    // After the album is known to be there, so a deleted album stays "not available" rather than
+    // "expired".
+    if (publication.expiresAt && publication.expiresAt <= new Date()) throw expiredLinkError();
     return { publication, album, version: publication.version };
   }
 
@@ -274,7 +277,7 @@ function createAlbumClientService(repo = repository, dependencies = {}) {
     await repo.recordPublicationAccess(publication.id);
     await record(album.id, "CLIENT_PIN_VERIFIED", clientActor(), { versionId: publication.versionId });
     await record(album.id, "CLIENT_OPENED", clientActor(), { versionId: publication.versionId });
-    return { sessionToken: crypto.signSession(token, publication.id, album.id) };
+    return { sessionToken: crypto.signSession(token, publication.id, album.id, publication.pinHash) };
   }
 
   /** The whole review payload: pages, own pins, submission state, revision arithmetic. */
@@ -401,11 +404,19 @@ function createAlbumClientService(repo = repository, dependencies = {}) {
   }
 
   const requireSession = (token, authHeader) => crypto.verifySession(token, authHeader);
+  // The signature alone, then the publication the link resolves to now: a Reset PIN or a new
+  // publication ends the sessions opened before it.
+  async function requireCurrentSession(token, authHeader) {
+    const session = requireSession(token, authHeader);
+    const { publication } = await resolve(token);
+    crypto.assertSessionCurrent(session, publication);
+    return session;
+  }
 
   return {
     publish, publicationInfo, revealCredentials, resetPin, updateExpiry, revoke, grantExtraRevision,
     resolve, meta, verifyPin, proof, addCorrection, editCorrection, deleteCorrection,
-    submitCorrections, approve, requireSession,
+    submitCorrections, approve, requireSession, requireCurrentSession,
   };
 }
 

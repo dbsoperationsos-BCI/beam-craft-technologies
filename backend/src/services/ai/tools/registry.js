@@ -1,5 +1,5 @@
 const iamService = require("../../iam.service");
-const { findModule, isGlobal } = require("../modules");
+const { findModule, isGlobal, permissionModuleFor } = require("../modules");
 
 /**
  * Every action Nebula can take, and who may take it.
@@ -34,8 +34,9 @@ class ToolAccessError extends Error {
 /*
  * What a tool can cost.
  *
- * Phase 2 registers only READ tools; the rest are named now so the shape is settled before anything
- * is written against it, and so a tool cannot be added later without someone choosing a level.
+ * **Nebula is read-only.** It answers, summarises and explains; it never changes a record. So only
+ * READ registers - `registerTool` refuses the rest at load. The other classes stay named so a tool
+ * declared as a write is refused for what it is, rather than mistaken for a typo.
  */
 const RISK = {
   READ: "READ",
@@ -88,15 +89,19 @@ function registerTool(tool) {
 
   const risk = RISK[tool.risk] || null;
   if (!risk) throw new Error(`AI tool ${name} must declare a risk of ${Object.keys(RISK).join(", ")}`);
+  if (risk !== RISK.READ) throw new Error(`AI tool ${name} is ${risk}; Nebula is read-only and registers READ tools alone`);
   if (typeof tool.execute !== "function") throw new Error(`AI tool ${name} has no execute function`);
   if (!tool.description) throw new Error(`AI tool ${name} needs a description - the model reads it to choose`);
 
   registry.set(name, {
     name,
     module: module.id,
-    // The permission actually checked. Taken from the module registry rather than from the tool, so
-    // a tool cannot nominate a softer permission than its module's.
+    // The permission actually checked - module and feature - taken from the module registry rather
+    // than from the tool, so a tool cannot nominate a softer permission than its module's.
+    permissionModule: permissionModuleFor(module),
     feature: module.feature,
+    // Where the module's routes admit any one of several permissions, the same list, read the same way.
+    anyOf: Array.isArray(module.anyOf) ? module.anyOf.map((grant) => ({ ...grant })) : null,
     risk,
     requiredLevel: REQUIRED_LEVEL[risk],
     description: String(tool.description),
@@ -110,6 +115,10 @@ function registerTool(tool) {
      * takes no arguments by definition: something that needs arguments is a lookup, not a summary.
      */
     summary: Boolean(tool.summary),
+    // A summary gathered only for the questions it is about (`summaryWhen(asked, intent)`), with arguments
+    // drawn from the question (`prefetchArgs`) - attendance, which is the whole studio's register.
+    summaryWhen: typeof tool.summaryWhen === "function" ? tool.summaryWhen : null,
+    prefetchArgs: typeof tool.prefetchArgs === "function" ? tool.prefetchArgs : null,
     /*
      * How a summary reads when it is put in front of the model.
      *
@@ -183,12 +192,14 @@ async function permits(context, tool) {
   const modules = new Set(Array.isArray(context?.modules) ? context.modules : []);
   if (!modules.has(tool.module)) return { ok: false, code: "AI_TOOL_OUT_OF_SCOPE" };
 
-  const permitted = await iamService.hasPermission(
-    context.userId,
-    tool.module,
-    tool.feature,
-    tool.requiredLevel,
-  );
+  const grants = tool.anyOf || [{ module: tool.permissionModule || tool.module, feature: tool.feature }];
+  let permitted = false;
+  for (const grant of grants) {
+    if (await iamService.hasPermission(context.userId, grant.module, grant.feature, tool.requiredLevel)) {
+      permitted = true;
+      break;
+    }
+  }
   return permitted ? { ok: true, code: "" } : { ok: false, code: "AI_TOOL_FORBIDDEN" };
 }
 

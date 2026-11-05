@@ -1,17 +1,39 @@
 "use client";
 
+import SharedTextAreaField from "@/components/shared/TextAreaField";
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AddShootDialog from "@/components/project-management/AddShootDialog";
-import SchedulePaymentSection, { paymentScheduleDefaults } from "@/components/project-management/SchedulePaymentSection";
+import SchedulePaymentSection, { paymentScheduleDefaults, usePaymentCategories } from "@/components/project-management/SchedulePaymentSection";
+import useScheduleReceiver from "@/components/project-management/useScheduleReceiver";
+import ScheduledPaymentPanel from "@/components/accounts/ScheduledPaymentPanel";
+import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
+import { amountForPercentage, scheduleFormRows, scheduleSavePayload, undatedPayments } from "@/lib/paymentSchedule.mjs";
 import useProjectPlan from "@/components/project-management/useProjectPlan";
 import ProjectServiceCreationSection from "@/components/project-management/ProjectServiceCreationSection";
-import { autoDeliverableNamesForServices, blockedDeliverableNamesForServices, deliverableExistsForShoot, findDeliverableDefinitionByName } from "@/components/project-management/serviceDeliverableRules";
+import { reorderShoots, shootListOrder } from "@/lib/shootOrder.mjs";
+import usePendingShootLines, { deliverablePayload, normalizePendingDeliverable, normalizePendingService, servicePayload } from "@/components/project-management/usePendingShootLines";
 import SchemaFormField, { visibleFields } from "@/components/schema-form/SchemaFormFields";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
 import SchemaFormSection from "@/components/schema-form/SchemaFormSection";
-import SaleDetailsSection, { missingSaleFields, saleFieldsFromProject } from "@/components/sales/SaleDetailsSection";
+import SaleExtrasSection from "./SaleExtrasSection";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import useUnsavedGuard from "@/components/shared/useUnsavedGuard";
+import SaleDetailsSection, { saleFieldProblems, saleFieldsFromProject } from "@/components/sales/SaleDetailsSection";
+import useFormErrors from "@/components/shared/useFormErrors";
+import ClientCredentialsSection from "@/components/sales/ClientCredentialsSection";
+import ExistingClientLogin from "@/components/sales/ExistingClientLogin";
+import ClientLoginEditSection from "@/components/sales/ClientLoginEditSection";
+import { getProjectPaymentSchedule } from "@/services/project-management/project-workflow.service";
+import { clientLoginPayload, clientLoginProblems, clientUsernameFor, emptyClientLogin } from "@/lib/clientLogin.mjs";
+import { getClientLoginByNumber } from "@/services/sales/projects.service";
+import { useModuleAccess } from "@/components/auth/PermissionsProvider";
 import {
   OTHER_HANDLER,
+  bookingSchedulePrefix,
+  settleChange,
+  settleNotes,
+  withSettledPayment,
   cashEntryPayload,
   cashEntryProblems,
   projectAdvanceFormSections,
@@ -19,8 +41,14 @@ import {
 } from "@/constants/accountsConfig";
 import usePaymentModes from "@/components/accounts/usePaymentModes";
 import { createProjectDeliverableAllocation, createProjectServiceAllocation, getProjectDeliverableDefinitions, getProjectServiceDefinitions, saveProjectShoots } from "@/services/project-management/project-workflow.service";
+import { projectLinesAmount } from "@/lib/projectLinePricing.mjs";
+import { deliverableVariantPayload } from "@/lib/deliverableBrands.mjs";
 import { getSalesQuotation, getProjectAdvanceOptions } from "@/services/sales/projects.service";
 import { planFromQuotation, readyToBringPlan, unplannedPart } from "@/components/sales/quotationProjectPlan";
+import Button from "@/components/shared/Button";
+import Dialog from "@/components/ui/Dialog";
+import { draftKeptUntil, draftSavedOn } from "@/components/sales/ProjectDraftsDialog";
+import { draftDropsFiles, projectDraftSnapshot } from "@/lib/projectDrafts.mjs";
 
 /*
  * Service Creation and Shedule Payment are named here exactly as Start / Edit Project names them,
@@ -33,15 +61,18 @@ import { planFromQuotation, readyToBringPlan, unplannedPart } from "@/components
  * planned and before the schedule said what the advance is a share of, put the one irreversible
  * answer on the form ahead of everything it depends on.
  */
-const createSectionLinks = [["project-details", "Project Details"], ["sales-remarks", "Sales Remarks"], ["service-creation", "Service Creation"], ["schedule-payment", "Shedule Payment"], ["payment-received", "Payment Received"]];
-// An edit corrects the sale, not the money against it or the shoots planned for it: a payment
-// already recorded is Accounts' to correct, on the project's own Payments tab.
+const projectSectionLinks = [["project-details", "Project Details"], ["sales-remarks", "Sales Remarks"], ["service-creation", "Service Creation"], ["sale-extras", "Extra"], ["schedule-payment", "Shedule Payment"], ["payment-received", "Payment Received"]];
 /*
+ * The rail: the project's own sections under one **Project** group, then **Client Credentials** -
+ * the client's sign-in, which is about who may log in rather than about the sale.
+ *
  * Editing a sale shows the same flow as creating one, minus Payment Received: the advance is
  * recorded once, when the project is created, and corrected afterwards in Accounts or on the
- * project's Payments tab. Showing it here would write a second cash entry on every save.
+ * project's Payments tab - showing it here would write a second cash entry on every save. Client
+ * Credentials is there in both: made with the project on Create, shown - or made for a project
+ * booked without one - on Edit.
  */
-const editSectionLinks = createSectionLinks.filter(([id]) => id !== "payment-received");
+const CLIENT_CREDENTIALS_LINK = ["client-credentials", "Client Credentials"];
 
 function initialForm(project) {
   return {
@@ -63,56 +94,39 @@ function initialForm(project) {
   };
 }
 
-const groupRowsByShoot = (items) => (items || []).reduce((result, item) => ({ ...result, [item.shootId]: [...(result[item.shootId] || []), item] }), {});
-const byId = (items) => new Map((items || []).map((item) => [item.id, item]));
-const byName = (items) => new Map((items || []).map((item) => [item.name?.toLocaleLowerCase(), item]).filter(([name]) => name));
-
-function normalizePendingService(row, definitions = []) {
-  const definition = row.serviceDefinition || byId(definitions).get(row.serviceDefinitionId) || byName(definitions).get(row.serviceName?.toLocaleLowerCase());
-  return {
-    ...row,
-    serviceDefinitionId: row.serviceDefinitionId || definition?.id || "",
-    serviceDefinition: definition || null,
-    serviceName: row.serviceName || definition?.name || "",
-    quantity: row.quantity ?? 1,
-    sessionOptionId: row.sessionOptionId || "",
-    sessionOption: row.sessionOption || null,
-    durationHours: row.durationHours ?? "",
-    durationMinutes: row.durationMinutes ?? "",
-    workDays: row.workDays ?? "",
-    timingMinutes: row.timingMinutes ?? "",
-    sizeOptionValueId: row.sizeOptionValueId || "",
-    sizeOptionValue: row.sizeOptionValue || null,
-    remarks: row.remarks || "",
-  };
-}
-
-function normalizePendingDeliverable(row, definitions = []) {
-  const definition = row.deliverableDefinition || byId(definitions).get(row.deliverableDefinitionId) || byName(definitions).get(row.deliverableName?.toLocaleLowerCase());
-  return {
-    ...row,
-    deliverableDefinitionId: row.deliverableDefinitionId || definition?.id || "",
-    deliverableDefinition: definition || null,
-    deliverableName: row.deliverableName || definition?.name || "",
-    quantity: row.quantity || 1,
-    numberOfPhotos: row.numberOfPhotos ?? "",
-    sizeOptionValueId: row.sizeOptionValueId || "",
-    sizeOptionValue: row.sizeOptionValue || null,
-    size: row.size || "",
-    remarks: row.remarks || "",
-  };
-}
-
 function hasChanged(form, originalForm) {
   return Object.keys(form).some((key) => JSON.stringify(form[key] ?? "") !== JSON.stringify(originalForm[key] ?? ""));
 }
 
 function TextAreaField({ label, helperText, value, onChange }) {
-  return <label className="block text-xs font-semibold text-slate-600"><span>{label}</span><textarea value={value} onChange={(event) => onChange(event.target.value)} className="mt-1.5 block min-h-24 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-normal text-slate-700 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />{helperText && <span className="mt-1 block text-xs font-normal text-slate-500">{helperText}</span>}</label>;
+  return <SharedTextAreaField label={label} helperText={helperText} value={value} onChange={(event) => onChange(event.target.value)} inputClassName="min-h-24" />;
 }
 
 
-export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [], isLoadingGroupNames = false, project = null, mode = "create", prefillPlan = null }) {
+/*
+ * `draft` is a Create Project put aside with Save Draft (`lib/projectDrafts.mjs`): the form as it was
+ * left, its pending plan, payment schedule and advance. It reopens through the same seeding a
+ * duplicate uses, so its rows are matched against today's master data. `onSaveDraft` puts the form
+ * aside and is offered only when creating - an edit writes to a project that already exists.
+ *
+ * `onReturnToProjects` is passed only for a project Projects sent back, and turns the footer into
+ * Discard, Save Draft and Update to Project: Save Draft saves the sale and leaves it under Sent Back
+ * (`onSave(..., { draft: true })`), Update to Project saves it and returns it to Projects → Yet to
+ * Start - or, with nothing on the form changed, only returns it (`onReturnToProjects`).
+ *
+ * `findDraft(enquiryId)` and `onUseDraft(draft)` are how the form asks, the moment an enquiry is
+ * chosen - picked, or arriving with a converted lead or a quotation - whether to carry on with the
+ * draft already saved for it or start this one new. `draftId` is the draft this form was opened on,
+ * which is never offered back to itself.
+ */
+export default function CreateProjectFormPanel({ editShootId = null, onClose, onSave, groupNames = [], isLoadingGroupNames = false, project = null, mode = "create", canEditSchedule = false, prefillPlan: duplicatePlan = null, draft = null, draftId = "", findDraft, onUseDraft, onSaveDraft, onReturnToProjects }) {
+  // A draft's plan is laid down exactly as a duplicate's is.
+  const prefillPlan = duplicatePlan || draft?.plan || null;
+  /*
+   * Locked only when there is an enquiry to show, which is what `enquiryLocked` means - and kept
+   * locked on a draft of such a booking, which carries the answer it was saved with.
+   */
+  const enquiryLocked = Boolean(project?.enquiryId || draft?.enquiryLocked);
   /*
    * Payment Received is shown to whoever may book a project.
    *
@@ -127,20 +141,158 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
    * created the project, writes through the Accounts module's own recorder, and is money-in only.
    * Nothing about `ACCOUNTS / Cash Management` moved - it still guards the cash book itself.
    */
-  const [originalForm] = useState(() => initialForm(project));
+  // Laid over a blank form, so a field added since the draft was saved still starts with its default.
+  const [originalForm] = useState(() => (draft?.form ? { ...initialForm(null), ...draft.form } : initialForm(project)));
   const [form, setForm] = useState(() => originalForm);
+  // Read as `formState` inside `submit`, which saves the form with the Signed Quotation on screen.
+  const formState = form;
   const [error, setError] = useState("");
+  // The sale fields' red, each under its own box; the banner says only how many.
+  const saleFields = useFormErrors();
   const [isSaving, setIsSaving] = useState(false);
-  // Not persisted yet - the rows reach no payload, here or in Start / Edit Project. Kept in step
-  // with that form rather than saved from only one of the two.
-  const [schedulePayments, setSchedulePayments] = useState(paymentScheduleDefaults);
+  /*
+   * The Schedule Payment rows. Creating a project sends them with it (`ProjectBookingPanel`); editing
+   * a sale **reads the project's own** below, because the schedule is the project's and showing the
+   * defaults over it read as "the rows I entered were not saved".
+   *
+   * Changing one answers to `PROJECT / Projects`, not to the sale's permission - so the section is a
+   * form for somebody who may (`canEditSchedule`) and read-only for everybody else, rather than a
+   * form whose save would be refused.
+   */
+  const [schedulePayments, setSchedulePayments] = useState(() => draft?.schedulePayments || paymentScheduleDefaults);
+  /*
+   * Edit Sale Details opens the schedule ready to edit for somebody who may change it
+   * (`canEditSchedule`), and read-only for everybody else. `loadedSchedule` is the schedule as it
+   * opened, so a change to it alone is still saved.
+   */
+  const scheduleReadOnly = mode === "edit" && !canEditSchedule;
+  const [loadedSchedule, setLoadedSchedule] = useState(() => draft?.schedulePayments || paymentScheduleDefaults);
+  const paymentCategories = usePaymentCategories();
+  // Set by a save refused for an undated payment, so the section marks which ones.
+  const [showScheduleDateErrors, setShowScheduleDateErrors] = useState(false);
   /*
    * Editing a sale edits a project that already exists, so its plan is read from the server and
    * every change is written straight back - the same hook, the same endpoints and the same careful
    * shoot deletion Start / Edit Project uses. Creating one has no project to write against yet, so
    * that path keeps its pending rows and sends them with the project.
    */
-  const plan = useProjectPlan(mode === "edit" ? project?.id : null, { onError: setError });
+  // `editShootId`: opened from a shoot's row - that shoot's edit dialog opens once the plan is in.
+  const plan = useProjectPlan(mode === "edit" ? project?.id : null, { onError: setError, editShootId: mode === "edit" ? editShootId : null });
+  // The published Net Extra the Extra section reads, shown under Shedule Payment's Signed Quotation.
+  const [publishedExtra, setPublishedExtra] = useState(null);
+  // The saved project's books as the schedule reads them - each payment's running balance and the
+  // Balance Amount (`GET …/payment-schedule`'s `ledger`). Edit only: a project being created has none.
+  const [scheduleLedger, setScheduleLedger] = useState(null);
+  // Amounts typed in the Extra section and not yet saved there: closing or saving the panel asks first.
+  const extrasUnsaved = useRef(false);
+  const markExtrasUnsaved = useCallback((unsaved) => { extrasUnsaved.current = unsaved; }, []);
+  const extrasGuard = useUnsavedGuard(() => extrasUnsaved.current, {
+    title: "Continue without the Extra amounts?",
+    message: "Amounts or remarks typed in Extra – Additional & Removed Items are not published yet, and will be lost - the rest of the sale is not affected. Go back and click Publish Updated Quotation there to keep them.",
+    confirmLabel: "Continue without them",
+  });
+  const closePanel = () => extrasGuard.guard(onClose);
+  // A sent-back project's footer: Discard, Save Draft, Update to Project (`onReturnToProjects`).
+  const sentBack = mode === "edit" && Boolean(project?.sentBackAt) && Boolean(onReturnToProjects);
+  const [savingDraft, setSavingDraft] = useState(false);
+  // Discard throws away whatever is typed and not saved - asked first when there is any. Shoots,
+  // services and payments saved through their own dialogs are already saved and stay so.
+  const discardGuard = useUnsavedGuard(() => hasChanged({ ...form, initialConvertedValue: signedQuotation }, originalForm), {
+    title: "Discard your changes?",
+    message: "Everything changed on this form since it was last saved is lost, and the project stays under Sent Back. Shoots, services and payments saved through their own dialogs stay saved.",
+    confirmLabel: "Discard",
+  });
+  const discardChanges = () => discardGuard.guard(closePanel);
+  // While the Extra section has something to publish - its Publish Updated Quotation open - the sale is
+  // not updated: Update Project is held, and Enter in a field of the form does not save it either.
+  // Publishing there (or undoing the change) opens it again. `submit` itself is unchanged.
+  const [extrasPublishPending, setExtrasPublishPending] = useState(false);
+  const EXTRAS_PENDING = "Publish Updated Quotation in Extra – Additional & Removed Items first, then update the project.";
+  const guardedSubmit = (event) => {
+    event.preventDefault();
+    if (extrasPublishPending) { setError(EXTRAS_PENDING); return; }
+    void submit(event);
+  };
+  // Save Draft on a sent-back project: the same checks and the same save, left under Sent Back.
+  const saveSentBackDraft = () => {
+    if (extrasPublishPending) { setError(EXTRAS_PENDING); return; }
+    void submit(null, { draft: true });
+  };
+
+  // Changes whenever Service Creation changes a row, so the Extra section re-reads what it records.
+  const planSignature = useMemo(() => JSON.stringify([
+    (plan.shoots || []).map((shoot) => shoot.id),
+    Object.values(plan.servicesByShoot || {}).flat().map((row) => [row.id, row.quantity, row.sessionOptionId, row.durationHours, row.durationMinutes, row.workDays, row.timingMinutes, row.sizeOptionValueId]),
+    Object.values(plan.deliverablesByShoot || {}).flat().map((row) => [row.id, row.quantity, row.numberOfPhotos, row.size, row.sizeOptionValueId, row.deliverableVariantId]),
+  ]), [plan.shoots, plan.servicesByShoot, plan.deliverablesByShoot]);
+
+  /*
+   * The project's saved schedule, once, when a sale is opened for editing. A project that has none -
+   * booked before the schedule was kept - keeps the defaults, so the section is never empty.
+   */
+  const savedScheduleFor = project?.initialConvertedValue;
+  /*
+   * Receive on a payment records money in Accounts' own panel; once it has, the schedule and its
+   * balances are read again so the row shows Cleared (or the payment a part payment split off) and
+   * Received and the Balance Amount move. Only while the schedule on screen has nothing unsaved -
+   * `useScheduleReceiver` asks for Update Project first otherwise - so nothing typed is lost.
+   */
+  const { notice, showSuccess, clearNotice } = useNotice();
+  const reloadSchedule = useCallback(async () => {
+    if (!project?.id) return;
+    try {
+      const saved = await getProjectPaymentSchedule(project.id);
+      if (saved?.data?.length) {
+        const loaded = scheduleFormRows(saved.data, savedScheduleFor);
+        setSchedulePayments(loaded);
+        setLoadedSchedule(loaded);
+      }
+      setScheduleLedger(saved?.ledger || null);
+    } catch (scheduleError) {
+      setError(scheduleError.message || "Unable to load the payment schedule.");
+    }
+  }, [project?.id, savedScheduleFor]);
+  const receiver = useScheduleReceiver({
+    isDirty: () => JSON.stringify(scheduleSavePayload(schedulePayments)) !== JSON.stringify(scheduleSavePayload(loadedSchedule)),
+    onRecorded: (message) => {
+      if (message) showSuccess(message);
+      void reloadSchedule();
+    },
+    onError: setError,
+  });
+  useEffect(() => {
+    if (mode !== "edit" || !project?.id) return undefined;
+    let current = true;
+    getProjectPaymentSchedule(project.id)
+      .then((saved) => {
+        if (current && saved?.data?.length) {
+          const loaded = scheduleFormRows(saved.data, savedScheduleFor);
+          setSchedulePayments(loaded);
+          setLoadedSchedule(loaded);
+        }
+        if (current) setScheduleLedger(saved?.ledger || null);
+      })
+      .catch((scheduleError) => {
+        if (current) setError((existing) => existing || scheduleError.message || "Unable to load the payment schedule.");
+      });
+    return () => { current = false; };
+  }, [mode, project?.id, savedScheduleFor]);
+  /*
+   * The Balance Amount beside the schedule is the server's reading of the books, and publishing a
+   * Sale Extra here changes its Updated Total Amount - so it is read again when the published net
+   * moves (the rows are left alone: they may be mid-edit). The first value is the one just loaded.
+   */
+  const publishedNet = publishedExtra ? publishedExtra.net : null;
+  const ledgerNetRef = useRef(publishedNet);
+  useEffect(() => {
+    if (mode !== "edit" || !project?.id || ledgerNetRef.current === publishedNet) return undefined;
+    ledgerNetRef.current = publishedNet;
+    let current = true;
+    getProjectPaymentSchedule(project.id)
+      .then((saved) => { if (current) setScheduleLedger(saved?.ledger || null); })
+      .catch(() => {});
+    return () => { current = false; };
+  }, [mode, project?.id, publishedNet]);
   useEffect(() => {
     if (mode !== "edit") return;
     void plan.load();
@@ -152,12 +304,13 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
   const [serviceDefinitionsError, setServiceDefinitionsError] = useState("");
   const [deliverableDefinitionsError, setDeliverableDefinitionsError] = useState("");
   const [isLoadingMasterData, setIsLoadingMasterData] = useState(mode === "create");
-  const [serviceAllocations, setServiceAllocations] = useState([]);
-  const [deliverableAllocations, setDeliverableAllocations] = useState([]);
-  const serviceAllocationsRef = useRef([]);
-  const deliverableAllocationsRef = useRef([]);
+  // A new project's services and deliverables, held here until Create Project saves them.
+  const pendingLines = usePendingShootLines({ serviceDefinitions, deliverableDefinitions });
+  const { serviceAllocations, deliverableAllocations, serviceAllocationsRef, deliverableAllocationsRef, servicesByShoot, deliverablesByShoot } = pendingLines;
   const [isShootDialogOpen, setIsShootDialogOpen] = useState(false);
   const [editingShoot, setEditingShoot] = useState(null);
+  // The shoot a Duplicate copies, while its dialog is open; Save adds the copy as a new shoot.
+  const [copyingShoot, setCopyingShoot] = useState(null);
   const [loadingQuotedPlan, setLoadingQuotedPlan] = useState(false);
   /*
    * The quotation whose plan has already been brought in, so it is brought in once.
@@ -172,7 +325,9 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
    * Create Project carries the row to read, and seeding would mark it applied before it had been
    * read - the panel would open naming the quotation and showing none of its shoots.
    */
-  const appliedQuotationRef = useRef(project?.quotationRowId ? "" : project?.quotationId || "");
+  // A draft's quotation was brought in before it was saved - its shoots are in the draft - so it is
+  // not brought in a second time over them.
+  const appliedQuotationRef = useRef(draft ? draft.form?.quotationId || "" : project?.quotationRowId ? "" : project?.quotationId || "");
   // The advance handed over when the booking was confirmed, recorded against the project the moment
   // it exists. Its own state rather than part of `form`: it is a cash entry, saved through Accounts'
   // own endpoint, and it must not reach the sales payload.
@@ -184,7 +339,7 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
    * edited, which is the opposite of what a duplicate is for.
    */
   const seededDuplicateRef = useRef(false);
-  const [advance, setAdvance] = useState(projectAdvanceInitialValues);
+  const [advance, setAdvance] = useState(() => (draft?.advance ? { ...projectAdvanceInitialValues, ...draft.advance } : projectAdvanceInitialValues));
   const [cashOptions, setCashOptions] = useState(null);
   const showAdvance = mode === "create";
   /*
@@ -216,6 +371,70 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
    */
   const [showProblems, setShowProblems] = useState(false);
   /*
+   * Client Credentials, on the same permission as the booking it belongs to.
+   *
+   * It asked for `ADMIN / User Management`, on the reading that making an account is User
+   * Management's act. That is true of a *staff* account; a client login reaches one project's
+   * portal and nothing else, and making it is the last step of booking that project. The section
+   * was hidden from the very people whose booking it is - and it took the form's left rail with
+   * it, since the rail then had one entry left to show.
+   *
+   * Asked here the way the server asks it: whoever may book the project may give its client a
+   * login, and the server's own checks were brought to the same line (`clientLoginFor`).
+   */
+  const { canWrite: salesManagerWrite } = useModuleAccess("SALES", "Sales Manager");
+  const { canWrite: projectsWrite } = useModuleAccess("PROJECT", "Projects");
+  const { canWrite: showAllProjectsWrite } = useModuleAccess("PROJECT", "Show All Projects");
+  const mayCreateClientLogin = salesManagerWrite || projectsWrite || showAllProjectsWrite;
+  const [clientLogin, setClientLogin] = useState(emptyClientLogin);
+  const [showClientLoginProblems, setShowClientLoginProblems] = useState(false);
+  // The client's username: their mobile number, from Client Main Number - followed as it is typed.
+  const clientUsername = clientUsernameFor(form.clientMainNumber);
+  // The server's refusal of a number that already has a login, shown on the Username for as long as
+  // the number is still that one.
+  const [clientLoginTaken, setClientLoginTaken] = useState(null);
+  // A returning client: the login their number already has. Then no new one is made - this project
+  // shows in their app through the number - and the section says so instead of asking for a password.
+  // Kept with the number it was asked for, so a changed number never shows another client's answer.
+  const [loginLookup, setLoginLookup] = useState({ username: "", login: null });
+  useEffect(() => {
+    if (mode !== "create" || !clientUsername) return undefined;
+    let active = true;
+    getClientLoginByNumber(clientUsername)
+      .then((response) => { if (active) setLoginLookup({ username: clientUsername, login: response?.data || null }); })
+      .catch(() => { if (active) setLoginLookup({ username: clientUsername, login: null }); });
+    return () => { active = false; };
+  }, [mode, clientUsername]);
+  const existingClientLogin = mode === "create" && clientUsername && loginLookup.username === clientUsername ? loginLookup.login : null;
+  const clientLoginErrors = useMemo(
+    () => ({
+      ...(showClientLoginProblems ? clientLoginProblems(clientLogin, { clientMainNumber: form.clientMainNumber }) : {}),
+      ...(clientLoginTaken && clientLoginTaken.username === clientUsername ? { username: clientLoginTaken.message } : {}),
+    }),
+    [clientLogin, clientLoginTaken, clientUsername, form.clientMainNumber, showClientLoginProblems],
+  );
+  const updateClientLogin = useCallback((field, value) => {
+    setClientLogin((current) => ({ ...current, [field]: value }));
+  }, []);
+  // The section sits last on a long form, so a problem in it is scrolled to rather than only named.
+  const showClientCredentials = () => document.getElementById("client-credentials")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  /*
+   * The draft already saved for the chosen enquiry, offered until it is answered.
+   *
+   * Worked out from the enquiry rather than set by an effect: `form.enquiryId` only changes when an
+   * enquiry is picked, never per keystroke, so the question comes up exactly once per choice.
+   * "Create new" is remembered for that enquiry so it is not asked again; the old draft is left
+   * where it is and is deleted when this project is saved.
+   */
+  const [declinedDraftFor, setDeclinedDraftFor] = useState([]);
+  const chosenEnquiry = String(form.enquiryId || "").trim();
+  const draftOffer = useMemo(() => {
+    if (mode !== "create" || !findDraft || !onUseDraft || !chosenEnquiry || declinedDraftFor.includes(chosenEnquiry)) return null;
+    const existing = findDraft(chosenEnquiry);
+    return existing && existing.id !== draftId ? existing : null;
+  }, [mode, findDraft, onUseDraft, chosenEnquiry, declinedDraftFor, draftId]);
+  const startNewOverDraft = () => setDeclinedDraftFor((current) => [...current, chosenEnquiry]);
+  /*
    * Nothing greys the button out. It is blue whenever the form is open, and pressing it always
    * runs `submit`, which is the only thing that refuses and the only thing that can say why.
    *
@@ -229,30 +448,179 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
    * being sent twice. It stays blue for it — dimmed and labelled "Saving...", which reads as work
    * in progress rather than as permission withheld.
    */
-  const servicesByShoot = useMemo(() => groupRowsByShoot(serviceAllocations), [serviceAllocations]);
-  const deliverablesByShoot = useMemo(() => groupRowsByShoot(deliverableAllocations), [deliverableAllocations]);
   // The rail lists what is actually on screen, so a form with no Payment Received section has no
   // entry pointing at one.
-  const sections = useMemo(
-    () => (mode === "create" ? createSectionLinks : editSectionLinks).filter(([id]) => id !== "payment-received" || showAdvance),
-    [mode, showAdvance],
-  );
+  const sections = useMemo(() => [
+    // Extra lists what changed after booking, so it exists only once there is a project to change.
+    ["project", "Project", projectSectionLinks.filter(([id]) => (id !== "payment-received" || (mode === "create" && showAdvance)) && (id !== "sale-extras" || mode === "edit"))],
+    ...(mayCreateClientLogin ? [CLIENT_CREDENTIALS_LINK] : []),
+  ], [mayCreateClientLogin, mode, showAdvance]);
 
   const update = useCallback((field, value) => {
     setForm((current) => ({ ...current, [field]: value }));
   }, []);
 
+  /*
+   * Signed Quotation, where no quotation answers it, follows what the lines come to.
+   *
+   * A project line stores no price, so a project booked without a quotation - from nothing, from a
+   * CRM lead, from a duplicate, or edited on Edit Sale Details - had Signed Quotation at ₹0 however
+   * many services and deliverables it held, and every Schedule Payment row a share of nothing. The
+   * lines are now priced at their Settings prices (`projectLinesAmount`, the generator's own
+   * totals) and, where the form opened with no figure, the figure follows them as they change.
+   *
+   * Never over an answer somebody gave. A figure the form opened with - a saved project's, a lead's,
+   * a duplicate's, a draft's - stands, and the note beside it says what the lines come to instead;
+   * typing a figure stops it following, and clearing the box hands it back to the lines. A linked
+   * quotation's figure is that document's, read-only, and is never touched. Nothing follows while the
+   * lines or their Settings are still loading, or could not be loaded.
+   */
+  const linesOpen = mode === "edit"
+    ? !plan.loading && !plan.loadingMasterData && !plan.sectionProps.serviceDefinitionsError && !plan.sectionProps.deliverableDefinitionsError
+    : !isLoadingMasterData && !loadingQuotedPlan && !serviceDefinitionsError && !deliverableDefinitionsError;
+  const lines = mode === "edit" ? plan.sectionProps : { shoots: form.shoots, servicesByShoot, deliverablesByShoot, serviceDefinitions, deliverableDefinitions };
+  const linesPricing = useMemo(() => projectLinesAmount({
+    services: Object.values(lines.servicesByShoot || {}).flat(),
+    deliverables: Object.values(lines.deliverablesByShoot || {}).flat(),
+    serviceDefinitions: lines.serviceDefinitions || [],
+    deliverableDefinitions: lines.deliverableDefinitions || [],
+    shoots: lines.shoots || [],
+  }), [lines.servicesByShoot, lines.deliverablesByShoot, lines.serviceDefinitions, lines.deliverableDefinitions, lines.shoots]);
+  const quotationLinked = Boolean(String(form.quotationId || "").trim());
+  const [signedFollowsLines, setSignedFollowsLines] = useState(() => !(Number(form.initialConvertedValue) > 0));
+  /*
+   * Worked out rather than written back by an effect: the figure shown, validated and saved is the
+   * lines' sum while the form follows them, and the box's own value otherwise. A sum of nothing is
+   * not followed - an empty box stays empty, a saved ₹0 stays ₹0.
+   */
+  const followingLines = linesOpen && !quotationLinked && signedFollowsLines && (linesPricing.amount > 0 || Number(form.initialConvertedValue) > 0);
+  const signedQuotation = followingLines ? String(linesPricing.amount) : form.initialConvertedValue;
+  const linesRupees = `₹${linesPricing.amount.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+  const unpricedWords = linesPricing.unpriced ? ` ${linesPricing.unpriced} ${linesPricing.unpriced === 1 ? "line has" : "lines have"} no price in Settings and ${linesPricing.unpriced === 1 ? "counts" : "count"} ₹0.` : "";
+  const signedQuotationNote = quotationLinked || !linesOpen || !linesPricing.amount
+    ? ""
+    : followingLines
+      ? `What the services and deliverables come to at their Settings prices.${unpricedWords} Type over it to set your own.`
+      : Number(signedQuotation) === linesPricing.amount
+        ? ""
+        : `The services and deliverables come to ${linesRupees} at their Settings prices.${unpricedWords} Clear the box to use that figure.`;
+
+  /*
+   * The payments this booking's own Schedule Payment lays down, for the advance's "Settles Payment":
+   * none is saved yet, so each is named by its place among the rows the save keeps, and the booking
+   * panel names the saved payment once the schedule is written (`ProjectBookingPanel`).
+   */
+  const bookingPayments = useMemo(() => (mode === "create" ? scheduleSavePayload(schedulePayments) : [])
+    .map((row, index) => ({ id: `${bookingSchedulePrefix}${index}`, category: row.category, dueDate: row.date || null, pending: amountForPercentage(row.percentage, signedQuotation) }))
+    .filter((payment) => payment.pending > 0), [mode, schedulePayments, signedQuotation]);
+
+  /*
+   * The advance is the schedule's first payment unless said otherwise: until Settles Payment is
+   * answered by hand (None included), it reads as that payment, so an advance taken at booking clears
+   * or part-pays it rather than leaving it to turn Overdue. Only what was typed counts as starting
+   * the section (`advanceStarted`), so the default never makes the advance required.
+   */
+  const [advanceSettleChosen, setAdvanceSettleChosen] = useState(false);
+  const advanceShown = useMemo(() => withSettledPayment(
+    !advanceSettleChosen && !advance.settlesPayment && bookingPayments.length ? { ...advance, settlesPayment: bookingPayments[0].id } : advance,
+    bookingPayments,
+  ), [advance, advanceSettleChosen, bookingPayments]);
+
   const updateAdvance = useCallback((field, value) => {
-    setAdvance((current) => ({ ...current, [field]: value }));
-  }, []);
+    if (field === "settlesPayment") setAdvanceSettleChosen(true);
+    // Against the payment as drawn, the first one included while it is still the default.
+    setAdvance((current) => settleChange(
+      !advanceSettleChosen && !current.settlesPayment && bookingPayments.length ? { ...current, settlesPayment: bookingPayments[0].id } : current,
+      field,
+      value,
+      bookingPayments,
+    ));
+  }, [advanceSettleChosen, bookingPayments]);
 
-  useEffect(() => {
-    serviceAllocationsRef.current = serviceAllocations;
-  }, [serviceAllocations]);
+  /** Creating: the quoted rows leave, and whatever was added by hand stays. */
+  function clearQuotedPlanFromForm() {
+    replaceQuotedPlanInForm({ shoots: [], services: [], deliverables: [] });
+  }
 
-  useEffect(() => {
-    deliverableAllocationsRef.current = deliverableAllocations;
-  }, [deliverableAllocations]);
+  /**
+   * Creating: the quotation's rows become the pending plan, replacing the last quotation's.
+   *
+   * Only the rows a quotation put there are replaced. A shoot somebody added by hand - which is
+   * only possible while the chosen quotation carried none - is theirs and survives the switch,
+   * along with its services and deliverables.
+   *
+   * `fromQuotation` is what marks the difference, and is also what closes the shoot controls: a
+   * shoot the client agreed to pay for is not the booking clerk's to rewrite on the way in. It goes to
+   * the server as `fromQuotation`, which makes the shoot Sale Extras' baseline - where a row came from.
+   */
+  function replaceQuotedPlanInForm(quoted) {
+    const quotedShoots = quoted.shoots.map((shoot) => ({ ...shoot, fromQuotation: true }));
+    /*
+     * The ids that survive, read from this render rather than from inside the updater below.
+     * An updater runs when React chooses to and must stay pure, so a value assigned inside one is
+     * not a value the next two lines can use.
+     */
+    const keptShootIds = new Set(form.shoots.filter((shoot) => !shoot.fromQuotation).map((shoot) => shoot.id));
+    setForm((current) => ({ ...current, shoots: shootListOrder([...current.shoots.filter((shoot) => !shoot.fromQuotation), ...quotedShoots]) }));
+    // The allocations follow their shoots: the ones belonging to rows just dropped go with them,
+    // and the new quotation's arrive priced and named.
+    const survives = (row) => keptShootIds.has(row.shootId);
+    pendingLines.replaceServices([...serviceAllocationsRef.current.filter(survives), ...quoted.services.map((row) => normalizePendingService(row, serviceDefinitions))]);
+    pendingLines.replaceDeliverables([...deliverableAllocationsRef.current.filter(survives), ...quoted.deliverables.map((row) => normalizePendingDeliverable(row, deliverableDefinitions))]);
+  }
+
+  /*
+   * Editing: the project exists, so the rows are written to it the way the section writes them.
+   *
+   * The shoots go first and in one call, because each needs the server-issued id its allocations
+   * hang off. An allocation that will not save is skipped rather than abandoning the rest - a
+   * retired service definition should cost its own row, not the whole plan - and the section is
+   * re-read at the end so what is on screen is what the server actually holds.
+   */
+  async function writeQuotedPlanToProject(quoted) {
+    const response = await saveProjectShoots(project.id, quoted.shoots.map(({ id, clientKey, ...shoot }) => shoot));
+    const created = Array.isArray(response?.data) ? response.data : [];
+    // Paired by position: the shoots come back in the order they were sent.
+    for (const [index, quotedShoot] of quoted.shoots.entries()) {
+      const shoot = created[index];
+      if (!shoot) continue;
+      for (const row of quoted.services.filter((service) => service.shootId === quotedShoot.id)) {
+        if (!row.serviceDefinitionId) continue;
+        try {
+          await createProjectServiceAllocation(project.id, shoot.id, {
+            serviceDefinitionId: row.serviceDefinitionId,
+            quantity: row.quantity === "" ? null : Number(row.quantity),
+            sessionOptionId: row.sessionOptionId || null,
+            durationHours: row.durationHours === "" ? null : Number(row.durationHours),
+            durationMinutes: row.durationMinutes === "" ? null : Number(row.durationMinutes),
+            workDays: row.workDays === "" ? null : Number(row.workDays),
+            timingMinutes: row.timingMinutes === "" ? null : Number(row.timingMinutes),
+            sizeOptionValueId: row.sizeOptionValueId || null,
+            remarks: row.remarks || null,
+          });
+        } catch {
+          // Skipped, and the refresh below shows what did land.
+        }
+      }
+      for (const row of quoted.deliverables.filter((deliverable) => deliverable.shootId === quotedShoot.id)) {
+        if (!row.deliverableDefinitionId) continue;
+        try {
+          await createProjectDeliverableAllocation(project.id, shoot.id, {
+            deliverableDefinitionId: row.deliverableDefinitionId,
+            quantity: Number(row.quantity || 1),
+            numberOfPhotos: row.numberOfPhotos === "" ? null : Number(row.numberOfPhotos),
+            sizeOptionValueId: row.sizeOptionValueId || null,
+            size: row.size || null,
+            remarks: row.remarks || null,
+            variant: deliverableVariantPayload(row),
+          });
+        } catch {
+          // As above.
+        }
+      }
+    }
+    await plan.load();
+  }
 
   /*
    * The shoots, services and deliverables the chosen quotation was priced on.
@@ -350,11 +718,6 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.quotationId, form.quotationRowId, isLoadingMasterData, plan.loading, mode]);
 
-  /** Creating: the quoted rows leave, and whatever was added by hand stays. */
-  function clearQuotedPlanFromForm() {
-    replaceQuotedPlanInForm({ shoots: [], services: [], deliverables: [] });
-  }
-
   /*
    * Booking a duplicate: the source project's plan is laid down as this form's own pending rows.
    *
@@ -378,100 +741,13 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
     const deliverableIds = new Set(deliverableDefinitions.map((definition) => definition.id));
     const services = (prefillPlan.services || []).filter((row) => serviceIds.has(row.serviceDefinitionId));
     const deliverables = (prefillPlan.deliverables || []).filter((row) => deliverableIds.has(row.deliverableDefinitionId));
-    setForm((current) => ({ ...current, shoots: prefillPlan.shoots || [] }));
-    const nextServices = services.map((row) => normalizePendingService(row, serviceDefinitions));
-    serviceAllocationsRef.current = nextServices;
-    setServiceAllocations(nextServices);
-    const nextDeliverables = deliverables.map((row) => normalizePendingDeliverable(row, deliverableDefinitions));
-    deliverableAllocationsRef.current = nextDeliverables;
-    setDeliverableAllocations(nextDeliverables);
+    setForm((current) => ({ ...current, shoots: shootListOrder(prefillPlan.shoots || []) }));
+    pendingLines.replaceServices(services.map((row) => normalizePendingService(row, serviceDefinitions)));
+    pendingLines.replaceDeliverables(deliverables.map((row) => normalizePendingDeliverable(row, deliverableDefinitions)));
     // Seeded once, guarded by the ref above; the definitions are read at that moment rather than
     // depended on, so a later refresh of them does not lay the plan down a second time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, prefillPlan, isLoadingMasterData]);
-
-  /**
-   * Creating: the quotation's rows become the pending plan, replacing the last quotation's.
-   *
-   * Only the rows a quotation put there are replaced. A shoot somebody added by hand - which is
-   * only possible while the chosen quotation carried none - is theirs and survives the switch,
-   * along with its services and deliverables.
-   *
-   * `fromQuotation` is what marks the difference, and is also what closes the shoot controls: a
-   * shoot the client agreed to pay for is not the booking clerk's to rewrite on the way in. It is
-   * stripped again in `shootsPayload` - it says where a row came from, not what the shoot is.
-   */
-  function replaceQuotedPlanInForm(quoted) {
-    const quotedShoots = quoted.shoots.map((shoot) => ({ ...shoot, fromQuotation: true }));
-    /*
-     * The ids that survive, read from this render rather than from inside the updater below.
-     * An updater runs when React chooses to and must stay pure, so a value assigned inside one is
-     * not a value the next two lines can use.
-     */
-    const keptShootIds = new Set(form.shoots.filter((shoot) => !shoot.fromQuotation).map((shoot) => shoot.id));
-    setForm((current) => ({ ...current, shoots: [...current.shoots.filter((shoot) => !shoot.fromQuotation), ...quotedShoots] }));
-    // The allocations follow their shoots: the ones belonging to rows just dropped go with them,
-    // and the new quotation's arrive priced and named.
-    const survives = (row) => keptShootIds.has(row.shootId);
-    const nextServices = [...serviceAllocationsRef.current.filter(survives), ...quoted.services.map((row) => normalizePendingService(row, serviceDefinitions))];
-    serviceAllocationsRef.current = nextServices;
-    setServiceAllocations(nextServices);
-    const nextDeliverables = [...deliverableAllocationsRef.current.filter(survives), ...quoted.deliverables.map((row) => normalizePendingDeliverable(row, deliverableDefinitions))];
-    deliverableAllocationsRef.current = nextDeliverables;
-    setDeliverableAllocations(nextDeliverables);
-  }
-
-  /*
-   * Editing: the project exists, so the rows are written to it the way the section writes them.
-   *
-   * The shoots go first and in one call, because each needs the server-issued id its allocations
-   * hang off. An allocation that will not save is skipped rather than abandoning the rest - a
-   * retired service definition should cost its own row, not the whole plan - and the section is
-   * re-read at the end so what is on screen is what the server actually holds.
-   */
-  async function writeQuotedPlanToProject(quoted) {
-    const response = await saveProjectShoots(project.id, quoted.shoots.map(({ id, clientKey, ...shoot }) => shoot));
-    const created = Array.isArray(response?.data) ? response.data : [];
-    // Paired by position: the shoots come back in the order they were sent.
-    for (const [index, quotedShoot] of quoted.shoots.entries()) {
-      const shoot = created[index];
-      if (!shoot) continue;
-      for (const row of quoted.services.filter((service) => service.shootId === quotedShoot.id)) {
-        if (!row.serviceDefinitionId) continue;
-        try {
-          await createProjectServiceAllocation(project.id, shoot.id, {
-            serviceDefinitionId: row.serviceDefinitionId,
-            quantity: row.quantity === "" ? null : Number(row.quantity),
-            sessionOptionId: row.sessionOptionId || null,
-            durationHours: row.durationHours === "" ? null : Number(row.durationHours),
-            durationMinutes: row.durationMinutes === "" ? null : Number(row.durationMinutes),
-            workDays: row.workDays === "" ? null : Number(row.workDays),
-            timingMinutes: row.timingMinutes === "" ? null : Number(row.timingMinutes),
-            sizeOptionValueId: row.sizeOptionValueId || null,
-            remarks: row.remarks || null,
-          });
-        } catch {
-          // Skipped, and the refresh below shows what did land.
-        }
-      }
-      for (const row of quoted.deliverables.filter((deliverable) => deliverable.shootId === quotedShoot.id)) {
-        if (!row.deliverableDefinitionId) continue;
-        try {
-          await createProjectDeliverableAllocation(project.id, shoot.id, {
-            deliverableDefinitionId: row.deliverableDefinitionId,
-            quantity: Number(row.quantity || 1),
-            numberOfPhotos: row.numberOfPhotos === "" ? null : Number(row.numberOfPhotos),
-            sizeOptionValueId: row.sizeOptionValueId || null,
-            size: row.size || null,
-            remarks: row.remarks || null,
-          });
-        } catch {
-          // As above.
-        }
-      }
-    }
-    await plan.load();
-  }
 
   /*
    * The studio accounts and the employees the advance can be credited to.
@@ -517,6 +793,8 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
     modesWithTransactionId: paymentModeOptions.modesWithTransactionId,
     modesWithAccount: paymentModeOptions.modesWithAccount,
     modesWithDetails: paymentModeOptions.modesWithDetails,
+    // The schedule being booked, as the payments the advance may settle.
+    openPayments: bookingPayments,
     options: {
       /*
        * The studio's own payment modes, the same list and the same fallbacks Cash Received offers.
@@ -532,11 +810,12 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
         ...(cashOptions?.employees || []).map((employee) => ({
           value: String(employee.id),
           label: `${employee.employeeName}${employee.employeeId ? ` · ${employee.employeeId}` : ""}`,
+          avatar: avatarOf(employee),
         })),
         { value: OTHER_HANDLER, label: "Other" },
       ],
     },
-  }), [cashOptions, paymentModeOptions]);
+  }), [bookingPayments, cashOptions, paymentModeOptions]);
 
   /*
    * What the advance still wants, keyed by field so each outstanding answer is marked on the box it
@@ -554,7 +833,7 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
    */
   const advanceStarted = showAdvance && Object.entries(projectAdvanceInitialValues)
     .some(([field, blank]) => String(advance?.[field] ?? "") !== String(blank ?? ""));
-  const advanceProblems = advanceStarted ? cashEntryProblems(advance, { requireLink: false, sections: projectAdvanceFormSections, context: advanceContext }) : {};
+  const advanceProblems = advanceStarted ? cashEntryProblems(advanceShown, { requireLink: false, sections: projectAdvanceFormSections, context: advanceContext }) : {};
   const advanceErrors = showProblems ? advanceProblems : {};
 
   useEffect(() => {
@@ -612,10 +891,11 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
     const makeKey = () => typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
     setForm((current) => {
       const hasNewMainEvent = rows.some((row) => row.isMainEvent);
-      return { ...current, shoots: [...(hasNewMainEvent ? current.shoots.map((shoot) => ({ ...shoot, isMainEvent: false })) : current.shoots), ...rows.map((row) => {
+      // In date order, undated last - the order the project will list them in once it is saved.
+      return { ...current, shoots: shootListOrder([...(hasNewMainEvent ? current.shoots.map((shoot) => ({ ...shoot, isMainEvent: false })) : current.shoots), ...rows.map((row) => {
       const clientKey = makeKey();
       return { ...row, dateCreated: row.dateCreated, id: clientKey, clientKey };
-    })] };
+    })]) };
     });
     setIsShootDialogOpen(false);
   }
@@ -628,152 +908,88 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
       return;
     }
     await addShoots(rows);
+    setCopyingShoot(null);
   }
 
   function openAddShootDialog() {
     setEditingShoot(null);
+    setCopyingShoot(null);
+    setIsShootDialogOpen(true);
+  }
+
+  function openDuplicateShootDialog(shoot) {
+    setEditingShoot(null);
+    // The pending row's own keys stay behind: the copy is given its own when it is added.
+    const { id: _id, clientKey: _clientKey, shootId: _shootId, ...values } = shoot;
+    setCopyingShoot(values);
     setIsShootDialogOpen(true);
   }
 
   function openEditShootDialog(shoot, index) {
+    setCopyingShoot(null);
     setEditingShoot({ shoot, index });
     setIsShootDialogOpen(true);
   }
 
   async function savePendingShootEdit(shoot, index, nextShoot) {
-    setForm((current) => ({ ...current, shoots: current.shoots.map((row, rowIndex) => {
-      if (rowIndex === index) return { ...row, ...nextShoot, shootId: row.shootId, dateCreated: nextShoot.dateCreated || row.dateCreated };
+    // The edit lands on the row by its place, then the list is put back in date order: a re-dated shoot moves.
+    setForm((current) => ({ ...current, shoots: shootListOrder(current.shoots.map((row, rowIndex) => {
+      // The dialog's date as given - none when Shoot Date Known is No, never the row's old one.
+      if (rowIndex === index) return { ...row, ...nextShoot, shootId: row.shootId, dateCreated: nextShoot.dateCreated || null };
       return nextShoot.isMainEvent ? { ...row, isMainEvent: false } : row;
-    }) }));
+    })) }));
   }
 
   async function deletePendingShoot(shoot) {
     setForm((current) => ({ ...current, shoots: current.shoots.filter((row) => row.id !== shoot.id) }));
-    setServiceAllocations((current) => {
-      const next = current.filter((row) => row.shootId !== shoot.id);
-      serviceAllocationsRef.current = next;
-      return next;
-    });
-    setDeliverableAllocations((current) => {
-      const next = current.filter((row) => row.shootId !== shoot.id);
-      deliverableAllocationsRef.current = next;
-      return next;
-    });
+    pendingLines.removeShootLines(shoot.id);
   }
 
-  async function addPendingService(shoot, definition) {
-    const row = normalizePendingService({
-      id: `pending-service-${shoot.id}-${definition.id}`,
-      shootId: shoot.id,
-      serviceDefinitionId: definition.id,
-      serviceDefinition: definition,
-      serviceName: definition.name,
-    }, serviceDefinitions);
-    const nextServices = [...serviceAllocationsRef.current, row];
-    serviceAllocationsRef.current = nextServices;
-    setServiceAllocations(nextServices);
-    addPendingAutoDeliverablesForService(shoot, nextServices);
-    return row;
-  }
 
-  function addPendingAutoDeliverablesForService(shoot, nextServices) {
-    setDeliverableAllocations((current) => {
-      const serviceNames = nextServices.filter((row) => row.shootId === shoot.id).map((row) => row.serviceName);
-      const names = autoDeliverableNamesForServices(serviceNames);
-      const blockedNames = blockedDeliverableNamesForServices(serviceNames);
-      const nextRows = current.filter((row) => !(row.shootId === shoot.id && blockedNames.has(row.deliverableName)));
-      names.filter((name) => !blockedNames.has(name)).forEach((name) => {
-        const definition = findDeliverableDefinitionByName(deliverableDefinitions, name);
-        if (!definition || deliverableExistsForShoot(nextRows, shoot.id, definition)) return;
-        nextRows.push(normalizePendingDeliverable({
-          id: `pending-deliverable-${shoot.id}-${definition.id}`,
-          shootId: shoot.id,
-          deliverableDefinitionId: definition.id,
-          deliverableDefinition: definition,
-          deliverableName: definition.name,
-          quantity: 1,
-        }, deliverableDefinitions));
-      });
-      deliverableAllocationsRef.current = nextRows;
-      return nextRows;
-    });
-  }
-
-  async function updatePendingService(row, data) {
-    setServiceAllocations((current) => {
-      const next = current.map((item) => item.id === row.id ? normalizePendingService({ ...item, ...data }, serviceDefinitions) : item);
-      serviceAllocationsRef.current = next;
-      return next;
-    });
-  }
-
-  async function deletePendingService(row) {
-    setServiceAllocations((current) => {
-      const next = current.filter((item) => item.id !== row.id);
-      serviceAllocationsRef.current = next;
-      return next;
-    });
-  }
-
-  async function addPendingDeliverable(shoot, definition) {
-    const row = normalizePendingDeliverable({
-      id: `pending-deliverable-${shoot.id}-${definition.id}`,
-      shootId: shoot.id,
-      deliverableDefinitionId: definition.id,
-      deliverableDefinition: definition,
-      deliverableName: definition.name,
-      quantity: 1,
-    }, deliverableDefinitions);
-    setDeliverableAllocations((current) => {
-      const next = [...current, row];
-      deliverableAllocationsRef.current = next;
-      return next;
-    });
-    return row;
-  }
-
-  async function updatePendingDeliverable(row, data) {
-    setDeliverableAllocations((current) => {
-      const next = current.map((item) => item.id === row.id ? normalizePendingDeliverable({ ...item, ...data }, deliverableDefinitions) : item);
-      deliverableAllocationsRef.current = next;
-      return next;
-    });
-  }
-
-  async function deletePendingDeliverable(row) {
-    setDeliverableAllocations((current) => {
-      const next = current.filter((item) => item.id !== row.id);
-      deliverableAllocationsRef.current = next;
-      return next;
+  /*
+   * A new project's shoots have no ids until it is saved, so a payment that follows one names it by
+   * its place in the list sent (`dueShootIndex`); the booking panel swaps that for the id the save
+   * hands back (`ProjectBookingPanel`).
+   */
+  function createScheduleWithShootPlaces() {
+    return scheduleSavePayload(schedulePayments).map(({ dueShootId, ...row }) => {
+      const index = dueShootId ? form.shoots.findIndex((shoot) => shoot.id === dueShootId) : -1;
+      return { ...row, dueShootId: null, ...(index >= 0 ? { dueShootIndex: index } : {}) };
     });
   }
 
   function shootsPayload() {
     return form.shoots.map(({ id, clientKey, shootId, fromQuotation, ...shoot }) => ({
       ...shoot,
-      services: (servicesByShoot[id] || []).map(({ serviceDefinitionId, quantity, sessionOptionId, durationHours, durationMinutes, workDays, timingMinutes, sizeOptionValueId, remarks }) => ({
-        serviceDefinitionId,
-        quantity: quantity === "" ? 1 : Number(quantity),
-        sessionOptionId: sessionOptionId || null,
-        durationHours: durationHours === "" ? null : Number(durationHours),
-        durationMinutes: durationMinutes === "" ? null : Number(durationMinutes),
-        workDays: workDays === "" ? null : Number(workDays),
-        timingMinutes: timingMinutes === "" ? null : Number(timingMinutes),
-        sizeOptionValueId: sizeOptionValueId || null,
-        remarks: remarks || null,
-      })),
-      deliverables: (deliverablesByShoot[id] || []).map(({ deliverableDefinitionId, quantity, numberOfPhotos, sizeOptionValueId, remarks }) => ({
-        deliverableDefinitionId,
-        quantity: Number(quantity || 1),
-        numberOfPhotos: numberOfPhotos === "" ? null : Number(numberOfPhotos),
-        sizeOptionValueId: sizeOptionValueId || null,
-        remarks: remarks || null,
-      })),
+      // Sale Extras: a shoot the finalized quotation laid down is the project's baseline; one added
+      // by hand is an extra from the start (`backend/.../sale-extras/booking.js`).
+      ...(fromQuotation ? { fromQuotation: true } : {}),
+      services: (servicesByShoot[id] || []).map(servicePayload),
+      deliverables: (deliverablesByShoot[id] || []).map(deliverablePayload),
     }));
   }
 
-  async function submit(event) {
-    event.preventDefault();
+  /*
+   * Puts the form aside as it stands - nothing is checked, a draft is allowed to be half-finished.
+   * The host stores it and closes the panel; a refusal (the browser's storage full) is said here,
+   * with the form still open and nothing lost.
+   */
+  async function saveDraft() {
+    setError("");
+    try {
+      await onSaveDraft(
+        projectDraftSnapshot({ form, services: serviceAllocations, deliverables: deliverableAllocations, schedulePayments, advance, enquiryLocked }),
+        { droppedFiles: draftDropsFiles(advance) },
+      );
+    } catch (draftError) {
+      setError(draftError.message);
+    }
+  }
+
+  async function submit(event, { draft = false } = {}) {
+    event?.preventDefault();
+    // The Signed Quotation on screen - the lines' sum while the form follows them - is the one saved.
+    const form = { ...formState, initialConvertedValue: signedQuotation };
     /*
      * An edit that changed nothing closes rather than saves, and says nothing about it.
      *
@@ -784,18 +1000,67 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
      * reader means by pressing Update on a form they have not touched.
      */
     if (mode === "edit" && !hasChanged(form, originalForm)) {
+      /*
+       * Only the schedule changed (opened with Edit): it is saved on its own, the sale is not sent
+       * again - re-sending an untouched sale is what this branch exists to avoid. The same date check
+       * the full save makes, and a sent-back project's Update to Project still returns it.
+       */
+      const scheduleChanged = canEditSchedule && JSON.stringify(scheduleSavePayload(schedulePayments)) !== JSON.stringify(scheduleSavePayload(loadedSchedule));
+      if (scheduleChanged) {
+        if (undatedPayments(schedulePayments, paymentCategories.settling).length) {
+          setShowScheduleDateErrors(true);
+          setError("Choose a date for every payment under Shedule Payment.");
+          return;
+        }
+        setError("");
+        setIsSaving(true);
+        setSavingDraft(draft);
+        try {
+          await onSave(form, null, scheduleSavePayload(schedulePayments), { draft, scheduleOnly: true });
+        } catch (saveError) {
+          setError(saveError.message || "Unable to save the payment schedule.");
+        } finally {
+          setIsSaving(false);
+          setSavingDraft(false);
+        }
+        return;
+      }
+      // A sent-back project's Update to Project still has its return to make - nothing else to save.
+      if (sentBack && !draft) {
+        setError("");
+        setIsSaving(true);
+        try {
+          await onReturnToProjects();
+        } catch (returnError) {
+          setError(returnError.message || "Unable to return the project to Projects.");
+        } finally {
+          setIsSaving(false);
+        }
+        return;
+      }
       onClose();
       return;
     }
-    const missing = missingSaleFields(form);
-    if (missing.length) {
-      setError(`Complete required fields: ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? "..." : ""}`);
+    if (!saleFields.check(saleFieldProblems(form))) {
+      setError("");
       return;
     }
     // Named where it now lives, so the message points at the box somebody has to go and fix rather
     // than at a field that used to be in Project Details.
     if (!Number.isFinite(Number(form.initialConvertedValue)) || Number(form.initialConvertedValue) < 0) {
       setError("Signed Quotation, under Shedule Payment, must be zero or a positive amount.");
+      return;
+    }
+    // Every payment the schedule saves falls due on a day - except the one settling the balance.
+    // Asked only where this save writes the schedule; the server refuses an undated one too.
+    if ((mode === "create" || canEditSchedule) && undatedPayments(schedulePayments, paymentCategories.settling).length) {
+      setShowScheduleDateErrors(true);
+      setError("Choose a date for every payment under Shedule Payment.");
+      return;
+    }
+    // A payment following a shoot taken off the list since: asked again rather than moved silently.
+    if (mode === "create" && schedulePayments.some((row) => row.dateKnown === false && row.shootKey && !form.shoots.some((shoot) => shoot.id === row.shootKey))) {
+      setError("A payment under Shedule Payment follows a shoot that was removed. Pick its shoot again.");
       return;
     }
     // Every answer the advance wants, marked where it sits rather than named one at a time. It
@@ -806,17 +1071,38 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
       setError("Fill in the required fields in Payment Received before creating the project.");
       return;
     }
+    // Every project made by somebody who may make a client login is made with one.
+    // Except a returning client's: their number already has a login, which reaches this project too.
+    const sendingClientLogin = mode === "create" && mayCreateClientLogin && !existingClientLogin;
+    if (sendingClientLogin && Object.keys(clientLoginProblems(clientLogin, { clientMainNumber: form.clientMainNumber })).length) {
+      setShowClientLoginProblems(true);
+      setError("Complete the client's login under Client Credentials.");
+      showClientCredentials();
+      return;
+    }
     setError("");
     setIsSaving(true);
+    setSavingDraft(draft);
     try {
       // Only when there is one. An untouched section is a project booked with no advance, which is
       // ordinary - not an empty cash entry to be filed against it.
-      const payment = advanceStarted ? cashEntryPayload(advance, { projectId: null }) : null;
-      await onSave({ ...form, shoots: mode === "create" ? shootsPayload() : undefined }, payment);
+      const payment = advanceStarted ? cashEntryPayload(advanceShown, { projectId: null }, { openPayments: bookingPayments }) : null;
+      // The client's login goes with the project; the message that hands it over is shown, once
+      // both exist, by Client Login Ready (`ProjectBookingPanel`).
+      await onSave({ ...form, shoots: mode === "create" ? shootsPayload() : undefined, clientLogin: sendingClientLogin ? clientLoginPayload(clientLogin, { clientMainNumber: form.clientMainNumber }) : null }, payment, mode === "create" ? createScheduleWithShootPlaces() : canEditSchedule ? scheduleSavePayload(schedulePayments) : null, { draft });
     } catch (saveError) {
-      setError(saveError.message || "Unable to save project.");
+      const message = saveError.message || "Unable to save project.";
+      const onUsername = /^Client Credentials/.test(message) && /username|mobile number/i.test(message);
+      // Said once: on the Username when it is about the number, otherwise above the form.
+      setError(onUsername ? "Check the Username under Client Credentials." : message);
+      // "Client Credentials: The mobile number … already has a client login …" - put it on the Username.
+      if (onUsername) {
+        setClientLoginTaken({ username: clientUsername, message: message.replace(/^Client Credentials[^:]*:\s*/, "") });
+        showClientCredentials();
+      }
     } finally {
       setIsSaving(false);
+      setSavingDraft(false);
     }
   }
 
@@ -825,11 +1111,12 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
     sections={sections}
     sidebarAriaLabel="Project form sections"
     closeAriaLabel="Close project form"
-    onClose={onClose}
-    onSubmit={submit}
-    error={error}
+    onClose={closePanel}
+    onSubmit={guardedSubmit}
+    error={(error === EXTRAS_PENDING && !extrasPublishPending ? "" : error) || saleFields.summary}
     zIndexClassName="z-[110]"
-    footer={<><button type="button" disabled={isSaving} onClick={onClose} className="mr-auto min-h-10 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 disabled:opacity-50 max-sm:mr-0 max-sm:w-full">Discard Changes</button><button disabled={isSaving} className="min-h-10 rounded-md bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-wait disabled:opacity-70 max-sm:flex-1">{isSaving ? "Saving..." : mode === "edit" ? "Update Project" : "Save Project"}</button></>}
+    footer={sentBack ? <>{extrasPublishPending && <p className="text-xs text-slate-500 max-sm:w-full sm:max-w-xs">Publish the Extra changes first.</p>}<Button type="button" variant="secondary" disabled={isSaving} onClick={discardChanges} className="max-sm:w-full">Discard</Button><Button type="button" variant="secondary" disabled={isSaving || extrasPublishPending} title={extrasPublishPending ? EXTRAS_PENDING : "Save the changes and keep the project under Sent Back"} onClick={saveSentBackDraft} className="max-sm:flex-1">{savingDraft ? "Saving..." : "Save Draft"}</Button><Button type="submit" variant="primary" disabled={isSaving || extrasPublishPending} title={extrasPublishPending ? EXTRAS_PENDING : "Save the changes and send the project to Projects → Yet to Start"} className="max-sm:flex-1">{isSaving && !savingDraft ? "Saving..." : "Update to Project"}</Button></> : <>{extrasPublishPending && <p className="text-xs text-slate-500 max-sm:w-full sm:max-w-xs">Publish the Extra changes first.</p>}<button type="button" disabled={isSaving} onClick={closePanel} className="min-h-10 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 disabled:opacity-50 max-sm:w-full">Discard Changes</button>{/* Held while a quotation's shoots are still arriving: saved then, the draft would name the
+       quotation as brought in and never carry its shoots. */}{mode === "create" && onSaveDraft && <Button type="button" disabled={isSaving || loadingQuotedPlan} onClick={() => void saveDraft()} className="max-sm:flex-1">Save Draft</Button>}<button disabled={isSaving || extrasPublishPending} title={extrasPublishPending ? EXTRAS_PENDING : undefined} className={`min-h-10 rounded-md bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-70 max-sm:flex-1 ${extrasPublishPending ? "disabled:cursor-not-allowed" : "disabled:cursor-wait"}`}>{isSaving ? "Saving..." : mode === "edit" ? "Update Project" : "Save Project"}</button></>}
   >
     <SchemaFormSection id="project-details" title="Project Details">
       {/*
@@ -842,7 +1129,7 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
         * the same package to somebody else - and it drew the picker as a settled value around an
         * empty string, so the one field the person had to answer was the one they could not reach.
         */}
-      <SaleDetailsSection form={form} setForm={setForm} groupNames={groupNames} isLoadingGroupNames={isLoadingGroupNames} initialGroupNameMode={project ? "manual" : "saved"} enquiryLocked={Boolean(project?.enquiryId)} />
+      <SaleDetailsSection form={form} setForm={setForm} groupNames={groupNames} isLoadingGroupNames={isLoadingGroupNames} initialGroupNameMode={project || (draft && !draft.form?.whatsappGroupNameId) ? "manual" : "saved"} enquiryLocked={enquiryLocked} savedQuotationId={mode === "edit" ? project?.quotationId || "" : ""} errors={saleFields.errors} onFieldChange={saleFields.clear} />
     </SchemaFormSection>
     <SchemaFormSection id="sales-remarks" title="Sales Remarks"><div className="grid gap-4 md:grid-cols-2"><TextAreaField label="Pre Production Remarks" helperText="Add If you have any remarks for Pre Production" value={form.salesPreProductionRemarks} onChange={(value) => update("salesPreProductionRemarks", value)} /><TextAreaField label="Production Remarks" helperText="Add If you have any remarks for Production" value={form.salesProductionRemarks} onChange={(value) => update("salesProductionRemarks", value)} /><TextAreaField label="Post Production Remarks" helperText="Add If you have any remarks for Post Production" value={form.salesPostProductionRemarks} onChange={(value) => update("salesPostProductionRemarks", value)} /></div></SchemaFormSection>
     {/* Creating holds its shoots pending until the project exists; editing writes each change
@@ -862,37 +1149,58 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
           deliverableDefinitions={deliverableDefinitions}
           servicesByShoot={servicesByShoot}
           deliverablesByShoot={deliverablesByShoot}
+          deliverableVariants
+          sessionTimingColumn={false}
           shootListHint={shootsFromQuotation
             ? "The shoots this quotation was priced on. They are what the client agreed to, so they are shown here rather than edited."
             : droppedFromDuplicate
-              ? `Copied from the project being duplicated. ${droppedFromDuplicate} ${droppedFromDuplicate === 1 ? "row" : "rows"} could not be copied because the service or deliverable is no longer active — add what this project needs.`
-              : prefillPlan
+              ? `${draft ? "Restored from your draft." : "Copied from the project being duplicated."} ${droppedFromDuplicate} ${droppedFromDuplicate === 1 ? "row" : "rows"} could not be copied because the service or deliverable is no longer active — add what this project needs.`
+              : duplicatePlan
                 ? "Copied from the project being duplicated. Every shoot, service and deliverable here can be changed."
                 : "Add one or more Shoots for this Project"}
           /* Absent, not disabled: with the shoots settled by the quotation there is nothing here
              for anybody to do, and a greyed-out row of controls only invites the question. */
           onAddShoot={shootsFromQuotation ? undefined : openAddShootDialog}
-          onSaveShootEdit={shootsFromQuotation ? undefined : savePendingShootEdit}
           onDeleteShoot={shootsFromQuotation ? undefined : deletePendingShoot}
           onRequestEditShoot={shootsFromQuotation ? undefined : openEditShootDialog}
+          onDuplicateShoot={shootsFromQuotation ? undefined : openDuplicateShootDialog}
+          /* Dragged into an order of its own, each draft shoot carries its place (`sortOrder`), and the
+             project is created with the shoots in that order. Not on quoted shoots, like the rest. */
+          onReorderShoots={shootsFromQuotation ? undefined : (keys) => setForm((current) => ({ ...current, shoots: reorderShoots(current.shoots, keys) }))}
           /* The rows the quotation priced, on the same rule as the shoots above them: shown, and
              not the booking clerk's to change. Without a quotation's shoots the section is the plan
              being built by hand, and all six come back. */
-          onAddService={shootsFromQuotation ? undefined : addPendingService}
-          onUpdateService={shootsFromQuotation ? undefined : updatePendingService}
-          onDeleteService={shootsFromQuotation ? undefined : deletePendingService}
-          onAddDeliverable={shootsFromQuotation ? undefined : addPendingDeliverable}
-          onUpdateDeliverable={shootsFromQuotation ? undefined : updatePendingDeliverable}
-          onDeleteDeliverable={shootsFromQuotation ? undefined : deletePendingDeliverable}
+          onAddService={shootsFromQuotation ? undefined : pendingLines.addService}
+          onUpdateService={shootsFromQuotation ? undefined : pendingLines.updateService}
+          onDeleteService={shootsFromQuotation ? undefined : pendingLines.deleteService}
+          onAddDeliverable={shootsFromQuotation ? undefined : pendingLines.addDeliverable}
+          onUpdateDeliverable={shootsFromQuotation ? undefined : pendingLines.updateDeliverable}
+          onDeleteDeliverable={shootsFromQuotation ? undefined : pendingLines.deleteDeliverable}
+          onReorderServices={shootsFromQuotation ? undefined : pendingLines.reorderServices}
+          onReorderDeliverables={shootsFromQuotation ? undefined : pendingLines.reorderDeliverables}
         />
-        : <ProjectServiceCreationSection {...plan.sectionProps} />}
+        : <ProjectServiceCreationSection {...plan.sectionProps} sessionTimingColumn={false} />}
     </div></SchemaFormSection>
+    {/* What changed on the plan since the finalized quotation was booked, priced by hand and published
+        onto the client's quotation - above the schedule it never changes. */}
+    {mode === "edit" && project?.id && <SchemaFormSection id="sale-extras" title="Extra – Additional & Removed Items">
+      <SaleExtrasSection projectId={project.id} planSignature={planSignature} canWrite={mayCreateClientLogin} onPublishedChange={setPublishedExtra} onUnsavedChange={markExtrasUnsaved} onPublishPendingChange={setExtrasPublishPending} onPlanChanged={() => void plan.load()} />
+      <ConfirmDialog {...extrasGuard.confirmProps} />
+      <ConfirmDialog {...discardGuard.confirmProps} />
+    </SchemaFormSection>}
     {/* The schedule is a share of what the project is signed for, which on this form is being typed
         as it goes - so it follows Initial Converted Value live rather than waiting for a save. */}
     {/* The figure the schedule is shares of, and the one place it is answered: it arrives from the
         chosen quotation and is corrected here rather than in a box up in the sale's own fields. */}
     <SchedulePaymentSection
-      signedQuotation={form.initialConvertedValue}
+      publishedExtra={mode === "edit" ? publishedExtra : null}
+      ledger={mode === "edit" ? scheduleLedger : null}
+      categories={paymentCategories}
+      showDateErrors={showScheduleDateErrors}
+      shoots={lines.shoots || []}
+      readOnly={scheduleReadOnly}
+      offerNewRow={mode === "edit" && canEditSchedule}
+      signedQuotation={signedQuotation}
       /*
        * Offered only where no quotation answered it — the same rule the sale's own fields keep in
        * `setByQuotation`, and it decides on the quotation rather than on which job this panel is
@@ -913,23 +1221,49 @@ export default function CreateProjectFormPanel({ onClose, onSave, groupNames = [
        * Correcting it later is Project Management's, on Projects → Edit Project, where whoever is
        * scheduling against the figure is the one who finds out it is wrong.
        */
-      onSignedQuotationChange={String(form.quotationId || "").trim() ? undefined : (value) => update("initialConvertedValue", value)}
+      onSignedQuotationChange={quotationLinked ? undefined : (value) => { setSignedFollowsLines(value === ""); update("initialConvertedValue", value); }}
+      signedQuotationNote={signedQuotationNote}
       rows={schedulePayments}
       onChange={setSchedulePayments}
+      onReceive={mode === "edit" && receiver.canReceive ? receiver.open : null}
+      receivingId={receiver.openingId}
     />
+    {receiver.payment && <ScheduledPaymentPanel key={receiver.payment.id} {...receiver.panelProps} />}
+    <FloatingNotice notice={notice} onClose={clearNotice} />
     {showAdvance && <SchemaFormSection id="payment-received" title="Payment Received">
       {/* Required in full: a project is created with the advance against it, not beside a promise
           of one. The section says none of this on screen — the fields are the same ones Accounts
           records money in with, each carrying its own asterisk, and a paragraph above them
           explaining the rule would be answering a question the heading has not raised. */}
       <div className="grid gap-4 md:grid-cols-2">
-        {projectAdvanceFormSections.flatMap((section) => visibleFields(section.fields, advance, advanceContext))
-          .map((field) => <SchemaFormField key={field.name} field={field} values={advance} onChange={updateAdvance} errors={advanceErrors} context={advanceContext} />)}
+        {projectAdvanceFormSections.flatMap((section) => visibleFields(section.fields, advanceShown, advanceContext))
+          .map((field) => <SchemaFormField key={field.name} field={field} values={advanceShown} onChange={updateAdvance} errors={advanceErrors} notes={settleNotes(advanceShown, advanceContext)} context={advanceContext} />)}
       </div>
+    </SchemaFormSection>}
+    {mayCreateClientLogin && <SchemaFormSection id="client-credentials" title="Client Credentials">
+      {/* Made with the project on Create Project; on Edit Sale Details, shown - or made now, for a
+          project booked without one. */}
+      {mode === "create"
+        ? existingClientLogin
+          ? <ExistingClientLogin login={existingClientLogin} />
+          : <ClientCredentialsSection value={clientLogin} username={clientUsername} onChange={updateClientLogin} errors={clientLoginErrors} disabled={isSaving} />
+        : <ClientLoginEditSection projectId={project?.id} projectName={project?.whatsappGroupName} clientMainNumber={project?.clientMainNumber} />}
     </SchemaFormSection>}
     {/* The group name's own group type - "Dum Dum", "Qua Qua", "Corp" - which is what decides
         whether a shoot is asked who it is for. */}
-    {mode === "create" && isShootDialogOpen && <AddShootDialog initialShoot={editingShoot?.shoot} existingShoots={form.shoots} vertical={form.groupType || form.vertical} onClose={() => { setIsShootDialogOpen(false); setEditingShoot(null); }} onSave={saveShootDialog} />}
-    {mode === "edit" && plan.shootDialog.open && <AddShootDialog initialShoot={plan.shootDialog.initialShoot} existingShoots={plan.shootDialog.existingShoots} vertical={form.groupType || form.vertical} onClose={plan.shootDialog.onClose} onSave={plan.shootDialog.onSave} />}
+    {mode === "create" && isShootDialogOpen && <AddShootDialog initialShoot={editingShoot?.shoot} copyOf={copyingShoot} existingShoots={form.shoots} vertical={form.groupType || form.vertical} onClose={() => { setIsShootDialogOpen(false); setEditingShoot(null); setCopyingShoot(null); }} onSave={saveShootDialog} />}
+    {/* Answering is required, so the × is "Create new": it keeps the form as it is, and the draft is
+        left untouched until this project is saved. */}
+    {draftOffer && <Dialog
+      layer="dialogOverPanel"
+      title="A draft already exists for this enquiry"
+      description={`“${draftOffer.title || `Enquiry #${draftOffer.enquiryId}`}” was saved ${draftSavedOn(draftOffer)} and is kept until ${draftKeptUntil(draftOffer)}. Use it to carry on where it was left, or create a new one - the draft is deleted when this project is saved.`}
+      onClose={startNewOverDraft}
+      footer={<>
+        <Button type="button" onClick={startNewOverDraft}>Create new</Button>
+        <Button type="button" variant="primary" onClick={() => onUseDraft(draftOffer)}>Use draft</Button>
+      </>}
+    />}
+    {mode === "edit" && plan.shootDialog.open && <AddShootDialog initialShoot={plan.shootDialog.initialShoot} copyOf={plan.shootDialog.copyOf} existingShoots={plan.shootDialog.existingShoots} vertical={form.groupType || form.vertical} onClose={plan.shootDialog.onClose} onSave={plan.shootDialog.onSave} />}
   </SchemaFormPanel>;
 }

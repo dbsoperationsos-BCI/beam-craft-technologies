@@ -6,6 +6,7 @@ import { getPublicCrdDocument } from "@/services/sales/public-crd-document.servi
 import { Notice, PublicLayout, TITLE_PREFIX_BY_VERTICAL } from "./crdDocumentShared";
 import PublicCrdDocumentFormDumDum from "./PublicCrdDocumentFormDumDum";
 import PublicCrdDocumentFormQuaQua from "./PublicCrdDocumentFormQuaQua";
+import "./crdAppEmbed.css";
 
 /**
  * The Customer Identification Document, as the client fills it in from the link Sales sends.
@@ -29,6 +30,14 @@ export default function PublicCrdDocumentForm({ token }) {
    * `initialContext`, which this shell has and they are handed. Copies left behind up here would be
    * a second set of the same flags, permanently at their defaults and read by nobody.
    */
+
+  // Shown inside the client's app or client website (`#embed=app`): the form drops its own logo bar
+  // and wears the app's look (`crdAppEmbed.css`). Kept for this tab, as the address loses its fragment.
+  useEffect(() => {
+    const EMBED_KEY = "dbs_crd_embed";
+    if (new URLSearchParams(window.location.hash.slice(1)).get("embed") === "app") window.sessionStorage.setItem(EMBED_KEY, "app");
+    if (window.sessionStorage.getItem(EMBED_KEY) === "app") document.documentElement.dataset.embed = "app";
+  }, []);
 
   useEffect(() => {
     let active = true;

@@ -4,11 +4,16 @@ const { cleanupService } = require("../cleanup/service");
 // The sidebar dot's rung is decided in one place — the dashboard classifier — so the dashboard's
 // stage counts and the sidebar's dots can never read the same project two ways.
 const { selectionProgressOf } = require("../dashboard/classify");
+const { projectsWithAShootReached } = require("../shoot-visibility");
+const { manualModules } = require("./modules");
 
 const sortFields = { name: "projectName", dateLastOpened: "lastOpenedAt", dateAdded: "createdAt", dateModified: "updatedAt", dateCreated: "createdAt", size: "totalPhotoSize" };
-// A production project in either of these states belongs in the Image Selection sidebar — the
-// same two statuses the old saved-group-name picker offered, now applied automatically.
-const IN_PROGRESS_SALES_STATUSES = ["Work in Progress - Pre & Production", "Work in Progress - Post Production"];
+// Every Project Management project that has been started gets its linked Image Selection project -
+// In Progress, Completed, On Hold, Rejected and the older statuses alike - so a booking moved on
+// before anybody opened Image Selection is not left without one. Only a booking not started yet is
+// skipped. Being linked is not being listed: the sidebar still waits for a shoot's own date
+// (`projectsWithAShootReached`), and nothing here reads Production or Pre Production.
+const NOT_STARTED_SALES_STATUSES = ["Yet to Start"];
 function httpError(status, message) { const error = new Error(message); error.status = status; return error; }
 function serialize(project) { return { ...project, totalPhotoSize: String(project.totalPhotoSize ?? 0) }; }
 // This page shows one Image Selection project per Sales Manager project. Should the table ever
@@ -34,24 +39,53 @@ function createImageSelectionProjectService(repo = repository, dependencies = {}
   // Required lazily: the dashboard service reads this module's classifier, and a require at the
   // top would make the two load each other. Injectable so the list can be tested without it.
   const attentionFilter = () => dependencies.attention || require("../dashboard/service").createDashboardService();
-  // Allocation is what puts a project here, not a picker: every in-progress Sales Manager
-  // project without an Image Selection project gets its linked project created on the way into
-  // the list — the same fill-derived-state-on-read pattern ensureShortCode uses for gallery
-  // codes. Web and the desktop app read the same list, so both see the project the moment
-  // production allocates it. A soft-deleted or archived linked project blocks re-creation —
-  // what an admin removed stays removed. The retired picker's one-project-per-group-name rule
-  // survives here: names are trimmed, blanks skipped, and a sales project whose group name an
-  // existing project (or an earlier row of this batch) already carries is left out, because two
-  // same-named sidebar projects means photos uploaded into one and the invite sent from the other.
+  // Which modules a project is linked to, and whether one may be unlinked (modules.js). Injectable
+  // so an edit can be tested without the database.
+  const projectModules = () => dependencies.projectModules || require("./modules");
+  /*
+   * A linked project's name is its Sales project's WhatsApp group name, copied when the row was
+   * made. A group renamed in Project Management afterwards left the copy behind, so the two screens
+   * named one booking two ways. Each list load brings the copies back in step - by the Sales
+   * project id, never by the old name - and touches nothing but the name: links, folders, photos and
+   * picks are the same rows. A rename that would give two Projects-page rows one name is left as it
+   * is and logged, for the reason the create below refuses one.
+   */
+  async function renameRenamedLinkedProjects() {
+    for (const { id, name } of await repo.listRenamedLinkedProjects()) {
+      try {
+        const holder = await repo.findProjectByName(name);
+        if (holder && holder.id !== id) { console.warn(`Image Selection sync kept project ${id}'s old name: "${name}" is already another project's.`); continue; }
+        await repo.updateProject(id, { projectName: name });
+      } catch (error) {
+        console.warn(`Image Selection sync could not rename project ${id}:`, error?.message || error);
+      }
+    }
+  }
+  // Allocation is what puts a project here, not a picker: every started Sales Manager project
+  // (`NOT_STARTED_SALES_STATUSES`) without an Image Selection project gets its linked project
+  // created on the way into the list — the same fill-derived-state-on-read pattern ensureShortCode
+  // uses for gallery codes. Web and the desktop app read the same list, so both see the project the
+  // moment it is started. Linked by the Sales project id, and only once: a Sales project that already
+  // has a Projects-page row is never offered again, whatever its status becomes. A soft-deleted or
+  // archived linked project blocks re-creation — what an admin removed stays removed. The retired
+  // picker's one-project-per-group-name rule survives here: names are trimmed, blanks skipped, and a
+  // sales project whose group name an existing project (or an earlier row of this batch) already
+  // carries is left out - and logged, so it is not missing silently - because two same-named sidebar
+  // projects means photos uploaded into one and the invite sent from the other.
   async function syncAllocatedSalesProjects() {
-    const pending = await repo.listSalesProjectsAwaitingImageProject(IN_PROGRESS_SALES_STATUSES);
+    await renameRenamedLinkedProjects().catch((error) => console.warn("Image Selection rename sync skipped:", error?.message || error));
+    const pending = await repo.listSalesProjectsAwaitingImageProject(NOT_STARTED_SALES_STATUSES);
     const claimedNames = new Set();
     for (const salesProject of pending) {
       const projectName = String(salesProject.whatsappGroupName || "").trim();
       const nameKey = projectName.toLowerCase();
       if (!projectName || claimedNames.has(nameKey)) continue;
       try {
-        if (await repo.findProjectByName(projectName)) { claimedNames.add(nameKey); continue; }
+        if (await repo.findProjectByName(projectName)) {
+          claimedNames.add(nameKey);
+          console.warn(`Image Selection sync did not create a project for sales project ${salesProject.id}: another project is already named "${projectName}".`);
+          continue;
+        }
         // The pending list was read a moment ago, and a booking deleted since then must not be
         // handed a new project by the very read that should have stopped showing it. The parent
         // is checked again with its row locked, in the same transaction as the create, so the
@@ -73,7 +107,8 @@ function createImageSelectionProjectService(repo = repository, dependencies = {}
     // Never for the archived list — a project the sync creates cannot appear there — and never
     // at the cost of the read: a sync failure is logged and the list still answers.
     if (!input.archived) await syncAllocatedSalesProjects().catch((error) => console.warn("Image Selection sync skipped:", error?.message || error));
-    const rows = await repo.listProjects({ search: input.search, archived: input.archived, orderBy: orderBy(input.sort, input.order) });
+    // A linked project is listed from its first shoot's own day (studio time) - see `projectsWithAShootReached`.
+    const rows = await projectsWithAShootReached(await repo.listProjects({ search: input.search, archived: input.archived, orderBy: orderBy(input.sort, input.order) }), repo.listShootDatesForSalesProjects);
     // The sidebar dot's answer, batched once for the whole list rather than per row.
     const { publishedProjectIds, configs, selectedConfigIds } = await repo.selectionProgressData(rows.map((row) => row.id));
     const published = new Set(publishedProjectIds);
@@ -95,17 +130,35 @@ function createImageSelectionProjectService(repo = repository, dependencies = {}
     // number there is nobody to send the gallery invite to, and this is the only screen that asks.
     // It also carries the workspace tabs it was created with — Photo Selection alone when the
     // form predates the choice — because it has no allocation to earn tabs from later.
-    if (!input.salesProjectId)
-      return serialize(await repo.createProject({
-        projectName: input.projectName,
-        sourceType: "Manual",
-        clientName: input.clientName ?? null,
-        clientMainNumber: input.clientMainNumber ?? null,
-        photoSelectionTab: input.workspaceTabs?.photoSelection ?? true,
-        photoCullingTab: input.workspaceTabs?.photoCulling ?? false,
-        signatureAlbumTab: input.workspaceTabs?.signatureAlbum ?? false,
-        createdByUserId: userId,
-      }));
+    //
+    // `modules` (the Create Project form's current module and its Linked Modules) creates the
+    // project in exactly those modules; `workspaceTabs` is the older form's ticks, read as they
+    // always were. Either way every one of AI Culling, AI Editing and Signature Album it is created
+    // in gets its own project record (own ID, name and client copied), all in one transaction with
+    // the photo workspace - which is Photo Selection's own project when Photo Selection is among
+    // them - so a failure leaves nothing behind. Nothing is published, processed or sent.
+    if (!input.salesProjectId) {
+      const modules = input.modules ? new Set(input.modules) : null;
+      const flags = modules
+        ? { photoSelectionTab: modules.has("photos"), photoCullingTab: modules.has("culling"), signatureAlbumTab: modules.has("album"), aiEditingTab: modules.has("editing") }
+        : {
+          photoSelectionTab: input.workspaceTabs?.photoSelection ?? true,
+          photoCullingTab: input.workspaceTabs?.photoCulling ?? false,
+          signatureAlbumTab: input.workspaceTabs?.signatureAlbum ?? false,
+          // Null when the form did not say (an older client): the tab is on, as the workspace reads it.
+          aiEditingTab: input.workspaceTabs?.aiEditing ?? null,
+        };
+      const workspace = { projectName: input.projectName, sourceType: "Manual", clientName: input.clientName ?? null, clientMainNumber: input.clientMainNumber ?? null, ...flags, createdByUserId: userId };
+      const recordModules = [...manualModules(flags)].filter((module) => module !== "photos");
+      if (!recordModules.length) return serialize(await repo.createProject(workspace));
+      return repo.transaction(async (tx) => {
+        const created = await tx.createProject(workspace);
+        const moduleProjects = [];
+        for (const module of recordModules)
+          moduleProjects.push(await tx.createModuleProject({ module, imageSelectionProjectId: created.id, projectName: created.projectName, clientName: created.clientName, clientMainNumber: created.clientMainNumber, createdByUserId: userId }));
+        return { ...serialize(created), moduleProjects };
+      });
+    }
     // A linked project reads its client from the SalesProject, so storing a second copy here would
     // only create two answers to the same question — the same rule the settings save applies.
     if (input.clientName != null || input.clientMainNumber != null)
@@ -127,21 +180,28 @@ function createImageSelectionProjectService(repo = repository, dependencies = {}
   // A linked project's name IS the Sales Manager project's WhatsApp group name, so renaming it
   // here would give the same project two names. The sidebar hides Edit for linked projects; this
   // is the same rule enforced where it cannot be bypassed. Editing re-opens the manual creation
-  // form, so alongside the name it may carry the client details and the workspace-tab choice —
-  // each applied only when sent, so a rename on its own leaves them alone.
-  async function edit(projectId, input) {
+  // form, so alongside the name it may carry the client details, each applied only when sent. It
+  // never changes which modules the project is in: those are chosen when it is created, and a
+  // module lets go of it only through its own Delete - so `workspaceTabs`, which an older form
+  // still sends, is not applied, and this edit touches Photo Selection's project alone, never the
+  // AI Culling, AI Editing or Signature Album projects made with it.
+  //
+  // `links` is the form's Linked Modules: applied by `moduleLinks.apply`, in one transaction with the
+  // name and client, so a refused unlink (a client still holding a link) saves nothing at all.
+  async function edit(projectId, input, userId) {
     const project = await repo.findProject(projectId, { archived: false });
     if (!project) throw httpError(404, "Active Image Selection project not found.");
     if (project.salesProjectId) throw httpError(409, "This project is named by the linked Sales Manager project's WhatsApp group name. Change it there instead.");
     const data = { projectName: input.projectName };
     if (input.clientName !== undefined) data.clientName = input.clientName;
     if (input.clientMainNumber !== undefined) data.clientMainNumber = input.clientMainNumber;
-    if (input.workspaceTabs != null) {
-      data.photoSelectionTab = input.workspaceTabs.photoSelection;
-      data.photoCullingTab = input.workspaceTabs.photoCulling;
-      data.signatureAlbumTab = input.workspaceTabs.signatureAlbum;
-    }
-    return serialize(await repo.updateProject(projectId, data));
+    if (!input.links) return serialize(await repo.updateProject(projectId, data));
+    const links = dependencies.moduleLinks || require("./moduleLinks");
+    const changed = await links.apply(projectId, "photos", input.links, userId, {
+      alsoWrite: (tx) => tx.imageSelectionProject.update({ where: { id: projectId }, data }),
+      copyFrom: { projectName: data.projectName, clientName: data.clientName ?? project.clientName, clientMainNumber: data.clientMainNumber ?? project.clientMainNumber },
+    });
+    return { ...serialize(await repo.updateProject(projectId, {})), links: changed };
   }
   // Delete is only for a project the studio typed itself (manual or duplicated): a linked project
   // is the Sales Manager project's presence here and is archived, never deleted. Deleting purges
@@ -152,6 +212,17 @@ function createImageSelectionProjectService(repo = repository, dependencies = {}
     const project = await repo.findProject(projectId);
     if (!project) throw httpError(404, "Image Selection project not found.");
     if (project.salesProjectId) throw httpError(409, "This project comes from a Sales Manager WhatsApp group name and cannot be deleted. Archive it instead.");
+    // Made with AI Culling, AI Editing or Signature Album projects too (records of their own on this
+    // workspace): deleting Photo Selection's project must not delete theirs, or the photos they work
+    // on. Photo Selection lets go of the workspace instead - refused while its gallery is published -
+    // and everything is kept.
+    // (`asLastModule`: the last module project on the workspace is the one being deleted, so the
+    // workspace goes with it - moduleProjects.remove.)
+    if (!options.asLastModule && (await repo.countModuleProjects?.(projectId)) > 0) {
+      const blocker = await projectModules().unlinkBlocker(project, "photos", { allowLast: true });
+      if (blocker) throw httpError(409, blocker);
+      return serialize(await repo.updateProject(projectId, { photoSelectionTab: false }));
+    }
     // Client-submitted selections are high-value business data. Their presence turns this into a
     // two-step delete: the first request answers 409 with the counts, and only a request that
     // explicitly acknowledges them may proceed. Checked here, at the moment of deletion — a
@@ -221,7 +292,7 @@ function createImageSelectionProjectService(repo = repository, dependencies = {}
       // null on a linked source, which correctly leaves the copy asking for them.
       // The workspace-tab choice travels too: a copy of a linked source carries null tabs, which
       // the workspace reads as the manual default of Photo Selection alone.
-      const duplicate = await tx.createProject({ projectName: await nextCopyName(source.projectName, tx), sourceType: "Duplicate", salesProjectId: null, clientName: source.clientName, clientMainNumber: source.clientMainNumber, photoSelectionTab: source.photoSelectionTab, photoCullingTab: source.photoCullingTab, signatureAlbumTab: source.signatureAlbumTab, status: "New", selectionValidUntil: source.selectionValidUntil, selectionValidityEnabled: source.selectionValidityEnabled, allowPhotoSelection: source.allowPhotoSelection, publicSlug: null, archivedAt: null, lastOpenedAt: null, totalPhotoSize: BigInt(0), publishVersion: 1, createdByUserId: userId });
+      const duplicate = await tx.createProject({ projectName: await nextCopyName(source.projectName, tx), sourceType: "Duplicate", salesProjectId: null, clientName: source.clientName, clientMainNumber: source.clientMainNumber, photoSelectionTab: source.photoSelectionTab, photoCullingTab: source.photoCullingTab, signatureAlbumTab: source.signatureAlbumTab, aiEditingTab: source.aiEditingTab, status: "New", selectionValidUntil: source.selectionValidUntil, selectionValidityEnabled: source.selectionValidityEnabled, allowPhotoSelection: source.allowPhotoSelection, publicSlug: null, archivedAt: null, lastOpenedAt: null, totalPhotoSize: BigInt(0), publishVersion: 1, createdByUserId: userId });
       const folders = await tx.listFoldersForDuplicate(source.id); const folderIds = new Map(); const remaining = [...folders];
       while (remaining.length) {
         const ready = remaining.filter((folder) => !folder.parentId || folderIds.has(folder.parentId));

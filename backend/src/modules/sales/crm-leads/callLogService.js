@@ -842,6 +842,55 @@ async function listLeadCallLogs(enquiryId, options = {}) {
 }
 
 /**
+ * Every call on a **number**, for a screen that has a person but no enquiry.
+ *
+ * The call log is one table keyed by the number the handset dialled, fed by the integration for the
+ * whole studio - it is not the CRM's private property, it had simply only ever been read from there.
+ * The Interview register needs the same answer about a candidate: has anybody actually rung this person,
+ * when, and for how long, which is the question the Follow Up stage exists to ask.
+ *
+ * Beside `listLeadCallLogs` and sharing its columns, its ordering and its table guard, rather than
+ * copied into the other module - a copy is the one that stops being updated when a column is added.
+ *
+ * **A number that cannot be read returns nothing.** `numberKey` gives "" for anything too short to be a
+ * number, and a blank key in the `WHERE` would match every row in the table: the whole studio's call
+ * history, handed to a screen that asked about one candidate. A candidate with no number has no calls.
+ */
+async function listCallLogsForNumber(phone, options = {}) {
+  const { limit = 200 } = options || {};
+  const key = numberKey(phone);
+  if (!key) return [];
+
+  try {
+    await ensureCallLogTable();
+  } catch (error) {
+    console.warn("Unable to prepare the CRM call log table:", error?.message || error);
+    return [];
+  }
+
+  const size = Math.min(Math.max(Number(limit) || 200, 1), 500);
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT \`id\`, \`enquiry_id\` AS \`enquiryId\`, \`client_name\` AS \`clientName\`,
+            \`client_number\` AS \`clientNumber\`, \`employee_name\` AS \`employeeName\`,
+            \`call_type\` AS \`callType\`, \`call_method\` AS \`callMethod\`, \`call_mode\` AS \`callMode\`,
+            \`call_date\` AS \`callDate\`, \`call_time\` AS \`callTime\`,
+            \`duration_seconds\` AS \`durationSeconds\`, \`note\`, \`recording_url\` AS \`recordingUrl\`,
+            \`crm_status\` AS \`crmStatus\`, \`source\`, \`raw\`, \`called_at\` AS \`calledAt\`
+     FROM \`sales_crm_call_log\`
+     WHERE RIGHT(REGEXP_REPLACE(COALESCE(\`client_number\`, ''), '[^0-9]', ''), 10) = ?
+     ORDER BY \`called_at\` DESC, \`id\` DESC
+     LIMIT ${size}`,
+    key,
+  );
+
+  return rows.map((row) => ({
+    ...row,
+    durationSeconds: Number(row.durationSeconds) || 0,
+    calledAt: row.calledAt ? new Date(row.calledAt).toISOString() : null,
+  }));
+}
+
+/**
  * How many calls are on record for each of these leads.
  *
  * What "Contact Repeated" is answering: a client the studio has spoken to more than once. Counted
@@ -976,23 +1025,28 @@ async function employeeMatchTable({ now = Date.now() } = {}) {
     });
     const byCode = new Map();
     const byName = new Map();
+    // The repository's own spelling for an id, which is what a matched handset should be written
+    // down as - on the call log's reports and on the `crm` of any lead the call becomes.
+    const nameById = new Map();
     const ambiguous = new Set();
     for (const row of rows) {
       const code = employeeCodeKey(row.employeeId);
       if (code && !byCode.has(code)) byCode.set(code, row.id);
+      const spelling = String(row.employeeName || "").trim();
+      if (spelling) nameById.set(row.id, spelling);
       const name = employeeNameKey(row.employeeName);
       if (!name) continue;
       if (byName.has(name)) { ambiguous.add(name); continue; }
       byName.set(name, row.id);
     }
     for (const name of ambiguous) byName.delete(name);
-    employeeCache = { at: now, table: { byCode, byName } };
+    employeeCache = { at: now, table: { byCode, byName, nameById } };
     return employeeCache.table;
   } catch (error) {
     // Never fatal: a delivery that cannot resolve its handsets still stores its calls, and
     // `matchEmployeesToCalls` picks them up afterwards.
     console.warn("Unable to read the employees for call matching:", error?.message || error);
-    return employeeCache.table || { byCode: new Map(), byName: new Map() };
+    return employeeCache.table || { byCode: new Map(), byName: new Map(), nameById: new Map() };
   }
 }
 
@@ -1003,17 +1057,35 @@ function resolveEmployeeId(table, { employeeCode, employeeName } = {}) {
   return table.byName.get(employeeNameKey(employeeName)) ?? null;
 }
 
+/**
+ * Whose handset this is, written down the way the repository spells it.
+ *
+ * The answer the `crm` column on a lead wants: that column is a name copy of `owner_employee_id`
+ * (see `nameCopies.js`), and the id is resolved back out of the text - so writing Callyzer's label
+ * there resolves to nobody whenever the handset is named anything but the employee, and the lead
+ * ends up owned by no one and on nobody's My Leads.
+ *
+ * Falls back to the label for a handset matched to nobody, which is the only name such a call has.
+ */
+function employeeNameFor(table, employee = {}) {
+  const id = resolveEmployeeId(table, {
+    employeeCode: employee.employeeCode ?? employee.emp_code ?? employee.empCode,
+    employeeName: employee.employeeName ?? employee.emp_name ?? employee.empName,
+  });
+  return (id && table.nameById?.get(id)) || "";
+}
+
 /** Drops the cached repository, so the next resolve goes to the database. For tests. */
 function forgetEmployeeIdsByName() {
   employeeCache = { at: 0, table: null };
 }
 
 module.exports = {
-  ensureCallLogTable, recordCallLogs, listLeadCallLogs, callLogCounts, toRow, calledAt,
+  ensureCallLogTable, recordCallLogs, listLeadCallLogs, listCallLogsForNumber, callLogCounts, toRow, calledAt,
   knownEmployeeNumbers, forgetKnownEmployeeNumbers, assignCallIds, ensureCallIds, renameCallIdTag, restampCalledAt, linkCallsToLead, numberKey,
   // The handset -> employee match: the two comparisons, the repository it reads, the ladder between
   // them, and the pass that catches up on the calls stored before their employee existed.
-  employeeNameKey, employeeCodeKey, employeeMatchTable, resolveEmployeeId, forgetEmployeeIdsByName, matchEmployeesToCalls,
+  employeeNameKey, employeeCodeKey, employeeMatchTable, resolveEmployeeId, employeeNameFor, forgetEmployeeIdsByName, matchEmployeesToCalls,
   // The one reading of "the lead a call belongs to", shared with the Calls board so the side that
   // writes a link and the side that keeps a row on that board cannot drift apart again.
   relinkOrphanedCalls, liveLeadSql, callerIsALeadSql,

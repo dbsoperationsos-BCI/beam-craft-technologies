@@ -3,6 +3,9 @@
 import { useCallback, useMemo, useState } from "react";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
 import { clientStorageFormSections, emptyValues } from "@/constants/formPanelConfig";
+import { dropUnansweredYesNo } from "@/constants/yesNoField";
+import { detailHelpFor } from "@/constants/detailHelp";
+import HelpTip from "@/components/shared/HelpTip";
 
 function formatDate(value) {
   return value ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium" }).format(new Date(value)) : "";
@@ -18,23 +21,24 @@ function formatDate(value) {
  */
 function ShootSummary({ shoot, project }) {
   const details = shoot?.project || project;
+  // The third entry names the same field on the storage record's details screen, so its ⓘ says the same.
   const rows = [
-    ["Date Created", formatDate(shoot?.dateCreated)],
-    ["Client Name", details?.clientName],
-    ["Project Status", details?.projectStatus],
-    ["Shoot", shoot?.shoot],
-    ["Main Event Date", formatDate(details?.mainEventDate)],
-    ["Source Branch", details?.sourceBranch],
-    ["CRM", details?.crmName],
-    ["Pre Production Coordinator", details?.preProductionCoordinator],
-    ["Creative Manager", details?.creativeManager],
-    ["Post Production Coordinator", details?.postProductionCoordinator],
+    ["Date Created", formatDate(shoot?.dateCreated), "Storage Record.shootDate"],
+    ["Client Name", details?.clientName, "Storage Record.clientName"],
+    ["Project Status", details?.projectStatus, "Storage Record.projectStatus"],
+    ["Shoot", shoot?.shoot, "Storage Record.shootName"],
+    ["Main Event Date", formatDate(details?.mainEventDate), "Storage Record.mainEventDate"],
+    ["Source Branch", details?.sourceBranch, "Project Team.sourceBranch"],
+    ["CRM", details?.crmName, "Project Team.crmName"],
+    ["Pre Production Coordinator", details?.preProductionCoordinator, "Project Team.preProductionCoordinator"],
+    ["Creative Manager", details?.creativeManager, "Project Team.creativeManager"],
+    ["Post Production Coordinator", details?.postProductionCoordinator, "Project Team.postProductionCoordinator"],
   ];
   if (!shoot && !details) return <p className="text-sm text-slate-500">Select a Shoot ID to pull in the client, project status and coordinator details.</p>;
   return <>
     {!shoot && <p className="mb-3 text-sm text-slate-500">Select a Shoot ID to record which shoot this footage came from.</p>}
     <dl className="grid gap-x-4 gap-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:grid-cols-2">
-      {rows.map(([label, value]) => <div key={label}><dt className="text-xs font-semibold text-slate-500">{label}</dt><dd className="mt-0.5 text-sm text-slate-800">{value || "—"}</dd></div>)}
+      {rows.map(([label, value, help]) => <div key={label}><dt className="flex items-center text-xs font-semibold text-slate-500">{label}<HelpTip text={detailHelpFor(...help.split("."))} /></dt><dd className="mt-0.5 text-sm text-slate-800">{value || "—"}</dd></div>)}
     </dl>
   </>;
 }
@@ -63,7 +67,12 @@ export default function ClientStorageFormPanel({ record, shoots, options, saving
   function submit(event) {
     event.preventDefault();
     const { storageId, shootSummary, ...payload } = form;
-    onSave({ ...payload, shootId: payload.shootId || null });
+    /*
+     * A check nobody answered is left out rather than sent. The columns are `z.boolean().optional()`, so
+     * omitting one says "not answered" and the empty string the form holds for it would have the server
+     * refuse the save - see `dropUnansweredYesNo`.
+     */
+    onSave({ ...dropUnansweredYesNo(clientStorageFormSections, payload), shootId: payload.shootId || null });
   }
 
   return <SchemaFormPanel

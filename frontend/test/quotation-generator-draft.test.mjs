@@ -38,18 +38,29 @@ test("nothing, or something unreadable, is nothing", () => {
 });
 
 test("the calculator hands over and the Quotations screen picks up, and nothing is saved between", () => {
+  /*
+   * The calculator is its own page since 2026-10-08 - it was a dialog inside `CRMPage.js` - so the
+   * handing over is read there. The CRM page's part is now one line: the lead popup's button
+   * navigates to it carrying the lead.
+   */
   const crm = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "components", "sales", "CRMPage.js"), "utf8");
+  const calculator = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "components", "sales", "QuotationCalculatorPage.js"), "utf8");
   const page = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "components", "sales", "QuotationPage.js"), "utf8");
   const generator = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "components", "sales", "QuotationGeneratorPanel.js"), "utf8");
-  assert.match(crm, /"Apply to Quotation"/);
+  assert.match(calculator, /"Apply to Quotation"/);
+  // Opened in a tab of its own, with the lead left open behind it.
+  assert.match(crm, /window\.open\(`\/sales\/quotation-calculator\?lead=\$\{encodeURIComponent\(leadPopup\?\.id \|\| ""\)\}`, "_blank", "noopener,noreferrer"\)/);
   // The calculator's old write onto the lead is gone. ("Apply to Lead" still exists elsewhere on the
   // CRM page, for a call transcript - a different thing, untouched.)
-  assert.doesNotMatch(crm, /saveLeadQuote|applyToLead\(\)|Signed Quotation when the lead is converted/);
-  assert.match(crm, /stashQuotationGeneratorDraft\(draft\);\s*onClose\?\.\(\);\s*router\.push\("\/sales\/quotation"\);/);
+  assert.doesNotMatch(calculator, /saveLeadQuote|applyToLead\(\)|Signed Quotation when the lead is converted/);
+  // Nothing to close on a page: the draft is stashed and the generator is navigated to.
+  assert.match(calculator, /stashQuotationGeneratorDraft\(draft\);\s*router\.push\("\/sales\/quotation"\);/);
   // A choice the generator cannot carry stops the handoff with its name, not a silent drop.
-  assert.match(crm, /if \(handoff\.skipped\.length\) \{\s*setApplyError\(`Not applied\. \$\{handoff\.skipped\.join\(" "\)\}`\);/);
+  assert.match(calculator, /if \(handoff\.skipped\.length\) \{\s*setApplyError\(`Not applied\. \$\{handoff\.skipped\.join\(" "\)\}`\);/);
   assert.match(page, /takeQuotationGeneratorDraft\(\)/);
-  assert.match(page, /initialDraft=\{editingQuotation \? null : generatorDraft\}/);
+  // The calculator's draft, unless the form is an edit or a duplicate (which opens on its source, or
+  // after a reload on the edits this tab kept of it).
+  assert.match(page, /initialDraft=\{editingQuotation \? null : restoredDraft \|\| \(duplicateSource \? duplicateDraft\(duplicateSource\) : generatorDraft\)\}/);
   // The generator opens on the draft as a new quotation: nothing is locked, and only editing locks.
   assert.match(generator, /const initialPayload = initialQuotation\?\.payload \|\| initialDraft \|\| \{\};/);
   assert.match(generator, /const verticalLocked = Boolean\(initialQuotation\);/);

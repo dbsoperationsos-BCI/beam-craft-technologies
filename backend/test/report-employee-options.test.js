@@ -67,10 +67,14 @@ test("nothing the call box invented is offered", async () => {
    * option must be a name the repository holds. A name that appears only in the call log - a
    * mislabelled handset, a client recorded on an outgoing call - is not an employee.
    */
+  // Employees are read before and after the filter: the suite runs in parallel, and another file's
+  // fixture employee can be made or removed between two reads. A name that was an employee at either
+  // moment is one; a name the call box invented is in neither.
+  const names = async () => (await prisma.employee.findMany({ select: { employeeName: true } })).map((row) => String(row.employeeName || "").trim());
+  const before = await names();
   const offered = await repositoryEmployees();
   if (offered.length === 0) return;
-  const known = new Set((await prisma.employee.findMany({ select: { employeeName: true } }))
-    .map((row) => String(row.employeeName || "").trim()));
+  const known = new Set([...before, ...(await names())]);
   const strangers = offered.map((option) => option.value).filter((value) => !known.has(value));
   assert.deepEqual(strangers, [], "the Employee filter is offering names that are in no employee record");
 });
@@ -116,8 +120,14 @@ test("only Active employees are offered, not everybody working here", async () =
     where: { archivedAt: null, employmentStatus: "Active" },
     select: { employeeName: true },
   })).map((row) => String(row.employeeName || "").trim()));
+  // Other suites create and remove employees in parallel, so a name missing from the second read
+  // only fails when it still exists: one deleted in between was Active when it was offered.
+  const stillThere = new Set((await prisma.employee.findMany({
+    where: { employeeName: { in: [...offered].filter((name) => !active.has(name)) } },
+    select: { employeeName: true },
+  })).map((row) => String(row.employeeName || "").trim()));
   for (const name of offered) {
-    assert.ok(active.has(name), `"${name}" is offered by the Employee filter and is not an Active employee`);
+    assert.ok(active.has(name) || !stillThere.has(name), `"${name}" is offered by the Employee filter and is not an Active employee`);
   }
 
   // A call made from that person's handset is still theirs, and still attributable.
@@ -132,18 +142,39 @@ test("no employee is offered twice", async () => {
   assert.equal(new Set(offered.map((option) => option.value)).size, offered.length);
 });
 
-test("choosing an employee searches for their number as well as their name", async () => {
+test("choosing an employee searches for the calls matched to them, and their name and number", async () => {
   const resolved = await resolveEmployeeFilter({ employee: NAME });
+  assert.ok(Array.isArray(resolved.employeeIds) && resolved.employeeIds.length, "the chosen employee's id was not resolved");
   assert.deepEqual(resolved.employeeNumbers, [NUMBER], "the chosen employee's number was not resolved");
 
   /*
-   * The filter is a **list** now, so the name is matched with `IN` rather than `=` - one name is a
-   * list of one, and the clause stopped being a special case for it. What it matches is unchanged:
-   * the chosen name against the handset label, and the repository's number against the handset.
+   * The **id** first, because that is what a call actually carries.
+   *
+   * `matched_employee_id` is what the webhook worked out when the call was delivered - Callyzer's
+   * Employee Code against the repository's code, then the handset's label. Without it the filter
+   * compared the repository's spelling against whatever the phone happened to be named in the
+   * Callyzer app, so choosing somebody whose handset is labelled anything else answered "no calls"
+   * however many they had made.
+   *
+   * The name and number stay beside it: a handset the match could not place carries no id, and the
+   * label is then both the only thing to filter it by and the name the report shows for it.
    */
   const { sql, params } = buildWhere(resolved);
-  assert.match(sql, /`c`\.`employee_number` IN \(\?\) OR `c`\.`employee_name` IN \(\?\) OR `c`\.`employee_number` IN \(\?\)/);
-  assert.deepEqual(params, [NAME, NAME, NUMBER]);
+  assert.match(sql, /`c`\.`matched_employee_id` IN \(\?\) OR `c`\.`employee_number` IN \(\?\) OR `c`\.`employee_name` IN \(\?\) OR `c`\.`employee_number` IN \(\?\)/);
+  assert.deepEqual(params, [resolved.employeeIds[0], NAME, NAME, NUMBER], "the values are no longer bound in the order the tests were written");
+});
+
+test("an id the caller supplies is not taken as the employee's own", async () => {
+  /*
+   * The same rule `employeeNumbers` keeps below. `employeeIds` is derived from the repository under
+   * this reader's scope, so a caller putting it on the query string must not be able to name a
+   * colleague's id and read their calls - which, unlike the number, would actually work.
+   */
+  const resolved = await resolveEmployeeFilter({ employee: NAME, employeeIds: [999999] });
+  assert.ok(!resolved.employeeIds.includes(999999), "an id from the query string reached the filter");
+
+  const noEmployee = await resolveEmployeeFilter({ employeeIds: [999999] });
+  assert.equal(noEmployee.employeeIds, undefined);
 });
 
 test("a number the caller supplies is not taken as the employee's own", async () => {

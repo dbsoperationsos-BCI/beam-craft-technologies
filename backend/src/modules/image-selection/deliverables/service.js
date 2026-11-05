@@ -1,6 +1,6 @@
 const repository = require("./repository");
 const { createSettingsService } = require("../settings/service");
-const { shootDayHasPassed } = require("../shoot-visibility");
+const { shootDayReached } = require("../shoot-visibility");
 // The Deliverables table's Image Selection column is typed words now rather than a Yes/No pair.
 // These read the words back into the answer this module has always worked from - see the module
 // for the rule. Every `Yes` and `No` written before it reads exactly as it did.
@@ -14,10 +14,12 @@ function normalizeServiceName(value) {
 
 // Photo Selection, Photo Culling and Signature Album are the workspace's own three tabs — the
 // client never picks photos against them as selection items, so they never appear in Selection
-// Settings whatever the Deliverables table answers. The table still speaks for them in one
-// place: each tab shows only when its deliverable is allocated and its row says an explicit
-// Yes. Matched by contained name so "Signature Album (Soft Copy)" and the other spellings count.
-const TAB_ONLY_SERVICES = ["photoselection", "photoculling", "signaturealbum"];
+// Settings whatever the Deliverables table answers. Which tabs a linked project shows is the
+// workspace's reading of `listAllocatedServices` (`frontend/src/lib/imageSelectionTabs.mjs`):
+// Photo Selection once any allocated service is `selectable` - a Selection Item - Photo Culling
+// always, and Signature Album when it is allocated and its row says an explicit Yes. Matched by
+// contained name so "Signature Album (Soft Copy)" and the other spellings count.
+const TAB_ONLY_SERVICES = ["photoselection", "photoculling", "aiculling", "aiediting", "signaturealbum"];
 function isTabOnlyService(name) {
   const key = normalizeServiceName(name);
   return TAB_ONLY_SERVICES.some((base) => key.includes(base));
@@ -69,13 +71,14 @@ function selectableWith(enabledByName) {
 function buildSources(deliverables, enabledByName = new Map()) {
   return deliverables
     .filter(selectableWith(enabledByName))
-    // A shoot's deliverables wait for the shoot: a Wedding dated 20 Aug offers its selection items
-    // from 21 Aug, while an already-shot Pre Wedding's are not held back by it. Synchronize marks
-    // the waiting items' configs inactive and revives them when the day arrives.
+    // A shoot's deliverables wait for the shoot: a Wedding dated 28 Oct offers its selection items
+    // from 28 Oct (studio time), while an already-shot Pre Wedding's are not held back by it.
+    // Synchronize leaves a waiting item's config exactly as it is (`heldSourceKeys`) - picks,
+    // submission and all - and offers it again the day its shoot arrives.
     // A deliverable that hangs off no shoot is not waiting for one; only a deliverable whose
     // shoot has yet to happen is held back. Asked in that order because an undated shoot and
     // an absent shoot both read as an empty date and mean opposite things.
-    .filter((deliverable) => !deliverable.shoot || shootDayHasPassed(deliverable.shoot.dateCreated))
+    .filter((deliverable) => !deliverable.shoot || shootDayReached(deliverable.shoot.dateCreated))
     // `selectionLimit` is the deliverable's own answer to "how many photos may the client pick" and
     // is the one number both screens share. With no limit set, `numberOfPhotos` — the No of Photos
     // typed on the Post Production Allocation — stands in, because that is the count the studio
@@ -85,6 +88,19 @@ function buildSources(deliverables, enabledByName = new Map()) {
     // The nested shoot keeps the three fields it always carried; the date only decides the filter
     // above and is not part of the payload.
     .map((deliverable) => ({ projectPostProductionAllocationId: null, projectShootDeliverableId: deliverable.id, name: deliverable.deliverableName, shootId: deliverable.shootId, shoot: deliverable.shoot ? { id: deliverable.shoot.id, shootId: deliverable.shoot.shootId, shoot: deliverable.shoot.shoot } : null, quantity: deliverable.quantity, numberOfPhotos: deliverable.numberOfPhotos ?? null, allocatedSelectionLimit: deliverable.selectionLimit ?? null }));
+}
+
+/*
+ * The selection items that are only waiting: their deliverable is live and selectable, and its shoot
+ * has not reached its day - not yet scheduled, or moved to a later date. Their configs are neither
+ * offered nor retired, so a shoot re-dated after the client picked from it keeps every pick and its
+ * submission, and is offered again as it was when the day comes. Keys as `sourceKey` writes them.
+ */
+function heldSourceKeys(deliverables, enabledByName = new Map()) {
+  return new Set(deliverables
+    .filter(selectableWith(enabledByName))
+    .filter((deliverable) => deliverable.shoot && !shootDayReached(deliverable.shoot.dateCreated))
+    .map((deliverable) => sourceKey({ projectShootDeliverableId: deliverable.id })));
 }
 
 // Every source is now an allocated post production deliverable, so each one is offered to
@@ -145,12 +161,14 @@ function createDeliverableService(repo = repository, settings = createSettingsSe
     const definitions = await store.listDeliverableDefinitions();
     return new Map(definitions.map((definition) => [normalizeServiceName(definition.name), definition.imageSelectionEnabled]));
   }
-  async function sourcesFor(project, store = repo) { return buildSources(await store.listShootDeliverables(project.salesProjectId), await enabledMapFor(store)); }
   async function synchronize(imageSelectionProjectId) {
     const project = await requireProject(imageSelectionProjectId);
     if (!project.salesProjectId) return [];
     return repo.transaction(async (tx) => {
-      const sources = await sourcesFor(project, tx);
+      const [deliverables, enabledByName] = await Promise.all([tx.listShootDeliverables(project.salesProjectId), enabledMapFor(tx)]);
+      const sources = buildSources(deliverables, enabledByName);
+      // Waiting for their shoot's day: neither offered nor retired below (`heldSourceKeys`).
+      const held = heldSourceKeys(deliverables, enabledByName);
       const existing = await tx.listConfigs(project.id); const byKey = new Map(existing.map((config) => [sourceKey(config), config]));
       const activeKeys = new Set(); const configs = []; let addedNew = false;
       for (const [displayOrder, source] of sources.entries()) {
@@ -162,7 +180,7 @@ function createDeliverableService(repo = repository, settings = createSettingsSe
       // no longer wholly submitted — the same invariant the reopen path maintains — so the
       // publication's all-submitted stamp is lifted and the gallery offers the new item.
       if (addedNew) await tx.clearPublicationSubmitted(project.id);
-      for (const config of existing) if (!activeKeys.has(sourceKey(config)) && !config.inactiveAt) await tx.updateConfig(config.id, { inactiveAt: new Date() });
+      for (const config of existing) if (!activeKeys.has(sourceKey(config)) && !held.has(sourceKey(config)) && !config.inactiveAt) await tx.updateConfig(config.id, { inactiveAt: new Date() });
       const byConfigKey = new Map(configs.map((config) => [sourceKey(config), config]));
       const { defaultSelectionLimit } = await settings.read();
       return sources.map((source) => mapSource(source, byConfigKey.get(sourceKey(source)), defaultSelectionLimit));
@@ -171,14 +189,21 @@ function createDeliverableService(repo = repository, settings = createSettingsSe
   // A manually named project has no allocation to derive selection items from, so the ones the
   // studio typed in Selection Settings are all it has. They are shaped exactly like a derived item
   // — same fields, same defaults — so nothing downstream has to know which kind it is reading.
-  // The shoot group the studio typed each item under stands in for the shoot: its key travels in
+  // The shoot each item is filed under stands in for a linked project's shoot: its key travels in
   // `shootId`, so the Selection Items table and the client gallery group by it — and submission
-  // goes out one group at a time — exactly as a linked project's shoots do. The nested `shootId`
-  // stays null because that slot is a shoot's DBS-SID business id, which a typed group lacks.
+  // goes out one group at a time — exactly as a linked project's shoots do. Where the item points at
+  // its root folder the key is that folder's id (`folder:<id>`) and the name is the folder's own,
+  // read live - so a renamed folder is the same shoot under its new name. A typed group no folder
+  // answers to yet keeps the name-made key it always had. The nested `shootId` stays null because
+  // that slot is a shoot's DBS-SID business id, which a manual shoot lacks.
   function manualShootOf(config) {
+    if (config.manualShootFolder) {
+      const key = `folder:${config.manualShootFolder.id}`;
+      return { shootId: key, shoot: { id: key, shootId: null, shoot: config.manualShootFolder.name, folderId: config.manualShootFolder.id } };
+    }
     if (!config.manualShootName) return { shootId: null, shoot: null };
     const key = `manual:${normalizeServiceName(config.manualShootName)}`;
-    return { shootId: key, shoot: { id: key, shootId: null, shoot: config.manualShootName } };
+    return { shootId: key, shoot: { id: key, shootId: null, shoot: config.manualShootName, folderId: null } };
   }
   async function listManual(imageSelectionProjectId) {
     const configs = await repo.listManualConfigs(imageSelectionProjectId);
@@ -208,9 +233,21 @@ function createDeliverableService(repo = repository, settings = createSettingsSe
     if (project.salesProjectId) throw httpError(409, "This project takes its selection items from the linked Project Management job. Change them there instead.");
     const existing = await repo.listManualConfigs(project.id);
     const name = input.name.trim();
-    const shootName = input.shootName?.trim() || null;
-    const shootKey = shootName ? normalizeServiceName(shootName) : null;
-    const groupKeyOf = (config) => (config.manualShootName ? normalizeServiceName(config.manualShootName) : null);
+    // The shoot, by its folder's id where the screen sent one, else by name to the root folder of
+    // that name. A shoot is always a folder: an item filed under a name no folder has would be an
+    // orphan no folder delete could reach, so that is refused.
+    let folder = null;
+    if (input.shootFolderId) {
+      folder = await repo.findRootFolder(project.id, input.shootFolderId);
+      if (!folder) throw httpError(404, "That shoot's folder is not in this project any more.");
+    } else if (input.shootName?.trim()) {
+      const key = normalizeServiceName(input.shootName);
+      folder = (await repo.listRootFolders(project.id)).find((entry) => normalizeServiceName(entry.name) === key) || null;
+      if (!folder) throw httpError(404, `There is no "${input.shootName.trim()}" folder in this project any more.`);
+    }
+    const shootName = folder ? folder.name : input.shootName?.trim() || null;
+    const groupKeyOf = (config) => (config.manualShootFolderId ? `folder:${config.manualShootFolderId}` : config.manualShootName ? normalizeServiceName(config.manualShootName) : null);
+    const shootKey = folder ? `folder:${folder.id}` : shootName ? normalizeServiceName(shootName) : null;
     if (existing.some((config) => groupKeyOf(config) === shootKey && (config.name || "").trim().toLowerCase() === name.toLowerCase()))
       throw httpError(409, `"${name}" is already a selection item${shootName ? ` under ${shootName}` : ""}.`);
     await repo.createConfig({
@@ -219,6 +256,7 @@ function createDeliverableService(repo = repository, settings = createSettingsSe
       projectShootDeliverableId: null,
       name,
       manualShootName: shootName,
+      manualShootFolderId: folder ? folder.id : null,
       enabled: DEFAULT_ENABLED,
       selectionLimitOverride: input.selectionLimit,
       displayOrder: existing.length,
@@ -245,13 +283,13 @@ function createDeliverableService(repo = repository, settings = createSettingsSe
     await repo.deleteConfig(config.id);
     return listManual(project.id);
   }
-  // The workspace tabs key off the raw Post Production Allocation rather than the Selection
-  // Items whitelist: Photo Culling and Signature Album are allocated work that earns its own
-  // tab even though the client never picks photos against them. Names repeat across shoots,
+  // The workspace tabs key off the raw Post Production Allocation: Signature Album is allocated
+  // work that earns its own tab even though the client never picks photos against it, and
+  // `selectable` - the Selection Items rule - is what earns Photo Selection. Names repeat across shoots,
   // so the list is deduplicated per service — but each service keeps the shoots it was
   // allocated to, so a tab can show exactly the shoots (Engagement, Pre Wedding, …) that carry
   // its work. The desktop app reads the same answer from the same endpoint. A shoot joins a
-  // service's list only after its day, the same gate the folder tree and selection items apply
+  // service's list from its own day, the same gate the folder tree and selection items apply
   // — a tab never offers a shoot whose root folder does not exist yet.
   async function listAllocatedServices(imageSelectionProjectId) {
     const project = await requireProject(imageSelectionProjectId);
@@ -268,7 +306,7 @@ function createDeliverableService(repo = repository, settings = createSettingsSe
       if (!byKey.has(key)) byKey.set(key, { key, name: deliverable.deliverableName, selectable: !isTabOnlyService(deliverable.deliverableName) && flagOf(deliverable) === true, imageSelectionEnabled: flagOf(deliverable), shoots: [], shootIds: new Set() });
       const entry = byKey.get(key);
       const shoot = deliverable.shoot;
-      if (shoot && shootDayHasPassed(shoot.dateCreated) && !entry.shootIds.has(shoot.id)) {
+      if (shoot && shootDayReached(shoot.dateCreated) && !entry.shootIds.has(shoot.id)) {
         entry.shootIds.add(shoot.id);
         entry.shoots.push({ id: shoot.id, shootId: shoot.shootId, shoot: shoot.shoot });
       }
@@ -341,4 +379,4 @@ function createDeliverableService(repo = repository, settings = createSettingsSe
   return { list, listAllocatedServices, synchronize, saveOverrides, addManualItem, removeManualItem };
 }
 
-module.exports = { createDeliverableService, buildSources, derivedLimitOf, DEFAULT_SELECTION_LIMIT, MIN_SELECTION_LIMIT, MAX_SELECTION_LIMIT };
+module.exports = { createDeliverableService, buildSources, heldSourceKeys, derivedLimitOf, DEFAULT_SELECTION_LIMIT, MIN_SELECTION_LIMIT, MAX_SELECTION_LIMIT };

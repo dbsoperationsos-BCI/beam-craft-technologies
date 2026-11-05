@@ -19,9 +19,8 @@ import MediaTab from "./tabs/MediaTab";
 import PeopleTab from "./tabs/PeopleTab";
 import GuestsTab from "./tabs/GuestsTab";
 import FaceRecognitionTab from "./tabs/FaceRecognitionTab";
-import SubEventsTab from "./tabs/SubEventsTab";
 import ActivityTab from "./tabs/ActivityTab";
-import UploadDialog from "./UploadDialog";
+import { useAiMediaLanded } from "../media-upload/hooks/useAiMediaUpload";
 import ShareDialog from "./ShareDialog";
 import EditEventDialog from "./EditEventDialog";
 import EventSettingsDialog from "./EventSettingsDialog";
@@ -32,7 +31,7 @@ const EVENTS_LIST = "/visual-curation/ai/events";
  * One event's workspace: the header names it, the tabs are where the studio works on it.
  *
  * Two permissions shape the page. The route's own (IMAGE_SELECTION / AI Feature) decides whether
- * the event, its media, guests and sub-events may be changed. AI Face Management decides whether
+ * the event, its media and guests may be changed. AI Face Management decides whether
  * the People and Face Recognition tabs exist at all - they are not mounted without READ on it -
  * and whether matches may be decided, failed photos retried, people merged or split.
  */
@@ -51,12 +50,12 @@ export default function AiEventWorkspacePage({ eventId }) {
   const [mediaRevision, setMediaRevision] = useState(0);
 
   const tabs = useMemo(() => [
-    { id: "overview", label: "Overview" },
+    // Labelled for what it is; the id stays "overview" so a remembered tab still opens it.
+    { id: "overview", label: "Project Dashboard" },
     { id: "media", label: "Media" },
     ...(faceAccess.canRead ? [{ id: "people", label: "People" }] : []),
     { id: "guests", label: "Guests" },
     ...(faceAccess.canRead ? [{ id: "faces", label: "Face Recognition" }] : []),
-    { id: "subEvents", label: "Sub Events" },
     { id: "activity", label: "Activity" },
   ], [faceAccess.canRead]);
   const tabIds = useMemo(() => tabs.map((tab) => tab.id), [tabs]);
@@ -78,6 +77,10 @@ export default function AiEventWorkspacePage({ eventId }) {
   }, [loadEvent]);
 
   const bumpMedia = useCallback(() => { setMediaRevision((value) => value + 1); loadEvent(); }, [loadEvent]);
+  // Uploads live in the app-level store (the Media tab's workspace starts them): the grid refreshes
+  // as photos land (throttled) and once more when the batch ends, whichever tab is open. No page
+  // reload, ever.
+  useAiMediaLanded(eventId, bumpMedia);
 
   async function runAction(action, done) {
     setBusy(true);
@@ -105,7 +108,7 @@ export default function AiEventWorkspacePage({ eventId }) {
   ] : [];
 
   const subtitle = event ? [formatEventRange(event.startDate, event.endDate), event.location].filter(Boolean).join(" • ") : "";
-  const tabProps = { eventId, event, canWrite, faceAccess, showSuccess, showError, mediaRevision, bumpMedia, reloadEvent: loadEvent, onUpload: () => setDialog("upload") };
+  const tabProps = { eventId, event, canWrite, faceAccess, showSuccess, showError, mediaRevision, bumpMedia, reloadEvent: loadEvent };
 
   return <section className="flex min-h-0 flex-1 flex-col bg-white">
     <ModulePageHeader
@@ -119,29 +122,29 @@ export default function AiEventWorkspacePage({ eventId }) {
       tabValue={tab}
       onTabChange={setTab}
       tabsAriaLabel="Event sections"
-      actions={canWrite && event && <>
-        {!archived && <Button type="button" size="sm" onClick={() => setDialog("upload")}>Upload</Button>}
-        {!archived && <Button type="button" variant="primary" size="sm" onClick={() => setDialog("share")}>Share</Button>}
-        <OptionsMenu ariaLabel="Event options" triggerVariant="button" items={menuItems} />
-      </>}
+      actions={canWrite && event && !archived ? <Button type="button" variant="primary" size="sm" onClick={() => setDialog("share")}>Share</Button> : null}
+      // The ⋮ in the header's own slot, so the row ends Nebula, then ⋮.
+      menu={canWrite && event ? <OptionsMenu ariaLabel="Event options" triggerVariant="button" items={menuItems} /> : undefined}
     />
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    {/* Media owns its own scrolling - the folder panel and the gallery each scroll alone inside
+        the height this box hands down (md and up; below that the page scrolls, as everywhere).
+        Every other tab keeps the one scrolling pane it always had. */}
+    <div className={`min-h-0 flex-1 ${tab === "media" && event && !loadError && !accessLoading ? "flex flex-col overflow-y-auto md:overflow-hidden" : "overflow-y-auto"}`}>
       {(!event && !loadError) || accessLoading
         ? <PageLoader label="Loading event..." />
         : loadError
           ? <EmptyState title="This event could not be opened." message={loadError} action={<Button type="button" size="sm" onClick={loadEvent}>Try again</Button>} />
-          : <div className="mx-auto w-full max-w-7xl px-3 py-4 sm:px-4 lg:px-5">
+          : tab === "media"
+            ? <MediaTab {...tabProps} />
+            : <div className="mx-auto w-full max-w-7xl px-3 py-4 sm:px-4 lg:px-5">
             {tab === "overview" && <OverviewTab {...tabProps} />}
-            {tab === "media" && <MediaTab {...tabProps} />}
             {tab === "people" && faceAccess.canRead && <PeopleTab {...tabProps} />}
             {tab === "guests" && <GuestsTab {...tabProps} />}
             {tab === "faces" && faceAccess.canRead && <FaceRecognitionTab {...tabProps} />}
-            {tab === "subEvents" && <SubEventsTab {...tabProps} />}
             {tab === "activity" && <ActivityTab {...tabProps} />}
           </div>}
     </div>
 
-    {dialog === "upload" && canWrite && <UploadDialog eventId={eventId} onClose={() => setDialog(null)} onBatchDone={bumpMedia} />}
     {dialog === "share" && canWrite && <ShareDialog eventId={eventId} eventName={event?.name} onClose={() => setDialog(null)} onNotify={showSuccess} />}
     {dialog === "edit" && canWrite && event && <EditEventDialog eventId={eventId} event={event} onClose={() => setDialog(null)} onSaved={(updated) => { setEvent(updated); setDialog(null); showSuccess("Event updated."); }} />}
     {dialog === "settings" && canWrite && <EventSettingsDialog eventId={eventId} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); showSuccess("Event settings saved."); loadEvent(); }} />}

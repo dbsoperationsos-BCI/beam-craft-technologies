@@ -15,7 +15,7 @@ const path = require("node:path");
  *     `new Date("2026-10-20")` it is midnight UTC, which is the 19th anywhere behind Greenwich -
  *     so a holiday declared on the 20th would be stored, drawn and counted on the 19th, and
  *     nothing about the screen would look wrong.
- *   * **the overwrite.** One holiday per day is a database constraint. A create that upserts turns
+ *   * **the overwrite.** One holiday per branch per day is the rule. A create that upserts turns
  *     a second person declaring the same day into a silent rename of the first one's holiday.
  *
  * No database and no server: the guard and the day handling are read off the source, which is
@@ -61,15 +61,22 @@ test("a holiday is read as the day it was written, never through a timezone", ()
   assert.match(CONTROLLER, /regex\(\/\^\\d\{4\}-\\d\{2\}-\\d\{2\}\$\//);
 });
 
-test("declaring a day that already has a holiday is refused, not silently overwritten", () => {
+test("declaring a day that already has a holiday for the same branch is refused, not silently overwritten", () => {
   /*
-   * The unique constraint on `holiday_date` is what makes this possible to get right: a `create`
-   * fails with P2002 where an `upsert` would have quietly replaced somebody else's holiday with
-   * this one's name. The 409 is what the screen turns into "edit the one that is there".
+   * The day is no longer unique in the table - two branches may each have a holiday on it - so the
+   * refusal is the controller's: the day's rows are locked and read inside the write's own
+   * transaction, and a second holiday whose branches overlap one already there is refused with the
+   * 409 the screen turns into "edit the one that is there". A `create`, never an `upsert`.
    */
-  assert.match(CONTROLLER, /prisma\.attendanceHoliday\.create\(/);
-  assert.doesNotMatch(CONTROLLER, /prisma\.attendanceHoliday\.upsert\(/);
-  assert.match(CONTROLLER, /error\?\.code === "P2002"/);
+  assert.match(CONTROLLER, /tx\.attendanceHoliday\.create\(/);
+  assert.doesNotMatch(CONTROLLER, /attendanceHoliday\.upsert\(/);
+  // A named lock, not a row lock: the first holiday on a day has no row to lock, and a gap lock
+  // lets two first declarations both in.
+  assert.match(CONTROLLER, /GET_LOCK\(\?, \?\)/, "holiday writes are not serialised before the overlap check");
+  assert.match(CONTROLLER, /RELEASE_LOCK\(\?\)/);
+  // A day the calendar does not have is refused, not rolled into the next month.
+  assert.match(CONTROLLER, /refine\(\(value\) => localIsoDate\(calendarDay\(value\)\) === value/);
+  assert.match(CONTROLLER, /holidayScopesOverlap\(scopeOf\(row\), scope\)/);
   assert.match(CONTROLLER, /status\(409\)/);
 });
 
@@ -85,5 +92,6 @@ test("the holiday list is no longer written from the attendance module", () => {
   const routes = fs.readFileSync(path.join(attendance, "routes.js"), "utf8");
   assert.doesNotMatch(routes, /router\.(post|delete|put)\("\/holidays/);
   const service = fs.readFileSync(path.join(attendance, "service.js"), "utf8");
-  assert.match(service, /attendanceHoliday\.findMany/, "attendance no longer reads the holidays when it judges a day");
+  // Read through the shared calendar, which answers per branch - see holiday-branches.test.js.
+  assert.match(service, /holidayCalendar\(start, end, client\)/, "attendance no longer reads the holidays when it judges a day");
 });

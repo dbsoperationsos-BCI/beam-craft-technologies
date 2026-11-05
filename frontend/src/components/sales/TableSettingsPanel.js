@@ -7,10 +7,13 @@ import Button from "@/components/shared/Button";
 import Checkbox from "@/components/shared/Checkbox";
 import DateField from "@/components/shared/DateField";
 import Dropdown from "@/components/shared/Dropdown";
+import HelpTip from "@/components/shared/HelpTip";
 import IconButton from "@/components/shared/IconButton";
 import SelectableOption from "@/components/shared/SelectableOption";
+import TextAreaField from "@/components/shared/TextAreaField";
 import TextField from "@/components/shared/TextField";
 import ToggleSwitch from "@/components/shared/ToggleSwitch";
+import useFormErrors from "@/components/shared/useFormErrors";
 import useUnsavedGuard from "@/components/shared/useUnsavedGuard";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import { SIDEBAR_MODULES } from "@/constants/navigation.mjs";
@@ -91,14 +94,16 @@ function optionsForSave(options) {
     });
 }
 
-// What stops a field being saved, said in the words the user needs to fix it. Shared by the
-// per-field editor and the whole-form Save so the two cannot disagree about what is valid.
-function draftError(field) {
-  if (!String(field?.label || "").trim()) return "Give the field a label.";
-  if (TYPES_WITH_OPTIONS.includes(field?.fieldType) && !optionsForSave(field?.options).length) {
-    return `A ${typeLabel(field.fieldType).toLowerCase()} needs at least one option with text.`;
-  }
-  return "";
+// What stops a field being saved, said in the words the user needs to fix it and keyed by the
+// card's box (`<id>:label`, `<id>:options`). Shared by the per-field editor and the whole-form
+// Save so the two cannot disagree about what is valid.
+function draftProblems(field) {
+  return {
+    [`${field.id}:label`]: String(field?.label || "").trim() ? "" : "Give the field a label.",
+    [`${field.id}:options`]: TYPES_WITH_OPTIONS.includes(field?.fieldType) && !optionsForSave(field?.options).length
+      ? `A ${typeLabel(field.fieldType).toLowerCase()} needs at least one option with text.`
+      : "",
+  };
 }
 
 function commitOptions(field) {
@@ -114,7 +119,7 @@ function commitOptions(field) {
  * mid-edit does not fight the user. Default is single-choice: ticking one unticks the rest,
  * because a field starts on one value or none.
  */
-function OptionsEditor({ options, onChange }) {
+function OptionsEditor({ options, error = "", onChange }) {
   const rows = normalizeOptions(options);
 
   function patchRow(index, patch) {
@@ -136,8 +141,9 @@ function OptionsEditor({ options, onChange }) {
             <input
               value={row.text}
               aria-label={`Option ${index + 1} text`}
+              aria-invalid={error ? "true" : undefined}
               onChange={(event) => patchRow(index, { text: event.target.value })}
-              className="block min-h-9 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              className={`block min-h-9 w-full rounded-lg border ${error ? "border-red-500" : "border-slate-300"} bg-white px-3 text-sm text-slate-700 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100`}
             />
           ) },
           { key: "value", label: "Value", render: (row, index) => (
@@ -173,6 +179,7 @@ function OptionsEditor({ options, onChange }) {
         rowKey={(_row, index) => index}
         emptyMessage="No options yet."
       />
+      {error && <p role="alert" className="mt-1.5 text-xs font-normal text-red-600">{error}</p>}
       <Button
         type="button"
         variant="secondary"
@@ -225,7 +232,18 @@ function toDraft(field) {
  * by Add Lead through `CustomFieldInput` below - a field that looks one way while being
  * built and another once saved would make the builder useless for checking your work.
  */
-export function CustomFieldInput({ field, value, onChange, disabled = false }) {
+// A required field left blank, as the line under its box; "" when answered or not required. A
+// choice with nothing to choose from is not asked, since no answer could satisfy it.
+export function customFieldProblem(field, value) {
+  if (!field?.required || String(value ?? "").trim()) return "";
+  const label = field.label || typeLabel(field.fieldType);
+  if (["dropdown", "radio", "checkbox"].includes(field.fieldType)) {
+    return renderableOptions(field.options).length ? `Choose ${label}.` : "";
+  }
+  return field.fieldType === "date" ? `Choose ${label}.` : `Enter ${label}.`;
+}
+
+export function CustomFieldInput({ field, value, onChange, disabled = false, error = "" }) {
   const label = field.label || typeLabel(field.fieldType);
   // `text` is displayed, `value` is stored - so a choice can read "Coimbatore" and file as
   // "Cbe". Rows still being typed carry no text and are not shown.
@@ -233,21 +251,21 @@ export function CustomFieldInput({ field, value, onChange, disabled = false }) {
 
   if (field.fieldType === "textarea") {
     return (
-      <label className="block text-xs font-semibold text-slate-600">
-        <span>{label}{field.required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</span>
-        <textarea
-          value={value || ""}
-          disabled={disabled}
-          placeholder={field.placeholder || ""}
-          onChange={(event) => onChange?.(event.target.value)}
-          className="mt-1.5 block min-h-[5.5rem] w-full resize-y rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-normal text-slate-700 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50"
-        />
-      </label>
+      <TextAreaField
+        label={label}
+        required={field.required}
+        error={error}
+        value={value || ""}
+        disabled={disabled}
+        placeholder={field.placeholder || ""}
+        onChange={(event) => onChange?.(event.target.value)}
+        inputClassName="min-h-[5.5rem] resize-y"
+      />
     );
   }
 
   if (field.fieldType === "date") {
-    return <DateField label={label} required={field.required} value={value || ""} disabled={disabled} onChange={(next) => onChange?.(next)} />;
+    return <DateField label={label} required={field.required} error={error} value={value || ""} disabled={disabled} onChange={(next) => onChange?.(next)} />;
   }
 
   if (field.fieldType === "dropdown") {
@@ -256,6 +274,7 @@ export function CustomFieldInput({ field, value, onChange, disabled = false }) {
         mode="input"
         label={label}
         required={field.required}
+        error={error}
         ariaLabel={label}
         placeholder={field.placeholder || "Select"}
         value={value || ""}
@@ -272,9 +291,9 @@ export function CustomFieldInput({ field, value, onChange, disabled = false }) {
     // needs a name of its own, or two fields sharing a label behave as one group.
     const groupName = `custom-${field.key || label}`;
     return (
-      <fieldset className="text-xs font-semibold text-slate-600">
+      <fieldset className="text-xs font-semibold text-slate-600" aria-invalid={error ? true : undefined}>
         <legend>{label}{field.required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</legend>
-        <div className="mt-1.5 flex min-h-9 flex-wrap items-center gap-4 rounded-lg border border-slate-300 bg-white px-3 py-2">
+        <div className={`mt-1.5 flex min-h-9 flex-wrap items-center gap-4 rounded-lg border bg-white px-3 py-2 ${error ? "border-red-400" : "border-slate-300"}`}>
           {options.map((option) => (
             <SelectableOption
               key={option.value || option.text}
@@ -288,6 +307,7 @@ export function CustomFieldInput({ field, value, onChange, disabled = false }) {
             />
           ))}
         </div>
+        {error && <p role="alert" className="mt-1.5 font-normal text-red-600">{error}</p>}
       </fieldset>
     );
   }
@@ -299,7 +319,7 @@ export function CustomFieldInput({ field, value, onChange, disabled = false }) {
     return (
       <div className="block text-xs font-semibold text-slate-600">
         <span>{label}{field.required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</span>
-        <div className="mt-1.5 flex min-h-9 flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border border-slate-300 bg-white px-3 py-2">
+        <div data-invalid={error ? true : undefined} className={`mt-1.5 flex min-h-9 flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border bg-white px-3 py-2 ${error ? "border-red-400" : "border-slate-300"}`}>
           {options.map((option) => {
             const stored = option.value || option.text;
             return (
@@ -318,6 +338,7 @@ export function CustomFieldInput({ field, value, onChange, disabled = false }) {
             );
           })}
         </div>
+        {error && <p role="alert" className="mt-1.5 font-normal text-red-600">{error}</p>}
       </div>
     );
   }
@@ -327,6 +348,7 @@ export function CustomFieldInput({ field, value, onChange, disabled = false }) {
     <TextField
       label={label}
       required={field.required}
+      error={error}
       type={inputType}
       value={value || ""}
       disabled={disabled}
@@ -336,9 +358,7 @@ export function CustomFieldInput({ field, value, onChange, disabled = false }) {
   );
 }
 
-function FieldCard({ field, index, total, editing, onEdit, onDuplicate, onRemove, onMove, onChange, onSave, onCancel }) {
-  const error = editing ? draftError(field) : "";
-
+function FieldCard({ field, index, total, editing, errors = {}, onEdit, onDuplicate, onRemove, onMove, onChange, onSave, onCancel }) {
   return (
     <li className="rounded-xl border border-slate-200 bg-white">
       <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-2.5">
@@ -380,11 +400,14 @@ function FieldCard({ field, index, total, editing, onEdit, onDuplicate, onRemove
               required
               value={field.label}
               onChange={(event) => onChange({ label: event.target.value })}
+              error={errors[`${field.id}:label`]}
+              helperText="The name staff see above this box on the lead form."
             />
             <Dropdown
               mode="input"
               label="Field type"
               ariaLabel="Field type"
+              helperText="Decides whether staff type, pick a date or choose from options."
               value={field.fieldType}
               onChange={(nextType) => onChange({
                 fieldType: nextType,
@@ -399,16 +422,18 @@ function FieldCard({ field, index, total, editing, onEdit, onDuplicate, onRemove
             {!TYPES_WITH_OPTIONS.includes(field.fieldType) && field.fieldType !== "date" && (
               <TextField
                 label="Placeholder"
+                helperText="Faint example text shown in the empty box, never saved."
                 value={field.placeholder}
                 onChange={(event) => onChange({ placeholder: event.target.value })}
               />
             )}
             {TYPES_WITH_OPTIONS.includes(field.fieldType) && (
-              <OptionsEditor options={field.options} onChange={(options) => onChange({ options })} />
+              <OptionsEditor options={field.options} error={errors[`${field.id}:options`]} onChange={(options) => onChange({ options })} />
             )}
             <div className="sm:col-span-2">
               <ToggleSwitch
                 label="Required"
+                helperText="When on, the lead cannot be saved with this field blank."
                 checked={field.required}
                 onCheckedChange={(checked) => onChange({ required: checked })}
               />
@@ -418,11 +443,10 @@ function FieldCard({ field, index, total, editing, onEdit, onDuplicate, onRemove
           {/* Save commits the card, Cancel puts it back as it was. Without them an edit was
               committed on every keystroke and there was no way to back out of one. */}
           <div className="flex flex-wrap items-center justify-end gap-3 border-t border-slate-200 px-4 py-3">
-            {error && <p role="alert" className="mr-auto text-xs text-rose-600">{error}</p>}
             <Button type="button" variant="secondary" size="sm" onClick={onCancel}>
               Cancel
             </Button>
-            <Button type="button" variant="primary" size="sm" onClick={onSave} disabled={Boolean(error)}>
+            <Button type="button" variant="primary" size="sm" onClick={onSave}>
               Save
             </Button>
           </div>
@@ -489,17 +513,21 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
   const canvasRef = useRef(null);
+  // The red under a card's label or options, set by either Save.
+  const marks = useFormErrors();
 
   function openEditor(field) {
+    marks.clearAll();
     setEditing({ id: field.id, draft: { ...field, options: normalizeOptions(field.options) } });
   }
 
   function patchDraft(patch) {
+    if (editing) Object.keys(patch).forEach((key) => marks.clear(`${editing.id}:${key === "fieldType" ? "options" : key}`));
     setEditing((current) => (current ? { ...current, draft: { ...current.draft, ...patch } } : current));
   }
 
   function commitEditor() {
-    if (!editing || draftError(editing.draft)) return;
+    if (!editing || !marks.check(draftProblems(editing.draft))) return;
     const committed = commitOptions(editing.draft);
     setFields((current) => current.map((field) => (field.id === editing.id ? committed : field)));
     setEditing(null);
@@ -512,6 +540,7 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
     setLoadedBranch(activeVertical);
     setFields((fieldsByVertical[activeVertical] || []).map(toDraft));
     setEditing(null);
+    marks.clearAll();
   }
 
 
@@ -557,6 +586,8 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
   function removeField(id) {
     setFields((current) => current.filter((field) => field.id !== id));
     setEditing((current) => (current?.id === id ? null : current));
+    marks.clear(`${id}:label`);
+    marks.clear(`${id}:options`);
   }
 
   /**
@@ -572,10 +603,6 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
     [editing, fields],
   );
 
-  const invalid = useMemo(
-    () => effectiveFields.map(draftError).find(Boolean) || "",
-    [effectiveFields],
-  );
 
   /*
    * Whether the canvas differs from what this vertical has saved.
@@ -604,7 +631,18 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
   }, [unsaved, unsavedRef]);
 
   async function save() {
-    if (invalid || saving) return;
+    if (saving) return;
+    // A card that cannot be saved is opened, so the red under its label or options is on screen.
+    const broken = effectiveFields.find((field) => Object.values(draftProblems(field)).some(Boolean));
+    if (broken) {
+      setPreview(false);
+      if (broken.id !== editing?.id) {
+        setFields(effectiveFields);
+        openEditor(broken);
+      }
+      marks.check(draftProblems(broken));
+      return;
+    }
     setSaving(true);
     try {
       // commitOptions turns an open editor's raw text into the list before it is sent; `id`
@@ -650,6 +688,7 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
           mode="input"
           label="Module"
           ariaLabel="Module"
+          helperText="The sidebar module whose form you are adding fields to."
           placeholder="Select module"
           value={moduleId}
           onChange={(value) => guardPickerChange(() => {
@@ -670,6 +709,7 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
           mode="input"
           label="Screen"
           ariaLabel="Screen"
+          helperText="The screen inside that module that shows these fields."
           placeholder={screenEnabled ? "Select screen" : "Select a module first"}
           value={screenId}
           disabled={!screenEnabled}
@@ -685,6 +725,7 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
           mode="input"
           label="Vertical"
           ariaLabel="Vertical"
+          helperText="Each vertical keeps its own set of extra fields."
           placeholder={!screenId ? "Select a screen first" : verticalEnabled ? "Select vertical" : "No table fields on this screen"}
           value={activeVertical}
           disabled={!verticalEnabled}
@@ -694,11 +735,11 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
           className="w-full sm:w-[13rem]"
         />
         <div className="ml-auto flex flex-wrap items-center gap-3">
-          <ToggleSwitch label="Preview" checked={preview} onCheckedChange={setPreview} />
+          <ToggleSwitch label="Preview" helperText="Shows the fields as Add Lead will lay them out." checked={preview} onCheckedChange={setPreview} />
           <Button type="button" variant="secondary" onClick={() => setLoadedBranch("")} disabled={saving || !ready}>
             Cancel
           </Button>
-          <Button type="button" variant="primary" onClick={() => void save()} disabled={saving || !ready || Boolean(invalid)}>
+          <Button type="button" variant="primary" onClick={() => void save()} disabled={saving || !ready}>
             {saving ? "Saving..." : "Save"}
           </Button>
         </div>
@@ -720,8 +761,7 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {!preview && (
           <aside className="w-[16rem] shrink-0 overflow-y-auto border-r border-slate-200 bg-white px-4 py-4">
-            <h3 className="text-sm font-semibold text-slate-800">Form Fields</h3>
-            <p className="mt-1 text-xs text-slate-500">Pick a field to add it to the form.</p>
+            <h3 className="flex items-center text-sm font-semibold text-slate-800">Form Fields<HelpTip text="Pick a field to add it to the form." /></h3>
             <ul className="mt-3 space-y-2">
               {FIELD_TYPES.map((item) => (
                 <li key={item.type}>
@@ -755,6 +795,7 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
                   onClick={() => {
                     setFields([]);
                     setEditing(null);
+                    marks.clearAll();
                   }}
                 >
                   Delete All
@@ -762,8 +803,8 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
               )}
             </div>
 
-            {invalid && !preview && (
-              <p role="alert" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{invalid}</p>
+            {marks.summary && !preview && (
+              <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{marks.summary}</p>
             )}
 
             {fields.length === 0 ? (
@@ -792,13 +833,14 @@ export default function TableSettingsPanel({ verticalOptions, fieldsByVertical, 
                     index={index}
                     total={fields.length}
                     editing={editing?.id === field.id}
-                    onEdit={() => (editing?.id === field.id ? setEditing(null) : openEditor(field))}
+                    errors={marks.errors}
+                    onEdit={() => { if (editing?.id === field.id) { marks.clearAll(); setEditing(null); } else openEditor(field); }}
                     onDuplicate={() => duplicateField(field.id)}
                     onRemove={() => removeField(field.id)}
                     onMove={moveField}
                     onChange={patchDraft}
                     onSave={commitEditor}
-                    onCancel={() => setEditing(null)}
+                    onCancel={() => { marks.clearAll(); setEditing(null); }}
                   />
                 ))}
               </ul>

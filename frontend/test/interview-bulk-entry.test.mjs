@@ -29,7 +29,14 @@ const interviewFile = (...parts) => fs.readFileSync(path.join(HERE, "..", "src",
 const DIALOG = interviewFile("components", "hrm", "InterviewBulkEntryDialog.js");
 const PAGE = interviewFile("components", "hrm", "InterviewPage.js");
 const ADD = interviewFile("components", "hrm", "InterviewAddApplicationDialog.js");
-const RECORD = interviewFile("components", "hrm", "InterviewCandidateFormPanel.js");
+const RECORD = interviewFile("components", "hrm", "InterviewCandidatePopup.js");
+/*
+ * The record form's apparatus - its four custom controls, its eleven option lists and the payload
+ * shaping that keeps an update from blanking columns the form does not draw - moved out of the panel
+ * the popup replaced into a module of its own. The rules below still hold; they are just read from
+ * where they now live rather than from the screen that draws them.
+ */
+const RECORD_FORM = interviewFile("components", "hrm", "candidateRecordForm.js");
 const INVITES = interviewFile("components", "hrm", "InterviewApplicationInviteDialog.js");
 const { applicationFormSections, applicationInitialValues, missingApplicationFields, requiredApplicationFields, totalExperienceFrom, EXPERIENCE_LEVELS, MAX_ATTACHMENTS, MAX_PORTFOLIO_LINKS, NOTICE_PERIODS } = await import("../src/constants/interviewApplicationConfig.js");
 
@@ -87,7 +94,7 @@ test("nobody is assigned a batch, because there is nobody to assign it to", () =
    * the comment that explains why it is gone, and a test that reads prose as a control is a test
    * that fails on a comment.
    */
-  for (const [name, file] of [["Bulk Entry", DIALOG], ["Add Application", ADD], ["the record panel", RECORD]]) {
+  for (const [name, file] of [["Bulk Entry", DIALOG], ["Add Application", ADD], ["the record form", RECORD_FORM]]) {
     assert.equal(file.includes("options.interviewers"), false, `${name} should not draw an interviewer picker`);
   }
   assert.equal(ADD.includes('label="Assign To"'), false, "Add Application should not draw an Assign To picker");
@@ -136,8 +143,9 @@ test("the action bar is the primary button and one ⋮ holding the other three w
   for (const entry of ["Bulk Entry", "Import", "View All Invites"]) {
     assert.match(PAGE, new RegExp(`label: "${entry}"`), `${entry} is not in the header's ⋮`);
   }
-  // Every one of them is behind the screen's own write, so nothing opens onto a refusal.
-  assert.match(PAGE, /actions=\{!canWrite \? null :/);
+  // Every one of them is behind the screen's own write, so nothing opens onto a refusal - a reader
+  // gets the Table / Board switch alone.
+  assert.match(PAGE, /actions=\{!canWrite \? <TableBoardSwitch value=\{layout\} onChange=\{changeLayout\} \/> :/);
 });
 
 test("Add Application is a dialog on Add Lead's own shape, not a full-screen form", () => {
@@ -178,12 +186,22 @@ test("Add Application asks the eight it needs and none of what the record holds"
   /*
    * The whole of the complaint this answers: an application arrives as a name, a number and the job
    * they are after, and everything else is either not known yet or is the candidate's own to type.
-   * The three marked are what make a candidate findable and filable.
    */
   for (const label of ["Candidate Name", "Contact", "Position Applied For", "Email", "Experience", "Source", "Next Follow-up Date", "Remarks"]) {
     assert.ok(ADD.includes(`"${label}"`) || ADD.includes(`label="${label}"`) || ADD.includes(`>${label}<`), `Add Application should ask for ${label}`);
   }
-  assert.match(ADD, /const REQUIRED = \[\["name", "Candidate Name"\], \["phone", "Contact"\], \["position", "Position Applied For"\]\]/);
+  /*
+   * **Two** are required, and Position Applied For is not one of them.
+   *
+   * A name and a number are what make a candidate findable and reachable, and nothing can be done
+   * about somebody the register cannot ring. The job they are after is genuinely often not known at
+   * the moment the application is written down - a walk-in, a number passed on by a friend of the
+   * studio, a CV in the inbox with no covering note - and refusing the row for it meant either a
+   * guess typed into the field or the candidate not being written down at all. The candidate's own
+   * screening form still asks them, which is where the real answer comes from.
+   */
+  assert.match(ADD, /const REQUIRED = \[\["name", "Candidate Name"\], \["phone", "Contact"\]\];/);
+  assert.equal(/"position", "Position Applied For"\]\]/.test(ADD), false, "the position is no longer refused for being blank");
 
   /*
    * Everything here belongs to the record rather than to the moment an application arrives. Each is
@@ -306,16 +324,32 @@ test("no screen asks for a stage that an act already sets", () => {
   assert.equal(CONFIG.includes("export const addApplicationStatuses"), false);
 });
 
-test("a double-click reads the record and never opens it for editing", () => {
+test("a double-click opens the candidate popup, and closing it asks once there is something to lose", () => {
   /*
-   * The gesture every table in the OS answers the same way, and this screen was the one that did
-   * not: it opened a live form. A double-click is too easy to trigger by accident - a slow second
-   * click on a row somebody meant to select - for it to be what puts boxes and a Save on screen.
-   * Editing is asked for by name, from the ⋮, which is where the rules about who may edit already
-   * live. `RecordViewPanel` is the same panel the Employee Repository shows.
+   * **This reverses a rule, deliberately, and the reason the old one existed still stands.**
+   *
+   * A double-click used to open a read-only panel, because a double-click is easy to trigger by
+   * accident - a slow second click on a row somebody meant to select - and that is a poor gesture for
+   * putting a live form on screen. The studio asked for the CRM's own arrangement instead: one popup
+   * where a candidate is read, corrected, noted and moved, reached by the double-click and by the ⋮.
+   *
+   * So the hazard is answered by a different means rather than ignored. An accidental open closes on
+   * one press; one with typing in it asks first, through the same `useUnsavedGuard` Add Lead uses. The
+   * comparison is against the record as it arrived, so a field typed into and back out of is not an
+   * unsaved change and does not nag.
    */
-  assert.match(PAGE, /onRowDoubleClick=\{setViewCandidate\}/);
-  assert.equal(/onRowDoubleClick=\{[^}]*setEditCandidate/.test(PAGE), false, "a double-click must not open the form");
+  assert.match(PAGE, /onRowDoubleClick=\{openCandidatePopup\}/);
+  const POPUP = interviewFile("components", "hrm", "InterviewCandidatePopup.js");
+  assert.match(POPUP, /useUnsavedGuard\(dirty, \{/);
+  /*
+   * Against the record as last **written** rather than as handed in, because the popup now stays open
+   * across a save - scheduling and sending the screening form both save and leave it up. Compared
+   * against the prop, everything already written still counted as unsaved and Discard asked about
+   * changes that were safely on the server.
+   */
+  assert.match(POPUP, /JSON\.stringify\(values\) !== JSON\.stringify\(candidateFormValues\(record\)\)/);
+  // Every way out goes through it - the backdrop, the header's close, and the footer's Discard.
+  assert.equal(POPUP.split("requestClose").length - 1 >= 4, true, "every way out must be guarded");
   assert.match(PAGE, /<RecordViewPanel/);
   assert.match(PAGE, /sections=\{candidateInfoSections\}/);
   // View in the menu opens that same record, exactly as the repository's View does, and is enabled.
@@ -334,31 +368,30 @@ test("the row menu's entries are named plainly, with no trailing ellipsis", () =
   // "Edit" is `reviewing ? "Review" : "Edit"` - the same entry, asking the question the row is
   // actually asking - so it is checked as the words rather than as a whole literal.
   assert.match(PAGE, /reviewing \? "Review" : "Edit"/);
-  for (const label of ["Send Screening Form", "Delete"]) {
+  for (const label of ["Copy Link", "Delete"]) {
     assert.match(PAGE, new RegExp(`label: "${label}"`), `${label} should be the label`);
     assert.equal(PAGE.includes(`label: "${label}..."`), false, `${label} should carry no ellipsis`);
   }
 });
 
 test("the form a candidate is sent is called the Screening Form throughout", () => {
-  assert.match(PAGE, /label: "Send Screening Form"/);
   /*
-   * On the record it is drawn from `formAction` rather than written into the footer, because the
-   * button there is one of two: a candidate who has not answered is asked with **Send Screening
-   * Form**, and one who has gets **Resend Form** in its place. The names are still the module's own
-   * - what changed is which of them the footer is holding.
+   * Sending one is a row menu entry no more - see `interview-review.test.mjs` for the popup's own
+   * footer button that went with it - but the choice between **Send Screening Form** and **Resend**
+   * still reads on `formSubmitted` in `STATUS_ACTS`, which the **Form Submission Pending** pill now
+   * fires directly. The names are still the module's own - what changed is which control holds them.
    */
-  assert.match(RECORD, /label: "Send Screening Form", onClick: saveThenSend/);
-  assert.match(RECORD, /label: review \? "Resend" : "Resend Form", onClick: saveThenResend/);
+  assert.match(RECORD, /\[FORM_PENDING_STATUS\]: \{ handler: \(props\) => \(props\.formSubmitted \? props\.onResendApplicationForm : props\.onSendApplicationForm\) \}/);
   for (const file of [PAGE, RECORD, ADD]) assert.equal(/Send Application Form/.test(file), false);
 });
 
 test("Remarks carries no placeholder", () => {
   // The heading says what the box is for; a sentence of example text inside an empty box is one
   // more thing to read past.
-  assert.match(ADD, /<h4 className="text-sm font-semibold text-slate-600">Remarks<\/h4>[\s\S]{0,400}?<TextAreaField[\s\S]{0,300}?\/>/);
+  assert.match(ADD, /<h4 className="text-sm font-semibold text-slate-600">Remarks(?:<HelpTip text="[^"]*" \/>)?<\/h4>[\s\S]{0,400}?<TextAreaField[\s\S]{0,300}?\/>/);
   const remarks = ADD.slice(ADD.indexOf(">Remarks<"));
-  const control = remarks.slice(0, remarks.indexOf("/>"));
+  const area = remarks.slice(remarks.indexOf("<TextAreaField"));
+  const control = area.slice(0, area.indexOf("/>"));
   assert.equal(control.includes("placeholder"), false, "the Remarks box should have no placeholder");
   const CONFIG = interviewFile("constants", "interviewConfig.js");
   assert.match(CONFIG, /name: "remarks", label: "Remarks", type: "textarea", props: \{ rows: 6 \}/);
@@ -378,7 +411,7 @@ test("where an application came from is the studio's list, not an array in the c
    */
   const CONFIG = interviewFile("constants", "interviewConfig.js");
   assert.equal(CONFIG.includes("CANDIDATE_SOURCES"), false, "the source list should not be an array in the config");
-  for (const [name, file] of [["Add Application", ADD], ["Bulk Entry", DIALOG], ["the record panel", RECORD]]) {
+  for (const [name, file] of [["Add Application", ADD], ["Bulk Entry", DIALOG], ["the record form", RECORD_FORM]]) {
     assert.equal(file.includes("CANDIDATE_SOURCES"), false, `${name} should not fall back to a hardcoded source list`);
     assert.match(file, /options\.sources \|\| \[\]/, `${name} should read the studio's own source list`);
   }
@@ -410,7 +443,7 @@ test("the table opens on the studio's own hiring sheet, in the sheet's order", (
    * what the candidate answered, then who they are. Somebody moving off the spreadsheet is not
    * relearning their own register.
    *
-   * `Sl. No.` is not in this list and should not be - the shared table numbers its own rows.
+   * `Sl. No.` is not in this list and should not be - no table carries a row number.
    */
   const hidden = new Set(candidateDefaultHiddenColumns);
   const visible = candidateTableFields.filter(([key]) => !hidden.has(key));
@@ -436,7 +469,7 @@ test("the table opens on the studio's own hiring sheet, in the sheet's order", (
   // The two follow-up dates read together or not at all, so they open side by side.
   const followUps = visible.map(([key]) => key);
   assert.equal(followUps.indexOf("nextFollowUpDate") - followUps.indexOf("lastFollowUpDate"), 1);
-  assert.equal(candidateTableFields.some(([key]) => key === "serial"), false, "the shared table adds Sl. No. itself");
+  assert.equal(candidateTableFields.some(([key]) => key === "serial"), false, "no table carries a Sl. No.");
   // Applied On is gone as a header: it is the Date column, one column and the studio's word for it.
   assert.equal(candidateTableFields.some(([, header]) => header === "Applied On"), false);
   assert.equal(candidateTableFields.some(([, header]) => header === "Interview Date"), false, "renamed to Interview Scheduled On");
@@ -470,7 +503,7 @@ test("the three ad columns are asked for everywhere a candidate can arrive from 
   const IMPORTS = interviewFile("constants", "importColumns.js");
   for (const [key, label] of [["campaignName", "Campaign Name"], ["adsetName", "Adset Name"], ["adName", "Ad Name"]]) {
     assert.ok(candidateTableFields.some(([field, header]) => field === key && header === label), `${label} should be a column`);
-    assert.match(CONFIG, new RegExp(`\\{ name: "${key}", label: "${label}", type: "text" \\}`), `${label} should be on the record`);
+    assert.match(CONFIG, new RegExp(`\\{ name: "${key}", label: "${label}", type: "text"(, helperText: "[^"]*")? \\}`), `${label} should be on the record`);
     assert.match(IMPORTS, new RegExp(`column\\("${key}", "${label}"\\)`), `${label} should be a CSV column`);
     assert.match(CONFIG, new RegExp(`\\["${key}", "${label}"\\]`), `${label} should be on the info panel`);
   }
@@ -671,9 +704,9 @@ test("a stage is moved through the status route, not the full update", () => {
 test("a row at any other stage keeps the plain menu", () => {
   // Anchored on the hoisted Edit, which every stage now gets - it was `...(editable ? ...)` while
   // the stage decided whether a record could be corrected at all.
-  const plainBranch = PAGE.slice(PAGE.indexOf("\n          editItem,"));
-  assert.match(PAGE, /const editItem = \{ label: reviewing \? "Review" : "Edit", onSelect: \(\) => setEditCandidate\(candidate\) \}/);
-  assert.ok(plainBranch.includes('label: "Send Screening Form"'));
+  const plainBranch = PAGE.slice(PAGE.indexOf("\n      editItem,"));
+  assert.match(PAGE, /const editItem = \{ label: reviewing \? "Review" : "Edit", onSelect: \(\) => openCandidatePopup\(candidate\) \}/);
+  assert.ok(plainBranch.includes('label: "Copy Link"'));
   assert.ok(plainBranch.includes('label: "Delete", tone: "danger"'));
   /*
    * And the menu stays one list of plain words: no rules between the entries and no second lines,
@@ -687,12 +720,14 @@ test("a row at any other stage keeps the plain menu", () => {
 
 test("somebody who has answered is never asked again from the row", () => {
   /*
-   * The wart this fixes: a submitted form is not *live*, so the row fell through to the state that
+   * The wart this fixed: a submitted form is not *live*, so the row fell through to the state that
    * had never been asked and offered **Send Screening Form** - to the one candidate who had already
-   * filled it in. Now that state offers nothing about the form, and Edit is the answer.
+   * filled it in. Sending one at all is gone from the row now - it is the **Form Submission
+   * Pending** pill's errand, in the popup Edit already opens - so there is no state left for a
+   * submitted form to fall through to: `form?.live` is the only question the plain menu asks.
    */
   assert.match(PAGE, /submitted: invite\.status === "Submitted"/);
-  assert.match(PAGE, /form\?\.submitted \? \[\]/);
+  assert.equal(PAGE.includes("form?.submitted"), false, "there is no submitted-specific fallback left to ask for");
 });
 
 test("only a form the candidate can still open counts as one that is out", () => {
@@ -991,7 +1026,7 @@ test("the form ends with two answerable questions rather than one shapeless box"
   // HR reads both on the record, under their own heading rather than mixed into Remarks.
   const CONFIG = interviewFile("constants", "interviewConfig.js");
   assert.match(CONFIG, /title: "In Their Words"/);
-  assert.match(CONFIG, /\{ name: "howYouKnowUs", label: "How do you know us\?", type: "text" \}/);
+  assert.match(CONFIG, /\{ name: "howYouKnowUs", label: "How do you know us\?", type: "text"(, helperText: "[^"]*")? \}/);
   // Available in the table, but not what the register opens on - the treatment Remarks gets.
   assert.ok(candidateDefaultHiddenColumns.includes("howYouKnowUs"));
   assert.ok(candidateDefaultHiddenColumns.includes("aboutUs"));
@@ -1047,8 +1082,8 @@ test("the record reads back the application the candidate filled in", () => {
   assert.match(CONFIG, /portfolioLinks: candidate\?\.portfolioLinks\?\.length/);
 
   // The record draws the lists with the application's own controls rather than its own copies.
-  const PANEL = interviewFile("components", "hrm", "InterviewCandidateFormPanel.js");
-  assert.match(PANEL, /<RepeatableTextList/);
+  const PANEL = interviewFile("components", "hrm", "candidateRecordForm.js");
+  assert.match(RECORD_FORM, /<RepeatableTextList/);
   assert.match(PANEL, /<RepeatableDetailsField/);
   assert.match(PANEL, /renderers: candidateRenderers/);
   // Attachments are read, not edited, and never sent: the update endpoint does not take the key.
@@ -1098,16 +1133,13 @@ test("the studio's decision about a candidate is asked apart from their record",
   const recordNames = candidateFormSections.flatMap((section) => section.fields).map((field) => field.name);
   for (const name of screeningNames) assert.equal(recordNames.includes(name), false, `${name} belongs to Schedule Interview, not the record`);
 
-  // Reached from the row's ⋮, on every row and in both menus - a candidate is scheduled, moved or
-  // rescheduled at any point, including while a screening form is still out.
+  // Booking a round is the popup's own **Interview Scheduled** pill now, not a row menu entry - see
+  // `interview-review.test.mjs` and `interview-candidate-popup.test.mjs` for that move. **Edit
+  // Schedule** stays on the row for correcting one already booked, which no pill can do.
   const PAGE = interviewFile("components", "hrm", "InterviewPage.js");
-  assert.match(PAGE, /label: scheduled \? "Schedule Next Round" : "Schedule Interview",/);
-  /*
-   * On the plain menu only. A row **waiting on its screening form** is not scheduled from here: a
-   * conversation goes in the diary after the form has been read, not before it has arrived.
-   */
-  assert.equal(PAGE.split("scheduleItem,").length - 1, 1, "not while the studio is waiting on the form");
-  assert.equal(waitingBranch().includes("scheduleItem"), false);
+  assert.equal(PAGE.includes('label: scheduled ? "Schedule Next Round" : "Schedule Interview",'), false);
+  assert.equal(PAGE.includes("scheduleItem"), false, "scheduling is a pill away, not a menu item");
+  assert.match(PAGE, /const editScheduleItem = scheduled/);
   assert.match(PAGE, /<InterviewScheduleDialog/);
 
   /*
@@ -1123,8 +1155,8 @@ test("the studio's decision about a candidate is asked apart from their record",
   assert.match(DIALOG, /scheduleInterview\(candidate\.id, \{/);
   assert.equal(DIALOG.includes("candidateFormValues"), false, "the schedule dialog no longer sends the whole record");
   assert.equal(DIALOG.includes("updateCandidate"), false, "scheduling goes through its own route, not the full update");
-  const PANEL = interviewFile("components", "hrm", "InterviewCandidateFormPanel.js");
-  assert.match(PANEL, /status: values\.status \|\| candidate\?\.status \|\| DEFAULT_CANDIDATE_STATUS,/);
+  const PANEL = interviewFile("components", "hrm", "candidateRecordForm.js");
+  assert.match(RECORD_FORM, /status: values\.status \|\| candidate\?\.status \|\| DEFAULT_CANDIDATE_STATUS,/);
 });
 
 test("the three interview modes read apart, and a Meet is joined from the row", () => {
@@ -1177,17 +1209,15 @@ test("a Selected candidate's row offers taking them on, and nothing about decidi
   /*
    * Every other stage is somewhere in a conversation; this one is finished. The only things left to
    * do about the person are to take them on, read them, correct them, change the answer or remove
-   * them - so the menu is those five. A row that still offered a screening form to somebody who has
-   * been given the job, or a round to schedule after the answer, read as a register that had not
-   * noticed it had decided.
+   * them. Taking them on is the popup's own **Onboarded** pill now, in the Edit every stage already
+   * has - a row-menu entry beside it would be a second way to ask for the one thing, which is why
+   * the branch itself carries only the answer changing again and removing them.
    */
   const branch = selectedBranch();
-  for (const label of ["Send Onboarding Invite", "Edit", "Delete"]) {
-    assert.ok(branch.includes(`label: "${label}"`) || branch.includes("rejectItem"), `${label} belongs on a Selected row`);
-  }
-  assert.ok(branch.includes("onboardingItem"));
   assert.ok(branch.includes("rejectItem"), "the answer can still be changed");
-  for (const gone of ["Send Screening Form", "Copy Link", "Schedule", "Mark Selected", "Put On Hold"]) {
+  assert.ok(branch.includes('label: "Delete", tone: "danger"'));
+  assert.equal(branch.includes("onboardingItem"), false, "taking them on is the popup's pill now, not a row menu entry");
+  for (const gone of ["Send Onboarding Invite", "Send Screening Form", "Copy Link", "Schedule", "Mark Selected", "Put On Hold"]) {
     assert.equal(branch.includes(gone), false, `${gone} is not what a Selected row is for`);
   }
 
@@ -1236,21 +1266,24 @@ test("a row is only offered the answers its stage can actually give", () => {
   assert.doesNotMatch(PAGE, /beforeAnyone/, "the stage gate on Mark Selected is back");
 
   /*
-   * **Scheduling** is off the waiting row for the same reason one stage earlier: a conversation is
-   * put in the diary after the form has been read, not before it has arrived. Both come back the
-   * moment the form does.
+   * **Booking the first round** is a row-menu entry nowhere at all now - it is the popup's own
+   * **Interview Scheduled** pill, reached through Edit. **Booking a next one**, and **correcting**
+   * one already booked, stay menu entries - a pill cannot ask either, since the candidate does not
+   * change stage for a second round and there is no stage to say "correct this". Both are still
+   * withheld from the waiting row, for the same reason a first round is: nothing is booked, or
+   * corrected, against a form that has not come back.
    */
   const waiting = waitingBranch();
-  assert.equal(waiting.includes("scheduleItem"), false, "nothing is booked against answers nobody has");
-  assert.equal(waiting.includes("selectItem"), false, "and nobody is selected off a form that has not arrived");
+  assert.equal(waiting.includes("scheduleNextItem"), false, "not while the studio is waiting on the form");
+  assert.equal(waiting.includes("selectItem"), false, "nobody is selected off a form that has not arrived");
   // What is left is the waiting itself, and the two stops that are always available.
   assert.ok(waiting.includes("holdItem"));
   assert.ok(waiting.includes("rejectItem"));
   assert.ok(waiting.includes('label: "Cancel Form"'));
 
-  // The plain menu keeps both, which is where they belong.
+  // The plain menu carries both real menu decisions: a next round, and the correction beside it.
   const plain = plainBranch();
-  assert.ok(plain.includes("scheduleItem"));
+  assert.ok(plain.includes("scheduleNextItem"), "a next round is still a menu item, not a pill");
   assert.ok(plain.includes("selectItem"));
 });
 
@@ -1349,10 +1382,17 @@ test("a second conversation is a round, not a correction of the first", () => {
    * third.
    */
   const PAGE = interviewFile("components", "hrm", "InterviewPage.js");
-  // What the row is actually asking for, by whether this candidate has been called before.
+  // Booking the *first* round is the popup's own Interview Scheduled pill now, and it asks the same
+  // question there for whichever mode the act itself needs - `alreadySeen` reads the same
+  // `interviewRound` the row menu's own `scheduled` does.
+  assert.match(PAGE, /const alreadySeen = Number\(target\?\.interviewRound\) > 0;/);
+  assert.match(PAGE, /mode: alreadySeen \? SCHEDULE_MODES\.next : SCHEDULE_MODES\.first/);
+  // A *next* round stays a menu entry - no pill can ask for one, since the candidate does not
+  // change stage for a second round - and Edit Schedule beside it is the correction, appearing
+  // only where there is something to correct or a round to add to.
   assert.match(PAGE, /const scheduled = Number\(candidate\.interviewRound\) > 0;/);
-  assert.match(PAGE, /label: scheduled \? "Schedule Next Round" : "Schedule Interview",/);
-  // Edit Schedule is the correction, and appears only where there is something to correct.
+  assert.match(PAGE, /const scheduleNextItem = scheduled/);
+  assert.match(PAGE, /label: "Schedule Next Round"/);
   assert.match(PAGE, /const editScheduleItem = scheduled/);
   assert.match(PAGE, /label: "Edit Schedule"/);
   assert.equal(PAGE.split("editScheduleItem ? [editScheduleItem] : []").length - 1, 1, "beside the scheduling it corrects");
@@ -1421,6 +1461,18 @@ test("a second conversation is a round, not a correction of the first", () => {
   assert.match(CELLS, /type === "number" \|\| type === "amount" \|\| type === "round"/);
 });
 
+test("the position applied for is asked everywhere and refused nowhere", () => {
+  /*
+   * One rule, in the three places it is enforced, because a field the form marks required and the
+   * validator does not - or the other way round - is a red asterisk over a save that goes through, or
+   * a save refused for a field with no mark on it.
+   */
+  const CONFIG = interviewFile("constants", "interviewConfig.js");
+  assert.match(CONFIG, /\{ name: "position", label: "Position Applied For", type: "combobox", options: "positions"/);
+  assert.equal(/name: "position"[^}]*required: true/.test(CONFIG), false, "the record's own field is not required");
+  assert.equal(/found\.position = /.test(RECORD_FORM), false, "the validator must not refuse a blank position");
+});
+
 test("the record asks fresher-or-experienced the way the form does, already answered", () => {
   /*
    * The same dropdown, and the same branch behind it - but read back off the record rather than
@@ -1450,8 +1502,8 @@ test("the record asks fresher-or-experienced the way the form does, already answ
    * rows add up to - but keeps the column's own text where there are no rows, so a sheet's
    * "2-3 yrs" is not destroyed by a screen that simply had nothing to put in its place.
    */
-  const PANEL = interviewFile("components", "hrm", "InterviewCandidateFormPanel.js");
-  assert.match(PANEL, /summed \|\| candidate\?\.experience \|\| ""/);
+  const PANEL = interviewFile("components", "hrm", "candidateRecordForm.js");
+  assert.match(RECORD_FORM, /summed \|\| candidate\?\.experience \|\| ""/);
   assert.match(PANEL, /experienceLevel: undefined,/);
 });
 

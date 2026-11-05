@@ -7,6 +7,7 @@ const activity = require("../shared/activity");
 const { mergeGroup } = require("../shared/settingsDefaults");
 const people = require("../people/clustering");
 const matching = require("../matches/matching");
+const runs = require("./runs");
 
 const MODEL = process.env.AI_FACE_MODEL_NAME || "buffalo_l";
 const FACE_THUMB_EDGE = 160;
@@ -66,6 +67,9 @@ async function processMedia(mediaId) {
   // an original may be HEIC or a 60 MB TIFF the engine would choke on for no gain in faces found.
   const frame = await fetchPublic(media.previewKey);
   const result = await engine.describe(frame);
+  // The photo may have been deleted while the engine looked at it (a single delete, or its folder's):
+  // nothing is written into a row on its way out, or the discard would find faces it never cleared.
+  if (await goneMeanwhile(mediaId)) return { skipped: "gone" };
   const faces = [];
   for (const found of result.faces) {
     const thumbnailKey = await cropFace(media.eventId, frame, found.box, result.width, result.height).catch(() => null);
@@ -82,14 +86,22 @@ async function processMedia(mediaId) {
   if (ai.faceClustering && usable.length) await people.assignFaces(media.eventId, usable, ai);
   if (ai.automaticMatching && usable.length) await matching.matchFacesToGuests(media.eventId, mediaId, usable, ai);
 
+  if (await goneMeanwhile(mediaId)) return { skipped: "gone" };
   await prisma.aiEventMedia.update({ where: { id: mediaId }, data: { aiStatus: "COMPLETED", aiCompletedAt: new Date(), faceCount: faces.length, aiError: null } });
   await announceIfFinished(media.eventId);
   return { faces: faces.length };
 }
 
+/** Whether the photo was deleted (marked, or already gone) since the job read it. */
+async function goneMeanwhile(mediaId) {
+  const row = await prisma.aiEventMedia.findUnique({ where: { id: mediaId }, select: { deletedAt: true } });
+  return !row || Boolean(row.deletedAt);
+}
+
 async function failMedia(mediaId, message) {
-  const media = await prisma.aiEventMedia.findUnique({ where: { id: mediaId }, select: { eventId: true, fileName: true, aiStatus: true } });
-  if (!media) return;
+  const media = await prisma.aiEventMedia.findUnique({ where: { id: mediaId }, select: { eventId: true, fileName: true, aiStatus: true, deletedAt: true } });
+  // A deleted photo is nobody's failure: nothing to mark, nothing to say on the timeline.
+  if (!media || media.deletedAt) return;
   // An engine outage is not the photo's fault: it stays QUEUED for the next retry-failed or restart.
   // The worker already skips these by error code; the message check is the belt to that brace.
   if (/Face engine unavailable|AI_FACE_ENGINE_ENABLED|not installed|is starting/i.test(message || "")) return;
@@ -97,8 +109,14 @@ async function failMedia(mediaId, message) {
   await activity.record(media.eventId, activity.EVENTS.AI_PROCESSING_FAILED, activity.systemActor(), media.fileName);
 }
 
-/** Once nothing is left queued or processing, say so once on the timeline. */
+/**
+ * Once nothing is left queued or processing, say so once on the timeline. Called after a photo
+ * completes - here and in the desktop hand-off (ingest.js) - so it is also where a finished photo
+ * is noted on the event's processing run (runs.touch, which never throws): that is what lets a photo
+ * left over from a stalled run still reach the guest's next summary.
+ */
 async function announceIfFinished(eventId) {
+  runs.touch(eventId);
   const open = await prisma.aiEventMedia.count({ where: { eventId, deletedAt: null, aiStatus: { in: ["QUEUED", "PROCESSING"] } } });
   if (open) return;
   const last = await prisma.aiEventActivity.findFirst({ where: { eventId, event: { in: [activity.EVENTS.AI_PROCESSING_COMPLETED, activity.EVENTS.AI_PROCESSING_STARTED, activity.EVENTS.MEDIA_UPLOADED] } }, orderBy: { createdAt: "desc" }, select: { event: true } });
@@ -115,4 +133,5 @@ async function matchGuestFace(guestFaceId) {
   return matching.matchGuestAgainstEvent(guestFace.eventId, guestFace.guestId, vectors.decode(guestFace.vector), ai);
 }
 
-module.exports = { processMedia, failMedia, matchGuestFace, aiSettingsFor };
+// `fetchPublic`, `cropFace` and `announceIfFinished` are shared with `ingest.js` (the desktop hand-off), which mirrors this write path without the engine.
+module.exports = { processMedia, failMedia, matchGuestFace, aiSettingsFor, fetchPublic, cropFace, announceIfFinished };

@@ -1,5 +1,5 @@
 /**
- * The module assistant's thread, for as long as the page is open.
+ * The module assistant's thread: one conversation across every section, kept while it is in use.
  *
  * A plain object in module scope, which is the whole trick: it outlives the panel being closed and
  * reopened, and outlives navigating between screens, because the floating button lives in the app
@@ -11,37 +11,58 @@
  * `localStorage` is further still from what is wanted. Memory is the only store with the lifetime
  * being asked for.
  *
- * Keyed by module, so walking from the CRM to Assets starts a fresh thread rather than carrying a
- * conversation about leads into a question about cameras.
+ * **One thread, not one per section.** It was keyed by module, so asking in Projects and walking to
+ * HRM showed an empty panel - the conversation was still there, filed under a screen you had left.
+ * Each turn now carries the section it was asked in, so the thread can say where it moved; what the
+ * answer may read is still the section's own, decided by the server for every question.
+ *
+ * **Forgotten after 30 minutes of quiet.** Counted from the last question asked or answer received -
+ * not from opening the panel, which is looking rather than talking - so a thread from this morning
+ * does not lead an afternoon question astray.
  *
  * The lead assistant does not use this. Its conversations are kept per lead in `localStorage` and
  * are meant to persist - a note about a client is worth having tomorrow, whereas a scratchpad
  * beside a dashboard is not.
  */
 
-const threads = new Map();
+export const IDLE_LIMIT_MS = 30 * 60 * 1000;
 
-/** What has been said in this module, this page-load. Never null - an empty thread is a thread. */
-export function readThread(module) {
-  return threads.get(String(module || "")) || [];
+let thread = [];
+let lastActiveAt = 0;
+
+/** When the thread is forgotten, or 0 while there is nothing to forget. */
+export function expiresAt() {
+  return thread.length && lastActiveAt ? lastActiveAt + IDLE_LIMIT_MS : 0;
+}
+
+/** Forgets the conversation. */
+export function clearThread() {
+  thread = [];
+  lastActiveAt = 0;
+}
+
+/** What has been said, unless it has gone quiet for too long. Never null - an empty thread is a thread. */
+export function readThread(now = Date.now()) {
+  const expiry = expiresAt();
+  if (expiry && now >= expiry) clearThread();
+  return thread;
 }
 
 /**
- * Replaces a module's thread.
+ * Replaces the thread.
  *
  * Stores a copy rather than the caller's array. React hands back a new array on every change, but a
  * caller that mutated one in place would otherwise be editing what is stored here as a side effect.
+ * Writing is not activity - the panel writes what it was handed back the moment it opens.
  */
-export function writeThread(module, turns) {
-  const key = String(module || "");
-  if (!key) return;
-  threads.set(key, Array.isArray(turns) ? [...turns] : []);
+export function writeThread(turns) {
+  thread = Array.isArray(turns) ? [...turns] : [];
+  if (!thread.length) lastActiveAt = 0;
 }
 
-/** Forgets one module's thread, or all of them. */
-export function clearThread(module) {
-  if (module === undefined) threads.clear();
-  else threads.delete(String(module || ""));
+/** A question was asked or an answer arrived: the 30 minutes start again from now. */
+export function markActive(now = Date.now()) {
+  lastActiveAt = now;
 }
 
 /**
@@ -51,8 +72,8 @@ export function clearThread(module) {
  * back invites it to apologise for something it did not do. Empty turns go too: the placeholder an
  * answer streams into is a turn with no content until the first token arrives.
  */
-export function historyFor(module) {
-  return readThread(module)
+export function historyFor(now = Date.now()) {
+  return readThread(now)
     .filter((turn) => !turn.error && typeof turn.content === "string" && turn.content.trim())
     .map((turn) => ({ role: turn.role, content: turn.content }));
 }

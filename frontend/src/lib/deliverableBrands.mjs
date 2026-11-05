@@ -74,12 +74,22 @@ export const emptyDeliverableBrand = (id) => ({ id: `brand-${id}`, name: "", var
  * names what it adds `…-new-N` - three vocabularies that cannot meet, and none of them a
  * server id.
  */
-export function brandFormRows(brands) {
+export function brandFormRows(brands, { keepServerIds = false } = {}) {
+  /*
+   * Editing a deliverable keeps the server's own id beside each brand and variant it opened on, as
+   * `serverId`, so Save updates those rows in place rather than replacing them. A service maps its
+   * bookings to a variant by id, and replacing the rows on every save gave every variant a new one
+   * - so renaming a deliverable left every service mapped to it reading "no longer offered". A
+   * duplicate is a new deliverable with rows of its own, and is opened without them.
+   */
+  const serverId = (row) => (keepServerIds && row?.id ? { serverId: row.id } : {});
   const rows = (Array.isArray(brands) ? brands : []).map((brand, index) => ({
     id: brand?.id || `stored-brand-${index}`,
+    ...serverId(brand),
     name: text(brand?.name),
     variants: (Array.isArray(brand?.variants) ? brand.variants : []).map((variant, inner) => ({
       id: variant?.id || `stored-variant-${index}-${inner}`,
+      ...serverId(variant),
       size: text(variant?.size),
       frameInches: text(variant?.frameInches),
       videoLength: text(variant?.videoLength),
@@ -133,12 +143,15 @@ export function brandsForSave(brands, mediaType) {
   return (brands || [])
     .filter((brand) => brandHasValue(brand, mediaType))
     .map((brand) => ({
+      // The row it was opened on, so the server keeps it - and its id - rather than replacing it.
+      ...(brand.serverId ? { id: brand.serverId } : {}),
       // Held to the column's width here, because the combo box it is typed into has no limit of
       // its own - the server refuses a longer one, and it did so only at Save.
       name: text(brand.name).slice(0, BRAND_NAME_MAX_LENGTH),
       variants: (brand.variants || [])
         .filter((variant) => variantHasValue(variant, mediaType))
         .map((variant) => ({
+          ...(variant.serverId ? { id: variant.serverId } : {}),
           size: asked.includes("size") ? text(variant.size) || null : null,
           frameInches: asked.includes("frameInches") ? text(variant.frameInches) || null : null,
           videoLength: asked.includes("videoLength") ? text(variant.videoLength) || null : null,
@@ -159,9 +172,23 @@ export function brandsForSave(brands, mediaType) {
  * gap, so a brand selling one unnamed size still reads as a sentence.
  */
 export function deliverableVariantLabel(definition, brand, variant, { withRemarks = false } = {}) {
+  /*
+   * A deliverable sold by nobody - no brand holding a variant - may still carry the one brand and
+   * size it was given before brands existed, in its own `brandName` / `imageSize` / `frameInches`
+   * / `videoLength`. Those are what it is, so it names itself by them rather than by its name
+   * alone. Only then: a deliverable that has variants rewrites those four from its first variant on
+   * every save, so reading them for a line chosen without a variant would name a variant nobody
+   * chose.
+   */
+  if (!brand && !variant && !hasVariants(definition)) {
+    brand = { name: definition?.brandName };
+    variant = { size: definition?.imageSize, frameInches: definition?.frameInches, videoLength: definition?.videoLength };
+  }
   const parts = [definition?.name, brand?.name];
   if (definition?.mediaType === "VIDEO") parts.push(variant?.videoLength);
-  else parts.push(variant?.size, variant?.frameInches);
+  else if (definition?.mediaType === "IMAGE") parts.push(variant?.size, variant?.frameInches);
+  // A type never answered, or a line read without its deliverable, is named by whatever it holds.
+  else parts.push(variant?.size, variant?.frameInches, variant?.videoLength);
   /*
    * And, where the reader asked for it, the note the studio wrote about the deliverable in
    * Settings - "Sent flat, never rolled." - so a quotation line says what it is *and* what is
@@ -223,4 +250,102 @@ export function deliverableVariantOptions(definitions = [], { withRemarks = fals
     }
   }
   return options;
+}
+
+const hasVariants = (definition) => (definition?.brands || []).some((brand) => (brand?.variants || []).length);
+
+/**
+ * The variant a saved deliverable line was added as - its brand, size, frame and length - or null
+ * for a line added as the deliverable alone.
+ *
+ * Two shapes carry it, both a snapshot taken when the variant was picked, because a variant can be
+ * resized, repriced or removed in Settings after the sale and the line still says what was sold:
+ *
+ *   - a quotation line names it `deliverableBrandName` beside the `deliverableVariantId` it was
+ *     picked by;
+ *   - a project line (`ProjectShootDeliverable`) holds `brandName`, `size`, `frameInches` and
+ *     `videoLength`, which nothing writes but the variant - so any of them holding something is
+ *     what says the line is a variant. A size picked from the deliverable's size list is
+ *     `sizeOptionValueId` instead, and is not the variant's.
+ */
+export function deliverableRowVariant(row) {
+  if (!row || typeof row !== "object") return null;
+  const snapshot = {
+    brandName: text(row.brandName ?? row.deliverableBrandName),
+    size: text(row.size),
+    frameInches: text(row.frameInches),
+    videoLength: text(row.videoLength),
+  };
+  if (row.deliverableVariantId) return snapshot;
+  const held = snapshot.brandName || snapshot.frameInches || snapshot.videoLength || (snapshot.size && !row.sizeOptionValueId);
+  return held ? snapshot : null;
+}
+
+/**
+ * What a saved deliverable line is called, wherever one is listed: the same sentence its picker
+ * offered it under, built by `deliverableVariantLabel` from the line's own snapshot.
+ *
+ * A quotation line stamped the label when its variant was picked, and that is read as it is so a
+ * quotation already sent goes on reading what it was sent with. Anything else is built here, from
+ * the linked deliverable's name where the line still points at one and the name copied onto the
+ * line where it does not. Blank parts are left out, so a line from before variants existed reads by
+ * its name and nothing else - never "undefined", never a dangling separator.
+ */
+export function deliverableRowLabel(row, { withRemarks = false } = {}) {
+  if (!row || typeof row !== "object") return "";
+  if (text(row.deliverableVariantLabel)) return text(row.deliverableVariantLabel);
+  const linked = row.deliverableDefinition || {};
+  const definition = { ...linked, name: text(linked.name) || text(row.deliverableName) };
+  const variant = deliverableRowVariant(row);
+  if (variant) return deliverableVariantLabel(definition, { name: variant.brandName }, variant, { withRemarks });
+  // A line added as the deliverable alone: named as the deliverable names itself in its picker.
+  return deliverableVariantLabel(definition, null, null, { withRemarks });
+}
+
+/**
+ * What makes two lines on one shoot the same line: the deliverable, and the variant it was added
+ * as. Two brands of one album, or one brand's two sizes, are two lines; the same variant twice is
+ * one. Case and spacing are not a difference. `backend/src/modules/sales/projects/controller.js`
+ * holds the same rule for what it refuses.
+ */
+export function deliverableIdentityKey(deliverableDefinitionId, variant) {
+  const norm = (value) => text(value).replace(/\s+/g, " ").toLocaleLowerCase();
+  const parts = variant ? [variant.brandName, variant.size, variant.frameInches, variant.videoLength].map(norm) : [];
+  // A variant holding nothing names nothing beyond its deliverable, so it is the deliverable alone.
+  return [String(deliverableDefinitionId || ""), ...(parts.some(Boolean) ? parts : [])].join("::");
+}
+
+/**
+ * The fields a project line takes from the variant it was picked as - a picker option's `variant`
+ * - in the project's own column names, so the line reads by `deliverableRowLabel` before it is
+ * ever saved. Empty for a deliverable picked on its own.
+ */
+export function projectDeliverableVariantFields(variant) {
+  if (!variant) return {};
+  return {
+    deliverableVariantId: text(variant.variantId),
+    brandName: text(variant.brandName),
+    size: text(variant.size),
+    frameInches: text(variant.frameInches),
+    videoLength: text(variant.videoLength),
+  };
+}
+
+/**
+ * The `variant` a project line is created with, from any saved or pending line, or null where the
+ * line was added as the deliverable alone. The server looks the id up against the deliverable's
+ * brands as they stand and saves what that variant holds; the words go with it for a variant that
+ * no longer exists - removed since, or replaced by a save from before ids were kept - which a
+ * quotation raised before then still names.
+ */
+export function deliverableVariantPayload(row) {
+  const variant = deliverableRowVariant(row);
+  if (!variant) return null;
+  return {
+    variantId: text(row.deliverableVariantId) || null,
+    brandName: variant.brandName || null,
+    size: variant.size || null,
+    frameInches: variant.frameInches || null,
+    videoLength: variant.videoLength || null,
+  };
 }

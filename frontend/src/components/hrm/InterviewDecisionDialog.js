@@ -122,25 +122,22 @@ export default function InterviewDecisionDialog({ candidate, status, canWrite = 
     </>}
   >
     {error && <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-normal text-red-700 sm:text-sm">{error}</p>}
-    {decision.asksDate && <div className="mb-4">
-      <DateField
-        label="Next Follow-up"
-        value={nextFollowUpDate}
-        onChange={setNextFollowUpDate}
-      />
-      {/* Said out loud, because it is what the register is worked by: the Next Follow-up column and
-          the date filters above the table both read this, so a row with no day on it is a row that
-          never comes back round to anybody. */}
-      <p className="mt-2 text-[11px] font-normal leading-5 text-slate-500 sm:text-xs">
-        When to try them again. Left blank, nothing brings this candidate back to anybody&apos;s attention.
-      </p>
-    </div>}
+    {/* The tip says what a blank costs, because it is what the register is worked by: the Next
+        Follow-up column and the date filters above the table both read this, so a row with no day
+        on it is a row that never comes back round to anybody. */}
+    {decision.asksDate && <DateField
+      className="mb-4"
+      label="Next Follow-up"
+      helperText="The day to try this candidate again. Left blank, nothing brings this candidate back to anybody's attention."
+      value={nextFollowUpDate}
+      onChange={setNextFollowUpDate}
+    />}
     <TextAreaField
       label="Remarks"
+      helperText={`Saved on the candidate's record with this decision.${decision.hint ? ` ${decision.hint}` : ""}`}
       value={note}
       onChange={(event) => setNote(event.target.value)}
       rows={5}
     />
-    <p className="mt-2 text-[11px] font-normal leading-5 text-slate-500 sm:text-xs">{decision.hint}</p>
   </Dialog>;
 }

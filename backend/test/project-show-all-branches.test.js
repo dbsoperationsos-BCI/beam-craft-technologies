@@ -31,6 +31,20 @@ const NAMED_ON = { OR: "the data scope's own named-on clause" };
 const iam = require("../src/services/iam.service");
 const { projectAccessWhere } = require("../src/services/projectScope");
 
+/*
+ * Login 1 is described here rather than read from the database: a plain account that opens the
+ * register through Sales Manager, so the only thing each test varies is the Show All Projects grant
+ * and the branch list stubbed below. Reading it from the database made the answer depend on whoever
+ * happened to hold id 1 - a fresh seed's Super Admin, or nobody at all on a restored copy.
+ */
+const originalUser = iam.getUserWithPermissions;
+const originalPermissions = iam.getUserPermissions;
+test.before(() => {
+  iam.getUserWithPermissions = async (userId) => ({ id: Number(userId), role: "USER" });
+  iam.getUserPermissions = async () => [{ module: "SALES", feature: "Sales Manager", accessLevel: "READ_WRITE" }];
+});
+test.after(() => { iam.getUserWithPermissions = originalUser; iam.getUserPermissions = originalPermissions; });
+
 /** A caller, with the two IAM answers this rule reads stubbed out. */
 function caller({ showsAll = true, branchIds = [] } = {}) {
   const originalHas = iam.hasPermission;

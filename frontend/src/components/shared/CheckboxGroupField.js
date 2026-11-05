@@ -1,3 +1,4 @@
+import HelpTip from "./HelpTip";
 import SelectableOption from "./SelectableOption";
 
 /**
@@ -25,6 +26,8 @@ export default function CheckboxGroupField({
   name = label,
   className = "",
   controlClassName = "rounded-md border border-slate-300 bg-white px-3 py-2",
+  error = "",
+  helperText = "",
 }) {
   const items = (options || []).map((option) => typeof option === "object" && option !== null ? option : { value: option, label: String(option) });
   const selected = Array.isArray(value) ? value : [];
@@ -39,8 +42,8 @@ export default function CheckboxGroupField({
   };
 
   return <fieldset className={`text-sm font-medium text-slate-700 ${className}`}>
-    <legend>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</legend>
-    <div className={`mt-2 flex min-h-11 flex-wrap items-center gap-4 ${controlClassName}`}>
+    <legend>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}<HelpTip text={helperText} /></legend>
+    <div data-invalid={error ? true : undefined} className={`mt-2 flex min-h-11 flex-wrap items-center gap-4 ${controlClassName} ${error ? "!border-red-400" : ""}`}>
       {items.map((item) => <SelectableOption
         key={item.value}
         type="checkbox"
@@ -52,5 +55,6 @@ export default function CheckboxGroupField({
         onCheckedChange={() => toggle(item.value)}
       />)}
     </div>
+    {error && <p role="alert" className="mt-1.5 text-xs font-normal text-red-600">{error}</p>}
   </fieldset>;
 }

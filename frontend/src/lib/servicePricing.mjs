@@ -65,7 +65,7 @@ export function pricedServiceSizeOptions(definition) {
  * lengths, in the words the Duration field has always used. Editable on the line - a studio whose
  * half session is "5-6 Hours" types that over it - and kept as typed.
  */
-export const DEFAULT_DURATION_BY_TIMING = { HALF_SESSION: "4-5 Hours (Half)", FULL_SESSION: "10-12 Hours (Full)" };
+export const DEFAULT_DURATION_BY_TIMING = { HALF_SESSION: "4-5 Hours (Half)", FULL_SESSION: "8-10 Hours (Full)" };
 export const defaultDurationFor = (timingMode) => DEFAULT_DURATION_BY_TIMING[timingMode] || "";
 export const DURATION_MAX_LENGTH = 60;
 const durationText = (value) => String(value ?? "").trim().slice(0, DURATION_MAX_LENGTH);
@@ -126,6 +126,26 @@ export function pricingLineDeliverables(row) {
 
 /** The key one mapped variant is held by, so a line cannot carry the same variant twice. */
 export const pricingDeliverableKey = (entry) => `${entry?.deliverableId}::${entry?.brandId}::${entry?.variantId}`;
+
+/**
+ * The deliverable variants a service brings with it, whatever shoot or session it is booked on.
+ *
+ * One list per service, held in the service's own `deliverables`. A service saved before that list
+ * existed carried its mapping per pricing line instead; until it is saved again it reads as every
+ * variant any of those lines named, each once, so nothing it was set up to bring is lost.
+ */
+export function serviceDeliverables(definition) {
+  const entries = Array.isArray(definition?.deliverables)
+    ? pricingLineDeliverables(definition)
+    : (Array.isArray(definition?.pricing) ? definition.pricing : []).flatMap(pricingLineDeliverables);
+  const seen = new Set();
+  return entries.filter((entry) => {
+    const key = pricingDeliverableKey(entry);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 export const emptyPricingLine = (id) => ({ id: `line-${id}`, shootType: "", timingMode: "", hours: "", duration: "", size: "", sizeOptionValueId: "", price: "", deliverables: [] });
 
@@ -240,6 +260,39 @@ export function servicePriceForShoot(definition, shoot, row = {}) {
 const sessionsPriced = (definition) => [...new Set((Array.isArray(definition?.pricing) ? definition.pricing : [])
   .map((entry) => entry?.timingMode)
   .filter((mode) => mode === "HALF_SESSION" || mode === "FULL_SESSION"))];
+
+/**
+ * Every timing a service allows (`timingModes`, falling back to the single `timingMode` of a
+ * service saved before the list existed), without "NONE".
+ */
+export function serviceTimingModes(definition) {
+  const listed = Array.isArray(definition?.timingModes) ? definition.timingModes.filter((mode) => mode && mode !== "NONE") : [];
+  if (listed.length) return listed;
+  const single = definition?.timingMode;
+  return single && single !== "NONE" ? [single] : [];
+}
+
+/**
+ * The Session Timing choices a service line offers: the active entries of the studio's session set
+ * whose code is a session this service is sold under. The set holds both halves, so a service sold
+ * only as a half session is not offered a full one.
+ */
+export function serviceSessionOptions(definition) {
+  const allowed = serviceTimingModes(definition).filter((mode) => mode === "HALF_SESSION" || mode === "FULL_SESSION");
+  return (definition?.timingOptionSet?.values || []).filter((option) => option?.isActive !== false && allowed.includes(option.code));
+}
+
+/**
+ * The Session Timing a newly added service line starts on: the shoot's own session, where the
+ * service offers exactly that one - matched by code (Half Session is HALF_SESSION), never by a
+ * nearby length - and "" otherwise, so the cell asks rather than guesses. Only a starting value:
+ * read once when the line is made, and the person may change it.
+ */
+export function defaultSessionOptionId(definition, shoot) {
+  const code = codeOf(listOf(shoot?.sessionTimings, shoot?.sessionTiming)[0], TIMING_MODE_BY_LABEL);
+  if (code !== "HALF_SESSION" && code !== "FULL_SESSION") return "";
+  return serviceSessionOptions(definition).find((option) => option.code === code)?.id || "";
+}
 
 /**
  * The session one quotation line was booked at, read off the option it names.

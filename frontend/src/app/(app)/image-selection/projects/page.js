@@ -8,17 +8,21 @@ import ImageSelectionProjectWorkspace from "@/components/image-selection/ImageSe
 import ProjectActionDialog from "@/components/image-selection/ProjectActionDialog";
 import ProjectSidebar from "@/components/image-selection/ProjectSidebar";
 import WhatsAppLinkAllDialog from "@/components/image-selection/WhatsAppLinkAllDialog";
+import ExpandDialog from "@/components/image-selection/dashboard/ExpandDialog";
 import { useRouteAccess } from "@/components/auth/PermissionsProvider";
+import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import { createVisualCurationProject } from "@/services/image-selection/module-projects.service";
+import { PROJECT_MODULES, createdProjectsText, linkChangesText, manualProjectModules } from "@/lib/stageDashboards.mjs";
 import {
   archiveImageSelectionProject,
-  createImageSelectionProject,
   deleteImageSelectionProject,
   editImageSelectionProject,
   listImageSelectionProjects,
   restoreImageSelectionProject,
 } from "@/services/image-selection/image-selection.service";
 import { toWorkspaceProject } from "@/lib/imageSelectionProjectSidebar.mjs";
-import { projectListFiltersFromParams } from "@/lib/imageSelectionDashboard.mjs";
+import { projectListFiltersFromParams, projectsHref } from "@/lib/imageSelectionDashboard.mjs";
 
 // useSearchParams makes everything under it client-rendered, so the page keeps a
 // Suspense boundary around the workspace as Next.js requires.
@@ -34,6 +38,8 @@ function ImageSelectionProjects() {
   // IMAGE_SELECTION / Project Management. Browsing projects and opening a workspace read them;
   // creating, editing, archiving and deleting do not.
   const { canWrite } = useRouteAccess();
+  // Says which projects - and IDs - a Create Project made, once every one of them exists.
+  const { notice: floating, showSuccess, clearNotice } = useNotice();
   const router = useRouter();
   const searchParams = useSearchParams();
   // Set by the floating upload dock when the user clicks a running upload. `at` only
@@ -58,6 +64,9 @@ function ImageSelectionProjects() {
   const [showNewProject, setShowNewProject] = useState(urlFilters.create);
   // ⋮ → Match WhatsApp Groups: every unlinked project linked to the group carrying its name.
   const [matchGroups, setMatchGroups] = useState(false);
+  // Sidebar filter → Expand: the reader's own dashboard over this page. Opening and closing it
+  // touches nothing else here - the open project, its tab and folder, the filters and the search.
+  const [expandOpen, setExpandOpen] = useState(false);
   // The manual project being edited in the main pane — the create form pre-filled with its data,
   // with Save and Cancel in place of Create Project. The sidebar only offers Edit on manual
   // projects, so the form's manual branch is always the right one.
@@ -99,8 +108,10 @@ function ImageSelectionProjects() {
       const response = await listImageSelectionProjects({ search, sort: "dateAdded", order: "desc", archived, attention });
       setProjects(response.data || []);
       setNotice("");
+      return response.data || [];
     } catch (error) {
       setNotice(error.message || "Unable to load Image Selection projects.");
+      return [];
     } finally {
       setIsLoading(false);
     }
@@ -143,12 +154,16 @@ function ImageSelectionProjects() {
   }
 
   // Only manual projects are created here — a production project joins the sidebar by itself
-  // once it is In Progress, so no saved-group-name branch and no salesProjectId are sent.
-  async function createProject(projectName, client = {}) {
-    const response = await createImageSelectionProject({ projectName, ...client });
-    await loadProjects();
-    selectProject(toWorkspaceProject(response.data));
+  // once it is In Progress and its first shoot has passed, so no saved-group-name branch and no
+  // salesProjectId are sent. One submission makes Photo Selection's project and one in each
+  // Linked Module ticked, all or none, and says which IDs it made.
+  async function createProject(projectName, payload = {}) {
+    const response = await createVisualCurationProject({ projectName, ...payload });
+    const rows = await loadProjects();
+    const created = rows.find((row) => row.id === response.data?.workspaceId);
+    if (created) selectProject(toWorkspaceProject(created));
     setShowNewProject(false);
+    showSuccess(createdProjectsText(response.data?.projects || []));
   }
 
   // `options` carries { acknowledgeSubmitted: true } when the dialog escalated to the
@@ -156,18 +171,22 @@ function ImageSelectionProjects() {
   async function confirmAction(options) {
     const { mode, project } = actionDialog;
     if (mode === "archive") await archiveImageSelectionProject(project.id);
-    if (mode === "delete") await deleteImageSelectionProject(project.id, options);
+    if (mode === "delete" || mode === "removeModule") await deleteImageSelectionProject(project.id, options);
     await loadProjects();
     selectProject(null);
   }
 
   // Save from the edit form: the same fields the manual creation asks for, written onto the
   // existing project. Thrown errors surface inside the form, which is why this does not catch.
+  // The name and client, and the Linked Modules ticks: the project opens again from the list read
+  // afterwards, which carries its links as they now are.
   async function saveEditedProject(payload) {
     const response = await editImageSelectionProject(editingProject.id, payload);
-    await loadProjects();
+    const rows = await loadProjects();
     setEditingProject(null);
-    selectProject(toWorkspaceProject(response.data));
+    selectProject(toWorkspaceProject(rows.find((row) => row.id === editingProject.id) || response.data));
+    const changed = linkChangesText(response.data?.links);
+    if (changed) showSuccess(changed);
   }
 
   async function handleProjectAction(mode, project) {
@@ -188,7 +207,32 @@ function ImageSelectionProjects() {
       selectProject(null);
       return;
     }
+    // A project made with AI Culling, AI Editing or Signature Album projects too: deleting Photo
+    // Selection's project leaves theirs - and the photos - where they are (the server's rule).
+    if (mode === "delete" && (manualProjectModules(project) || []).some((module) => module !== "photos")) {
+      setActionDialog({ mode: "removeModule", project });
+      return;
+    }
     setActionDialog({ mode, project });
+  }
+
+  // A project switched in Expand: the sidebar is read again for its Disabled mark, and an open
+  // project takes the new state at once, so its upload and send controls follow it.
+  function expandChanged(row, enabled) {
+    setSelectedProject((current) => (current?.id === row.id ? { ...current, disabledAt: enabled ? null : new Date().toISOString() } : current));
+    loadProjects();
+  }
+
+  // A double-click on an Expand row opens that project here. A row the sidebar is not showing -
+  // searched or filtered away - goes through the project link, as a Dashboard row does.
+  function openExpandProject(row) {
+    const match = projects.find((project) => project.id === row.id);
+    setShowNewProject(false);
+    setEditingProject(null);
+    if (match && !archived) { selectProject(toWorkspaceProject(match)); return; }
+    setQuery("");
+    setProgressFilter("all");
+    router.push(projectsHref({ projectId: row.id }));
   }
 
   function toggleArchived() {
@@ -206,11 +250,13 @@ function ImageSelectionProjects() {
       {/* ⋮ → Project Settings edits the studio-wide record, and the default selection limit it
           holds is what an unallocated deliverable falls back to — so the workspace is refreshed
           after a save rather than left showing limits derived from the previous default. */}
+      <FloatingNotice notice={floating} onClose={clearNotice} />
       <ImageSelectionNavigation
         onSettingsSaved={() => setSettingsRevision((value) => value + 1)}
         options={canWrite ? [{ label: "Match WhatsApp Groups", onSelect: () => setMatchGroups(true) }] : []}
       />
       {matchGroups && <WhatsAppLinkAllDialog onClose={() => setMatchGroups(false)} onLinked={loadProjects} />}
+      {expandOpen && <ExpandDialog onClose={() => setExpandOpen(false)} onOpenProject={openExpandProject} canWrite={canWrite} onProjectChanged={expandChanged} />}
 
       {/* Fills what is left of the shell's flex column. On a phone the two rows stack and this
           grid is what scrolls; from md up it holds its height and the workspace panes inside
@@ -235,6 +281,7 @@ function ImageSelectionProjects() {
           onToggleCollapsed={() => setSidebarCollapsed((current) => !current)}
           progressFilter={progressFilter}
           onProgressFilterChange={setProgressFilter}
+          onOpenExpand={() => setExpandOpen(true)}
           attentionFilter={attention}
           // Clearing the row's filter also takes it out of the URL, keeping whatever else the
           // link carried, so a reload does not quietly put the narrowing back.
@@ -275,7 +322,16 @@ function ImageSelectionProjects() {
         </main>
       </div>
 
-      {actionDialog && <ProjectActionDialog {...actionDialog} onClose={() => setActionDialog(null)} onConfirm={confirmAction} />}
+      {actionDialog?.mode === "removeModule" && (
+        <ConfirmDialog
+          title={`Delete the Photo Selection project "${actionDialog.project.projectName}"?`}
+          message={`${actionDialog.project.projectCode ? `${actionDialog.project.projectCode} leaves Photo Selection. ` : ""}Its linked projects in ${(manualProjectModules(actionDialog.project) || []).filter((module) => module !== "photos").map((module) => PROJECT_MODULES[module].label).join(" and ")} stay, with every photo.`}
+          confirmLabel="Delete Photo Selection project"
+          onCancel={() => setActionDialog(null)}
+          onConfirm={() => confirmAction().then(() => setActionDialog(null)).catch((error) => { setActionDialog(null); setNotice(error.message || "Unable to delete the project."); })}
+        />
+      )}
+      {actionDialog && actionDialog.mode !== "removeModule" && <ProjectActionDialog {...actionDialog} onClose={() => setActionDialog(null)} onConfirm={confirmAction} />}
     </section>
   );
 }

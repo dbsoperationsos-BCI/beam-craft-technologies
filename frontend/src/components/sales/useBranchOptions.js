@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { getCrmBranches } from "@/services/sales/crm-leads.service";
 import useBranchRegistry from "@/components/shared/useBranchRegistry";
-import { FALLBACK_BRANCH_OPTIONS } from "@/lib/crmOptions";
 
 /**
  * The branches a lead, a quotation or an imported row may be assigned to.
@@ -23,17 +22,16 @@ import { FALLBACK_BRANCH_OPTIONS } from "@/lib/crmOptions";
  * The answer is already narrowed to the branches this person's roles reach — the server decides
  * that, not this — so what comes back is what they may actually file against.
  *
- * `FALLBACK_BRANCH_OPTIONS` stands in only while the first request is in flight or if it fails: a
- * picker with no options at all cannot be used, and the fallback is the studio's six spelled the way
- * the branch table spells them.
+ * Nothing is written down to stand in while the request is in flight: the picker is empty until the
+ * studio's own branches arrive, so it never offers a name the branch table does not hold.
  *
  * Asked again whenever the branch register changes, so a branch added or renamed in Settings —
  * an overlay over the very screens this fills — is offered here without the page being reloaded.
  * The options already on screen are held until the new answer arrives and are only replaced when it
- * is not empty, so a refresh never blinks a picker back to the fallback.
+ * is not empty, so a refresh never blinks a picker empty.
  */
 export default function useBranchOptions() {
-  const [branches, setBranches] = useState(FALLBACK_BRANCH_OPTIONS);
+  const [branches, setBranches] = useState([]);
   const [loading, setLoading] = useState(true);
   const branchRegistryRevision = useBranchRegistry();
 
@@ -48,8 +46,7 @@ export default function useBranchOptions() {
           const options = rows
             .map((row) => (typeof row === "string" ? { value: row, label: row } : row))
             .filter((row) => row?.value);
-          // An empty answer is left on the fallback rather than emptying the picker: a studio that
-          // has recorded no branches is a studio whose leads still have to be filed somewhere.
+          // An empty answer on a refresh keeps the branches already shown rather than blinking empty.
           if (live && options.length) setBranches(options);
         })
         .catch(() => {})

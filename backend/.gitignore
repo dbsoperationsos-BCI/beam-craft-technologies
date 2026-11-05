@@ -29,3 +29,6 @@ debug.log
 # Python environment for the AI Feature face engine and the call-transcript sidecar (never committed)
 .venv/
 venv/
+
+# The face engine's own Python environment (backend/scripts/face-engine-setup.sh)
+.venv-face/

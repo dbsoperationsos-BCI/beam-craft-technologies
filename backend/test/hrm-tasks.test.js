@@ -38,8 +38,9 @@ const task = (overrides = {}) => ({
   ...overrides,
 });
 
-test("the five states a task can be in, and the two it is over in", () => {
-  assert.deepEqual(STATUSES, ["PENDING", "IN_PROGRESS", "COMPLETED", "REASSIGNED", "CANCELLED"]);
+test("the six states a task can be in, and the two it is over in", () => {
+  // SUBMITTED is Finish & Send Back: open, waiting for whoever assigned it.
+  assert.deepEqual(STATUSES, ["PENDING", "IN_PROGRESS", "SUBMITTED", "COMPLETED", "REASSIGNED", "CANCELLED"]);
   /*
    * REASSIGNED is open, where the REVERTED it replaced was closed, and that is the difference the
    * whole feature turns on: a rolled-back task was finished — it had gone back to whoever set it and
@@ -102,6 +103,33 @@ test("the person who gave the task cannot complete it themselves", () => {
   assert.match(refusalFor(task(), "start", GIVER), /assigned to/i);
 });
 
+test("a Super Admin may reassign any open task, and nothing else of the holder's", () => {
+  // A bystander to the task - neither its giver nor its holder - who is a Super Admin.
+  assert.equal(refusalFor(task(), "reassign", BYSTANDER, "SUPER_ADMIN"), null);
+  assert.equal(refusalFor(task({ status: "IN_PROGRESS" }), "reassign", BYSTANDER, "SUPER_ADMIN"), null);
+  for (const status of CLOSED_STATUSES) {
+    assert.match(refusalFor(task({ status }), "reassign", BYSTANDER, "SUPER_ADMIN"), /cannot be changed/i, `a ${status} task stays where it is`);
+  }
+  // Starting and completing are about doing the work, so they stay the holder's.
+  assert.match(refusalFor(task(), "start", BYSTANDER, "SUPER_ADMIN"), /assigned to/i);
+  assert.match(refusalFor(task({ status: "IN_PROGRESS" }), "complete", BYSTANDER, "SUPER_ADMIN"), /assigned to/i);
+  // And no other role gets it: an administrator who is not Super Admin is still a bystander.
+  assert.match(refusalFor(task(), "reassign", BYSTANDER, "ADMIN"), /assigned to/i);
+});
+
+test("a reassignment names the holder it came from, and who moved it when that was somebody else", () => {
+  const start = serviceSource.indexOf('} else if (action === "reassign") {');
+  const branch = serviceSource.slice(start, serviceSource.indexOf('} else if (action === "resolve") {', start));
+  assert.match(branch, /reassignedFromUserId: task\.assignedToUserId \|\| actor\.id \|\| null,/);
+  assert.match(branch, /reassignedFromName: fromName,/);
+  assert.match(branch, /`Reassigned from \$\{fromName\} to \$\{nextName\}\$\{byAnother \? ` by \$\{actorName\}` : ""\}\. Reason: \$\{why\}`/);
+  // The person it was taken from is told.
+  assert.match(branch, /title: `Task moved off you: \$\{task\.title\}`/);
+  // The menu and the write path ask the same question with the same role.
+  assert.match(serviceSource, /canReassign: refusalFor\(task, "reassign", viewerId, viewerRole\) === null,/);
+  assert.match(serviceSource, /const refusal = refusalFor\(task, action, actor\.id, actor\.role\);/);
+});
+
 test("somebody who is neither side of the task may do nothing to it", () => {
   for (const action of ["start", "complete", "reassign", "cancel", "delete"]) {
     assert.notEqual(refusalFor(task(), action, BYSTANDER), null, `a bystander should be refused ${action}`);
@@ -161,8 +189,10 @@ test("a task already deleted cannot be deleted again", () => {
  * would silently gain verbs the module's whole access model says belong to the two people on the
  * task - and that would be a role check overruling ownership, which is what this module avoids.
  */
-test("the role widens deleting and nothing else", () => {
-  for (const action of ["start", "complete", "reassign", "cancel"]) {
+// Deleting and editing, and reassigning since the studio asked for it (see the Super Admin reassign
+// test above). Starting, completing and cancelling stay with the task's own two people.
+test("the role widens deleting and reassigning, and nothing else", () => {
+  for (const action of ["start", "complete", "cancel"]) {
     assert.notEqual(refusalFor(task(), action, BYSTANDER, "SUPER_ADMIN"), null, `SUPER_ADMIN must not be able to ${action}`);
   }
 });
@@ -432,4 +462,34 @@ test("an edit cannot quietly hand the task to somebody else", async () => {
 
 test("an edit asks for a due date, exactly as a create does", async () => {
   assert.equal((await updateSchema.safeParseAsync({ ...submission(), dueOn: "" })).success, false);
+});
+
+/*
+ * Finish & Send Back, Mark as Completed and Revoke: the holder finishes and sends the task back,
+ * and whoever assigned it marks it completed or revokes it - reassigning it to anyone if they like.
+ */
+test("the holder finishes and sends back; only the assigner marks it completed, and only then", () => {
+  assert.equal(refusalFor(task({ status: "IN_PROGRESS" }), "complete", RECEIVER), null);
+  assert.equal(refusalFor(task({ status: "SUBMITTED" }), "approve", GIVER), null);
+  for (const status of ["PENDING", "IN_PROGRESS"]) {
+    assert.match(refusalFor(task({ status, assignedToName: "Receiver" }), "approve", GIVER), /has not finished and sent back/);
+  }
+  assert.match(refusalFor(task({ status: "SUBMITTED" }), "approve", RECEIVER), /only the person who assigned/i);
+  assert.match(refusalFor(task({ status: "SUBMITTED" }), "approve", BYSTANDER), /only the person who assigned/i);
+});
+
+test("a task sent back is no longer the holder's to act on", () => {
+  for (const action of ["start", "complete", "reassign"]) {
+    assert.match(refusalFor(task({ status: "SUBMITTED", assignedByName: "Giver" }), action, RECEIVER), /sent back to Giver/);
+  }
+});
+
+test("only whoever assigned the task can revoke it, at any point while it is open", () => {
+  for (const status of ["PENDING", "IN_PROGRESS", "SUBMITTED"]) {
+    assert.equal(refusalFor(task({ status }), "revoke", GIVER), null, `revoke should be open on ${status}`);
+  }
+  assert.match(refusalFor(task(), "revoke", RECEIVER), /only the person who assigned/i);
+  assert.match(refusalFor(task(), "revoke", BYSTANDER), /only the person who assigned/i);
+  assert.match(refusalFor(task({ status: "COMPLETED" }), "revoke", GIVER), /already completed/i);
+  assert.match(refusalFor(task({ assignedToUserId: GIVER }), "revoke", GIVER), /already with you/i);
 });

@@ -149,7 +149,7 @@ test("select all means the rows the table is showing, not the rows it was given"
   // `canSelectRow` joins the same filter: a table that mixes records it can act on with rows it
   // cannot - the Employee Repository lists onboarding invites beside employees - must not have its
   // header box offer to tick rows that have no box of their own.
-  assert.match(DATA_TABLE, /table\.getRowModel\(\)\.rows\s*\.filter\(\(row\) => row\.depth === 0 && \(!canSelectRow \|\| canSelectRow\(row\.original\)\)\)\s*\.map\(\(row\) => rowId\(row\)\)/);
+  assert.match(DATA_TABLE, /const topRows = table\.getRowModel\(\)\.rows\.filter\(\(row\) => row\.depth === 0\);[\s\S]*?: selectableIds\(topRows\);/);
 });
 
 test("a selection may only be moved to a stage that is a decision", () => {
@@ -161,5 +161,7 @@ test("a selection may only be moved to a stage that is a decision", () => {
 });
 
 test("the stage dialog refuses until a stage is chosen", () => {
-  assert.match(STAGE_DIALOG, /disabled=\{saving \|\| !canWrite \|\| !status\}/);
+  // The button stays live and marks the stage under the pills when pressed without one.
+  assert.match(STAGE_DIALOG, /disabled=\{saving \|\| !canWrite\}/);
+  assert.match(STAGE_DIALOG, /fields\.check\(\{ status: status \? "" : "Choose the stage to move them to\." \}\)/);
 });

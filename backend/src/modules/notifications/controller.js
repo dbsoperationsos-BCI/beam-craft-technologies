@@ -70,6 +70,30 @@ function byUrgency(first, second) {
   return new Date(first.at) - new Date(second.at);
 }
 
+// Every open tab polls this once a minute and each derived source is a heavy query, so a reader's
+// derived notices are computed at most every ninety seconds and shared by requests that arrive
+// while one runs. Longer than the poll on purpose: at exactly sixty seconds the entry had nearly
+// always expired by the next poll, so every poll recomputed and the cache saved almost nothing.
+const DERIVED_TTL_MS = 90_000;
+const derivedCache = new Map();
+
+function sharedDerived(key, compute, now = Date.now()) {
+  for (const [cachedKey, entry] of derivedCache) {
+    if (entry.settledAt !== null && now - entry.settledAt >= DERIVED_TTL_MS) derivedCache.delete(cachedKey);
+  }
+  const hit = derivedCache.get(key);
+  if (hit) return hit.promise;
+  const entry = { settledAt: null, promise: null };
+  let started;
+  try { started = Promise.resolve(compute()); } catch (error) { started = Promise.reject(error); }
+  entry.promise = started.then(
+    (value) => { entry.settledAt = Date.now(); return value; },
+    (error) => { if (derivedCache.get(key) === entry) derivedCache.delete(key); throw error; },
+  );
+  derivedCache.set(key, entry);
+  return entry.promise;
+}
+
 async function list(req, res) {
   try {
     /*
@@ -79,12 +103,12 @@ async function list(req, res) {
      * records as the CRM working it - a name rather than an id, which is the CRM's own compromise
      * and is noted in `sources.js`.
      */
-    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { id: true, name: true } });
+    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { id: true, name: true, linkedEmployeeId: true } });
 
     const allowed = [];
     for (const source of SOURCES) {
-      // Asked one at a time rather than in parallel: `hasPermission` reads a cache per user, and
-      // the first call is what fills it.
+      // Asked one at a time rather than in parallel: the user and their grants are read once for
+      // the request (`services/requestCache.js`), and the first call is what fills it.
       if (await iamService.hasPermission(req.user.id, source.module, source.feature, "READ")) allowed.push(source);
     }
 
@@ -114,11 +138,16 @@ async function list(req, res) {
     const viewerFor = (source) => ({
       userId: req.user.id,
       userName: String(user?.name || "").trim(),
+      // The employee behind the login, for the sources whose rows name an employee rather than a
+      // login - the CRM's leads foremost. Null for a login with no employee (the Super Admin).
+      employeeId: user?.linkedEmployeeId ?? null,
       everyone: Boolean(everyone.get(`${source.module}:${source.feature}`)),
     });
 
+    // The key carries everything the answer depends on, so a changed permission or scope misses.
+    const derivedKey = JSON.stringify([req.user.id, user?.name || "", user?.linkedEmployeeId ?? null, allowed.map((source) => [source.key, viewerFor(source).everyone])]);
     const [collected, stored] = await Promise.all([
-      Promise.all(allowed.map((source) => source.load(viewerFor(source)))),
+      sharedDerived(derivedKey, () => Promise.all(allowed.map((source) => source.load(viewerFor(source))))),
       // Not read at all when no permission reaches any kind, rather than read and filtered: a role
       // that holds neither module has nothing that could have put a row here, and asking is a query
       // for a guaranteed nothing.
@@ -176,4 +205,4 @@ async function markAllRead(req, res) {
   }
 }
 
-module.exports = { list, markRead, markAllRead };
+module.exports = { list, markRead, markAllRead, _sharedDerived: sharedDerived, _clearDerivedCache: () => derivedCache.clear() };

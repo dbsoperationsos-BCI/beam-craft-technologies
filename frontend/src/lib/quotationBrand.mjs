@@ -13,6 +13,7 @@
  */
 
 import { deliverableAnswerOn } from "./deliverableAnswers.mjs";
+import { DISCOUNT_SOURCES, calculateDiscount } from "./quotationDiscount.mjs";
 
 export const QUOTATION_BRANDS = [
   { code: "DUM_DUM", label: "Dum Dum", vertical: "Dum Dum", badge: "DUM DUM" },
@@ -62,11 +63,18 @@ export function brandOfQuotation(quotation) {
 /*
  * ── Pricing ─────────────────────────────────────────────────────────────────────────────────────
  *
- * A line is priced at the `unitPrice` stamped on it when it was added - the brand's default for
- * that service at that moment - and, for a row from before brands existed or one added off the
- * project catalogue, at the rates the quotation was raised with: the per-definition price where
- * the studio set one, the flat service or deliverable rate otherwise. The order matters: a stamped
- * price is a fact about this line, and re-reading the rates would reprice it against today.
+ * A line is priced at the `unitPrice` stamped on it when it was added - what Settings configures
+ * for it: its pricing line for the shoot's type and session, its size or variant, its flat price,
+ * a package's price or the brand's default - and otherwise at the per-definition price the
+ * quotation's rates name for it, where one was set. Nothing else: a line nothing configures a
+ * price for is unpriced, and comes to ₹0. It is never given the studio's blanket service or
+ * deliverable rate in its place - that invented a price (₹2,000, ₹1,000) for a line that had none.
+ *
+ * The order matters: a stamped price is a fact about this line, and re-reading the rates would
+ * reprice it against today. A quotation saved before this rule had its unpriced lines charged at
+ * those blanket rates; `withSavedUnitPrices` stamps them with what they were charged at when such a
+ * quotation is opened, so it reads exactly as it was saved, and every line saved since carries its
+ * own figure.
  */
 const finite = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -78,16 +86,35 @@ export function serviceUnitPrice(row, rates = {}) {
   const stamped = finite(row?.unitPrice);
   if (stamped !== null) return stamped;
   const custom = rates.servicePricing && row?.serviceDefinitionId in rates.servicePricing ? finite(rates.servicePricing[row.serviceDefinitionId]) : null;
-  if (custom !== null) return custom;
-  return finite(rates.serviceRate) ?? 0;
+  return custom ?? 0;
 }
 
 export function deliverableUnitPrice(row, rates = {}) {
   const stamped = finite(row?.unitPrice);
   if (stamped !== null) return stamped;
   const custom = rates.deliverablePricing && row?.deliverableDefinitionId in rates.deliverablePricing ? finite(rates.deliverablePricing[row.deliverableDefinitionId]) : null;
-  if (custom !== null) return custom;
-  return finite(rates.deliverableRate) ?? 0;
+  return custom ?? 0;
+}
+
+/**
+ * A saved quotation's lines, each carrying the unit price it was charged at.
+ *
+ * A line saved without a stamped price was charged, before unpriced lines came to ₹0, at its rates'
+ * per-definition price or else the blanket service or deliverable rate held in those same saved
+ * rates. That figure is stamped onto the line here, once, as the quotation is opened, so its total
+ * reads exactly as it was saved and saving a new version keeps it. A line already carrying a price
+ * - every line saved since - is returned as it is.
+ */
+export function withSavedUnitPrices(rows, rates = {}, kind) {
+  const service = kind === "service";
+  const configured = (service ? rates?.servicePricing : rates?.deliverablePricing) || {};
+  const blanket = finite(service ? rates?.serviceRate : rates?.deliverableRate);
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    if (finite(row?.unitPrice) !== null) return row;
+    const id = service ? row?.serviceDefinitionId : row?.deliverableDefinitionId;
+    const custom = id in configured ? finite(configured[id]) : null;
+    return { ...row, unitPrice: custom ?? blanket ?? 0 };
+  });
 }
 
 const quantityOf = (row) => Math.max(1, Number(row?.quantity) || 1);
@@ -119,11 +146,23 @@ export function deliverableUnits(row) {
 
 /**
  * The quotation's figures: what the services and deliverables come to, the discount taken off,
- * the total the client is quoted, and the GST stated on top of it. GST is stated rather than
- * added - the page has always printed "+ 18% GST APPLICABLE" under the total - so `amount` is the
+ * the total the client is quoted, and the GST stated on top of it.
+ *
+ * In this order: the Performance Cost - a rupee figure - is added to the subtotal (`grossCost`),
+ * the discount comes off that (`discountAmount`, from `calculateDiscount` - a percentage of it, or
+ * the rupees typed when `discountSource` is `AMOUNT`; a caller naming no source is giving
+ * `discountPercent`, as every caller did before rupees could be typed), then the extra discounts -
+ * up to three rupee figures, never percentages, given as `extraDiscounts` (or one `extraDiscountAmount`, as a
+ * quotation raised before they were a list carries it) - come off what is left. Together they take
+ * the total to nothing and no further: `extraDiscountAmount` is what was actually taken off, and
+ * `extraDiscountLimit` the most it could have been, for the form to say so. Last, the Round Off
+ * Discount - one rupee figure, never a percentage, to bring the total to a round number - comes off
+ * whatever is left, no further than nothing (`roundOffDiscount` taken, `roundOffLimit` the most it
+ * could be); it is folded into the total and listed nowhere the client reads. GST is stated rather than
+ * added - the page prints "+ 18% GST APPLICABLE", at the configured rate, under the total - so `amount` is the
  * pre-tax figure the register lists, and `gstAmount` and `grandTotal` are there for the snapshot.
  */
-export function quotationTotals({ services = [], deliverables = [], rates = {}, discountPercent = 0, gstPercent }) {
+export function quotationTotals({ services = [], deliverables = [], rates = {}, discountPercent = 0, discountSource, discountValue, performanceCost = 0, extraDiscounts = null, extraDiscountAmount = 0, roundOffDiscount = 0, gstPercent, discountCapPercent = null }) {
   /*
    * A line given rather than charged for comes to nothing, whatever its quantity, its count or its
    * unit price. The line keeps all three - what is being given away is worth seeing on the screen -
@@ -137,12 +176,72 @@ export function quotationTotals({ services = [], deliverables = [], rates = {}, 
   // Quantity × count × price where the deliverable is counted, quantity × price where it is not.
   const deliverableCost = deliverables.reduce((total, row) => total + (given(row) ? 0 : deliverableUnits(row) * deliverableUnitPrice(row, rates)), 0);
   const subtotal = serviceCost + deliverableCost;
-  const discount = Math.min(100, Math.max(0, Number(discountPercent) || 0));
-  const discountAmount = Math.round(subtotal * (discount / 100));
-  const amount = subtotal - discountAmount;
-  const gst = finite(gstPercent) ?? finite(rates.gstPercent) ?? 18;
+  const performance = Math.max(0, finite(performanceCost) ?? 0);
+  const grossCost = subtotal + performance;
+  const discount = calculateDiscount(discountSource ? { discountSource, discountValue, discountableSubtotal: grossCost } : { discountSource: DISCOUNT_SOURCES.PERCENTAGE, discountValue: discountPercent, discountableSubtotal: grossCost });
+  /*
+   * The cap, where the caller names one (the Quotation Generator: `MAX_DISCOUNT_PERCENT`), holds
+   * the Discount alone, whatever is typed; `discountCap` is the rupees it allows, for the form to
+   * say. Without one the Discount may take the total to nothing, as before. The extra discounts are
+   * never held to the cap - a Diwali offer beside a full 15% is the studio's call - only to what the
+   * Discount leaves, so together they take the total to nothing and no further.
+   */
+  const capPercent = finite(discountCapPercent);
+  const discountCap = capPercent === null ? grossCost : Math.min(grossCost, Math.round(grossCost * (capPercent / 100)));
+  const discountAmount = Math.min(discount.discountAmount, discountCap);
+  const discountPercentApplied = discountAmount === discount.discountAmount ? discount.discountPercentage : (grossCost > 0 ? (discountAmount / grossCost) * 100 : 0);
+  const extraDiscountLimit = Math.max(0, grossCost - discountAmount);
+  const typedExtra = Array.isArray(extraDiscounts)
+    ? extraDiscounts.reduce((sum, entry) => sum + Math.max(0, finite(entry?.amount) ?? 0), 0)
+    : Math.max(0, finite(extraDiscountAmount) ?? 0);
+  const extra = Math.min(extraDiscountLimit, typedExtra);
+  // After everything else, so it never narrows what the extra discounts may take, and taken once.
+  const roundOffLimit = Math.max(0, grossCost - discountAmount - extra);
+  const roundOff = Math.min(roundOffLimit, Math.max(0, finite(roundOffDiscount) ?? 0));
+  const amount = grossCost - discountAmount - extra - roundOff;
+  // The rate the quotation is priced at - the brand's or the studio's, as configured - and none
+  // where nothing configures one; never an assumed 18%.
+  const gst = finite(gstPercent) ?? finite(rates.gstPercent) ?? 0;
   const gstAmount = Math.round(amount * (gst / 100));
-  return { serviceCost, deliverableCost, subtotal, discountPercent: discount, discountAmount, amount, gstPercent: gst, gstAmount, grandTotal: amount + gstAmount };
+  return { serviceCost, deliverableCost, subtotal, performanceCost: performance, grossCost, discountSource: discount.discountSource, discountPercent: discountPercentApplied, discountAmount, discountCap, extraDiscountAmount: extra, extraDiscountLimit, roundOffDiscount: roundOff, roundOffLimit, amount, gstPercent: gst, gstAmount, grandTotal: amount + gstAmount };
+}
+
+/** The most extra discounts a quotation carries. */
+export const MAX_EXTRA_DISCOUNTS = 3;
+
+/**
+ * A saved quotation's extra discounts as `{ reason, amount }`: the list it was saved with, or - a
+ * quotation raised when there could be only one - its `extraDiscountReason` / `extraDiscountAmount`
+ * as the first. An entry with neither a reason nor an amount is not one.
+ */
+export function extraDiscountsOf(payload = {}) {
+  const listed = Array.isArray(payload?.extraDiscounts)
+    ? payload.extraDiscounts
+    : (payload?.extraDiscountReason || Number(payload?.extraDiscountAmount) > 0 ? [{ reason: payload.extraDiscountReason, amount: payload.extraDiscountAmount }] : []);
+  return listed.slice(0, MAX_EXTRA_DISCOUNTS)
+    .map((entry) => ({ reason: String(entry?.reason ?? "").trim(), amount: Math.max(0, finite(entry?.amount) ?? 0) }))
+    .filter((entry) => entry.reason || entry.amount > 0);
+}
+
+/**
+ * What the client's copy prints of a saved quotation's discounts - read, never worked out again,
+ * so the total it prints (the saved `amount`, which already has them taken off) and the lines it
+ * lists above it are one calculation. The rupees the discount came to as `quotationTotals` stamped
+ * them when the quotation was saved (`discountAmount`; worked out from the percentage only for a
+ * payload that predates it), and each extra discount with an amount. Nothing at zero is listed.
+ *
+ * Rupees only, never the percentage: the client is told what comes off, not what share of the
+ * price that is. The public API sends no percentage either (`clientFacingQuotation` in the
+ * backend), so `discountAmount` is always present on what the client's page reads.
+ */
+export function quotationDiscountBreakdown(quotation) {
+  const payload = quotation?.payload || {};
+  const percent = Math.min(100, Math.max(0, finite(payload.discount) ?? finite(quotation?.discount) ?? 0));
+  const gross = (finite(payload.subtotal) ?? finite(quotation?.subtotal) ?? 0) + Math.max(0, finite(payload.performanceCost) ?? 0);
+  const amount = finite(payload.discountAmount) ?? (percent > 0 ? calculateDiscount({ discountValue: percent, discountableSubtotal: gross }).discountAmount : 0);
+  const discount = amount > 0 ? { amount } : null;
+  const extras = extraDiscountsOf(payload).filter((entry) => entry.amount > 0);
+  return { discount, extras, any: Boolean(discount) || extras.length > 0 };
 }
 
 /*
@@ -169,51 +268,70 @@ export function splitRowsForBrandSwitch(rows = [], offeredIds = new Set(), key =
 }
 
 /**
- * The brand's masters as the service table's "definitions".
+ * ── What the generator offers, and why the catalogue is always in it ──────────────────────────
  *
- * The table draws every row off a project definition - timing modes, size options, whether
- * remarks are allowed - so a brand service that points at one is that definition, carrying the
- * brand's own name and price beside it. One that points at nothing is a plain priced line: named,
- * counted, remarked on, with none of the project columns. `brandServiceId` on the definition is
- * what the row inherits, and what says which brand it came from.
+ * Settings → Project → Services is the list. Every active service in it is offered on every
+ * brand's quotation, and a brand's own master is an **overlay** on the matching catalogue entry -
+ * its name and its price - rather than a replacement for the whole list.
  *
- * A brand that has configured nothing is answered with the project catalogue whole, exactly as
- * every brand was offered before brands existed - `usingCatalogue` says so.
+ * It used to be a replacement: a brand holding any active master was offered those and nothing
+ * else. That reading was safe only while the studio could see and edit the masters, and Quotation
+ * Settings lost its Services, Deliverables, Packages and Pricing tabs at the studio's request. The
+ * rows behind them stayed. So a brand configured before those screens went on answering with the
+ * handful it had been given, every service added to Settings afterwards was invisible on that
+ * brand's quotations, and there was no longer any screen that could change it - Corp offered five
+ * services against a catalogue of ten, and the studio could do nothing about it.
+ *
+ * Overlaying instead of replacing is what makes Settings authoritative without losing anything the
+ * generator already offers: a brand master still names the line and still stamps its price, and a
+ * master naming no catalogue entry - a bespoke line, or one whose definition has since been
+ * retired - is offered beside the catalogue rather than dropped. Nothing that could be picked
+ * yesterday cannot be picked today; the services that were missing are simply there now.
+ *
+ * `usingCatalogue` says nothing of the brand's applied - the plain catalogue, exactly as it reads
+ * in Settings.
  */
-export function brandServiceDefinitions(brandServices = [], catalogue = []) {
-  const configured = (brandServices || []).filter((row) => row?.isActive !== false);
-  if (!configured.length) return { definitions: catalogue || [], usingCatalogue: true };
-  const byId = new Map((catalogue || []).map((definition) => [definition.id, definition]));
-  return {
-    usingCatalogue: false,
-    definitions: configured.map((row) => {
-      const definition = row.definition || byId.get(row.serviceDefinitionId) || null;
-      return {
-        ...(definition || { id: `brand-service:${row.id}`, quantityMode: "INTEGER", defaultQuantity: 1, remarksEnabled: true }),
-        name: row.name || definition?.name || "",
-        brandServiceId: row.id,
-        brandDefaultPrice: finite(row.defaultPrice),
-      };
-    }),
-  };
+function offeredDefinitions(rows, catalogue, { idKey, linkKey, prefix }) {
+  const configured = (rows || []).filter((row) => row?.isActive !== false);
+  const list = catalogue || [];
+  const catalogueIds = new Set(list.map((definition) => definition.id));
+  // First by the brand's own order, so two masters naming one definition cannot disagree about
+  // which name and price the line carries.
+  const byDefinition = new Map();
+  for (const row of configured) {
+    const id = row?.[linkKey];
+    if (id && catalogueIds.has(id) && !byDefinition.has(id)) byDefinition.set(id, row);
+  }
+  const definitions = list.map((definition) => {
+    const row = byDefinition.get(definition.id);
+    if (!row) return definition;
+    return { ...definition, name: row.name || definition.name || "", [idKey]: row.id, brandDefaultPrice: finite(row.defaultPrice) };
+  });
+  /*
+   * A master with no catalogue entry to sit on: one that names nothing (the plain priced line the
+   * removed screens could add) or one whose definition has been retired out of the catalogue. It
+   * stands on its own, under a made-up id the table can key, exactly as it always did.
+   */
+  const bespoke = configured
+    .filter((row) => !row?.[linkKey] || !catalogueIds.has(row[linkKey]))
+    .map((row) => ({
+      ...(row.definition || { id: `${prefix}${row.id}`, quantityMode: "INTEGER", defaultQuantity: 1, remarksEnabled: true }),
+      ...(row.definition ? {} : { id: `${prefix}${row.id}` }),
+      name: row.name || row.definition?.name || "",
+      [idKey]: row.id,
+      brandDefaultPrice: finite(row.defaultPrice),
+    }));
+  return { usingCatalogue: !byDefinition.size && !bespoke.length, definitions: [...definitions, ...bespoke] };
 }
 
+/** The services a brand's generator offers: the catalogue, with the brand's own masters overlaid. */
+export function brandServiceDefinitions(brandServices = [], catalogue = []) {
+  return offeredDefinitions(brandServices, catalogue, { idKey: "brandServiceId", linkKey: "serviceDefinitionId", prefix: "brand-service:" });
+}
+
+/** The same for deliverables, which lost the same screen and carry the same rows behind it. */
 export function brandDeliverableDefinitions(brandDeliverables = [], catalogue = []) {
-  const configured = (brandDeliverables || []).filter((row) => row?.isActive !== false);
-  if (!configured.length) return { definitions: catalogue || [], usingCatalogue: true };
-  const byId = new Map((catalogue || []).map((definition) => [definition.id, definition]));
-  return {
-    usingCatalogue: false,
-    definitions: configured.map((row) => {
-      const definition = row.definition || byId.get(row.deliverableDefinitionId) || null;
-      return {
-        ...(definition || { id: `brand-deliverable:${row.id}`, remarksEnabled: true }),
-        name: row.name || definition?.name || "",
-        brandDeliverableId: row.id,
-        brandDefaultPrice: finite(row.defaultPrice),
-      };
-    }),
-  };
+  return offeredDefinitions(brandDeliverables, catalogue, { idKey: "brandDeliverableId", linkKey: "deliverableDefinitionId", prefix: "brand-deliverable:" });
 }
 
 /**

@@ -30,3 +30,29 @@ export function sourceNotices(response) {
   const notices = response?.data?.notices;
   return Array.isArray(notices) ? notices : [];
 }
+
+/*
+ * ── Marked as read, and gone ─────────────────────────────────────────────────────────────────
+ *
+ * Every row on the bell leaves it once it has been read, which is opening it - there is no "Mark as
+ * read", so a notice stays until the page it points at has been looked at. A
+ * stored notice is marked on the server and simply stops being listed. A derived notice or a meeting
+ * has no read state of its own, so the ids this reader has dismissed are kept in their browser and
+ * filtered out here.
+ */
+
+/** The entries this reader has not dismissed. */
+export function withoutDismissed(entries, dismissed) {
+  const hidden = new Set((dismissed || []).map(String));
+  return (entries || []).filter((entry) => !hidden.has(String(entry.id)));
+}
+
+/**
+ * The dismissed ids still worth remembering: only those the bell is still being sent. A notice that
+ * has gone from the reply - the follow-up was made, the meeting is over - needs no hiding, so the
+ * list can never grow past what is outstanding.
+ */
+export function pruneDismissed(dismissed, entries) {
+  const live = new Set((entries || []).map((entry) => String(entry.id)));
+  return (dismissed || []).map(String).filter((id) => live.has(id));
+}

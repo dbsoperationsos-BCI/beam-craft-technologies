@@ -49,6 +49,7 @@ export const separationFormSections = [
       {
         name: "separationType",
         label: "Separation Type",
+        helperText: "How the employee is leaving; it decides their new employment status.",
         type: "select",
         required: true,
         options: separationTypeOptions,
@@ -59,12 +60,13 @@ export const separationFormSections = [
       {
         name: "separationReason",
         label: "Separation Reason",
+        helperText: "The main reason, from the list that fits the chosen type.",
         type: "select",
         required: true,
         options: (values) => separationReasonsByType[values.separationType] || [],
         props: (values) => ({ disabled: !values.separationType, placeholder: values.separationType ? "Select" : "Choose a separation type first" }),
       },
-      { name: "detailedReason", label: "Detailed Reason", type: "textarea", colSpan: 2, props: { rows: 3 } },
+      { name: "detailedReason", label: "Detailed Reason", type: "textarea", colSpan: 2, props: { rows: 3 }, helperText: "Anything more about why they are leaving, in your own words." },
     ],
   },
   {
@@ -72,29 +74,29 @@ export const separationFormSections = [
     title: "Employee Submission",
     when: hasSubmission,
     fields: [
-      { name: "resignationDate", label: "Resignation Date", type: "date", required: true, props: { restriction: "future" } },
-      { name: "resignationLetter", label: "Resignation Letter", type: "file", props: { maxFiles: 1, accept: ".pdf,.doc,.docx,.png,.jpg,.jpeg,.webp" } },
+      { name: "resignationDate", label: "Resignation Date", type: "date", required: true, props: { restriction: "future" }, helperText: "The day the employee handed in their resignation." },
+      { name: "resignationLetter", label: "Resignation Letter", type: "file", props: { maxFiles: 1, accept: ".pdf,.doc,.docx,.png,.jpg,.jpeg,.webp" }, helperText: "The employee's resignation letter, as one PDF, Word file or image." },
     ],
   },
   {
     id: "notice",
     title: "Notice Period",
     fields: [
-      { name: "proposedLastWorkingDate", label: "Proposed Last Working Date", type: "date", required: true },
-      { name: "noticePeriodRequired", label: "Notice Period Required (days)", props: { type: "number", min: 0, inputMode: "numeric" } },
-      { name: "noticePeriodServed", label: "Notice Period Served (days)", props: { type: "number", min: 0, inputMode: "numeric" } },
-      { name: "noticePeriodWaived", label: "Notice Period Waived (days)", props: { type: "number", min: 0, inputMode: "numeric" } },
+      { name: "proposedLastWorkingDate", label: "Proposed Last Working Date", type: "date", required: true, helperText: "The day the employee is expected to work for the last time." },
+      { name: "noticePeriodRequired", label: "Notice Period Required (days)", props: { type: "number", min: 0, inputMode: "numeric" }, helperText: "How many days of notice their terms ask them to serve." },
+      { name: "noticePeriodServed", label: "Notice Period Served (days)", props: { type: "number", min: 0, inputMode: "numeric" }, helperText: "How many of those notice days they have actually worked." },
+      { name: "noticePeriodWaived", label: "Notice Period Waived (days)", props: { type: "number", min: 0, inputMode: "numeric" }, helperText: "Notice days the studio lets go; any above zero asks why." },
       // Waiving notice needs a reason on the record; asking for one before any is waived does not.
-      { name: "waiverReason", label: "Waiver Reason", type: "textarea", colSpan: 2, when: (values) => Number(values.noticePeriodWaived) > 0, props: { rows: 3 } },
-      { name: "earlyReleaseRequested", label: "Early release requested by the employee", type: "toggle", colSpan: 2 },
-      { name: "earlyReleaseReason", label: "Early Release Reason", type: "textarea", colSpan: 2, when: (values) => Boolean(values.earlyReleaseRequested), props: { rows: 3 } },
+      { name: "waiverReason", label: "Waiver Reason", type: "textarea", colSpan: 2, when: (values) => Number(values.noticePeriodWaived) > 0, props: { rows: 3 }, helperText: "Why the studio is letting the employee skip those notice days." },
+      { name: "earlyReleaseRequested", label: "Early release requested by the employee", type: "toggle", colSpan: 2, helperText: "Turn on if the employee asked to leave before their notice ends." },
+      { name: "earlyReleaseReason", label: "Early Release Reason", type: "textarea", colSpan: 2, when: (values) => Boolean(values.earlyReleaseRequested), props: { rows: 3 }, helperText: "Why the employee wants to leave before their notice ends." },
     ],
   },
   {
     id: "hr",
     title: "HR Remarks",
     fields: [
-      { name: "hrRemarks", label: "HR Remarks", type: "textarea", colSpan: 2, props: { rows: 4, placeholder: "Anything HR wants kept with this separation." } },
+      { name: "hrRemarks", label: "HR Remarks", type: "textarea", colSpan: 2, props: { rows: 4, placeholder: "Anything HR wants kept with this separation." }, helperText: "Internal notes kept with this separation for HR to refer back to." },
     ],
   },
 ];

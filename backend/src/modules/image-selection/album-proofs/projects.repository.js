@@ -1,4 +1,5 @@
 const prisma = require("../../../config/db");
+const { everyChunk } = require("../../../services/wordChunks");
 
 /**
  * Album Proofing's own project rows.
@@ -21,8 +22,9 @@ const projectSelect = {
 function createRepository(client = prisma) {
   return {
     transaction: (callback) => client.$transaction((transaction) => callback(createRepository(transaction))),
+    // Word Chunk Search: every word typed, any order.
     listProjects: ({ search, archived, orderBy }) => client.imageSelectionProject.findMany({
-      where: { deletedAt: null, albumProofing: ALBUM_PROOFING, archivedAt: archived ? { not: null } : null, ...(search ? { projectName: { contains: search } } : {}) },
+      where: { deletedAt: null, albumProofing: ALBUM_PROOFING, archivedAt: archived ? { not: null } : null, ...(search ? { AND: everyChunk(search, (chunk) => ({ projectName: { contains: chunk } })) } : {}) },
       select: projectSelect, orderBy,
     }),
     findProject: (id, { archived } = {}) => client.imageSelectionProject.findFirst({

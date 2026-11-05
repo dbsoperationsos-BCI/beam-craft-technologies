@@ -1,6 +1,7 @@
 "use client";
 
 import { useId, useRef, useState } from "react";
+import HelpTip from "@/components/shared/HelpTip";
 import useMenuDismiss from "@/components/shared/useMenuDismiss";
 
 /**
@@ -30,7 +31,7 @@ import useMenuDismiss from "@/components/shared/useMenuDismiss";
  * label on this screen that named its own control rather than its answer. The W/A Group-Name
  * Generator already passed this label by hand, so the two now agree without being told to.
  */
-export default function EnquiryCombobox({ label = "Enquiry ID", required = false, readOnly = false, value, enquiries, loading, capped = false, total = 0, onSearch, onSelect }) {
+export default function EnquiryCombobox({ label = "Enquiry ID", helperText = "", required = false, readOnly = false, value, enquiries, loading, capped = false, total = 0, error = "", onSearch, onSelect }) {
   const [open, setOpen] = useState(false);
   // The text being typed, which exists only while the list is open. Closed, the box reads `value`.
   const [query, setQuery] = useState("");
@@ -66,19 +67,18 @@ export default function EnquiryCombobox({ label = "Enquiry ID", required = false
    */
   if (readOnly) {
     return <div className="block text-[11px] font-semibold text-slate-600 sm:text-xs">
-      <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</span>
+      <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}<HelpTip text="The enquiry this project was booked against, and it cannot be changed here." /></span>
       <input
         value={value || ""}
         readOnly
         aria-label={label}
         className="mt-1.5 block min-h-9 w-full cursor-default rounded-lg border border-slate-300 bg-slate-100 px-3 text-xs font-normal text-slate-600 outline-none sm:text-sm"
       />
-      <p className="mt-1.5 font-normal text-slate-500">The enquiry this project was booked against, and it cannot be changed here.</p>
     </div>;
   }
 
   return <div ref={rootRef} className="relative block text-[11px] font-semibold text-slate-600 sm:text-xs">
-    <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</span>
+    <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}<HelpTip text={helperText} /></span>
     <input
       type="search"
       role="combobox"
@@ -101,8 +101,10 @@ export default function EnquiryCombobox({ label = "Enquiry ID", required = false
         setOpen(true);
       }}
       placeholder="Search enquiry ID, client name or number"
-      className="mt-1.5 block min-h-9 w-full rounded-lg border border-slate-300 bg-white px-3 text-xs font-normal text-slate-700 outline-none transition sm:text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+      aria-invalid={error ? "true" : undefined}
+      className={`mt-1.5 block min-h-9 w-full rounded-lg border ${error ? "border-red-500" : "border-slate-300"} bg-white px-3 text-xs font-normal text-slate-700 outline-none transition sm:text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100`}
     />
+    {error && !open && <p role="alert" className="mt-1.5 text-xs font-normal text-red-600">{error}</p>}
     {open && <div className="absolute z-[90] mt-1 w-full overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">
       <div id={listboxId} className="max-h-64 overflow-y-auto py-1" role="listbox" aria-label={label}>
         {loading
@@ -117,7 +119,21 @@ export default function EnquiryCombobox({ label = "Enquiry ID", required = false
               onClick={() => { onSelect(item); close(); }}
               className="block w-full border-b border-slate-100 px-3 py-2 text-left text-sm font-normal text-slate-700 hover:bg-blue-50"
             >
-              <span className="block font-medium text-slate-900">{item.enquiryId}</span>
+              <span className="flex items-center gap-2 font-medium text-slate-900">
+                {item.enquiryId}
+                {/*
+                  * What this enquiry has already been booked as, where it has been.
+                  *
+                  * Booking the same client again is allowed - a second wedding, another event on the
+                  * one enquiry - and the picker used to hide every id that had a project, which left
+                  * no way to do it at all. This is what replaces that: not a refusal, a note, so a
+                  * second booking is a choice somebody makes rather than one they make by accident
+                  * from a stale tab. Absent on the great majority of rows, which have no project.
+                  */}
+                {item.projectCount > 0 && <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                  {item.projectCount === 1 ? "1 project" : `${item.projectCount} projects`}
+                </span>}
+              </span>
               <span className="mt-1 block text-xs text-slate-500">{[item.clientName, item.clientMainNumber, item.whatsappGroupName].filter(Boolean).join(" · ") || "CRM lead enquiry"}</span>
             </button>)
             : <p className="px-3 py-3 text-sm font-normal text-slate-500">No matching enquiries found. Enquiries come from the CRM&apos;s leads, and only a lead that exists there can be chosen.</p>}

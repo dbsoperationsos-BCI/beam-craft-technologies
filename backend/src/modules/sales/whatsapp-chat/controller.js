@@ -2,7 +2,6 @@ const prisma = require("../../../config/db");
 const iamService = require("../../../services/iam.service");
 const { salesEmployees } = require("../../../services/employeeOptionLists");
 const { leadAccessWhere } = require("../../../services/leadScope");
-const path = require("path");
 const { listMessages, getMessage, findMessageByWaId, isChatEnabled, setChatEnabled, chatLimits, setChatLimits, blockedChatUserIds, isChatEnabledForUser, setUserChatEnabled, usageForUsers } = require("./repository");
 const { evaluateUsage, limits: activeLimits, sanitizeLimits, DEFAULT_LIMITS, LIMIT_BOUNDS } = require("./usage");
 const { subscribeToThread } = require("./events");
@@ -10,21 +9,12 @@ const { MAX_MESSAGE_LENGTH, MAX_CAPTION_LENGTH } = require("./security");
 // The one rule for whether a typed number is a whole number, shared with the lead forms that
 // collect it and with the server that stores it.
 const { isValidPhoneNumber } = require("../../../services/phoneNumber");
+// Every send from here is recorded in Settings → WhatsApp Activity Log.
+const whatsappActivity = require("../../../services/whatsappActivity");
 const {
   sessionState, startSession, logoutSession, sendMessageToLead, sendMediaToLead,
-  markThreadRead, numberOnWhatsApp, jidFor, mediaFilePath, sessionStatesFor, loadOlderMessages, actOnMessage, refetchMedia,
-  getMedia, isRemoteKey,
+  markThreadRead, numberOnWhatsApp, jidFor, sessionStatesFor, loadOlderMessages, actOnMessage, mediaStreamFor,
 } = require("./sessionManager");
-
-async function fileExists(file) {
-  if (!file) return false;
-  try {
-    await require("fs/promises").access(file);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function sendError(res, error, fallback) {
   const status = error?.status || 500;
@@ -345,7 +335,11 @@ async function send(req, res) {
     }
     const phone = await leadPhone(req, enquiryId, typedPhoneOf(req));
     if (!phone) return res.status(400).json({ message: NO_WHATSAPP_NUMBER_MESSAGE });
-    const sent = await sendMessageToLead({ userId: req.user.id, enquiryId, phone, body });
+    const sent = await whatsappActivity.track({
+      mode: "MANUAL", provider: "baileys", trigger: "CRM_LEAD_MESSAGE", eventRef: `crm-lead:${enquiryId}`,
+      initiatedByUserId: req.user.id, senderUserId: req.user.id, links: { crmLeadId: enquiryId },
+      recipient: { kind: "LEAD", address: phone }, body, resendable: true,
+    }, () => sendMessageToLead({ userId: req.user.id, enquiryId, phone, body }));
     return res.status(201).json({ message: "Message sent.", data: sent });
   } catch (error) {
     return sendError(res, error, "Unable to send this WhatsApp message.");
@@ -357,7 +351,8 @@ async function send(req, res) {
 // Name picker on Create Project is drawn from. See `services/employeeOptionLists`.
 
 /**
- * The CRMs who can chat, and whether their WhatsApp is linked.
+ * The CRMs who can chat, and everybody else Allow WhatsApp has been ticked for - and whether each
+ * one's WhatsApp is linked.
  *
  * Built from the sales team as it stands rather than a list kept by hand: an employee added to
  * Sales appears here without anyone editing this module, which is the whole point of reading it
@@ -365,8 +360,16 @@ async function send(req, res) {
  * and that login is what carries a WhatsApp session; a login in Sales with no employee record
  * behind it is listed in its own right rather than left out.
  *
- * An administrator's own account is not a CRM and is not listed. It is a login, not somebody a
- * client is talking to.
+ * **Required is a second, independent reason to be on this list.** `whatsappRequired` - Allow
+ * WhatsApp in Login Credentials - holds somebody to the application-wide gate whether or not they
+ * are in Sales, and an administrator switching it on for someone has no way to see afterwards
+ * whether that person has actually linked - the only other place that answer shows is the gate
+ * itself, on that person's own screen. So anybody ticked appears here too, `required: true`,
+ * alongside whoever is here for being a CRM (`salesTeam: true`); a row can be either, or both.
+ *
+ * An administrator is never listed for being required - `linkRequired` never holds one regardless
+ * of the tick, so a row that could never be blocked would only be confusing here. One who also
+ * happens to sit in the Sales department is unaffected by that and is listed as a CRM as before.
  */
 async function users(req, res) {
   try {
@@ -374,9 +377,16 @@ async function users(req, res) {
       salesEmployees({ select: { id: true, employeeName: true, department: true, designation: true, contactNumber: true } }),
       prisma.user.findMany({
         where: { status: "ACTIVE" },
-        select: { id: true, name: true, username: true, linkedEmployeeId: true, accessDepartment: true },
+        select: {
+          id: true, name: true, username: true, linkedEmployeeId: true, accessDepartment: true, role: true, whatsappRequired: true,
+          roles: { select: { role: { select: { isAdmin: true, isActive: true } } } },
+        },
       }),
     ]);
+
+    // The same rule `whatsappStanding` applies to one account at a time - kept in step with it
+    // rather than re-derived, since this is the only other place that asks the question.
+    const isAdminAccount = (account) => account.role === "SUPER_ADMIN" || account.roles.some((entry) => entry.role?.isActive && entry.role?.isAdmin);
 
     const accountByEmployee = new Map(
       accounts.filter((account) => Number.isInteger(account.linkedEmployeeId)).map((account) => [account.linkedEmployeeId, account]),
@@ -388,20 +398,55 @@ async function users(req, res) {
       role: employee.designation || employee.department || "",
       contactNumber: employee.contactNumber || "",
       account: accountByEmployee.get(employee.id) || null,
+      salesTeam: true,
+      required: Boolean(accountByEmployee.get(employee.id)?.whatsappRequired),
     }));
 
-    // A Sales login with no employee record is still a CRM someone can chat as.
+    // Required but not already listed as a Sales employee - Allow WhatsApp reaches anybody, and an
+    // employee ticked for it needs their own name and role shown, not just their login's.
+    const listedEmployeeIds = new Set(employees.map((employee) => employee.id));
+    const extraRequiredEmployeeIds = accounts
+      .filter((account) => account.whatsappRequired === true && !isAdminAccount(account) && Number.isInteger(account.linkedEmployeeId) && !listedEmployeeIds.has(account.linkedEmployeeId))
+      .map((account) => account.linkedEmployeeId);
+    const extraEmployees = extraRequiredEmployeeIds.length
+      ? await prisma.employee.findMany({
+          where: { id: { in: extraRequiredEmployeeIds } },
+          select: { id: true, employeeName: true, department: true, designation: true, contactNumber: true },
+        })
+      : [];
+    for (const employee of extraEmployees) {
+      rows.push({
+        key: `employee-${employee.id}`,
+        name: employee.employeeName,
+        role: employee.designation || employee.department || "",
+        contactNumber: employee.contactNumber || "",
+        account: accountByEmployee.get(employee.id) || null,
+        salesTeam: false,
+        required: true,
+      });
+    }
+
+    // A login with no employee record behind it - a Sales login someone can chat as, a required
+    // login Allow WhatsApp was ticked for, or both - is still listed in its own right.
     for (const account of accounts) {
       if (accountByEmployee.has(account.linkedEmployeeId)) continue;
-      if (String(account.accessDepartment || "").trim().toUpperCase() !== "SALES") continue;
+      const salesTeam = String(account.accessDepartment || "").trim().toUpperCase() === "SALES";
+      const required = account.whatsappRequired === true && !isAdminAccount(account);
+      if (!salesTeam && !required) continue;
       rows.push({
         key: `user-${account.id}`,
         name: account.name || account.username || "",
         role: account.accessDepartment || "",
         contactNumber: "",
         account,
+        salesTeam,
+        required,
       });
     }
+
+    // Rows now arrive from three sources rather than one, in whatever order each answered in -
+    // sorted by name so the table still reads as one list rather than three stacked together.
+    rows.sort((first, second) => first.name.localeCompare(second.name));
 
     const accountIds = rows.map((row) => row.account?.id).filter(Boolean);
     const [states, usage, blocked, saved] = await Promise.all([
@@ -436,6 +481,10 @@ async function users(req, res) {
         status: state?.status || "disconnected",
         paired: Boolean(state?.paired),
         isSelf: row.account?.id === req.user.id,
+        // Why this row is here, so the table can say so rather than leaving Sales and Required
+        // looking like the same list. Never both false - see the two loops above.
+        salesTeam: row.salesTeam,
+        required: row.required,
       };
     });
 
@@ -463,7 +512,12 @@ async function sendMedia(req, res) {
     }
     const phone = await leadPhone(req, enquiryId, typedPhoneOf(req));
     if (!phone) return res.status(400).json({ message: NO_WHATSAPP_NUMBER_MESSAGE });
-    const sent = await sendMediaToLead({
+    // The file itself is not kept by the log, so an attachment is recorded but never resent from it.
+    const sent = await whatsappActivity.track({
+      mode: "MANUAL", provider: "baileys", trigger: "CRM_LEAD_MEDIA", eventRef: `crm-lead:${enquiryId}`,
+      initiatedByUserId: req.user.id, senderUserId: req.user.id, links: { crmLeadId: enquiryId },
+      recipient: { kind: "LEAD", address: phone }, body: caption, preview: `Attachment: ${req.file.originalname || "file"}${caption ? ` - ${caption}` : ""}`, resendable: false,
+    }, () => sendMediaToLead({
       userId: req.user.id,
       enquiryId,
       phone,
@@ -472,92 +526,52 @@ async function sendMedia(req, res) {
       // Set by the microphone button only. It decides whether this goes as a voice note or as an
       // ordinary audio file, which is not something the mime type can be asked.
       voice: String(req.body?.voice || "") === "1",
-    });
+    }));
     return res.status(201).json({ message: "Attachment sent.", data: sent });
   } catch (error) {
     return sendError(res, error, "Unable to send this attachment.");
   }
 }
 
-// A file from the thread, served from the sender's own folder. The message is looked up first,
-// so a path can never be asked for directly.
+const GONE_MESSAGE = "This file is no longer on WhatsApp. Open it on your phone.";
+
+/**
+ * A file from the thread, fetched from WhatsApp for View or Download.
+ *
+ * Nothing is kept: the file is asked of WhatsApp at this moment and piped straight to the browser
+ * - see `mediaOnDemand.js`. The message is looked up first, so a file can never be asked for by
+ * its address.
+ */
 async function media(req, res) {
   try {
     const message = await getMessage(req.params.messageId);
-    if (!message?.mediaPath && !message?.rawMessage) {
-      return res.status(404).json({ message: "No file on this message." });
-    }
-
     /*
      * The file belongs to the session that received it, and only that session may read it.
      *
-     * Without this, any signed-in account could ask for any message id. It happened to fail -
-     * the bytes were served from the caller's own folder, so another CRM's file was simply not
-     * there - but the refetch below would then ask WhatsApp for it again, which is the leak the
-     * accident was hiding. Said as "no file" rather than "not yours": whether a message id
-     * exists is itself something the caller has no business learning.
+     * Said as "no file" rather than "not yours": whether a message id exists is itself something
+     * the caller has no business learning. A message taken back takes its file with it.
      */
-    if (Number(message.userId) !== Number(req.user.id)) {
+    if (!message?.mediaType || Number(message.userId) !== Number(req.user.id) || message.revokedAt || message.deletedAt) {
       return res.status(404).json({ message: "No file on this message." });
     }
 
-    const gone = () => res.status(404).json({ message: "This file is no longer stored." });
+    const file = await mediaStreamFor(message);
+    if (!file) return res.status(404).json({ message: GONE_MESSAGE });
 
-    /*
-     * Streams an object out of the bucket.
-     *
-     * Piped rather than buffered: a video can be tens of megabytes, and holding one per viewer
-     * in the server's memory is how a chat panel takes the API down with it. Nothing public is
-     * involved - the object is read by the server and sent through this authenticated endpoint,
-     * so a URL to the file itself is never built and never handed out.
-     */
-    const sendFromBucket = async (key) => {
-      const object = await getMedia(key);
-      if (!object) return false;
-      res.setHeader("Content-Type", object.contentType);
-      // The bucket is the copy of record; nothing in between should keep one of a client's
-      // conversation.
-      res.setHeader("Cache-Control", "private, no-store");
-      if (object.contentLength) res.setHeader("Content-Length", String(object.contentLength));
-      object.stream.pipe(res).on("error", () => {
-        if (!res.headersSent) gone();
-      });
-      return true;
-    };
-
-    /*
-     * The bucket, then the disk.
-     *
-     * Attachments live in R2 under the client they belong to. Messages stored before that still
-     * point at a file beside the application, so both are read - a slash in the stored path is
-     * what tells them apart, since a local name can never contain one.
-     */
-    let stored = message.mediaPath;
-    if (isRemoteKey(stored) && (await sendFromBucket(stored))) return undefined;
-
-    const localMissing = !isRemoteKey(stored)
-      && (!stored || !(await fileExists(mediaFilePath(req.user.id, stored))));
-
-    // Whatever is missing, ask WhatsApp for it again while it still has the keys. A re-fetch
-    // files into the bucket, so the thread heals forward rather than rebuilding the old layout.
-    if (isRemoteKey(stored) || localMissing) {
-      const refetched = await refetchMedia(message);
-      if (refetched) stored = refetched;
-      if (isRemoteKey(stored)) return (await sendFromBucket(stored)) ? undefined : gone();
-    }
-
-    const file = stored ? mediaFilePath(req.user.id, stored) : "";
-    if (!file) return res.status(404).json({ message: "No file on this message." });
-    /*
-     * `dotfiles: "allow"` is the whole reason this worked on disk and not over HTTP.
-     *
-     * The older files sit under `.whatsapp-sessions`, and Express refuses any path with a
-     * dot-segment in it unless told otherwise - so every image in the thread answered 404 and
-     * read as "no longer stored" while the file was sitting there the whole time.
-     */
-    return res.sendFile(path.resolve(file), { dotfiles: "allow" }, (error) => {
-      if (error && !res.headersSent) gone();
+    // The type is what the sender's phone declared, so the browser is told not to second-guess it.
+    res.setHeader("Content-Type", file.contentType);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    // A client's conversation: nothing in between keeps a copy either.
+    res.setHeader("Cache-Control", "private, no-store");
+    file.stream.on("error", (error) => {
+      console.warn("[whatsapp] File stream broke:", error?.message || error);
+      if (!res.headersSent) res.status(502).json({ message: GONE_MESSAGE });
+      else res.destroy();
     });
+    // Stop pulling from WhatsApp when the browser stops listening.
+    res.on("close", () => file.stream.destroy?.());
+    file.stream.pipe(res);
+    return undefined;
   } catch (error) {
     return sendError(res, error, "Unable to load this attachment.");
   }
@@ -617,15 +631,28 @@ async function act(req, res) {
     // taken from the request, so a message cannot be forwarded to an arbitrary number.
     const toPhone = req.body?.toEnquiryId ? await leadPhone(req, String(req.body.toEnquiryId).trim()) : "";
 
-    const result = await actOnMessage({
+    const action = String(req.body?.action || "");
+    const perform = () => actOnMessage({
       userId: req.user.id,
       phone,
       message,
-      action: String(req.body?.action || ""),
+      action,
       emoji: req.body?.emoji,
       body: req.body?.body,
       toPhone,
     });
+    // A reply and a forward are sends, and are recorded as such; a reaction, pin or delete is not.
+    const sendsAMessage = action === "reply" || action === "forward";
+    const result = sendsAMessage
+      ? await whatsappActivity.track({
+        mode: "MANUAL", provider: "baileys", trigger: action === "reply" ? "CRM_LEAD_REPLY" : "CRM_LEAD_FORWARD",
+        eventRef: `crm-lead:${action === "forward" ? String(req.body?.toEnquiryId || "").trim() : enquiryId}`,
+        initiatedByUserId: req.user.id, senderUserId: req.user.id,
+        links: { crmLeadId: action === "forward" ? String(req.body?.toEnquiryId || "").trim() || null : enquiryId },
+        recipient: { kind: "LEAD", address: action === "forward" ? toPhone : phone },
+        body: action === "reply" ? req.body?.body : message.body, resendable: false,
+      }, perform)
+      : await perform();
     return res.json({ message: "Done.", data: result });
   } catch (error) {
     return sendError(res, error, "Unable to act on this message.");

@@ -1,4 +1,5 @@
 const puppeteer = require("puppeteer");
+const { installPdfImageCompression } = require("./pdfImageCompression");
 
 /**
  * Turns the client-facing quotation page into a PDF.
@@ -65,15 +66,22 @@ async function getBrowser() {
 }
 
 /** Renders one quotation and resolves to the PDF bytes. */
-async function renderQuotationPdf(token) {
+async function renderQuotationPdf(token, { printPass } = {}) {
   const instance = await getBrowser();
   const page = await instance.newPage();
   try {
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
+    // A client portal download of a lapsed quotation: the page's API calls carry the one-time pass
+    // (`services/quotationPrintPass.js`) so the quotation still loads for this render.
+    if (printPass) await page.setExtraHTTPHeaders({ "x-quotation-print-pass": printPass });
     const url = `${frontendOrigin()}/q/${encodeURIComponent(token)}?print=1`;
     // Print colours as designed, and set before the page loads so it is laid out once rather than
     // rendered for the screen and then reflowed for paper.
     await page.emulateMediaType("print");
+    // Its photographs as JPEG sized for the sheet, so the PDF stays small - see pdfImageCompression.
+    await installPdfImageCompression(page);
+    // Counted from the first request, so a picture asked for before the document settles is waited for.
+    const pendingImages = trackImageRequests(page);
     /*
      * Wait for the document, not for the network to go quiet.
      *
@@ -104,7 +112,8 @@ async function renderQuotationPdf(token) {
       const detail = await page.evaluate(() => document.body.innerText.trim().slice(0, 200));
       throw Object.assign(new Error(`The quotation page could not be printed (${state}): ${detail}`), { pageState: state });
     }
-    await waitForRenderedAssets(page);
+    await waitForRenderedAssets(page, pendingImages);
+    await dropBlurredShadows(page);
     /*
      * One page, as tall as the document.
      *
@@ -128,28 +137,100 @@ async function renderQuotationPdf(token) {
   }
 }
 
+/*
+ * Every picture the page has asked for and not yet been handed, `<img>` and CSS background alike.
+ *
+ * Asked of the network rather than of the document because `document.images` cannot see a
+ * background (the India map), and because each picture now passes through `pdfImageCompression`
+ * first - a fetch and a JPEG encode, three at a time - so the document can be ready seconds before
+ * its pictures are. A failed request leaves the set too: it is answered, if not well. Only web
+ * addresses are counted, as `pdfImageCompression` only converts those: a `data:` picture is already
+ * in the page.
+ */
+function trackImageRequests(page) {
+  const pending = new Set();
+  page.on("request", (request) => { if (request.resourceType() === "image" && /^https?:\/\//i.test(request.url())) pending.add(request); });
+  const settle = (request) => { pending.delete(request); };
+  page.on("requestfinished", settle);
+  page.on("requestfailed", settle);
+  return pending;
+}
+
 /**
  * The pictures and the type, which are what a PDF prints wrong if it does not wait.
  *
- * Only the images actually on the page and only the ones still loading - the logo, in practice.
- * A blanket wait for the network would be back to `networkidle0`; this asks the document what it is
- * still missing, and stops as soon as it has it. `document.fonts.ready` is the same question for
- * the type: a heading printed mid-swap is a heading in the wrong face.
+ * Printed only once every picture asked for has arrived, every `<img>` has decoded and the fonts
+ * are in - `document.fonts.ready` is the type's half: a heading printed mid-swap is a heading in the
+ * wrong face. A picture that failed to load is not waited for again; the page shows the client the
+ * same thing, and the logo falls back to the bundled mark on its own.
  *
- * Given its own timeout so a logo the studio's storage is slow to hand over delays the PDF by two
- * seconds rather than failing it - a quotation with an unfetched image still prints correctly in
- * every other respect.
+ * This used to give up after two seconds and print whatever had arrived, which with the pictures
+ * queued through the JPEG conversion was a cover or a collage cell printed blank, silently. A
+ * picture still on its way after `ASSET_TIMEOUT_MS` now fails the render instead: the studio is told
+ * the download did not work and can try again, rather than sending a client a quotation with holes.
  */
-const ASSET_TIMEOUT_MS = 2_000;
+const ASSET_TIMEOUT_MS = 20_000;
+const ASSET_POLL_MS = 100;
 
-async function waitForRenderedAssets(page) {
-  await page.evaluate((timeout) => {
-    const images = Array.from(document.images)
-      .filter((image) => !image.complete)
-      .map((image) => new Promise((resolve) => { image.addEventListener("load", resolve, { once: true }); image.addEventListener("error", resolve, { once: true }); }));
-    const settled = Promise.all([...images, document.fonts?.ready].filter(Boolean));
-    return Promise.race([settled, new Promise((resolve) => { setTimeout(resolve, timeout); })]);
-  }, ASSET_TIMEOUT_MS).catch(() => {});
+async function waitForRenderedAssets(page, pendingImages, timeoutMs = ASSET_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    // A lazy picture off-screen is never asked for, so it is not waited for; the sheet has none today.
+    const documentReady = await page.evaluate(() => Array.from(document.images).every((image) => image.complete || image.loading === "lazy"));
+    if (documentReady && pendingImages.size === 0) break;
+    if (Date.now() > deadline) {
+      throw new Error(`The quotation's pictures did not finish loading within ${timeoutMs / 1000}s (${pendingImages.size} still loading).`);
+    }
+    await new Promise((resolve) => { setTimeout(resolve, ASSET_POLL_MS); });
+  }
+  // Loaded is not yet decoded; a decode that fails is a broken picture, already counted as answered.
+  await page.evaluate(() => Promise.all([
+    ...Array.from(document.images).map((image) => image.decode().catch(() => {})),
+    document.fonts?.ready,
+  ]));
+}
+
+/*
+ * A box-shadow with only its sharp layers left: those with no blur radius.
+ *
+ * Chrome cannot write a blurred shadow into a PDF as vectors, so it paints each one as a bitmap at
+ * print resolution - a card 1040px wide became a 3257px JPEG plus a soft mask of the same size, for
+ * a shadow a few pixels deep. The cards' soft drop-shadows were 35-45% of every quotation PDF. A
+ * shadow with no blur (the 3px halo round a timeline dot, a 1px ring) is drawn as a shape and costs
+ * nothing, so it stays. Computed values only: Chrome writes each layer as `<colour> <x> <y> <blur>
+ * <spread> [inset]`, the colour first.
+ */
+function withoutBlurredShadows(value) {
+  if (!value || value === "none") return value;
+  const layers = [];
+  let depth = 0;
+  let current = "";
+  for (const char of value) {
+    if (char === "(") depth += 1;
+    if (char === ")") depth -= 1;
+    if (char === "," && depth === 0) { layers.push(current.trim()); current = ""; } else current += char;
+  }
+  if (current.trim()) layers.push(current.trim());
+  const kept = layers.filter((layer) => {
+    const lengths = layer.replace(/[a-z-]+\([^)]*\)/gi, "").match(/-?[\d.]+px/g) || [];
+    return !(parseFloat(lengths[2] || "0") > 0);
+  });
+  return kept.length ? kept.join(", ") : "none";
+}
+
+/**
+ * Takes the blurred shadows off the page being printed (see `withoutBlurredShadows`). Only the
+ * renderer's own headless page is touched - the client's link and the studio's screens keep them.
+ */
+async function dropBlurredShadows(page) {
+  const shadows = await page.evaluate(() => Array.from(document.querySelectorAll("body *"), (node) => getComputedStyle(node).boxShadow));
+  const replaced = shadows.map((value) => { const next = withoutBlurredShadows(value); return next === value ? null : next; });
+  if (!replaced.some((value) => value !== null)) return;
+  await page.evaluate((values) => {
+    Array.from(document.querySelectorAll("body *")).forEach((node, index) => {
+      if (values[index] !== null && values[index] !== undefined) node.style.setProperty("box-shadow", values[index], "important");
+    });
+  }, replaced);
 }
 
 /**
@@ -170,4 +251,5 @@ async function closeQuotationPdfBrowser() {
   if (instance) await instance.close().catch(() => {});
 }
 
-module.exports = { renderQuotationPdf, warmQuotationPdfBrowser, closeQuotationPdfBrowser };
+// `getBrowser` is shared: the Signature Album prints its Download Album PDF with the same browser.
+module.exports = { renderQuotationPdf, warmQuotationPdfBrowser, closeQuotationPdfBrowser, getBrowser, frontendOrigin, withoutBlurredShadows, trackImageRequests, waitForRenderedAssets };

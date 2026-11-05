@@ -41,8 +41,9 @@ test("step one refuses to move on without its required answers", () => {
   assert.deepEqual(detailsProblems({ name: "Arun & Priya", eventType: "Wedding", startDate: "2026-09-22" }), {});
 });
 
-test("the wizard has six steps and the list five filters, review last and All first", () => {
-  assert.equal(WIZARD_STEPS.length, 6);
+test("the wizard has five steps, none of them Sub Events, and the list five filters, review last and All first", () => {
+  assert.equal(WIZARD_STEPS.length, 5);
+  assert.ok(!WIZARD_STEPS.some(([id]) => id === "subEvents"));
   assert.equal(WIZARD_STEPS.at(-1)[0], "review");
   assert.equal(EVENT_FILTERS[0][0], "all");
   assert.equal(toDateInput("2026-09-22T00:00:00.000Z"), "2026-09-22");

@@ -22,6 +22,12 @@ const RETRY_DELAY_MS = 1500;
 
 export default function PermissionsProvider({ children }) {
   const [permissions, setPermissions] = useState([]);
+  // The server's answer to "is this login an administrator" - a Super Admin, or a role with the
+  // Administrator tick - for the screens that are administrators' alone. False until it says so.
+  const [isAdministrator, setIsAdministrator] = useState(false);
+  // Narrower: a Super Admin of either kind (`isSuperAdmin` in the backend's services/administrator),
+  // for the few things kept for Super Admins alone. False until the server says so.
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   // Bumping this re-runs the effect below. Callers get `reload` rather than an async loader so the
@@ -45,6 +51,8 @@ export default function PermissionsProvider({ children }) {
         .then((data) => {
           if (cancelled) return;
           setPermissions(data?.permissions ?? []);
+          setIsAdministrator(data?.isAdministrator === true);
+          setIsSuperAdmin(data?.isSuperAdmin === true);
           setError(null);
           setLoading(false);
         })
@@ -57,6 +65,7 @@ export default function PermissionsProvider({ children }) {
             return;
           }
           setPermissions([]);
+          setIsAdministrator(false);
           setError(cause);
           setLoading(false);
         });
@@ -75,6 +84,8 @@ export default function PermissionsProvider({ children }) {
     };
     return {
       permissions,
+      isAdministrator,
+      isSuperAdmin,
       loading,
       // Set only when the permission set could not be fetched at all. Anything reading this to
       // decide what to show must not treat it as "no access".
@@ -84,7 +95,7 @@ export default function PermissionsProvider({ children }) {
       hasAllPermissions: (required = []) => required.every((entry) => has(entry.module, entry.feature, entry.level)),
       hasAnyPermission: (required = []) => required.some((entry) => has(entry.module, entry.feature, entry.level)),
     };
-  }, [error, loading, permissions, reload]);
+  }, [error, isAdministrator, isSuperAdmin, loading, permissions, reload]);
 
   return <PermissionsContext.Provider value={value}>{children}</PermissionsContext.Provider>;
 }

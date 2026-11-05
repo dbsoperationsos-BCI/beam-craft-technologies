@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getNotifications } from "@/services/notifications.service";
-import { sourceNotices } from "@/lib/notificationFeed.mjs";
+import { sourceNotices, withoutDismissed } from "@/lib/notificationFeed.mjs";
+import useDismissedNotices from "@/components/app-shell/useDismissedNotices";
 
 /*
  * ── The third half of the bell: what is waiting on this person, from every module ─────────────
@@ -41,6 +42,8 @@ const POLL_INTERVAL_MS = 60000;
  * outstanding each time it is written, so it cannot grow without limit.
  */
 const SEEN_KEY = "dbs_seen_source_notices";
+/** The notices this person has marked as read, which the bell no longer lists. */
+const DISMISSED_KEY = "dbs_dismissed_source_notices";
 
 function readSeen() {
   if (typeof window === "undefined") return [];
@@ -86,7 +89,11 @@ export default function useSourceNotices({ enabled = true } = {}) {
     return () => window.clearInterval(timer);
   }, [enabled, load]);
 
-  const unread = notices.filter((entry) => !seen.includes(String(entry.id)));
+  // Opened, and so read - and off the bell in this browser. Only opening does it: a notice stays on
+  // the bell until its page has been looked at.
+  const { dismissed, dismiss } = useDismissedNotices(DISMISSED_KEY);
+  const showing = withoutDismissed(notices, dismissed);
+  const unread = showing.filter((entry) => !seen.includes(String(entry.id)));
 
   /** Opening the bell is reading it, so that is where the badge clears. */
   const markSeen = useCallback(() => {
@@ -110,15 +117,15 @@ export default function useSourceNotices({ enabled = true } = {}) {
      *
      * Already sorted by the server, soonest first, so the ones that are late are at the top.
      */
-    for (const entry of notices) {
+    for (const entry of showing) {
       items.push({
         label: `${entry.kind} · ${entry.title}`,
         detail: entry.detail,
         tone: entry.tone === "urgent" ? "danger" : undefined,
-        onSelect: () => { if (entry.href) router.push(entry.href); },
+        onSelect: () => { dismiss(entry.id, notices); if (entry.href) router.push(entry.href); },
       });
     }
   }
 
-  return { items, unreadCount: unread.length, count: notices.length, markSeen };
+  return { items, unreadCount: unread.length, count: showing.length, markSeen };
 }

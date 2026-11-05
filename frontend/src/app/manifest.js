@@ -1,20 +1,28 @@
+import { BUNDLED_APP_NAME, BUNDLED_APP_SHORT_NAME, appIconUrl, serverStudioBranding, studioAppName } from "../lib/serverStudioBranding.js";
+
 /**
  * What a browser is told when somebody installs this application to a home screen.
  *
  * Served at `/manifest.webmanifest` by the file convention - the name, the icons and the window
- * the application opens in. It is static on purpose, and read once, at install: Settings can
- * change the studio's name and its tab mark at runtime (see `StudioFavicon`), but a manifest is
- * fetched when the icon is created and an installed device keeps what it was given. Branding an
- * installed app from the database would therefore only reach installs made after the change, and
- * would make the install itself depend on the API answering - so the mark that ships with the
- * application is the one that goes on the home screen.
+ * the application opens in. The name and the icons follow Settings → Branding: the studio's name
+ * and an icon drawn from its favicon by the API (`/api/public/app-icon`), and the bundled name and
+ * icons when either is not set or the API cannot be reached - so installing never depends on the
+ * API answering. A manifest is read once, when the icon is created, so a change in Settings reaches
+ * new installs; one already on a device keeps what it was given until it is installed again.
  */
 
-/** The studio's mark, rendered from `public/brand/favicon.svg`. See README - PWA. */
-const ICONS = [
+/*
+ * A manifest is cached like any route by default, which would freeze whatever branding was there at
+ * build time. Re-read once a minute instead - the same minute `serverStudioBranding` caches for - so
+ * a name or favicon saved in Settings reaches the next install without a redeploy.
+ */
+export const revalidate = 60;
+
+/** The icons, as `appIconUrl` resolves them - the bundled ones are drawn from `public/brand/favicon.svg`. */
+const iconsFor = (branding) => [
   // `any` is the mark as drawn: a white rounded ground the platform does not reshape.
-  { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
-  { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+  { src: appIconUrl(branding, "icon-192"), sizes: "192x192", type: "image/png", purpose: "any" },
+  { src: appIconUrl(branding, "icon-512"), sizes: "512x512", type: "image/png", purpose: "any" },
   /*
    * `maskable` is the same mark at 70% on a full-bleed white square. Android cuts its own shape -
    * a circle, a squircle, a rounded square, whichever the launcher uses - out of whatever it is
@@ -22,11 +30,13 @@ const ICONS = [
    * over the `any` file would clip the B and the C; shrinking it inside the square is what keeps
    * the whole mark inside every shape a launcher might cut.
    */
-  { src: "/icons/maskable-192.png", sizes: "192x192", type: "image/png", purpose: "maskable" },
-  { src: "/icons/maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+  { src: appIconUrl(branding, "maskable-192"), sizes: "192x192", type: "image/png", purpose: "maskable" },
+  { src: appIconUrl(branding, "maskable-512"), sizes: "512x512", type: "image/png", purpose: "maskable" },
 ];
 
-export default function manifest() {
+export default async function manifest() {
+  const branding = await serverStudioBranding();
+  const studioName = studioAppName(branding);
   return {
     /*
      * The install's identity, stated rather than inferred. Left out, a browser derives it from
@@ -34,10 +44,10 @@ export default function manifest() {
      * than an update to the one already on the home screen.
      */
     id: "/",
-    name: "DBS Operations OS",
-    // What fits under an icon. Android gives a home screen label about twelve characters before it
-    // truncates, and "DBS Operations OS" is not one of them.
-    short_name: "DBS OS",
+    name: studioName || BUNDLED_APP_NAME,
+    // What goes under the icon. The studio's own name as it is - a launcher truncates one longer
+    // than about twelve characters - and the bundled short name when the studio has not set one.
+    short_name: studioName || BUNDLED_APP_SHORT_NAME,
     description:
       "The studio's operations workspace: sales and CRM, projects, image selection, HRM and accounts.",
     lang: "en",
@@ -69,6 +79,6 @@ export default function manifest() {
     background_color: "#ffffff",
     theme_color: "#ffffff",
     categories: ["business", "productivity"],
-    icons: ICONS,
+    icons: iconsFor(branding),
   };
 }

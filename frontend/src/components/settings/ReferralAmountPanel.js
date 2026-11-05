@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Button from "@/components/shared/Button";
+import HelpTip from "@/components/shared/HelpTip";
 import TextField from "@/components/shared/TextField";
 import { INSTALMENT_INTERVAL_MONTHS, instalmentLabel, previewSplit, readInstalmentCount } from "@/components/hrm/referralPayouts";
 import { getReferralSettings, saveReferralSettings } from "@/services/hrm/referrals.service";
@@ -142,15 +143,6 @@ export default function ReferralAmountPanel({ canWrite = false, onNotice, onErro
   }
 
   return <div className="space-y-3">
-    <p className="text-xs text-slate-500 sm:text-sm">
-      What the studio pays for a referral, and how many instalments it is paid in. One falls due every
-      three months from the referred employee&rsquo;s joining date, so two instalments are their third
-      month and their sixth. The amount is divided equally between them, and what each one comes to is
-      shown below. A referral is recorded by
-      naming a <span className="font-medium text-slate-700">Referred By</span>{" "}on an employee&rsquo;s record,
-      and what it owes is tracked on <span className="font-medium text-slate-700">HRM → Employee Referral</span>.
-    </p>
-
     {/* The two questions, side by side on anything wider than a phone and stacked below it - an
         amount without a schedule is not a payment, so they are asked together rather than in two
         places. */}
@@ -161,29 +153,26 @@ export default function ReferralAmountPanel({ canWrite = false, onNotice, onErro
         value={loading ? "" : amount}
         readOnly={!canWrite || loading}
         placeholder={loading ? "Loading..." : "0"}
+        helperText="The total paid for each referral, in rupees, divided equally across the instalments. A referral is recorded by naming a Referred By on an employee's record, and what it owes is tracked on HRM → Employee Referral."
         onChange={(event) => setAmount(event.target.value.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1"))}
       />
-      <div>
-        <TextField
-          label="Number of instalments"
-          inputMode="numeric"
-          value={loading ? "" : countText}
-          readOnly={!canWrite || loading}
-          placeholder={loading ? "Loading..." : "2"}
-          error={loading ? "" : countError || ""}
-          onChange={(event) => setCountText(event.target.value.replace(/\D/g, ""))}
-        />
-        <p className="mt-1.5 text-[11px] font-normal text-slate-500 sm:text-xs">
-          One every {INSTALMENT_INTERVAL_MONTHS} months, from the employee&rsquo;s joining date.
-        </p>
-      </div>
+      <TextField
+        label="Number of instalments"
+        inputMode="numeric"
+        value={loading ? "" : countText}
+        readOnly={!canWrite || loading}
+        placeholder={loading ? "Loading..." : "2"}
+        error={loading ? "" : countError || ""}
+        helperText={`One every ${INSTALMENT_INTERVAL_MONTHS} months from the referred employee's joining date, so two instalments are their third month and their sixth.`}
+        onChange={(event) => setCountText(event.target.value.replace(/\D/g, ""))}
+      />
     </div>
 
     {/* What the two answers come to, per month. Worked out rather than described: this is the
         question the studio is really asking, and the figures here are the ones that reach a payslip. */}
     <div className="sm:max-w-md">
       <div className="text-[11px] font-semibold text-slate-600 sm:text-xs">
-        <span>{parts.length === 1 ? "The instalment" : `Each instalment (${parts.length})`}</span>
+        <span className="flex items-center">{parts.length === 1 ? "The instalment" : `Each instalment (${parts.length})`}{parts.length > 1 && <HelpTip text={`Divided equally, with any remainder on the last so the parts add back up to ${currency(amount)}.`} />}</span>
         <div className="mt-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-normal text-slate-600 sm:text-sm">
           {!parts.length && <span>{loading ? "Loading..." : "Say how many instalments to see the split."}</span>}
           {parts.length > 0 && <ul className="space-y-1">
@@ -194,9 +183,6 @@ export default function ReferralAmountPanel({ canWrite = false, onNotice, onErro
               </li>
             ))}
           </ul>}
-          {parts.length > 1 && <p className="mt-2 border-t border-slate-200 pt-2 text-[11px] text-slate-500">
-            Divided equally, with any remainder on the last so the parts add back up to {currency(amount)}.
-          </p>}
         </div>
       </div>
     </div>
@@ -204,7 +190,7 @@ export default function ReferralAmountPanel({ canWrite = false, onNotice, onErro
     {canWrite && <div className="flex flex-wrap items-center gap-3">
       <Button variant="primary" disabled={!changed || saving || loading || Boolean(countError)} onClick={() => void save()}>{saving ? "Saving..." : "Save settings"}</Button>
       {changed && <Button type="button" disabled={saving} onClick={() => { setAmount(savedAmount); setCountText(savedCount); }}>Discard changes</Button>}
-      <p className="text-xs text-slate-500">Applies to referrals made from now on. Anyone already referred keeps the amount and the months their referral was made under.</p>
+      <HelpTip text="Applies to referrals made from now on. Anyone already referred keeps the amount and the months their referral was made under." />
     </div>}
   </div>;
 }

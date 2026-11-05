@@ -28,7 +28,7 @@ export const MENU_MIN_HEIGHT = 96;
 export const MENU_GAP = 4;
 export const VIEWPORT_EDGE = 8;
 
-export function placeDropdownMenu({ rect, viewportWidth, viewportHeight, minWidth = 0 }) {
+export function placeDropdownMenu({ rect, viewportWidth, viewportHeight, minWidth = 0, maxWidth = 0, maxHeight: ceiling = MENU_MAX_HEIGHT }) {
   /*
    * The menu is its trigger's width. Both modes, and the reason is the same for both: a list that
    * hangs off a control and is not the shape of that control reads as a mistake before anybody has
@@ -42,18 +42,25 @@ export function placeDropdownMenu({ rect, viewportWidth, viewportHeight, minWidt
    * a box a few characters wide, and a menu matching it wrapped every country name over three
    * lines. There the menu is wider than its field on purpose. The clamp below is what stops any of
    * this running off the side of the window.
+   *
+   * `maxWidth` is the other half of it, for a field whose own width is not a width to copy: the
+   * Production Schedule's Assist grows sideways as people are added to it, and a list that grew
+   * with it would be a menu of five names across an empty half-metre. Passed with `minWidth`, the
+   * two pin the menu to one size whatever the field does.
    */
   const naturalWidth = rect.width;
+  const ceilingWidth = Math.max(MENU_MIN_WIDTH, viewportWidth - VIEWPORT_EDGE * 2);
   const width = Math.min(
-    Math.max(naturalWidth, minWidth),
-    Math.max(MENU_MIN_WIDTH, viewportWidth - VIEWPORT_EDGE * 2),
+    maxWidth ? Math.min(Math.max(naturalWidth, minWidth), maxWidth) : Math.max(naturalWidth, minWidth),
+    ceilingWidth,
   );
   const spaceBelow = viewportHeight - rect.bottom - MENU_GAP - VIEWPORT_EDGE;
   const spaceAbove = rect.top - MENU_GAP - VIEWPORT_EDGE;
-  const openUpward = spaceBelow < MENU_MAX_HEIGHT && spaceAbove > spaceBelow;
+  const openUpward = spaceBelow < ceiling && spaceAbove > spaceBelow;
   // Never shorter than a couple of rows, so it stays usable in a cramped pane, and never taller
-  // than the room it has, so it cannot run off the screen.
-  const maxHeight = Math.min(MENU_MAX_HEIGHT, Math.max(MENU_MIN_HEIGHT, openUpward ? spaceAbove : spaceBelow));
+  // than the room it has, so it cannot run off the screen. `ceiling` is MENU_MAX_HEIGHT unless a
+  // short fixed list asks to be shown whole (the activity log's nine periods).
+  const maxHeight = Math.min(ceiling, Math.max(MENU_MIN_HEIGHT, openUpward ? spaceAbove : spaceBelow));
   const left = Math.max(VIEWPORT_EDGE, Math.min(rect.left, viewportWidth - width - VIEWPORT_EDGE));
 
   // Upward, the menu is pinned by its bottom edge rather than given a top, because only the

@@ -11,6 +11,8 @@ import {
   meetingNotices,
   meetingTitle,
 } from "@/lib/meetings";
+import { withoutDismissed } from "@/lib/notificationFeed.mjs";
+import useDismissedNotices from "@/components/app-shell/useDismissedNotices";
 
 /**
  * The meetings half of the top bar's bell: what is booked today, and what is coming.
@@ -25,7 +27,7 @@ import {
  * idea of whether it has been and gone. A bell that counted differently from the page it links to
  * would be worse than no bell.
  *
- * Read only. Nothing here books, cancels or dismisses anything.
+ * Read only. Nothing here books or cancels anything; marking a meeting read only takes it off the bell.
  */
 
 // How often the bell re-reads the day. Slow on purpose: this is a glance, not a countdown, and
@@ -47,6 +49,8 @@ const UPCOMING_DAYS = 14;
  * task is a fact about the studio rather than one reader's idea of what they have glanced at.
  */
 const SEEN_KEY = "dbs_seen_meeting_notices";
+/** The meetings this person has marked as read, which the bell no longer lists. */
+const DISMISSED_KEY = "dbs_dismissed_meeting_notices";
 
 function readSeen() {
   if (typeof window === "undefined") return [];
@@ -61,7 +65,7 @@ function readSeen() {
 }
 
 /** One meeting as a menu row: when it is, what it is, and who it is with. */
-function noticeItem(meeting, { dated, now, onSelect }) {
+function noticeItem(meeting, { dated, now, onSelect, onMarkRead }) {
   const when = dated ? `${formatMeetingDate(meeting.startAt)} · ${formatMeetingTime(meeting.startAt)}` : formatMeetingTime(meeting.startAt);
   const withWhom = meetingLeadName(meeting);
   // Only where the clock says something the time does not: "in 10 minutes", "under way",
@@ -72,7 +76,8 @@ function noticeItem(meeting, { dated, now, onSelect }) {
     // The client and the countdown as the row's own second line rather than a row beneath it: one
     // meeting is one entry, and two blocks made the panel twice as tall as the day it describes.
     detail: [withWhom, standing].filter(Boolean).join(" · "),
-    onSelect,
+    // Opening it is what reads it: there is no "Mark as read", so it stays until it is opened.
+    onSelect: () => { onMarkRead(); onSelect?.(); },
   };
 }
 
@@ -119,7 +124,13 @@ export default function useMeetingNotices({ enabled = true, onOpenMeetings } = {
     };
   }, [enabled, load]);
 
-  const { today, upcoming } = enabled ? meetingNotices(meetings, { now }) : { today: [], upcoming: [] };
+  const all = enabled ? meetingNotices(meetings, { now }) : { today: [], upcoming: [] };
+  // A meeting that has been opened leaves the bell in this browser. It is still in the diary; the
+  // bell just stops repeating it.
+  const { dismissed, dismiss } = useDismissedNotices(DISMISSED_KEY);
+  const today = withoutDismissed(all.today, dismissed);
+  const upcoming = withoutDismissed(all.upcoming, dismissed);
+  const markRead = (meeting) => dismiss(meeting.id, [...all.today, ...all.upcoming]);
 
   /*
    * What the badge counts: today's meetings still to come that this reader has not looked at.
@@ -151,12 +162,13 @@ export default function useMeetingNotices({ enabled = true, onOpenMeetings } = {
    */
   const items = [];
   if (enabled) {
-    if (today.length === 0) items.push({ description: "Nothing booked for today." });
-    else for (const meeting of today) items.push(noticeItem(meeting, { dated: false, now, onSelect: onOpenMeetings }));
+    // "Nothing booked" only when nothing is; a day whose meetings have all been read says nothing.
+    if (all.today.length === 0) items.push({ description: "Nothing booked for today." });
+    else for (const meeting of today) items.push(noticeItem(meeting, { dated: false, now, onSelect: onOpenMeetings, onMarkRead: () => markRead(meeting) }));
 
     if (upcoming.length) {
-      items.push({ separator: true });
-      for (const meeting of upcoming) items.push(noticeItem(meeting, { dated: true, now, onSelect: onOpenMeetings }));
+      if (items.length) items.push({ separator: true });
+      for (const meeting of upcoming) items.push(noticeItem(meeting, { dated: true, now, onSelect: onOpenMeetings, onMarkRead: () => markRead(meeting) }));
     }
   }
 

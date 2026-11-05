@@ -13,7 +13,7 @@
 import { loginEmail, loginUsername } from "../../lib/employeeName.mjs";
 
 /** The fields the record proposes an answer for; everything else is only ever typed. */
-const PROPOSED_FIELDS = ["username", "email", "alternative1EmployeeId", "alternative2EmployeeId", "leaveApproverIds", "permissionApproverEmployeeId"];
+const PROPOSED_FIELDS = ["username", "email", "alternative1EmployeeId", "alternative2EmployeeId", "leaveApproverIds", "permissionApproverEmployeeId", "regularizationApproverEmployeeId"];
 
 /**
  * What the account is proposed as, from the record it belongs to.
@@ -47,6 +47,7 @@ function proposalsFor(record, domain) {
     alternative2EmployeeId: record?.alternative2EmployeeId ? String(record.alternative2EmployeeId) : "",
     leaveApproverIds: [record?.leaveApprover1EmployeeId, record?.leaveApprover2EmployeeId, record?.leaveApprover3EmployeeId].filter(Boolean).map(String),
     permissionApproverEmployeeId: record?.permissionApproverEmployeeId ? String(record.permissionApproverEmployeeId) : "",
+    regularizationApproverEmployeeId: record?.regularizationApproverEmployeeId ? String(record.regularizationApproverEmployeeId) : "",
   };
 }
 
@@ -82,10 +83,13 @@ export function draftFrom(values) {
     branchId: values.branchId ? String(values.branchId) : "",
     roleIds: [...(values.roleIds || [])],
     whatsappAllowed: values.whatsappAllowed === true,
+    excludeFromAttendance: values.excludeFromAttendance === true,
+    allowFlexibleShift: values.allowFlexibleShift === true,
     alternative1EmployeeId: values.alternative1EmployeeId ? String(values.alternative1EmployeeId) : "",
     alternative2EmployeeId: values.alternative2EmployeeId ? String(values.alternative2EmployeeId) : "",
     leaveApproverIds: (values.leaveApproverIds || []).map(String),
     permissionApproverEmployeeId: values.permissionApproverEmployeeId ? String(values.permissionApproverEmployeeId) : "",
+    regularizationApproverEmployeeId: values.regularizationApproverEmployeeId ? String(values.regularizationApproverEmployeeId) : "",
   };
 }
 

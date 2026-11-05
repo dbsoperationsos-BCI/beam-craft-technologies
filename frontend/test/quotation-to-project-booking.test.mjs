@@ -34,32 +34,22 @@ test("the quotation's own row travels, which is what brings its shoots with it",
   assert.equal(prefill.enquiryId, "DBS-EID-DD-ERD-000001");
 });
 
-test("the branch is spelled the way a project spells it, not the way a quotation does", () => {
-  assert.equal(quotationToProjectPrefill(quotation()).sourceBranch, "Erode TN");
-  // The studio's own short forms, which older records still hold.
-  assert.equal(sourceBranchForCrmBranch("cbe"), "Coimbatore TN");
+test("the branch text travels to the form as it is; the form resolves it against the register", () => {
   /*
-   * And the register's own name, handed back as it came.
-   *
-   * This is the case that was broken. Repairing the branch text made every properly filed record
-   * store the register's spelling, so a conversion arrived here already reading "Erode TN" - which
-   * a list of *cities* does not contain, so it answered "" and Create Project opened with Source
-   * Branch blank on a required field.
+   * This used to translate "Erode" to "Erode TN" and "cbe" to "Coimbatore TN" through six branch
+   * names typed into this file - so a branch renamed in Settings went on being translated to its
+   * old name, and the form's dropdown then refused the value. The register is the only thing that
+   * knows what a branch is called today, so the form resolves the text against the list it loads
+   * (`resolveBranchName`, tested in branch-name.test.mjs) and this hands the text over untouched.
    */
-  for (const name of ["Erode TN", "Visakhapatnam AP", "Coimbatore TN"]) {
+  assert.equal(quotationToProjectPrefill(quotation()).sourceBranch, "Erode");
+  for (const name of ["Erode TN", "Visakhapatnam AP", "cbe", "Nowhere"]) {
     assert.equal(sourceBranchForCrmBranch(name), name);
   }
+  assert.equal(sourceBranchForCrmBranch("  Erode  "), "Erode");
   // Nothing at all is still nothing - there is no branch to guess at.
   assert.equal(sourceBranchForCrmBranch(""), "");
   assert.equal(sourceBranchForCrmBranch(null), "");
-  /*
-   * Text that names no branch is passed on rather than blanked, and **the register is what judges
-   * it**: Create Project loads the branches and clears anything not among them, so this cannot
-   * invent a branch - it only stops mistranslating the ones it is handed. Holding a list of real
-   * branch names here instead would be the same fault the backend matcher was rewritten to remove:
-   * a new branch would work everywhere except this one function.
-   */
-  assert.equal(sourceBranchForCrmBranch("Nowhere"), "Nowhere");
 });
 
 test("the vertical fills both fields a project stores it in", () => {

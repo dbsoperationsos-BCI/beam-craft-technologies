@@ -2,7 +2,18 @@ const { z } = require("zod");
 const { importTableRows, templateHeaders } = require("../../../services/tableImport");
 const service = require("./service");
 const { cancelInterviewMeeting, syncInterviewMeeting } = require("./meetings");
-const { INTERVIEW_SCHEDULED_STATUS, MANUAL_SOURCE, CSV_IMPORT_SOURCE } = require("./candidates");
+const { sendWhatsAppToPerson } = require("../../sales/whatsapp-chat/directSend");
+const whatsappActivity = require("../../../services/whatsappActivity");
+/*
+ * The studio's call log, read by number. It lives with the CRM because that is where it was first
+ * needed, not because it belongs to the CRM: the table is one row per call the handset made, keyed by
+ * the number dialled. Imported rather than re-queried here - see `listCallLogsForNumber`.
+ */
+const { listCallLogsForNumber } = require("../../sales/crm-leads/callLogService");
+// A transcript belongs to a call, so the module that owns transcripts is reused whole rather than
+// this file learning what a segment or a provider is.
+const transcripts = require("../../sales/call-transcripts/repository");
+const { INTERVIEW_SCHEDULED_STATUS, FOLLOW_UP_STATUS, MANUAL_SOURCE, CSV_IMPORT_SOURCE } = require("./candidates");
 
 /*
  * How the candidate reached the register, where nobody said where they came from.
@@ -506,6 +517,226 @@ async function applyStatus(id, status, note, actor, { nextFollowUpDate } = {}) {
   return service.updateCandidate(id, values, actor, { partial: true });
 }
 
+/*
+ * A remark written about a candidate **without** moving their stage.
+ *
+ * Until now a note could only reach the record by taking a decision, because the decision dialog is
+ * what asks for one - so "they said to call back after Diwali" had nowhere to go unless the recruiter
+ * also pretended to change something. It lands in `statusNotes`, the same append-only log the
+ * decisions write to, so one list holds both why a stage moved and what was said.
+ *
+ * The stage travels with the entry rather than being changed by it: a note written while somebody is
+ * at Follow Up reads differently from the same words written after they were Selected, and the log is
+ * unreadable without knowing which.
+ */
+const remarkSchema = z.object({
+  note: z.string().trim().min(1, "Write the remark before saving it.").max(2000),
+});
+
+async function addRemark(req, res) {
+  const parsed = remarkSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ message: firstIssue(parsed), errors: parsed.error.flatten() });
+  try {
+    const current = await service.getCandidate(req.params.id);
+    const held = Array.isArray(current?.statusNotes) ? current.statusNotes : [];
+    const values = {
+      statusNotes: [...held, {
+        status: current?.status || null,
+        note: parsed.data.note,
+        at: new Date().toISOString(),
+        // Who wrote it. A decision's entry never carried this, and a log of notes with no author is
+        // a log somebody has to guess at three months later.
+        by: req.user?.name || req.user?.username || null,
+      }],
+    };
+    return res.json({ data: await service.updateCandidate(req.params.id, values, req.user, { partial: true }) });
+  } catch (error) {
+    return fail(res, error, "Unable to add that remark.");
+  }
+}
+
+/*
+ * A WhatsApp message to the candidate, from their own record.
+ *
+ * **The number is never in the body.** `directSend.js` states the rule it exists to keep: there is no
+ * "send WhatsApp to this number" route in this application and there must not be, because the studio's
+ * paired number can be banned for being used that way. So the schema does not name a number, the
+ * object schema drops one that arrives anyway, and the handler reads the record the id names.
+ *
+ * One-way. Replies do not come back - the inbound handler discards anything from a number that is not
+ * a CRM lead - so this is the half that is free: the recruiter stops leaving the screen to open
+ * WhatsApp on their phone. The studio switch and the per-user switch are `sendWhatsAppToPerson`'s to
+ * enforce, and this adds nothing to them.
+ */
+/**
+ * The calls on a candidate's number, for the popup's Call Logs tab.
+ *
+ * ── What is shared, and what deliberately is not ──
+ *
+ * The studio's call log is one table keyed by the number the handset dialled, so a number that is a
+ * candidate here can be a client in the CRM - and the row carries the CRM's own reading of that client:
+ * the name it filed them under, the enquiry it belongs to, its status, the recording, the raw webhook
+ * payload, the note whoever took the call typed, the recording and the CRM's own status.
+ *
+ * ── Who may read that, and why it is this permission ──────────────────────────────────────────
+ *
+ * It was stripped, on the reading that `HRM / Interview` is not a grant of `SALES / CRM Leads`.
+ * The studio's decision is the other one: each module answers for its own permission, so the
+ * Interview register's call tab answers for `HRM / Interview` exactly as the CRM's answers for
+ * `SALES / CRM Leads`. A recruiter who may open a candidate may read the calls on that candidate's
+ * number in full - when, how long, who, what was said and the recording itself.
+ *
+ * What that admits is worth writing down rather than discovering later: the log is one studio-wide
+ * table keyed by the number dialled, so a number that is a candidate here may be a client in the
+ * CRM, and those calls are the same rows. Somebody who may edit a candidate can therefore point a
+ * record at any number and read what the log holds against it. That is accepted deliberately;
+ * narrowing it again is a permission decision rather than a code one.
+ *
+ * The number is still read off the candidate the id names, never from the request - the id is the
+ * only thing the caller chooses, and it names a record they already hold.
+ */
+/**
+ * The transcripts of this candidate's calls, and the AI reading of each.
+ *
+ * A transcript hangs off a **call**, not off a lead - `sales_call_transcript.call_log_id` - which is
+ * what makes it reachable here at all: the candidate's number finds the calls, and the calls find
+ * their transcripts. The lead's own tab asks by enquiry id, which a candidate has never had.
+ *
+ * Same permission and same reasoning as the call tab above: `HRM / Interview` answers for the
+ * Interview register, as `SALES / CRM Leads` answers for the board. What that admits is written out
+ * there and is not repeated here.
+ *
+ * `suggestions` and `appliedFields` are stored as JSON text and parsed on the way out, exactly as
+ * the lead's own endpoint parses them, so one tab can draw either.
+ */
+async function candidateTranscripts(req, res) {
+  try {
+    const candidate = await service.getCandidate(req.params.id);
+    if (!candidate) return res.status(404).json({ message: "Candidate not found." });
+    const calls = await listCallLogsForNumber(candidate.whatsappNumber || candidate.phone || "");
+    const rows = await transcripts.listForCallLogs(calls.map((call) => call.id));
+    return res.json({
+      data: rows.map((row) => ({
+        ...row,
+        suggestions: row.suggestions ? JSON.parse(row.suggestions) : null,
+        appliedFields: row.appliedFields ? JSON.parse(row.appliedFields) : null,
+      })),
+    });
+  } catch (error) {
+    // A refusal that carries its own status - the candidate not found - is answered as itself.
+    if (error?.status) return fail(res, error, "Unable to read the transcripts for this candidate.");
+    // An empty tab rather than a refusal, as the call tab does: a transcription service having a
+    // moment is not a reason the candidate's record cannot be worked.
+    console.warn("Unable to read the transcripts for this candidate:", error?.message || error);
+    return res.json({ data: [] });
+  }
+}
+
+/** One transcript with its segments - what "View Full Transcript" opens on a candidate. */
+async function candidateTranscriptDetail(req, res) {
+  try {
+    /*
+     * Reached through the candidate, never by transcript id alone.
+     *
+     * A bare id would be a way to read any transcript in the studio from a screen that answers for
+     * the Interview register - so the id is checked against the transcripts this candidate's own
+     * calls produced, and anything else is simply not found.
+     */
+    const candidate = await service.getCandidate(req.params.id);
+    if (!candidate) return res.status(404).json({ message: "Candidate not found." });
+    const calls = await listCallLogsForNumber(candidate.whatsappNumber || candidate.phone || "");
+    const allowed = await transcripts.listForCallLogs(calls.map((call) => call.id));
+    const wanted = String(req.params.transcriptId || "").trim();
+    if (!allowed.some((row) => row.id === wanted)) return res.status(404).json({ message: "Transcript not found." });
+
+    const detail = await transcripts.findById(wanted);
+    if (!detail) return res.status(404).json({ message: "Transcript not found." });
+    return res.json({
+      data: {
+        ...detail,
+        suggestions: detail.suggestions ? JSON.parse(detail.suggestions) : null,
+        appliedFields: detail.appliedFields ? JSON.parse(detail.appliedFields) : null,
+      },
+    });
+  } catch (error) {
+    // `fail` answers a status the error carries - a candidate not found is a 404, not a 500.
+    return fail(res, error, "Unable to load that transcript.");
+  }
+}
+
+async function candidateCallLogs(req, res) {
+  try {
+    const candidate = await service.getCandidate(req.params.id);
+    if (!candidate) return res.status(404).json({ message: "Candidate not found." });
+    const calls = await listCallLogsForNumber(candidate.whatsappNumber || candidate.phone || "");
+    return res.json({
+      data: calls.map((call) => ({
+        id: call.id,
+        calledAt: call.calledAt,
+        callDate: call.callDate,
+        callTime: call.callTime,
+        callType: call.callType,
+        callMode: call.callMode,
+        durationSeconds: call.durationSeconds,
+        employeeName: call.employeeName,
+        // What the caller typed, where the CRM had them, and the recording itself - see above for
+        // whose question this is and what it admits.
+        note: call.note,
+        crmStatus: call.crmStatus,
+        recordingUrl: call.recordingUrl,
+      })),
+    });
+  } catch (error) {
+    /*
+     * An empty tab rather than a refusal, the same way the CRM treats a log it cannot read: the call
+     * history is something extra the popup shows about a candidate, and a handset integration having a
+     * moment is not a reason the record cannot be worked.
+     */
+    console.warn("Unable to read the call logs for this candidate:", error?.message || error);
+    return res.json({ data: [] });
+  }
+}
+
+const whatsappSchema = z.object({
+  body: z.string().trim().min(1, "Write the message before sending it.").max(4000),
+});
+
+async function sendCandidateWhatsApp(req, res) {
+  const parsed = whatsappSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ message: firstIssue(parsed), errors: parsed.error.flatten() });
+  try {
+    const candidate = await service.getCandidate(req.params.id);
+    const number = candidate.whatsappNumber || candidate.phone;
+    if (!number) return res.status(400).json({ message: "This candidate has no WhatsApp number or phone number on their record yet." });
+
+    // Recorded in Settings → WhatsApp Activity Log, where a failed one can be sent again.
+    await whatsappActivity.track({
+      mode: "MANUAL", provider: "baileys", trigger: "INTERVIEW_CANDIDATE_MESSAGE", eventRef: `interview-candidate:${req.params.id}`,
+      initiatedByUserId: req.user?.id, senderUserId: req.user?.id,
+      recipient: { kind: "PERSON", address: number, name: candidate.candidateName || candidate.name || null },
+      body: parsed.data.body, resendable: true,
+    }, () => sendWhatsAppToPerson({ userId: req.user?.id, phone: number, body: parsed.data.body }));
+
+    /*
+     * Recorded on the record, so nobody has to guess afterwards whether the candidate was ever
+     * contacted - which is the same pair of rows the Follow Up stage exists to separate. Written only
+     * after the send succeeded: a note saying a message went out when it did not is worse than none.
+     */
+    const held = Array.isArray(candidate.statusNotes) ? candidate.statusNotes : [];
+    const saved = await service.updateCandidate(req.params.id, {
+      statusNotes: [...held, {
+        status: candidate.status || null,
+        note: `WhatsApp sent: ${parsed.data.body}`,
+        at: new Date().toISOString(),
+        by: req.user?.name || req.user?.username || null,
+      }],
+    }, req.user, { partial: true });
+    return res.json({ data: saved, sentTo: number });
+  } catch (error) {
+    return fail(res, error, "Unable to send that WhatsApp message.");
+  }
+}
+
 async function setStatus(req, res) {
   const parsed = statusSchema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ message: firstIssue(parsed), errors: parsed.error.flatten() });
@@ -665,12 +896,20 @@ async function schedule(req, res) {
       ? (rounds.length ? [...rounds.slice(0, -1), round] : [round])
       : [...rounds, round];
 
+    /*
+     * Omitted means "leave it"; `null` means "cleared" - the dialog sends null for a box emptied, so
+     * `??` would have put the old value straight back. An interviewer cleared takes the name derived
+     * from them along, unless the caller sent a name of its own.
+     */
+    const given = (key) => input[key] !== undefined;
     const values = {
       interviewRounds,
-      interviewerEmployeeId: input.interviewerEmployeeId ?? candidate.interviewerEmployeeId ?? null,
-      interviewer: input.interviewer ?? candidate.interviewer ?? null,
-      nextFollowUpDate: input.nextFollowUpDate ?? candidate.nextFollowUpDate ?? null,
-      remarks: input.remarks ?? candidate.remarks ?? null,
+      interviewerEmployeeId: given("interviewerEmployeeId") ? input.interviewerEmployeeId : (candidate.interviewerEmployeeId ?? null),
+      interviewer: given("interviewer")
+        ? input.interviewer
+        : (input.interviewerEmployeeId === null ? null : (candidate.interviewer ?? null)),
+      nextFollowUpDate: given("nextFollowUpDate") ? input.nextFollowUpDate : (candidate.nextFollowUpDate ?? null),
+      remarks: given("remarks") ? input.remarks : (candidate.remarks ?? null),
     };
 
     /*
@@ -721,6 +960,16 @@ async function meetGuestOptions(req, res) {
  * body that names every candidate the studio has ever seen is not a selection somebody made.
  */
 const bulkIds = z.array(z.string().trim().min(1).max(64)).min(1, "Select at least one candidate.").max(2000);
+
+/*
+ * Deleting has a cap of its own, and a far higher one - the CRM lead board's.
+ *
+ * The 2,000 above exists because the paths that use it work a row at a time. Deleting no longer
+ * does: `service.deleteCandidates` batches the whole selection into a handful of statements, so
+ * the number here bounds the request rather than the loop, and a studio clearing a register does
+ * not have to do it two thousand at a time.
+ */
+const bulkDeleteIds = z.array(z.string().trim().min(1).max(64)).min(1, "Select at least one candidate.").max(200000);
 
 const bulkStatusSchema = z.object({
   ids: bulkIds,
@@ -773,19 +1022,16 @@ async function bulkStatus(req, res) {
  * a linked sheet will not undo - the row each came from is remembered as imported and stays out.
  */
 async function removeBulk(req, res) {
-  const parsed = z.object({ ids: bulkIds }).safeParse(req.body || {});
+  const parsed = z.object({ ids: bulkDeleteIds }).safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ message: firstIssue(parsed), errors: parsed.error.flatten() });
-  const ids = [...new Set(parsed.data.ids)];
-  const deletedIds = [];
-  const missedIds = [];
-  for (const id of ids) {
-    try {
-      await service.deleteCandidate(id);
-      deletedIds.push(id);
-    } catch (error) {
-      void error;
-      missedIds.push(id);
-    }
+  // One batched pass rather than a call per candidate; the reply is unchanged, so the screen
+  // reports what it always did.
+  let deletedIds = [];
+  let missedIds = [];
+  try {
+    ({ deletedIds, missedIds } = await service.deleteCandidates(parsed.data.ids));
+  } catch (error) {
+    return fail(res, error, "Unable to delete those candidates.");
   }
   if (!deletedIds.length) return res.status(404).json({ message: "None of the selected candidates were found.", data: { deletedIds, missedIds } });
   const deleted = `${deletedIds.length} candidate${deletedIds.length === 1 ? "" : "s"}`;
@@ -797,9 +1043,30 @@ async function removeBulk(req, res) {
   });
 }
 
+/**
+ * Why a candidate saved in Follow Up cannot stand, or null: a follow-up stage is a promise to call
+ * back, so it needs the day of the call - a real one. `YYYY-MM-DD` is what the date picker sends;
+ * `DD/MM/YYYY` is how a linked sheet writes it, and the picker reads that too. Asked of an update
+ * only - the screen saving a candidate - so a candidate already in the register with no date still
+ * opens, and an import is not refused for a column it never had.
+ */
+function followUpDateProblem(input) {
+  if (input?.status !== FOLLOW_UP_STATUS) return null;
+  const value = String(input.nextFollowUpDate || "").trim();
+  if (!value) return "Next follow-up date is required for Follow Up stage.";
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  const dmy = /^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/.exec(value);
+  const [year, month, day] = iso ? [iso[1], iso[2], iso[3]] : dmy ? [dmy[3], dmy[2], dmy[1]] : [];
+  const date = year ? new Date(Date.UTC(Number(year), Number(month) - 1, Number(day))) : null;
+  const real = date && date.getUTCFullYear() === Number(year) && date.getUTCMonth() === Number(month) - 1 && date.getUTCDate() === Number(day);
+  return real ? null : "Enter a valid next follow-up date.";
+}
+
 async function update(req, res) {
   const parsed = candidateSchema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ message: firstIssue(parsed), errors: parsed.error.flatten() });
+  const followUpProblem = followUpDateProblem(parsed.data);
+  if (followUpProblem) return res.status(400).json({ message: followUpProblem, errors: { fieldErrors: { nextFollowUpDate: [followUpProblem] } } });
   try {
     return res.json({ data: await service.updateCandidate(req.params.id, parsed.data, req.user) });
   } catch (error) {
@@ -838,4 +1105,4 @@ async function importRows(req, res) {
   }
 }
 
-module.exports = { options, list, ids, columnValues, duplicates, get, create, createBulk, batchCandidateClashes, update, setStatus, bulkStatus, schedule, meetGuestOptions, remove, removeBulk, importTemplate, importRows, candidateSchema, statusSchema, bulkStatusSchema, scheduleSchema, INTERVIEW_IMPORT_COLUMNS };
+module.exports = { followUpDateProblem, options, list, ids, columnValues, duplicates, get, create, createBulk, batchCandidateClashes, candidateTranscripts, candidateTranscriptDetail, update, setStatus, bulkStatus, addRemark, sendCandidateWhatsApp, candidateCallLogs, schedule, meetGuestOptions, remove, removeBulk, importTemplate, importRows, candidateSchema, statusSchema, bulkStatusSchema, remarkSchema, whatsappSchema, scheduleSchema, INTERVIEW_IMPORT_COLUMNS };

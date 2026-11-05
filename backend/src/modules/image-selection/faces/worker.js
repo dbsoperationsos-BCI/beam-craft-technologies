@@ -4,8 +4,11 @@ const { QUEUE_NAME } = require("./queue");
 const config = require("./config");
 const engine = require("./engine");
 const processing = require("./processing");
+const service = require("./service");
 
 let worker;
+/** How often the worker looks for photos a desktop deferred and never described (`service.requeueStaleDeferred`). */
+const DEFERRED_SWEEP_MS = 10 * 60 * 1000;
 const ENGINE_RETRY_MS = Number.parseInt(process.env.IMAGE_SELECTION_FACE_ENGINE_RETRY_MS || process.env.AI_FACE_ENGINE_RETRY_MS || "60000", 10);
 // The engine answers one frame at a time, so more than a couple of parallel jobs only queue
 // behind it. Two keeps the read of the next preview overlapping the inference of this one.
@@ -34,6 +37,13 @@ function startWorker() {
   });
   worker.on("error", (error) => { if (!isConnectionError(error)) console.error("[image-selection faces] worker error:", error); });
   engine.checkFaceEngineReady();
+  // The backstop under the desktop's deferral: never the reason the process stays alive.
+  const sweep = setInterval(() => {
+    service.requeueStaleDeferred()
+      .then((count) => { if (count) console.log(`[image-selection faces] queued ${count} deferred photo${count === 1 ? "" : "s"} no desktop described`); })
+      .catch((error) => console.warn(`[image-selection faces] deferred sweep failed: ${error.message}`));
+  }, DEFERRED_SWEEP_MS);
+  sweep.unref?.();
   console.log(`[image-selection faces] worker started with concurrency ${concurrency()}`);
   return worker;
 }

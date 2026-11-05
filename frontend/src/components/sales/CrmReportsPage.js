@@ -4,6 +4,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import DataTable from "@/components/data-table/DataTable";
 import DataTableShell from "@/components/data-table/DataTableShell";
 import TableFooter from "@/components/data-table/TableFooter";
+import KanbanBoard, { columnsFromRows, groupValue } from "@/components/data-table/KanbanBoard";
+import { CRM_BOARD_STATUS_ORDER } from "@/lib/crmBoardOrder.mjs";
+import { columnSumText } from "@/lib/kanbanSummary.mjs";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import ModulePageHeader from "@/components/layout/ModulePageHeader";
 import Button from "@/components/shared/Button";
 import DateField from "@/components/shared/DateField";
@@ -13,7 +17,7 @@ import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import useCompactView from "@/components/shared/useCompactView";
 import Tabs from "@/components/ui/Tabs";
 import { getCrmReport, getReportOptions } from "@/services/sales/crm-reports.service";
-import { REPORTS, reportById, EMPTY_FILTERS, hasFilters, filterSummary, describeRange, defaultRange, totalsSummary, ignoredNote, reportRowId, USAGE_REPORTS } from "@/lib/crmReports";
+import { REPORTS, reportById, EMPTY_FILTERS, hasFilters, filterSummary, describeRange, defaultRange, totalsSummary, ignoredNote, reportRowId, USAGE_REPORTS, dateOnly, dateTime } from "@/lib/crmReports";
 
 /**
  * CRM → Reports.
@@ -60,6 +64,74 @@ import { REPORTS, reportById, EMPTY_FILTERS, hasFilters, filterSummary, describe
  * said there were none. The totals live in the table's own footer now, beside the row count.
  */
 
+const count = (value) => Number(value || 0).toLocaleString("en-IN");
+const monthOf = (day) => {
+  const stamp = new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(day || "")) ? `${day}T00:00:00Z` : day || "");
+  return Number.isNaN(stamp.getTime()) ? "" : new Intl.DateTimeFormat("en-IN", { month: "long", year: "numeric", timeZone: "UTC" }).format(stamp);
+};
+
+/*
+ * The Board for each report that has a category to stand its rows under: the lead's status on the
+ * three lead reports, the call's type on Call History, the month on Summary and the date on Work
+ * Hours. A report is a reading, not a set of records to move, so every board is a view only and a
+ * card opens nothing (a row opens nothing either). The per-person reports - Employee Analysis,
+ * WhatsApp Usage, Application Usage - are one row a person with no category to group by, so they
+ * offer no board and the switch is absent on them.
+ */
+const leadCard = {
+  title: (row) => row.client || row.clientNumber || "-",
+  subtitle: (row) => [row.enquiryId, row.employee || row.crm].filter(Boolean).join(" · "),
+  meta: (row) => [row.vertical, row.attempts != null ? `${count(row.attempts)} attempts` : `${count(row.calls)} calls`].filter(Boolean).join(" · "),
+};
+// When a report's row happened, for its board's trend: the day on Summary and Work Hours, the call on
+// Call History, and a lead's first call in the range (its last, where only that is reported).
+const timeOf = (value) => {
+  const stamp = new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? `${value}T00:00:00` : value || "");
+  return Number.isNaN(stamp.getTime()) ? null : stamp.getTime();
+};
+const dayOf = (row) => timeOf(row.day);
+const leadCalledOn = (row) => timeOf(row.firstCalledAt || row.lastCalledAt);
+/*
+ * Each report board's columns in their own order rather than A-Z: the lead reports in the pipeline's
+ * (`CRM_BOARD_STATUS_ORDER`, the Leads board's own), and Summary's months and Work Hours' days in
+ * time, earliest first - "1 Nov" sorted as a word came before "10 Oct".
+ */
+const IN_TIME = "time";
+const inTimeOrder = (rows, board) => {
+  const first = new Map();
+  for (const row of rows || []) {
+    const group = groupValue(board.groupOf(row));
+    const time = board.dateOf(row);
+    if (time !== null && (!first.has(group) || time < first.get(group))) first.set(group, time);
+  }
+  return [...first.entries()].sort((a, b) => a[1] - b[1]).map(([group]) => group);
+};
+/*
+ * The figure under each column, one per report: the calls that connected on Summary, the talk time
+ * on Call History, the hours worked on Work Hours, and the tries on the two never-reached reports.
+ * Lead Analysis reports no attempts, so it sums the calls made instead.
+ */
+const plainCount = (sum) => count(Math.round(sum));
+const talkTime = (seconds) => {
+  const minutes = Math.round(seconds / 60);
+  return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} m` : `${minutes} m`;
+};
+const sumOf = (field) => (row) => Number(row[field]) || 0;
+const connectedFigure = (rows) => columnSumText(rows, sumOf("connected"), "Connected", plainCount);
+const attemptsFigure = (rows) => columnSumText(rows, sumOf("attempts"), "Attempts", plainCount);
+const callsFigure = (rows) => columnSumText(rows, sumOf("calls"), "Calls", plainCount);
+const talkFigure = (rows) => columnSumText(rows, sumOf("durationSeconds"), "Talk", talkTime);
+const workedFigure = (rows) => columnSumText(rows, (row) => sumOf("workedSeconds")(row) / 3600, "Worked", (hours) => `${Math.round(hours * 10) / 10} h`);
+const boardColumnsFor = (rows, board) => columnsFromRows(rows, board.groupOf, { order: board.order === IN_TIME ? inTimeOrder(rows, board) : board.order || [] });
+const REPORT_BOARDS = {
+  summary: { order: IN_TIME, groupOf: (row) => monthOf(row.day), dateOf: dayOf, card: { title: (row) => dateOnly(row.day), subtitle: (row) => `${count(row.calls)} calls · ${count(row.clients)} clients`, meta: (row) => `${count(row.connected)} connected · ${row.totalDuration || "0m"}` }, columnAmount: connectedFigure },
+  "lead-analysis": { order: CRM_BOARD_STATUS_ORDER, groupOf: (row) => row.status, dateOf: leadCalledOn, card: leadCard, columnAmount: callsFigure },
+  "never-attended": { order: CRM_BOARD_STATUS_ORDER, groupOf: (row) => row.status, dateOf: leadCalledOn, card: leadCard, columnAmount: attemptsFigure },
+  "not-picked-up": { order: CRM_BOARD_STATUS_ORDER, groupOf: (row) => row.status, dateOf: leadCalledOn, card: leadCard, columnAmount: attemptsFigure },
+  "call-history": { groupOf: (row) => row.callType, dateOf: (row) => timeOf(row.calledAt), card: { title: (row) => row.client || row.clientNumber || "-", subtitle: (row) => [row.enquiryId, row.employee].filter(Boolean).join(" · "), meta: (row) => [dateTime(row.calledAt), row.duration].filter(Boolean).join(" · ") }, columnAmount: talkFigure },
+  "work-hours": { order: IN_TIME, groupOf: (row) => dateOnly(row.day), dateOf: dayOf, card: { title: (row) => row.employee || "-", subtitle: (row) => dateOnly(row.day), meta: (row) => `Worked ${row.worked || "0m"} · ${count(row.calls)} calls` }, columnAmount: workedFigure },
+};
+
 export default function CrmReportsPage() {
   const [activeReport, setActiveReport] = useState(REPORTS[0].id);
   // What the filter bar holds, and what the report on screen was actually built from. They differ
@@ -75,6 +147,9 @@ export default function CrmReportsPage() {
   const { density } = useCompactView();
 
   const definition = reportById(activeReport);
+  const [layout, setLayout] = useTableBoardLayout("crm-reports");
+  const board = REPORT_BOARDS[activeReport];
+  const onBoard = Boolean(board) && layout === "board";
 
   /*
    * The filter options, once.
@@ -202,8 +277,8 @@ export default function CrmReportsPage() {
           `min-h-9` control, so a grid of them is even at every width.
         */}
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-          <DateField label="From" value={draft.from} onChange={(value) => set({ from: value })} />
-          <DateField label="To" value={draft.to} onChange={(value) => set({ to: value })} />
+          <DateField label="From" helperText="First day the report covers; press Apply to update." value={draft.from} onChange={(value) => set({ from: value })} />
+          <DateField label="To" helperText="Last day the report covers; press Apply to update." value={draft.to} onChange={(value) => set({ to: value })} />
           {/*
             * **Several people, not one.** Reading a team's week meant running the report once per
             * name and adding it up by hand; the filter now takes as many as the question needs.
@@ -213,6 +288,7 @@ export default function CrmReportsPage() {
             */}
           <MultiSelectField
             label="Employee"
+            helperText="Pick one or more people, or leave empty for everyone."
             values={draft.employee || []}
             onChange={(value) => set({ employee: value })}
             options={people}
@@ -223,6 +299,7 @@ export default function CrmReportsPage() {
           />
           <Dropdown
             label="Vertical"
+            helperText="Report on one vertical only, or leave on all verticals."
             ariaLabel="Vertical"
             value={draft.vertical}
             onChange={(value) => set({ vertical: value })}
@@ -231,6 +308,7 @@ export default function CrmReportsPage() {
           />
           <Dropdown
             label="Call Type"
+            helperText="Count only calls logged with this call type."
             ariaLabel="Call type"
             value={draft.callType}
             onChange={(value) => set({ callType: value })}
@@ -239,6 +317,7 @@ export default function CrmReportsPage() {
           />
           <Dropdown
             label="Duration"
+            helperText="Count only calls whose length falls in this range."
             ariaLabel="Duration"
             value={draft.duration}
             onChange={(value) => set({ duration: value })}
@@ -271,12 +350,26 @@ export default function CrmReportsPage() {
       padding matches the header's rows above it, so the first tab sits under the first letter of
       the title.
     */}
-    <div className="shrink-0 border-b border-slate-200 bg-white px-3 pb-2 pt-1 sm:px-4 lg:px-5">
-      <Tabs tabs={REPORTS.map((entry) => ({ id: entry.id, label: entry.label }))} value={activeReport} onChange={changeReport} ariaLabel="CRM report" />
+    <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3 pb-2 pt-1 sm:px-4 lg:px-5">
+      <div className="min-w-0 flex-1"><Tabs tabs={REPORTS.map((entry) => ({ id: entry.id, label: entry.label }))} value={activeReport} onChange={changeReport} ariaLabel="CRM report" /></div>
+      {board && <TableBoardSwitch value={layout} onChange={setLayout} />}
     </div>
 
-    <div className="min-h-0 flex-1 pt-3">
-      <DataTableShell
+    <div className={onBoard ? "flex min-h-0 min-w-0 flex-1" : "min-h-0 flex-1 pt-3"}>
+      {onBoard ? <KanbanBoard
+        rows={rows}
+        columns={boardColumnsFor(rows, board)}
+        statusOf={(row) => groupValue(board.groupOf(row))}
+        dateOf={board.dateOf}
+        card={board.card}
+        // The report's own figure under each column (see REPORT_BOARDS).
+        columnAmount={board.columnAmount}
+        getRowId={reportRowId}
+        viewOnly="Reports are worked out from the leads and calls. Change a lead in Leads & Followups."
+        loading={loading}
+        noun="rows"
+        ariaLabel={`${definition.label} board`}
+      /> : <DataTableShell
         className="h-full min-h-0"
         footer={<TableFooter spread>
           {/* The Summary's totals, where the row count already is. They were a row of cards above
@@ -308,7 +401,7 @@ export default function CrmReportsPage() {
             csvExport: { enabled: true, fileName: `crm-${definition.id}` },
           }}
         />
-      </DataTableShell>
+      </DataTableShell>}
     </div>
   </section>;
 }

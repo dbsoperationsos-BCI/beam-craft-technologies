@@ -23,7 +23,7 @@ import EventDefaultSettingsPanel from "./settings/EventDefaultSettingsPanel";
  * Settings by name, so somebody who runs events but may not change the template is not offered
  * a menu the server would refuse.
  */
-const SECTIONS = [{ label: "Overview", value: "/visual-curation/ai/overview" }, { label: "Events", value: "/visual-curation/ai/events" }];
+const SECTIONS = [{ label: "Dashboard", value: "/visual-curation/ai/overview" }, { label: "Events", value: "/visual-curation/ai/events" }];
 
 export default function AiFeatureNavigation({ onCreateEvent, actions = null, options = [] }) {
   const pathname = usePathname();
@@ -41,8 +41,9 @@ export default function AiFeatureNavigation({ onCreateEvent, actions = null, opt
       actions={<>
         {actions}
         {canWrite && onCreateEvent && <Button type="button" variant="primary" size="sm" onClick={onCreateEvent}>+ Create Event</Button>}
-        {menuItems.length > 0 && <OptionsMenu ariaLabel="AI Feature options" triggerVariant="button" items={menuItems} />}
       </>}
+      // The ⋮ in the header's own slot, so the row ends Nebula, then ⋮.
+      menu={menuItems.length > 0 ? <OptionsMenu ariaLabel="AI Feature options" triggerVariant="button" items={menuItems} /> : undefined}
     />
     {defaultsOpen && <EventDefaultSettingsPanel onClose={() => setDefaultsOpen(false)} />}
   </>;

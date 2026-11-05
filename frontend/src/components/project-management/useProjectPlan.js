@@ -12,12 +12,19 @@ import {
   getProjectServiceAllocations,
   getProjectServiceDefinitions,
   getProjectShoots,
+  reorderProjectDeliverableAllocations,
+  reorderProjectServiceAllocations,
+  reorderProjectShoots,
   saveProjectShoots,
   updateProjectDeliverableAllocation,
   updateProjectServiceAllocation,
   updateProjectShoot,
 } from "@/services/project-management/project-workflow.service";
 import { shootTimingsOf, shootTypesOf } from "./AddShootDialog";
+import { defaultSessionOptionId } from "@/lib/servicePricing.mjs";
+import { deliverableIdentityKey, deliverableRowVariant, deliverableVariantPayload, projectDeliverableVariantFields } from "@/lib/deliverableBrands.mjs";
+import { reorderLines } from "@/lib/quotationLineOrder.mjs";
+import { orderShoots, reorderShoots as reorderShootList, shootListOrder } from "@/lib/shootOrder.mjs";
 import { autoDeliverableNamesForServices, blockedDeliverableNamesForServices, deliverableExistsForShoot, findDeliverableDefinitionByName, isAutoDeliverableName } from "./serviceDeliverableRules";
 
 /*
@@ -102,7 +109,12 @@ const mergeShootRows = (currentRows, nextRows) => {
  * @param onNotice given a message worth mentioning that is not a failure.
  * @param onSuccess given a message for something that worked.
  */
-export default function useProjectPlan(projectId, { onShootChange, onError, onNotice, onSuccess } = {}) {
+/**
+ * `editShootId`: a shoot to open for editing as soon as the plan has loaded - the Edit on a shoot's row
+ * under its project, which opens the project's form on that shoot. Opened once; closing it leaves the
+ * form as it is.
+ */
+export default function useProjectPlan(projectId, { onShootChange, onError, onNotice, onSuccess, editShootId = null } = {}) {
   const [shoots, setShoots] = useState([]);
   const [serviceDefinitions, setServiceDefinitions] = useState([]);
   const [deliverableDefinitions, setDeliverableDefinitions] = useState([]);
@@ -121,6 +133,8 @@ export default function useProjectPlan(projectId, { onShootChange, onError, onNo
   const [deliverableDefinitionsError, setDeliverableDefinitionsError] = useState("");
   const [isShootDialogOpen, setIsShootDialogOpen] = useState(false);
   const [editingShoot, setEditingShoot] = useState(null);
+  // The shoot a Duplicate copies, while its dialog is open; Save adds the copy as a new shoot.
+  const [copyingShoot, setCopyingShoot] = useState(null);
 
   const servicesByShoot = useMemo(() => groupRowsByShoot(serviceAllocations), [serviceAllocations]);
   const deliverablesByShoot = useMemo(() => groupRowsByShoot(deliverableAllocations), [deliverableAllocations]);
@@ -152,7 +166,7 @@ export default function useProjectPlan(projectId, { onShootChange, onError, onNo
     setLoading(true);
     try {
       const shootResult = await getProjectShoots(projectId);
-      setShoots(Array.isArray(shootResult?.data) ? shootResult.data : []);
+      setShoots(orderShoots(shootResult?.data));
     } catch (shootError) {
       setShoots([]);
       report("onError", shootError.message || "Unable to load project shoots.");
@@ -170,7 +184,7 @@ export default function useProjectPlan(projectId, { onShootChange, onError, onNo
     setDeliverableDefinitionsError("");
     try {
       const shootResult = await getProjectShoots(projectId);
-      setShoots(Array.isArray(shootResult?.data) ? shootResult.data : []);
+      setShoots(orderShoots(shootResult?.data));
     } catch (shootError) {
       setShoots([]);
       report("onError", shootError.message || "Unable to load project shoots.");
@@ -208,22 +222,33 @@ export default function useProjectPlan(projectId, { onShootChange, onError, onNo
     const createdShoots = Array.isArray(response?.data) ? response.data : [];
     setShoots((current) => mergeShootRows(current, createdShoots));
     setIsShootDialogOpen(false);
+    setCopyingShoot(null);
     report("onSuccess", "Shoot list saved successfully.");
     await callbacks.current.onShootChange?.();
   }
 
   function openAddShootDialog() {
     setEditingShoot(null);
+    setCopyingShoot(null);
+    setIsShootDialogOpen(true);
+  }
+
+  function openDuplicateShootDialog(shoot) {
+    setEditingShoot(null);
+    setCopyingShoot(shoot);
     setIsShootDialogOpen(true);
   }
 
   function openEditShootDialog(shoot, index) {
+    setCopyingShoot(null);
     setEditingShoot({ shoot, index });
     setIsShootDialogOpen(true);
   }
 
   async function saveShootEdit(shoot, index, nextShoot) {
-    const response = await updateProjectShoot(projectId, shoot.id, { dateCreated: nextShoot.dateCreated || shoot.dateCreated, shoot: nextShoot.shoot, shootPlace: nextShoot.shootPlace, shootTypes: shootTypesOf(nextShoot), sessionTimings: shootTimingsOf(nextShoot), shootType: nextShoot.shootType || "Studio / In-House", isMainEvent: Boolean(nextShoot.isMainEvent), district: nextShoot.district, state: nextShoot.state, sessionTiming: nextShoot.sessionTiming, sessionDurationHours: nextShoot.sessionDurationHours, sessionDurationMinutes: nextShoot.sessionDurationMinutes, foodTakenCareBy: nextShoot.foodTakenCareBy || "Studio", accommodation: nextShoot.accommodation || "Studio", travel: nextShoot.travel || "Studio", preference: nextShoot.preference });
+    // The dialog's own date, null included: "Shoot Date Known: No" sends none, and falling back to the
+    // saved one here kept a date the user had just taken away.
+    const response = await updateProjectShoot(projectId, shoot.id, { dateCreated: nextShoot.dateCreated || null, shoot: nextShoot.shoot, shootPlace: nextShoot.shootPlace, shootLocations: nextShoot.shootLocations || null, shootTypes: shootTypesOf(nextShoot), sessionTimings: shootTimingsOf(nextShoot), shootType: nextShoot.shootType || "Studio / In-House", isMainEvent: Boolean(nextShoot.isMainEvent), district: nextShoot.district, state: nextShoot.state, sessionTiming: nextShoot.sessionTiming, sessionDurationHours: nextShoot.sessionDurationHours, sessionDurationMinutes: nextShoot.sessionDurationMinutes, foodTakenCareBy: nextShoot.foodTakenCareBy || "Studio", accommodation: nextShoot.accommodation || "Studio", travel: nextShoot.travel || "Studio", preference: nextShoot.preference });
     const updatedShoot = response?.data;
     setShoots((current) => current.map((row) => {
       if (row.id === shoot.id) return updatedShoot;
@@ -249,7 +274,10 @@ export default function useProjectPlan(projectId, { onShootChange, onError, onNo
   }
 
   async function addService(shoot, definition) {
-    const response = await createProjectServiceAllocation(projectId, shoot.id, { serviceDefinitionId: definition.id });
+    // Starts on the shoot's own session where the service offers it, the Quotation Generator's rule
+    // (`defaultSessionOptionId`), and blank where it does not; the person may change it after.
+    const sessionOptionId = defaultSessionOptionId(definition, shoot);
+    const response = await createProjectServiceAllocation(projectId, shoot.id, { serviceDefinitionId: definition.id, ...(sessionOptionId ? { sessionOptionId } : {}) });
     const normalized = normalizeServiceAllocation(response?.data, serviceDefinitions, definition);
     const nextServices = normalized ? [...serviceAllocationsRef.current, normalized] : serviceAllocationsRef.current;
     if (normalized) {
@@ -323,14 +351,24 @@ export default function useProjectPlan(projectId, { onShootChange, onError, onNo
     await refreshAllocations(serviceDefinitions, deliverableDefinitions);
   }
 
-  async function addDeliverable(shoot, definition) {
-    const duplicate = deliverableAllocations.some((row) => row.shootId === shoot.id && (row.deliverableDefinitionId === definition.id || row.deliverableName?.toLocaleLowerCase() === definition.name?.toLocaleLowerCase()));
+  async function addDeliverable(shoot, definition, variant = null) {
+    /*
+     * The same variant twice is one line too many; another variant of the same deliverable - the
+     * other brand, the other size - is a line of its own. A deliverable added on its own is still
+     * matched by name as well, for a line whose deliverable has since been renamed or retired.
+     */
+    const fields = projectDeliverableVariantFields(variant);
+    const key = deliverableIdentityKey(definition.id, deliverableRowVariant(fields));
+    const duplicate = deliverableAllocations.some((row) => row.shootId === shoot.id && (
+      deliverableIdentityKey(row.deliverableDefinitionId, deliverableRowVariant(row)) === key
+      || (!variant && !deliverableRowVariant(row) && row.deliverableName?.toLocaleLowerCase() === definition.name?.toLocaleLowerCase())
+    ));
     if (duplicate) {
       report("onNotice", "This deliverable is already added to the selected shoot.");
       return null;
     }
     try {
-      const response = await createProjectDeliverableAllocation(projectId, shoot.id, { deliverableDefinitionId: definition.id });
+      const response = await createProjectDeliverableAllocation(projectId, shoot.id, { deliverableDefinitionId: definition.id, variant: deliverableVariantPayload(fields) });
       const normalized = normalizeDeliverableAllocation(response?.data, deliverableDefinitions, definition);
       if (normalized) setDeliverableAllocations((current) => {
         const next = [...current, normalized];
@@ -370,9 +408,71 @@ export default function useProjectPlan(projectId, { onShootChange, onError, onNo
     await refreshAllocations(serviceDefinitions, deliverableDefinitions);
   }
 
+  /*
+   * One shoot's lines put in the order they were dragged to: shown at once, then saved. A save that
+   * fails says so and puts back the order the server holds, so the screen never shows an order
+   * that was not kept.
+   */
+  /*
+   * The Shoot List dragged into a new order: shown at once, then saved. A save that fails says so and
+   * reads the shoots back, so the list never shows an order the server does not hold. Only the list's
+   * order changes - no date, Shoot ID or allocation.
+   */
+  async function reorderShoots(ids) {
+    setShoots((current) => reorderShootList(current, ids));
+    try {
+      await reorderProjectShoots(projectId, ids);
+    } catch (orderError) {
+      report("onError", orderError.message || "Unable to save the order of the shoots.");
+      await refreshShoots();
+    }
+  }
+
+  async function reorderServices(shootId, ids) {
+    const next = reorderLines(serviceAllocationsRef.current, ids);
+    serviceAllocationsRef.current = next;
+    setServiceAllocations(next);
+    try {
+      await reorderProjectServiceAllocations(projectId, shootId, ids);
+    } catch (orderError) {
+      report("onError", orderError.message || "Unable to save the order of the services.");
+      await refreshAllocations(serviceDefinitions, deliverableDefinitions);
+    }
+  }
+
+  async function reorderDeliverables(shootId, ids) {
+    const next = reorderLines(deliverableAllocationsRef.current, ids);
+    deliverableAllocationsRef.current = next;
+    setDeliverableAllocations(next);
+    try {
+      await reorderProjectDeliverableAllocations(projectId, shootId, ids);
+    } catch (orderError) {
+      report("onError", orderError.message || "Unable to save the order of the deliverables.");
+      await refreshAllocations(serviceDefinitions, deliverableDefinitions);
+    }
+  }
+
+  /*
+   * The shoots in date order, undated last, as the server lists them - kept so while the plan is being
+   * changed: a shoot added lands where its day is rather than at the end, and one re-dated moves - with
+   * the order the studio dragged the Shoot List into on top (`shootListOrder`), so an arranged list
+   * stays arranged. Edits and deletes find a shoot by its id, never by its place in this list.
+   */
+  const orderedShoots = useMemo(() => shootListOrder(shoots), [shoots]);
+
+  // The shoot the form was opened on, put in its edit dialog once the plan is in.
+  const openedShoot = useRef(null);
+  useEffect(() => {
+    if (!editShootId || loading || openedShoot.current === editShootId) return;
+    const index = orderedShoots.findIndex((shoot) => String(shoot.id) === String(editShootId));
+    if (index < 0) return;
+    openedShoot.current = editShootId;
+    const timer = setTimeout(() => openEditShootDialog(orderedShoots[index], index), 0);
+    return () => clearTimeout(timer);
+  }, [editShootId, loading, orderedShoots]);
 
   return {
-    shoots,
+    shoots: orderedShoots,
     serviceDefinitions,
     deliverableDefinitions,
     servicesByShoot,
@@ -391,7 +491,7 @@ export default function useProjectPlan(projectId, { onShootChange, onError, onNo
      * than restating thirteen handlers - and so a handler added here reaches both screens at once.
      */
     sectionProps: {
-      shoots,
+      shoots: orderedShoots,
       loading,
       loadingMasterData,
       serviceDefinitionsError,
@@ -409,16 +509,22 @@ export default function useProjectPlan(projectId, { onShootChange, onError, onNo
       onUpdateDeliverable: updateDeliverable,
       onDeleteDeliverable: removeDeliverable,
       onClearDeliverables: clearDeliverables,
-      onSaveShootEdit: saveShootEdit,
+      onReorderShoots: reorderShoots,
+      onReorderServices: reorderServices,
+      onReorderDeliverables: reorderDeliverables,
+      // A shoot holds one line per variant, so the picker lists each brand and size on its own.
+      deliverableVariants: true,
       onDeleteShoot: removeShoot,
       onRequestEditShoot: openEditShootDialog,
+      onDuplicateShoot: openDuplicateShootDialog,
     },
     /** What `AddShootDialog` needs to open, edit and save against this project. */
     shootDialog: {
       open: isShootDialogOpen,
       initialShoot: editingShoot?.shoot,
+      copyOf: copyingShoot,
       existingShoots: shoots,
-      onClose: () => { setIsShootDialogOpen(false); setEditingShoot(null); },
+      onClose: () => { setIsShootDialogOpen(false); setEditingShoot(null); setCopyingShoot(null); },
       onSave: saveShoots,
     },
   };

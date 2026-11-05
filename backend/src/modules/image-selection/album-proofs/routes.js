@@ -42,6 +42,9 @@ if (createUploadsRouter) router.use("/projects/:projectId/uploads", createUpload
 router.get("/", READ_ANY, controller.listAlbums);
 router.post("/", WRITE, controller.createAlbum);
 router.get("/activity", READ_ANY, controller.listActivity);
+// The dashboard summarises what the list above answers, under the same grant; declared ahead of
+// the album-id routes so "dashboard" is never read as an album id.
+router.get("/dashboard", READ_ANY, controller.dashboard);
 router.get("/:albumId", READ_ANY, controller.getAlbum);
 router.patch("/:albumId", WRITE, controller.editAlbum);
 router.delete("/:albumId", WRITE, controller.deleteAlbum);

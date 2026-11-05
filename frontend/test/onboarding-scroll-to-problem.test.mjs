@@ -65,8 +65,10 @@ test("no refusal still marks a field without going to it", () => {
   const submitFn = code.slice(code.indexOf("async function submit("));
   const body = submitFn.slice(0, submitFn.indexOf("\n  }\n"));
   const writes = body.match(/setFieldErrors\([^)]*\)/g) || [];
-  // Exactly one, and it is the clear on the way out - every refusal above it goes through `refuse`.
-  assert.deepEqual(writes, ["setFieldErrors({})"], "a refusal marks fields without scrolling to them");
+  // The agreement adds its own mark beside the others (`refuse` would replace them), and goes to it.
+  assert.match(body, /setFieldErrors\(\(current\) => \(\{ \.\.\.current, policyAgreementAccepted: [^\n]+\n\s*scrollToSection\(AGREEMENT_SECTION\)/, "the agreement mark does not go to the agreement");
+  // Otherwise exactly one, and it is the clear on the way out - every refusal above it goes through `refuse`.
+  assert.deepEqual(writes.filter((write) => write !== "setFieldErrors((current)"), ["setFieldErrors({})"], "a refusal marks fields without scrolling to them");
   // Five of them: the agreement, the missing fields, a bad format, the age rule and the row lists.
   assert.ok((body.match(/refuse\(/g) || []).length >= 4, "the refusals no longer go through the helper");
 });

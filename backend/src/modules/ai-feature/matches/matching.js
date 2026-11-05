@@ -21,12 +21,22 @@ async function loadGuestVectors(eventId) {
   return rows.map((row) => ({ id: row.guestId, vector: vectors.decode(row.vector) }));
 }
 
+/** What a guest sees as theirs (public/service.myPhotos). */
+const VISIBLE = ["MATCHED", "CONFIRMED"];
+/**
+ * `source` names what made the match visible to the guest. A row found one way but held back for
+ * review, and later made visible another way, takes the later source: the guest WhatsApp summary
+ * (notifications/service.js) reports what the guest has not been shown, and tells a selfie search's
+ * on-screen results from the rest by this column.
+ */
+const sourceWhenShown = (existing, status, source) => (!VISIBLE.includes(existing.status) && VISIBLE.includes(status) ? { source } : {});
+
 async function upsertMatch(eventId, { guestId, mediaId, faceId, personId, similarity, band, status, source }) {
   const existing = await prisma.aiEventFaceMatch.findUnique({ where: { guestId_mediaId: { guestId, mediaId } } });
   if (existing) {
     if (existing.status === "REJECTED" || existing.status === "CONFIRMED") return existing;
     if (similarity <= existing.similarity && existing.status === status) return existing;
-    return prisma.aiEventFaceMatch.update({ where: { id: existing.id }, data: { faceId, personId, similarity, band, status } });
+    return prisma.aiEventFaceMatch.update({ where: { id: existing.id }, data: { faceId, personId, similarity, band, status, ...sourceWhenShown(existing, status, source) } });
   }
   const created = await prisma.aiEventFaceMatch.create({ data: { eventId, guestId, mediaId, faceId, personId, similarity, band, status, source } });
   await recountGuest(guestId);
@@ -46,7 +56,10 @@ async function matchFacesToGuests(eventId, mediaId, faces, ai) {
   const written = [];
   for (const face of faces) {
     const personId = (await prisma.aiEventFace.findUnique({ where: { id: face.id }, select: { personId: true } }))?.personId ?? null;
-    for (const hit of vectors.topMatches(face.vector, guests, { k: 3, floor: ai.lowConfidenceHandling === "HIDE" ? floor : 0.3 })) {
+    // A guest may have several selfies: each guest's best one counts once, so one guest's selfies never crowd another out of the three.
+    const best = new Map();
+    for (const hit of vectors.topMatches(face.vector, guests, { k: guests.length, floor: ai.lowConfidenceHandling === "HIDE" ? floor : 0.3 })) if (!best.has(hit.id)) best.set(hit.id, hit);
+    for (const hit of [...best.values()].slice(0, 3)) {
       const band = vectors.bandFor(hit.score, { high: ai.similarityHigh, medium: ai.similarityMedium });
       const status = statusFor(band, ai);
       if (!status) continue;
@@ -81,15 +94,45 @@ async function matchGuestAgainstEvent(eventId, guestId, selfieVector, ai) {
   return { matched, considered: bestPerMedia.size };
 }
 
+/**
+ * After a guest removes a selfie: the matches only that selfie supported go, and every match another
+ * of their selfies still supports stays as it is (its source, review state and report untouched).
+ * "Supported" is the rule a selfie search uses (`statusFor` at the event's bands), over every face the
+ * event holds. Only what a selfie made is judged - SELFIE_SEARCH and AUTO rows not yet decided; a
+ * match staff confirmed, linked or set by hand, and one the guest rejected, are never touched. With no
+ * selfie left, every such row goes. Answers how many rows were removed.
+ */
+async function pruneGuestMatches(eventId, guestId, ai) {
+  const remaining = (await prisma.aiEventGuestFace.findMany({ where: { eventId, guestId }, select: { vector: true } })).map((row) => vectors.decode(row.vector));
+  const judged = { eventId, guestId, source: { in: ["SELFIE_SEARCH", "AUTO"] }, status: { notIn: ["CONFIRMED", "REJECTED"] } };
+  const rows = await prisma.aiEventFaceMatch.findMany({ where: judged, select: { id: true, mediaId: true } });
+  if (!rows.length) return 0;
+  const supported = new Set();
+  if (remaining.length) {
+    const mediaIds = [...new Set(rows.map((row) => row.mediaId))];
+    const faces = await prisma.aiEventFaceEmbedding.findMany({ where: { eventId, face: { mediaId: { in: mediaIds } } }, select: { vector: true, face: { select: { mediaId: true } } } });
+    for (const face of faces) {
+      if (supported.has(face.face.mediaId)) continue;
+      const vector = vectors.decode(face.vector);
+      const score = Math.max(...remaining.map((selfie) => vectors.similarity(selfie, vector)));
+      if (statusFor(vectors.bandFor(score, { high: ai.similarityHigh, medium: ai.similarityMedium }), ai)) supported.add(face.face.mediaId);
+    }
+  }
+  const gone = rows.filter((row) => !supported.has(row.mediaId)).map((row) => row.id);
+  if (gone.length) await prisma.aiEventFaceMatch.deleteMany({ where: { id: { in: gone }, ...judged } });
+  await recountGuest(guestId);
+  return gone.length;
+}
+
 /** Staff named a person as a guest: every photo of that person is that guest's, CONFIRMED. */
 async function relinkPersonToGuest(eventId, personId, guestId) {
   const faces = await prisma.aiEventFace.findMany({ where: { eventId, personId }, select: { id: true, mediaId: true } });
   for (const face of faces) {
     const existing = await prisma.aiEventFaceMatch.findUnique({ where: { guestId_mediaId: { guestId, mediaId: face.mediaId } } });
-    if (existing) { if (existing.status !== "REJECTED") await prisma.aiEventFaceMatch.update({ where: { id: existing.id }, data: { status: "CONFIRMED", personId, faceId: face.id } }); continue; }
+    if (existing) { if (existing.status !== "REJECTED") await prisma.aiEventFaceMatch.update({ where: { id: existing.id }, data: { status: "CONFIRMED", personId, faceId: face.id, ...sourceWhenShown(existing, "CONFIRMED", "PERSON_LINK") } }); continue; }
     await prisma.aiEventFaceMatch.create({ data: { eventId, guestId, mediaId: face.mediaId, faceId: face.id, personId, similarity: 1, band: "HIGH", status: "CONFIRMED", source: "PERSON_LINK" } });
   }
   await recountGuest(guestId);
 }
 
-module.exports = { matchFacesToGuests, matchGuestAgainstEvent, relinkPersonToGuest, recountGuest, statusFor };
+module.exports = { matchFacesToGuests, matchGuestAgainstEvent, relinkPersonToGuest, recountGuest, statusFor, pruneGuestMatches };

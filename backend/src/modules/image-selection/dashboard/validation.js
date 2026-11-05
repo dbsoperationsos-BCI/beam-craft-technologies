@@ -1,10 +1,12 @@
 const { z } = require("zod");
-const { RANGE_KEYS, DEFAULT_RANGE } = require("./service");
+// The dashboard's query is the range key every module dashboard reads - the schema lives with the
+// shared range vocabulary - plus `expand`, the reader's own Expand view: cards over the enabled projects.
+const { dashboardQuerySchema: rangeQuerySchema } = require("../../../services/dashboardRange");
 
-// `range` is the page's one range — the period figures and the chart both follow it. A key rather
-// than a pair of dates, so a URL cannot ask for a range the picker has no option for.
-const dashboardQuerySchema = z.object({
-  range: z.enum(RANGE_KEYS).optional().default(DEFAULT_RANGE),
+const dashboardQuerySchema = rangeQuerySchema.extend({
+  expand: z.enum(["true", "false"]).optional().transform((value) => value === "true"),
 });
 
-module.exports = { dashboardQuerySchema };
+const expandSchema = z.object({ enabled: z.boolean() });
+
+module.exports = { dashboardQuerySchema, expandSchema };

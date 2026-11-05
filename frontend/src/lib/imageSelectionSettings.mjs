@@ -64,3 +64,41 @@ export function hasSettingsChanges(initial, current) {
     || initial.selectionValidUntil !== current.selectionValidUntil
     || initial.deliverables.some((item) => { const next = current.deliverables.find((candidate) => candidate.id === item.id); return !next || item.enabled !== next.enabled || item.selectionLimit !== next.selectionLimit; });
 }
+
+// What a selection item the studio types is given when its Limits box is left empty. One photo,
+// not the studio-wide default selection limit: that setting is the fallback for an allocated
+// deliverable that carries no quantity, and a typed item has no allocation to read one from.
+export const NEW_SELECTION_ITEM_LIMIT = 1;
+export function newSelectionItemLimit(typed) {
+  return String(typed ?? "").trim() === "" ? NEW_SELECTION_ITEM_LIMIT : Number(typed);
+}
+
+// The add rows that hold a name but were never added — typed, then Review & Share pressed instead
+// of +. Keyed by group, as the table keeps them.
+export function pendingSelectionDrafts(drafts) {
+  return Object.entries(drafts || {})
+    .filter(([, draft]) => String(draft?.name || "").trim())
+    .map(([groupId, draft]) => ({ groupId, name: draft.name.trim(), selectionLimit: newSelectionItemLimit(draft.limit), shootName: draft.shootName || null, shootFolderId: draft.shootFolderId || null }));
+}
+
+/**
+ * Review & Share: whatever is pending is saved first, and the share flow opens only once it is.
+ *
+ * Each step is a function returning false (or throwing) to stop, or null when there is nothing for
+ * it to do - validate the form, save the settings, add the typed-but-unadded items, publish the
+ * gallery. `open` runs only after every step has succeeded, so a failed save never leaves the
+ * screen and the edits stay where they were for another try.
+ */
+export async function saveThenShare({ validate = null, save = null, addDrafts = null, publish = null, open }) {
+  if (validate && !validate()) return { ok: false, step: "validate" };
+  for (const [step, run] of [["save", save], ["addDrafts", addDrafts], ["publish", publish]]) {
+    if (!run) continue;
+    try {
+      if ((await run()) === false) return { ok: false, step };
+    } catch (error) {
+      return { ok: false, step, error };
+    }
+  }
+  open();
+  return { ok: true };
+}

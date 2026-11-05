@@ -4,6 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import DataTable from "@/components/data-table/DataTable";
 import useTableSelection from "@/components/data-table/useTableSelection";
 import DataTableShell from "@/components/data-table/DataTableShell";
+import KanbanBoard, { columnsFromRows, groupValue } from "@/components/data-table/KanbanBoard";
+import { columnTotal } from "@/lib/kanbanSummary.mjs";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import DataTableInfoPanel from "@/components/data-table/DataTableInfoPanel";
 import RecordViewPanel from "@/components/data-table/RecordViewPanel";
 import { quotationInfoSections } from "@/constants/infoPanelConfig";
@@ -16,17 +19,21 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import Dialog from "@/components/ui/Dialog";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import useCompactView from "@/components/shared/useCompactView";
-import { createSalesQuotation, createSalesQuotationVersion, deleteSalesQuotation, downloadSalesQuotationPdf, duplicateSalesQuotation, getSalesQuotation, getSalesQuotations, renewSalesQuotationLink } from "@/services/sales/projects.service";
+import useSubmitOnce from "@/components/shared/useSubmitOnce";
+import { createSalesQuotation, createSalesQuotationDraft, createSalesQuotationVersion, deleteSalesQuotation, downloadSalesQuotationPdf, finalizeSalesQuotation, generateSalesQuotationDraft, getSalesQuotation, getSalesQuotations, renewSalesQuotationLink, unfinalizeSalesQuotation, updateSalesQuotationDraft } from "@/services/sales/projects.service";
 
 import ProjectBookingPanel from "./ProjectBookingPanel";
+import { draftKeptUntil } from "./ProjectDraftsDialog";
+import useProjectDrafts from "./useProjectDrafts";
+import { projectDraftTitle } from "@/lib/projectDrafts.mjs";
 import { quotationToProjectPrefill } from "./projectBooking";
 import QuotationGeneratorPanel from "./QuotationGeneratorPanel";
-import QuotationDuplicateDialog from "./QuotationDuplicateDialog";
 import QuotationVersionsDialog from "./QuotationVersionsDialog";
-import { isLinkActive, linkExpiryText, linkStatusLabel } from "./quotationLinkStatus";
+import { isDraftQuotation, isFinalizedQuotation, isLinkActive, linkExpiryText, linkStatusLabel } from "./quotationLinkStatus";
 import { publicOrigin } from "@/lib/publicOrigin";
 import { QUOTATION_BRANDS, brandBadgeLabel, brandLabel, brandOfQuotation } from "@/lib/quotationBrand.mjs";
 import { takeQuotationGeneratorDraft } from "@/lib/quotationGeneratorDraft";
+import { clearEditingDrafts, editingDraftScope, readEditingDraft } from "@/lib/quotationEditingDraft.mjs";
 
 
 /*
@@ -112,6 +119,7 @@ function decorateQuotation(quotation) {
     // The brand as a word, so the column, the info panel and the CSV export all read "Dum Dum"
     // rather than a code.
     brandName: brandLabel(quotationBrand),
+    isDraft: isDraftQuotation(quotation),
     linkStatus: linkStatusLabel(quotation),
     versionCount: quotation.versionCount ?? (quotation.versions?.length || 1),
     /*
@@ -143,6 +151,60 @@ function versionRow(chain, version) {
     versionCount: null,
     // Nothing hangs under a version, and it holds no payload of its own until it is opened.
     isVersionRow: true,
+  };
+}
+
+/** Whether a row is a chain of the register rather than an earlier version opened under one. */
+const isChainRow = (row) => !row?.isVersionRow;
+
+/*
+ * A duplicate open in the generator, named in the address so a reload opens it again rather than
+ * dropping what was on screen: `?duplicate=<source version id>`. Replaced rather than pushed, so Back
+ * leaves the register instead of reopening a form that was closed.
+ */
+const DUPLICATE_PARAM = "duplicate";
+
+function setDuplicateParam(sourceId) {
+  const url = new URL(window.location.href);
+  if (sourceId) url.searchParams.set(DUPLICATE_PARAM, sourceId);
+  else url.searchParams.delete(DUPLICATE_PARAM);
+  window.history.replaceState(window.history.state, "", url);
+}
+
+/*
+ * The version being edited, in the address the same way: `?edit=<version id>`. A reload reopens the
+ * generator on it, with the edits auto-saved in this tab (`lib/quotationEditingDraft.mjs`) put back
+ * - the published quotation is never what changes until Save as New Version is pressed.
+ */
+const EDIT_PARAM = "edit";
+
+function setEditParam(versionId) {
+  const url = new URL(window.location.href);
+  if (versionId) url.searchParams.set(EDIT_PARAM, versionId);
+  else url.searchParams.delete(EDIT_PARAM);
+  window.history.replaceState(window.history.state, "", url);
+}
+
+/*
+ * What a duplicate opens on: the source version's payload, with its row's own columns underneath
+ * for a version raised before the payload carried them. Nothing that identifies the source goes
+ * across - no id, number, version or link - because the generator builds the saved quotation from
+ * its own fields and the server numbers it as a new chain. The enquiry is left empty as well: a
+ * duplicate is for another enquiry, which is chosen afresh rather than carried over from the source.
+ */
+function duplicateDraft(source) {
+  return {
+    clientName: source.clientName,
+    clientMainNumber: source.clientMainNumber,
+    sourceBranch: source.sourceBranch,
+    eventVenue: source.eventVenue,
+    followedBy: source.followedBy,
+    referredBy: source.referredBy,
+    secondaryContactNumber: source.secondaryContactNumber,
+    additionalNotes: source.additionalNotes,
+    discount: source.discount,
+    ...(source.payload || {}),
+    enquiryId: "",
   };
 }
 
@@ -195,18 +257,61 @@ function BrandBadge({ code }) {
 }
 
 /*
- * The tabs over the register: every brand, then one per brand. The count beside each is the
- * chains it would show, so the tab says how much of the register it holds before it is pressed.
+ * The tabs over the register: every brand, then one per brand, then the drafts. The count beside
+ * each is the chains it would show, so the tab says how much of the register it holds before it is
+ * pressed.
+ *
+ * All and the brand tabs are the generated quotations - what they have always listed, and what a
+ * client can have been sent. A draft has been sent to nobody, so it sits under Draft alone, whatever
+ * its brand (the Brand column still says which), rather than being counted among quotations that
+ * exist for a client. Generating a draft moves it across.
  */
 const BRAND_TAB_ALL = "ALL";
+const DRAFT_TAB = "DRAFT";
 
 function brandTabs(quotations) {
   const counts = new Map();
-  for (const chain of quotations) counts.set(chain.quotationBrand, (counts.get(chain.quotationBrand) || 0) + 1);
+  let drafts = 0;
+  for (const chain of quotations) {
+    if (chain.isDraft) drafts += 1;
+    else counts.set(chain.quotationBrand, (counts.get(chain.quotationBrand) || 0) + 1);
+  }
   return [
-    { id: BRAND_TAB_ALL, label: "All", count: quotations.length },
+    { id: BRAND_TAB_ALL, label: "All", count: quotations.length - drafts },
     ...QUOTATION_BRANDS.map((brand) => ({ id: brand.code, label: brand.label, count: counts.get(brand.code) || 0 })),
+    { id: DRAFT_TAB, label: "Draft", count: drafts },
   ];
+}
+
+/** The chains one tab lists: the drafts under Draft, and only generated quotations everywhere else. */
+function chainsForTab(quotations, tab) {
+  if (tab === DRAFT_TAB) return quotations.filter((chain) => chain.isDraft);
+  return quotations.filter((chain) => !chain.isDraft && (tab === BRAND_TAB_ALL || chain.quotationBrand === tab));
+}
+
+/*
+ * The Board: a quotation has no status to move through - it is generated or still a draft - so the
+ * register stands in the columns its tabs already cut it into: one per brand, then Draft. A card opens
+ * the quotation, as a double-click does. Nothing is dropped: a brand is a fact about the quotation,
+ * not a state it reaches, and a draft is generated from its own form.
+ */
+const BOARD_DRAFT = "Draft";
+// The board's trend counts a quotation by its Quotation Date, else by when it was created.
+const quotedOn = (quotation) => {
+  const time = new Date(quotation.quotationDate || quotation.createdAt || "").getTime();
+  return Number.isNaN(time) ? null : time;
+};
+const BOARD_ORDER = [...QUOTATION_BRANDS.map((brand) => brand.label), BOARD_DRAFT];
+const boardGroupOf = (chain) => (chain.isDraft ? BOARD_DRAFT : groupValue(chain.brandName));
+const BOARD_CARD = {
+  title: (chain) => chain.clientName || chain.quotationName || chain.quotationId || "Quotation",
+  subtitle: (chain) => [chain.quotationId || chain.quotationNumber || chain.enquiryId, chain.followedBy].filter(Boolean).join(" · "),
+  meta: (chain) => [chain.quotationDate ? formatDate(chain.quotationDate) : "", (chain.versionCount || 1) > 1 ? `${chain.versionCount} versions` : ""].filter(Boolean).join(" · "),
+};
+
+function emptyMessageFor(tab) {
+  if (tab === DRAFT_TAB) return "Quotations saved with Save Draft will appear here until they are generated.";
+  return tab === BRAND_TAB_ALL ? "Generated quotations will appear here." : `No ${brandLabel(tab)} quotations yet.`;
 }
 
 function sortValue(quotation, column) {
@@ -230,6 +335,9 @@ function sortValue(quotation, column) {
  */
 const bookedFromChain = (chain) => Boolean(chain?.finalized) || (chain?.versions || []).some((version) => version.finalized);
 
+/** The one version of a quotation that is FINALIZED, newest or not - or null when none is. */
+const finalizedVersionOf = (chain) => (isFinalizedQuotation(chain) ? chain : (chain?.versions || []).find(isFinalizedQuotation) || null);
+
 export default function QuotationPage() {
   // SALES / Quotation Management. Reading the register and a chain's versions is a read; raising a
   // version, duplicating one, deleting one and re-enabling a link are writes and are hidden
@@ -252,6 +360,8 @@ export default function QuotationPage() {
   const [tableStats, setTableStats] = useState({ total: 0 });
   const [generatorOpen, setGeneratorOpen] = useState(false);
   const [editingQuotation, setEditingQuotation] = useState(null);
+  // A duplicate's edits, kept in this tab and put back after a reload (`lib/quotationEditingDraft.mjs`).
+  const [restoredDraft, setRestoredDraft] = useState(null);
   const [deletingQuotation, setDeletingQuotation] = useState(null);
   const [shareQuotation, setShareQuotation] = useState(null);
   // The chain the generator is editing, kept beside the version loaded into it: the chain carries
@@ -260,34 +370,61 @@ export default function QuotationPage() {
   // A quotation started on the CRM's Quotation Calculator, waiting for the generator to open on it.
   const [generatorDraft, setGeneratorDraft] = useState(null);
   const [versionsQuotation, setVersionsQuotation] = useState(null);
-  // The version being copied onto another enquiry, which may be the register row or one picked out
-  // of the version history.
-  const [duplicatingQuotation, setDuplicatingQuotation] = useState(null);
-  const [duplicating, setDuplicating] = useState(false);
+  /*
+   * The version a Duplicate opened the generator on, read back in full. Its own state rather than
+   * `editingQuotation`, because that one means "raise the next version of this" and a duplicate is a
+   * new quotation: saving it creates version 01 of a new number and never writes to the source.
+   */
+  const [duplicateSource, setDuplicateSource] = useState(null);
   const [renewingId, setRenewingId] = useState("");
-  const [savingQuotation, setSavingQuotation] = useState(false);
+  // Finalize or Unfinalize in flight from the generator - "finalize", "unfinalize" or neither.
+  const [finalizing, setFinalizing] = useState("");
+  // One PDF at a time - the server takes a few seconds to render one, and the guard is set before
+  // the first await, so a second press does not start a second render. The id says which version's
+  // Download is the busy one; the others are disabled until it is done.
+  const { busy: downloadingPdf, run: runDownload } = useSubmitOnce();
+  const [downloadingId, setDownloadingId] = useState("");
+  // One press is one quotation: the guard is set before the first await, so a double-click is ignored.
+  const { busy: savingQuotation, run: runSave } = useSubmitOnce();
+  // Which of the generator's two saves is in flight, so the spinner is on the button pressed.
+  const [savingKind, setSavingKind] = useState("");
+  /*
+   * The generator's key, held while a new quotation becomes a draft under it.
+   *
+   * The panel is keyed on what it was opened on, so picking another version rebuilds it. The first
+   * Save Draft turns a new quotation into a draft with an id of its own, and re-keying then would
+   * rebuild the form the person is still typing in - so the key it was opened under is kept until
+   * the generator closes.
+   */
+  const [heldGeneratorKey, setHeldGeneratorKey] = useState(null);
   const { notice, showNotice, showSuccess, showError, clearNotice } = useNotice();
+  // Save Draft on a booking started here; the drafts are listed and reopened on Bookings & Converted.
+  // `bookingDraft` is a draft chosen with "Use draft" when this quotation's enquiry already had one.
+  const projectDrafts = useProjectDrafts();
+  const [bookingDraft, setBookingDraft] = useState(null);
+  const closeBooking = () => { setBookingPrefill(null); setBookingDraft(null); };
   const { density } = useCompactView();
   // Which brand's chains the table shows. Filtered here, over the rows already loaded, so pressing
   // a tab is immediate and the search, the sort, the export and the row actions carry on as they
   // are - the table simply sees fewer rows.
   const [brandTab, setBrandTab] = useState(BRAND_TAB_ALL);
-  const visibleQuotations = useMemo(() => brandTab === BRAND_TAB_ALL ? quotations : quotations.filter((chain) => chain.quotationBrand === brandTab), [brandTab, quotations]);
+  const visibleQuotations = useMemo(() => chainsForTab(quotations, brandTab), [brandTab, quotations]);
   const tabs = useMemo(() => brandTabs(quotations), [quotations]);
 
   /*
    * The tick boxes, for a role holding `ADMIN / Table Select All`.
    *
-   * `rows` is the chains on screen, not their earlier versions: a version is a sub-row under its
-   * chain, and `selectedFrom` only ever matches what this list holds. A version ticked under an
-   * open chevron is still a quotation the server will delete by id - it is the same record the row
-   * menu's Delete removes - it just is not counted here, which keeps the count honest for the
-   * common case of ticking the register itself.
+   * `rows` is the chains on screen, and a tick is a whole chain: the bulk route deletes every
+   * version of it, where the row menu's Delete takes one version and keeps the rest. Earlier
+   * versions under an open chevron carry no box (`isChainRow`) - the table only ever sends its
+   * top-level rows, so a box there would tick and do nothing.
    */
   const bulk = useTableSelection({
     prefix: "/api/sales/quotations",
     rows: visibleQuotations,
     noun: "quotation",
+    canSelectRow: isChainRow,
+    deleteMessage: "Every version of each selected quotation is deleted. This cannot be undone. Anything that cannot be deleted is left alone and stays ticked.",
     canDelete: canWrite,
     showSuccess,
     showError,
@@ -335,17 +472,65 @@ export default function QuotationPage() {
     setEditingChain(row);
     if (row.payload) {
       setEditingQuotation(row);
+      setEditParam(row.id);
       setGeneratorOpen(true);
       return;
     }
     try {
       const response = await getSalesQuotation(row.id);
       setEditingQuotation(decorateQuotation({ ...response.data, versions: row.versions }));
+      setEditParam(row.id);
       setGeneratorOpen(true);
     } catch (error) {
       showError(error.message || "Unable to open that version.");
     }
     }, [showError]);
+
+  /*
+   * A reload with `?edit=` in the address: the same version back in the generator, with the edits
+   * auto-saved in this tab put back over it where there are any. Read in full, as a row expanded out
+   * of its chain is. Nothing is saved by reopening.
+   */
+  const reopenEdit = useCallback(async (versionId) => {
+    try {
+      const response = await getSalesQuotation(versionId);
+      const version = decorateQuotation(response.data);
+      const edits = readEditingDraft(editingDraftScope({ editingId: version.id }));
+      setEditingChain(version);
+      setEditingQuotation(edits ? { ...version, payload: edits } : version);
+      setGeneratorOpen(true);
+      if (edits) showSuccess(`Your unsaved changes to ${version.quotationId || "this quotation"} were restored. Nothing is saved until you save it.`);
+    } catch (error) {
+      setEditParam(null);
+      showError(error.message || "Unable to reopen that quotation.");
+    }
+  }, [showError, showSuccess]);
+
+  /*
+   * Opens the generator on a copy of a version, as a new quotation.
+   *
+   * Read back in full rather than taken off the row, because an earlier-version row carries no
+   * payload and a register loaded minutes ago is not what should be copied. Also how a reload with
+   * `?duplicate=` in the address gets back to the same form.
+   */
+  const openDuplicate = useCallback(async (sourceId, { restore = false } = {}) => {
+    try {
+      const response = await getSalesQuotation(sourceId);
+      setEditingQuotation(null);
+      setEditingChain(null);
+      setGeneratorDraft(null);
+      setDuplicateSource(response.data);
+      // On a reload, the copy as it was being edited, where this tab kept it.
+      const edits = restore ? readEditingDraft(editingDraftScope({ duplicateId: response.data.id })) : null;
+      setRestoredDraft(edits);
+      setDuplicateParam(response.data.id);
+      setGeneratorOpen(true);
+      if (edits) showSuccess("Your unsaved changes to this copy were restored. Nothing is saved until you save it.");
+    } catch (error) {
+      setDuplicateParam(null);
+      showError(error.message || "Unable to open that quotation to duplicate.");
+    }
+  }, [showError, showSuccess]);
 
   /*
    * Books the project this quotation was raised for, without leaving the register.
@@ -364,6 +549,66 @@ export default function QuotationPage() {
     }
   }, [showError]);
 
+  // One list for the row's ⋮ and the board card's ⋮.
+  const quotationActions = useCallback((quotation) => [
+    // The only way to reach the record view on a touch screen, where a double-click is the
+    // browser's zoom gesture rather than something a row ever receives.
+    { label: "View", onSelect: () => setViewingQuotation(quotation) },
+    // Editing does not change this quotation, it raises the next version of it.
+    // On a draft, Edit carries on with the draft itself rather than raising a version over it.
+    ...(canWrite ? [{ label: "Edit", onSelect: () => void openGenerator(quotation) }] : []),
+    /*
+     * Where a quotation is opened, copied, saved as a PDF and re-enabled - offered on every row
+     * except a draft's, however many versions the chain has.
+     *
+     * It used to appear only on a chain with more than one, on the reasoning that a list of one
+     * version is the row you are already looking at. True of the *list*, and wrong about the
+     * point: the actions underneath each version are the only way to reach the link the client
+     * was sent, so a quotation raised once had no way to be downloaded or copied from the
+     * register at all. The dialog already drew a single version correctly.
+     *
+     * Named for what it holds in each case - the history where there is one, the link where there
+     * is not - so the entry says what pressing it will show. "Quotation link" said *quotation*
+     * twice on a menu already opened from a quotation's own row.
+     *
+     * Read off `versions` rather than `versionCount`: the count is blanked on an earlier-version
+     * row on purpose - `versionRow` - so the register's own Versions column does not repeat "3
+     * versions" on every row of a chain already known to have three. The array itself is not; it
+     * rides along on every row of a chain, current version and earlier ones alike, so this is
+     * offered from a version row exactly as it is from the chain's current one.
+     */
+    // A draft has no link and no history yet - nothing has been sent - so neither is offered.
+    ...(quotation.isDraft ? [] : [{ label: (quotation.versions?.length || 0) > 1 ? "Versions" : "Link", onSelect: () => setVersionsQuotation(quotation) }]),
+    /*
+     * Booking the project this quotation was raised for, offered while nothing has been booked
+     * from it yet.
+     *
+     * "Nothing" means the whole chain, not this row: a project converts at one *version*, and a
+     * chain with an earlier version already converted is a quotation that has been booked -
+     * offering it again would invite a second project against one negotiation. `finalized` rides
+     * on every version for exactly this reading.
+     *
+     * The project is booked here, on the register, rather than by being sent to Bookings &
+     * Converted to start again: the quotation is what is being acted on and the studio is in the
+     * middle of reading it. `ProjectBookingPanel` is the same panel and the same save that
+     * screen uses, so there is still one definition of what booking a project means - the two
+     * screens share it rather than each having one.
+     *
+     * And only at the finalized version - whichever version of the quotation that is, newest or
+     * not: a project is booked at a finalized quotation and nothing else (the server refuses any
+     * other), so a quotation with no finalized version does not offer it.
+     */
+    ...(canCreateProject && !quotation.isDraft && finalizedVersionOf(quotation) && !bookedFromChain(quotation)
+      ? [{ label: "Create Project", onSelect: () => void openBooking(finalizedVersionOf(quotation).id) }]
+      : []),
+    // Duplicating writes a new quotation, so it is a write and is absent without READ_WRITE
+    // rather than present and refused.
+    ...(canWrite && !quotation.isDraft ? [{ label: "Duplicate", onSelect: () => void openDuplicate(quotation.id) }] : []),
+    // A finalized version is kept as it is, so a quotation holding one is not offered for deleting
+    // (the server refuses it too); unfinalizing that version first is what brings Delete back.
+    ...(canWrite && !finalizedVersionOf(quotation) ? [{ label: "Delete", tone: "danger", onSelect: () => setDeletingQuotation(quotation) }] : []),
+  ], [canCreateProject, canWrite, openBooking, openDuplicate, openGenerator]);
+
   const columns = useMemo(() => quotationColumns.map((column) => ({
     ...column,
     header: column.label,
@@ -374,60 +619,11 @@ export default function QuotationPage() {
       return typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b), undefined, { numeric: true });
     },
     /*
-     * Editing does not change this quotation, it raises the next version of it; Duplicate writes one
-     * under another enquiry. Both are writes, so both are absent without READ_WRITE rather than
+     * Editing does not change this quotation, it raises the next version of it; Duplicate opens a
+     * copy of it that saves as a new quotation. Both are writes, so both are absent without READ_WRITE rather than
      * present and refused.
      */
-    cell: column.id === "actions" ? ({ row }) => <OptionsMenu ariaLabel={`Actions for ${row.original.quotationId || row.original.quotationNumber || "quotation"}`} items={[
-      // The only way to reach the record view on a touch screen, where a double-click is the
-      // browser's zoom gesture rather than something a row ever receives.
-      { label: "View", onSelect: () => setViewingQuotation(row.original) },
-      // Editing does not change this quotation, it raises the next version of it.
-      ...(canWrite ? [{ label: "Edit", onSelect: () => void openGenerator(row.original) }] : []),
-      /*
-       * Where a quotation is opened, copied, saved as a PDF and re-enabled - offered on every row,
-       * however many versions the chain has.
-       *
-       * It used to appear only on a chain with more than one, on the reasoning that a list of one
-       * version is the row you are already looking at. True of the *list*, and wrong about the
-       * point: the actions underneath each version are the only way to reach the link the client
-       * was sent, so a quotation raised once had no way to be downloaded or copied from the
-       * register at all. The dialog already drew a single version correctly.
-       *
-       * Named for what it holds in each case - the history where there is one, the link where there
-       * is not - so the entry says what pressing it will show. "Quotation link" said *quotation*
-       * twice on a menu already opened from a quotation's own row.
-       *
-       * Read off `versions` rather than `versionCount`: the count is blanked on an earlier-version
-       * row on purpose - `versionRow` - so the register's own Versions column does not repeat "3
-       * versions" on every row of a chain already known to have three. The array itself is not; it
-       * rides along on every row of a chain, current version and earlier ones alike, so this is
-       * offered from a version row exactly as it is from the chain's current one.
-       */
-      { label: (row.original.versions?.length || 0) > 1 ? "Versions" : "Link", onSelect: () => setVersionsQuotation(row.original) },
-      /*
-       * Booking the project this quotation was raised for, offered while nothing has been booked
-       * from it yet.
-       *
-       * "Nothing" means the whole chain, not this row: a project converts at one *version*, and a
-       * chain with an earlier version already converted is a quotation that has been booked -
-       * offering it again would invite a second project against one negotiation. `finalized` rides
-       * on every version for exactly this reading.
-       *
-       * The project is booked here, on the register, rather than by being sent to Bookings &
-       * Converted to start again: the quotation is what is being acted on and the studio is in the
-       * middle of reading it. `ProjectBookingPanel` is the same panel and the same save that
-       * screen uses, so there is still one definition of what booking a project means - the two
-       * screens share it rather than each having one.
-       */
-      ...(canCreateProject && !bookedFromChain(row.original)
-        ? [{ label: "Create Project", onSelect: () => void openBooking(row.original.id) }]
-        : []),
-      // Duplicating writes a quotation under another enquiry, so it is a write and is absent
-      // without READ_WRITE rather than present and refused.
-      ...(canWrite ? [{ label: "Duplicate", onSelect: () => setDuplicatingQuotation(row.original) }] : []),
-      ...(canWrite ? [{ label: "Delete", tone: "danger", onSelect: () => setDeletingQuotation(row.original) }] : []),
-    ]} /> : column.id === "finalizedQuotation"
+    cell: column.id === "actions" ? ({ row }) => <OptionsMenu ariaLabel={`Actions for ${row.original.quotationId || row.original.quotationNumber || "quotation"}`} items={quotationActions(row.original)} /> : column.id === "finalizedQuotation"
       ? ({ row }) => <FinalizedQuotationCell quotation={row.original} />
       : column.id === "brandName"
         ? ({ row }) => <BrandBadge code={row.original.quotationBrand} />
@@ -436,7 +632,9 @@ export default function QuotationPage() {
     // The name is five facts joined by dashes, so it is given room the other columns do not need.
     width: column.id === "actions" ? 56 : column.id === "quotationName" ? 320 : column.id === "brandName" ? 110 : 180,
     minWidth: column.id === "actions" ? 56 : column.id === "quotationName" ? 240 : column.id === "brandName" ? 96 : 160,
-  })), [canCreateProject, canWrite, openBooking, openGenerator]);
+  })), [quotationActions]);
+
+  const generatorKey = heldGeneratorKey || editingQuotation?.id || (duplicateSource ? `duplicate-${duplicateSource.id}` : generatorDraft ? "calculator-draft" : "new-quotation");
 
   const updatedText = lastUpdated ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(lastUpdated) : "—";
 
@@ -456,11 +654,17 @@ export default function QuotationPage() {
      * and saved from the bytes rather than by pointing the browser at an address.
      */
     if (!quotation?.id) return;
-    try {
-      await downloadSalesQuotationPdf(quotation.id, `${quotation.quotationId || "quotation"}.pdf`);
-    } catch (error) {
-      showError(error?.message || "Unable to download the quotation PDF.");
-    }
+    await runDownload(async () => {
+      setDownloadingId(quotation.id);
+      try {
+        await downloadSalesQuotationPdf(quotation.id, `${quotation.quotationId || "quotation"}.pdf`);
+      } catch (error) {
+        // A dropped connection throws the browser's own words ("Failed to fetch"), not the server's.
+        showError(error instanceof TypeError ? "Couldn't reach the server. Check your connection and try again." : error?.message || "Unable to download the quotation PDF.");
+      } finally {
+        setDownloadingId("");
+      }
+    });
   }
 
   async function copyPublicLink(quotation) {
@@ -475,9 +679,16 @@ export default function QuotationPage() {
 
   function closeGenerator() {
     setGeneratorOpen(false);
+    setHeldGeneratorKey(null);
     setEditingQuotation(null);
     setEditingChain(null);
     setGeneratorDraft(null);
+    setDuplicateSource(null);
+    setRestoredDraft(null);
+    setDuplicateParam(null);
+    setEditParam(null);
+    // Closed or saved: the edits this tab kept are done with.
+    clearEditingDrafts();
   }
 
   /*
@@ -491,6 +702,18 @@ export default function QuotationPage() {
     // Deferred a tick, as the register's own first load is, so the pickup is not a state change
     // made inside the effect body.
     const timer = window.setTimeout(() => {
+      // A duplicate open when the page was reloaded opens again, read back from its source.
+      const duplicateId = new URLSearchParams(window.location.search).get(DUPLICATE_PARAM);
+      if (duplicateId) {
+        void openDuplicate(duplicateId, { restore: true });
+        return;
+      }
+      // A version that was being edited reopens the same way, with its kept edits.
+      const editId = new URLSearchParams(window.location.search).get(EDIT_PARAM);
+      if (editId) {
+        void reopenEdit(editId);
+        return;
+      }
       const draft = takeQuotationGeneratorDraft();
       if (!draft) return;
       setEditingChain(null);
@@ -499,7 +722,7 @@ export default function QuotationPage() {
       setGeneratorOpen(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [canWrite]);
+  }, [canWrite, openDuplicate, reopenEdit]);
 
   /** Loads an earlier version into the generator, so the next version can be raised from it. */
   async function loadVersionIntoGenerator(versionId) {
@@ -507,6 +730,7 @@ export default function QuotationPage() {
     try {
       const response = await getSalesQuotation(versionId);
       setEditingQuotation(decorateQuotation(response.data));
+      setEditParam(versionId);
     } catch (error) {
       showError(error.message || "Unable to load that version.");
     }
@@ -523,63 +747,131 @@ export default function QuotationPage() {
    * and a new version changes the row that is already there.
    */
   async function addGeneratedQuotation(quotation) {
+    // Which save this is, said once: only an edit raises a version; a duplicate is created exactly
+    // as a new quotation is, so it gets a new number and starts at version 01; a draft is generated
+    // in place, under the number it already has.
+    const mode = isDraftQuotation(editingQuotation) ? "draft" : editingQuotation ? "edit" : duplicateSource ? "duplicate" : "create";
     const source = editingQuotation;
-    setSavingQuotation(true);
-    try {
-      const response = source
-        ? await createSalesQuotationVersion(source.id, quotation)
-        : await createSalesQuotation(quotation);
-      const saved = decorateQuotation(response.data);
-      await loadQuotations({ notifyOnError: false });
-      closeGenerator();
-      setShareQuotation(saved);
-      showNotice(source ? `${saved.quotationId} raised as the new version.` : `${saved.quotationId} generated and added to inventory.`);
-    } catch (error) {
-      showError(error.message || "Unable to save quotation.");
-    } finally {
-      setSavingQuotation(false);
-    }
+    const duplicatedFrom = duplicateSource;
+    setSavingKind("generate");
+    await runSave(async () => {
+      try {
+        const response = mode === "draft"
+          ? await generateSalesQuotationDraft(source.id, { ...quotation, draftUpdatedAt: source.updatedAt })
+          : mode === "edit"
+          ? await createSalesQuotationVersion(source.id, quotation)
+          : await createSalesQuotation(quotation);
+        const saved = decorateQuotation(response.data);
+        await loadQuotations({ notifyOnError: false });
+        closeGenerator();
+        setShareQuotation(saved);
+        showNotice(mode === "draft"
+          ? `${saved.quotationId} generated from the draft.`
+          : mode === "edit"
+          // A save that changed nothing in the document raises no version: the client has that
+          // quotation already, and a second identical one would only move its link.
+          ? response.unchanged
+            ? `Nothing changed in ${saved.quotationId}, so no new version was raised.`
+            : `${saved.quotationId} raised as the new version.`
+          : mode === "duplicate"
+            ? `${saved.quotationId} created as a duplicate of ${duplicatedFrom.quotationId}.`
+            : `${saved.quotationId} generated and added to inventory.`);
+      } catch (error) {
+        // The form stays open with everything typed into it, so the save can simply be pressed again.
+        showError(error.message || "Unable to save quotation.");
+      }
+    });
+  }
+
+  /*
+   * Save Draft. The first save of a new quotation numbers it and keeps it as a draft; every later
+   * one - in this sitting or after reopening it from the Draft tab - rewrites that same draft, never
+   * a second one. The generator stays open on it, so the person can carry on and save again, and
+   * the register is re-read behind it so the Draft tab's count is the database's.
+   *
+   * The draft's `updatedAt` goes back with each save: a draft changed in another tab since this one
+   * opened it is refused (409) rather than overwritten, and the message says to reopen it.
+   */
+  async function saveQuotationDraft(quotation) {
+    const draft = isDraftQuotation(editingQuotation) ? editingQuotation : null;
+    const keyBeforeSave = generatorKey;
+    setSavingKind("draft");
+    await runSave(async () => {
+      try {
+        const response = draft
+          ? await updateSalesQuotationDraft(draft.id, { ...quotation, draftUpdatedAt: draft.updatedAt })
+          : await createSalesQuotationDraft(quotation);
+        const saved = decorateQuotation({ ...response.data, versions: [] });
+        if (!draft) setHeldGeneratorKey(keyBeforeSave);
+        setEditingQuotation(saved);
+        setEditingChain(saved);
+        // From here it is this draft being edited, not a calculator handoff or a duplicate: a
+        // reload must not reopen a second copy of the source.
+        setGeneratorDraft(null);
+        setDuplicateSource(null);
+        setRestoredDraft(null);
+        setDuplicateParam(null);
+        setEditParam(saved.id);
+        // Saved to the server now, so nothing is left to keep in this tab.
+        clearEditingDrafts();
+        showSuccess(`${saved.quotationId} saved as a draft. Carry on here, or reopen it later from the Draft tab.`);
+        await loadQuotations({ notifyOnError: false });
+      } catch (error) {
+        // The form stays open with everything typed into it, so the save can simply be pressed again.
+        showError(error.message || "Unable to save the draft.");
+      }
+    });
   }
 
   /*
    * A renewed link changes one version, which may be the row in the register, a row in the version
    * history, or both at once. Patched in place rather than re-read: the list is unchanged apart
    * from this one clock, and reloading it would close the dialog the button was pressed in.
+   *
+   * A finalize or an unfinalize changes the same things - the clock, and the version's finalize
+   * state with it - and is patched the same way, the generator open on it included.
    */
   function applyRenewedVersion(saved) {
     const patchChain = (chain) => {
       if (chain.quotationNumber !== saved.quotationNumber) return chain;
       const versions = (chain.versions || []).map((version) => version.id === saved.id
-        ? { ...version, linkExpiresAt: saved.linkExpiresAt, linkActive: saved.linkActive }
+        ? { ...version, linkExpiresAt: saved.linkExpiresAt, linkActive: saved.linkActive, linkNeverExpires: saved.linkNeverExpires, finalization: saved.finalization }
         : version);
       return decorateQuotation({ ...chain, ...(chain.id === saved.id ? saved : {}), versions });
     };
     setQuotations((current) => current.map(patchChain));
     setShareQuotation((current) => current?.id === saved.id ? saved : current);
     setVersionsQuotation((current) => current ? patchChain(current) : current);
+    setEditingQuotation((current) => current ? patchChain(current) : current);
+    setEditingChain((current) => current ? patchChain(current) : current);
   }
 
   /*
-   * Copies a version onto another enquiry, as a quotation of its own.
-   *
-   * The whole list is re-read afterwards: the copy is a new row of the register, not a version of
-   * anything the target enquiry was quoted before.
+   * Finalize Quotation and Unfinalize, from the generator. Neither raises a version: the generator
+   * stays open on the same one, which then reads only (finalized) or edits again (unfinalized).
+   * Finalize sends what is on screen, and the server refuses it when that is not what is saved.
    */
-  async function duplicateVersion(enquiryId) {
-    if (!duplicatingQuotation) return;
-    setDuplicating(true);
+  async function changeFinalization(kind, payload) {
+    const source = editingQuotation;
+    if (!source?.id || finalizing) return;
+    setFinalizing(kind);
     try {
-      const response = await duplicateSalesQuotation(duplicatingQuotation.id, enquiryId);
-      const saved = decorateQuotation(response.data);
-      await loadQuotations({ notifyOnError: false });
-      setDuplicatingQuotation(null);
-      setVersionsQuotation(null);
-      setShareQuotation(saved);
-      showNotice(`${saved.quotationId} duplicated onto ${enquiryId}.`);
+      const response = kind === "finalize"
+        ? await finalizeSalesQuotation(source.id, payload)
+        : await unfinalizeSalesQuotation(source.id);
+      applyRenewedVersion(decorateQuotation(response.data));
+      const name = response.data?.quotationId || source.quotationId || "Quotation";
+      if (kind === "finalize") {
+        // What is on screen is what was saved, so nothing is left for this tab to keep.
+        clearEditingDrafts();
+        showNotice(response.unchanged ? `${name} was already finalized.` : `${name} finalized. Its link no longer expires.`);
+      } else {
+        showNotice(response.unchanged ? `${name} was not finalized.` : `${name} unfinalized. Its link is open for 5 days - edit it and Save as new version to change it.`);
+      }
     } catch (error) {
-      showError(error.message || "Unable to duplicate quotation.");
+      showError(error.message || (kind === "finalize" ? "Unable to finalize the quotation." : "Unable to unfinalize the quotation."));
     } finally {
-      setDuplicating(false);
+      setFinalizing("");
     }
   }
 
@@ -600,16 +892,21 @@ export default function QuotationPage() {
   async function confirmDeleteQuotation() {
     if (!deletingQuotation) return;
     try {
-      await deleteSalesQuotation(deletingQuotation.id);
+      const deleted = deletingQuotation;
+      await deleteSalesQuotation(deleted.id);
       // Re-read rather than drop the row: deleting the current version leaves the chain standing on
       // the version below it, and filtering the row out would hide a quotation that still exists.
       setDeletingQuotation(null);
       await loadQuotations({ notifyOnError: false });
-      showNotice("Quotation version deleted.");
+      showNotice(deleted.isDraft ? `Draft ${deleted.quotationId} deleted.` : "Quotation version deleted.");
     } catch (error) {
       showError(error.message || "Unable to delete quotation.");
     }
   }
+
+  const [layout, setLayout] = useTableBoardLayout("sales-quotations");
+  const onBoard = layout === "board";
+  const boardColumns = useMemo(() => columnsFromRows(quotations, boardGroupOf, { order: BOARD_ORDER }), [quotations]);
 
   return <section className="flex h-full min-h-0 w-full min-w-0 flex-col">
     {/* The generator writes - it creates a quotation - so it is gated on this screen's own
@@ -617,37 +914,71 @@ export default function QuotationPage() {
         here; `/api/sales/quotation-settings` and its dialog are untouched and have no way in. */}
     <ModulePageHeader
       title="Quotations"
-      tabs={tabs}
+      // The Board's columns are the tabs' own brands and Draft, so the tabs step aside while it shows.
+      tabs={onBoard ? undefined : tabs}
       tabValue={brandTab}
       onTabChange={setBrandTab}
       tabsAriaLabel="Quotation brand"
-      actions={canWrite ? <Button type="button" variant="primary" onClick={() => void openGenerator(null)}>Quotation generator</Button> : null}
+      actions={<>
+        <TableBoardSwitch value={layout} onChange={setLayout} />
+        {canWrite && <Button type="button" variant="primary" onClick={() => void openGenerator(null)}>Quotation generator</Button>}
+      </>}
     />
     <FloatingNotice notice={notice} onClose={clearNotice} />
     {/* Booking a project from a quotation, on the register rather than on another screen. The
         panel and its save are Bookings & Converted's own, shared rather than repeated. */}
-    {bookingPrefill && <ProjectBookingPanel
-      prefill={bookingPrefill}
-      onClose={() => setBookingPrefill(null)}
+    {(bookingPrefill || bookingDraft) && <ProjectBookingPanel
+      key={bookingDraft?.id || "new"}
+      prefill={bookingDraft ? null : bookingPrefill}
+      draft={bookingDraft?.snapshot || null}
+      draftId={bookingDraft?.id || ""}
+      findDraft={projectDrafts.forEnquiry}
+      onUseDraft={setBookingDraft}
+      onSaveDraft={(snapshot, { droppedFiles = false } = {}) => {
+        const saved = projectDrafts.save({ id: bookingDraft?.id, enquiryId: snapshot.form?.enquiryId, title: projectDraftTitle(snapshot.form), snapshot });
+        closeBooking();
+        showSuccess(`Draft saved on this computer until ${draftKeptUntil(saved)} - open it from Bookings & Converted → Drafts.${droppedFiles ? " The payment proof is not kept; choose it again when you reopen." : ""}`);
+      }}
+      onClose={closeBooking}
       /* The register is re-read so the quotation that has now been booked stops offering to book
-         again - `finalized` is what the entry reads, and it only changes on the server. */
-      onSaved={() => loadQuotations({ notifyOnError: false })}
+         again - `finalized` is what the entry reads, and it only changes on the server. A draft of
+         this booking is done with too. */
+      onSaved={(created, sent) => {
+        if (bookingDraft) projectDrafts.remove(bookingDraft.id);
+        projectDrafts.removeForEnquiry(sent?.enquiryId || created?.enquiryId);
+        return loadQuotations({ notifyOnError: false });
+      }}
       onNotice={showNotice}
       onError={showError}
     />}
     <div className="min-h-0 flex-1">
-      <DataTableShell className="h-full min-h-0" footer={<TableFooter spread><span>Last updated: {updatedText}</span><span>Total rows: {tableStats.total}</span></TableFooter>}>
+      <DataTableShell className="h-full min-h-0" footer={<TableFooter spread><span>Last updated: {updatedText}</span><span>Total rows: {onBoard ? quotations.length : tableStats.total}</span></TableFooter>}>
         {/* The shell stacks its children, so the table and the panel beside it need a row of their
             own — without it the info panel lands under the table instead of next to it. */}
         <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <div className="flex min-h-0 min-w-0 flex-1">
+        {onBoard ? <KanbanBoard
+          rows={quotations}
+          columns={boardColumns}
+          statusOf={boardGroupOf}
+          // What the quotations in each column are worth.
+          columnAmount={(rows) => columnTotal(rows, (chain) => chain.amount, "Quoted")}
+          dateOf={quotedOn}
+          card={BOARD_CARD}
+          onOpen={setViewingQuotation}
+          // The card's ⋮ is the row's ⋮.
+          cardActions={quotationActions}
+          viewOnly="A quotation's brand is fixed when it is made. Duplicate it to quote under another brand."
+          loading={isLoading}
+          noun="quotations"
+          ariaLabel="Quotations board"
+        /> : <div className="flex min-h-0 min-w-0 flex-1">
         <DataTable
           columns={columns}
           data={visibleQuotations}
           density={density}
           loading={isLoading}
           loadingMessage="Loading quotations..."
-          emptyMessage={brandTab === BRAND_TAB_ALL ? "Generated quotations will appear here." : `No ${brandLabel(brandTab)} quotations yet.`}
+          emptyMessage={emptyMessageFor(brandTab)}
           noMatchMessage="No quotations found."
           onVisibleRowsChange={setTableStats}
           selectedRowId={infoQuotation?.id}
@@ -658,7 +989,7 @@ export default function QuotationPage() {
              list of enquiries, and the history is one click away on the row it belongs to. */
           features={{ filtering: true, sorting: true, columnVisibility: true, expandable: { label: "earlier versions of this quotation", canExpand: (row) => !row.isVersionRow && (row.versionCount || 1) > 1, getSubRows: earlierVersions }, infiniteScroll: { pageSize: 50 }, csvExport: { enabled: true, fileName: "sales-quotations", onResult: (exported) => showNotice(exported ? "Quotation CSV export downloaded." : "No quotations available to export.") }, selection: bulk.selection }}
         />
-        </div>
+        </div>}
         <DataTableInfoPanel
           title="Quotations"
           entity={infoQuotation}
@@ -680,14 +1011,25 @@ export default function QuotationPage() {
     {/* Keyed on the version loaded, so picking another version rebuilds the form from that
         version's payload instead of leaving the last one's answers underneath it. */}
     {generatorOpen && <QuotationGeneratorPanel
-      key={editingQuotation?.id || (generatorDraft ? "calculator-draft" : "new-quotation")}
+      key={generatorKey}
+      editingDraftScope={editingDraftScope({ editingId: editingQuotation?.id, duplicateId: duplicateSource?.id })}
       initialQuotation={editingQuotation}
-      initialDraft={editingQuotation ? null : generatorDraft}
-      versions={editingChain?.versions || []}
+      initialDraft={editingQuotation ? null : restoredDraft || (duplicateSource ? duplicateDraft(duplicateSource) : generatorDraft)}
+      duplicateOf={editingQuotation ? null : duplicateSource}
+      saving={savingQuotation}
+      savingDraft={savingQuotation && savingKind === "draft"}
+      // A draft has one version and nothing to pick between, so it is offered no version picker.
+      versions={editingQuotation?.isDraft ? [] : editingChain?.versions || []}
       selectedVersionId={editingQuotation?.id || ""}
       onSelectVersion={loadVersionIntoGenerator}
-      onClose={closeGenerator}
+      // Not while a save is in flight: the save closes the form itself and opens the share dialog.
+      onClose={() => { if (!savingQuotation) closeGenerator(); }}
       onGenerate={addGeneratedQuotation}
+      onSaveDraft={saveQuotationDraft}
+      // Writes, so a writer's only - the generator opens only for one, and says so again here.
+      finalizing={finalizing}
+      onFinalize={canWrite ? (payload) => changeFinalization("finalize", payload) : undefined}
+      onUnfinalize={canWrite ? () => changeFinalization("unfinalize") : undefined}
     />}
     {shareQuotation && <Dialog
       title={`${shareQuotation.quotationId || "Quotation"} ready`}
@@ -700,7 +1042,7 @@ export default function QuotationPage() {
         {/* A lapsed link is not something to send: the actions that hand it out give way to the
             one that reopens it. */}
         {isLinkActive(shareQuotation) ? <>
-          <Button type="button" onClick={() => downloadPdf(shareQuotation)}>Download PDF</Button>
+          <Button type="button" busy={downloadingId === shareQuotation.id} busyLabel="Preparing PDF..." disabled={downloadingPdf} onClick={() => downloadPdf(shareQuotation)}>Download PDF</Button>
           <Button type="button" onClick={() => void copyPublicLink(shareQuotation)}>Copy Link</Button>
           <Button type="button" variant="primary" onClick={() => window.open(publicUrl(shareQuotation), "_blank", "noopener,noreferrer")}>Open Quotation</Button>
         </> : canWrite ? <Button
@@ -728,7 +1070,10 @@ export default function QuotationPage() {
       canWrite={canWrite}
       renewingId={renewingId}
       onRenew={renewLink}
+      // A new tab on the page the client is sent, so this list is still here when they come back.
+      onOpenLink={(version) => window.open(publicUrl(version), "_blank", "noopener,noreferrer")}
       onCopyLink={(version) => void copyPublicLink(version)}
+      downloadingId={downloadingId}
       onDownloadPdf={downloadPdf}
       /*
        * The same generator the register row's Edit opens, on this version rather than on whichever
@@ -740,17 +1085,13 @@ export default function QuotationPage() {
       onEditVersion={(version) => { setVersionsQuotation(null); void openGenerator({ ...version, versions: versionsQuotation.versions }); }}
       onClose={() => setVersionsQuotation(null)}
     />}
-    {duplicatingQuotation && <QuotationDuplicateDialog
-      quotation={duplicatingQuotation}
-      saving={duplicating}
-      onDuplicate={duplicateVersion}
-      onClose={() => setDuplicatingQuotation(null)}
-    />}
     <ConfirmDialog
       open={Boolean(deletingQuotation)}
-      title="Delete quotation?"
-      message={`This removes ${deletingQuotation?.quotationId || "this quotation"} from the quotation inventory. Earlier versions of ${deletingQuotation?.quotationNumber || "this chain"} are kept.`}
-      confirmLabel="Delete"
+      title={deletingQuotation?.isDraft ? "Delete draft?" : "Delete quotation?"}
+      message={deletingQuotation?.isDraft
+        ? `This deletes the draft ${deletingQuotation.quotationId || ""}. Nothing was sent from it, and it cannot be undone.`
+        : `This removes ${deletingQuotation?.quotationId || "this quotation"} from the quotation inventory. Earlier versions of ${deletingQuotation?.quotationNumber || "this chain"} are kept.`}
+      confirmLabel={deletingQuotation?.isDraft ? "Delete draft" : "Delete"}
       onCancel={() => setDeletingQuotation(null)}
       onConfirm={confirmDeleteQuotation}
     />

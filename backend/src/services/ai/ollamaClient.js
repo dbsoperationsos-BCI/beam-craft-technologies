@@ -12,19 +12,17 @@
  */
 
 /*
- * `qwen3:1.7b` rather than the 8B, because of the machine this runs on.
+ * `qwen3:8b`: the model in Nebula's workflow that reads the question and writes the answer. Large
+ * enough to choose its lookups reliably and to explain what they returned; the 1.7B it replaced
+ * missed tool calls and misread figures.
  *
- * The production box has 2 cores and no swap. An 8B model there generates one to three tokens a
- * second - minutes for a single analysis - and holds both cores while faster-whisper wants them
- * for a transcription. The small model answers in seconds and leaves the server able to serve the
- * CRM, which is what it is mainly for.
- *
- * It is only a default. `OLLAMA_MODEL` overrides it, so a bigger box runs a bigger model without a
- * code change.
+ * It costs memory and time: about 5GB resident, and on a small CPU-only server a few tokens a
+ * second. It is only a default - `OLLAMA_MODEL` overrides it, so a box that cannot carry it runs a
+ * smaller model without a code change.
  */
 const DEFAULTS = {
   baseUrl: "http://127.0.0.1:11434",
-  model: "qwen3:1.7b",
+  model: "qwen3:8b",
   /*
    * How long Ollama keeps the model in memory after a question.
    *
@@ -131,6 +129,16 @@ async function health() {
   }
 }
 
+/*
+ * The request's deadline, and the caller's cancel where there is one. A reader who closes the panel
+ * mid-answer cancels the generation rather than leaving it to run to the end in the background -
+ * holding a core, and one of the assistant's few concurrent slots, for an answer nobody will read.
+ */
+function deadline(timeoutMs, cancel) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return cancel ? AbortSignal.any([timeout, cancel]) : timeout;
+}
+
 /**
  * One completion.
  *
@@ -139,7 +147,7 @@ async function health() {
  * `"json"` is the fallback and the result is validated by the caller either way - a model that
  * returns valid JSON of the wrong shape is the failure this cannot prevent.
  */
-async function complete({ system, prompt, schema, temperature = 0.2, repeatPenalty, maxTokens: tokenLimit, model: modelOverride, messages: conversation, tools, raw = false } = {}) {
+async function complete({ system, prompt, schema, temperature = 0.2, repeatPenalty, maxTokens: tokenLimit, model: modelOverride, messages: conversation, tools, raw = false, signal: cancel } = {}) {
   const { baseUrl, timeoutMs, keepAlive, maxTokens } = config();
   const model = String(modelOverride || config().model);
   const started = Date.now();
@@ -180,7 +188,7 @@ async function complete({ system, prompt, schema, temperature = 0.2, repeatPenal
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: deadline(timeoutMs, cancel),
     });
   } catch (error) {
     if (error.name === "TimeoutError") {
@@ -243,7 +251,7 @@ async function complete({ system, prompt, schema, temperature = 0.2, repeatPenal
  * Ollama streams newline-delimited JSON, one object per token or so. `onToken` is called with each
  * fragment; the whole answer is returned at the end for the caller that wants it.
  */
-async function completeStream({ system, prompt, temperature = 0.3, repeatPenalty, maxTokens: tokenLimit, model: modelOverride, messages: conversation } = {}, onToken) {
+async function completeStream({ system, prompt, temperature = 0.3, repeatPenalty, maxTokens: tokenLimit, model: modelOverride, messages: conversation, signal: cancel } = {}, onToken) {
   const { baseUrl, timeoutMs, keepAlive, maxTokens } = config();
   const model = String(modelOverride || config().model);
   const started = Date.now();
@@ -265,7 +273,7 @@ async function completeStream({ system, prompt, temperature = 0.3, repeatPenalty
         ],
         options: { temperature, top_p: 0.9, num_predict: tokenLimit || maxTokens, ...(repeatPenalty ? { repeat_penalty: repeatPenalty } : {}) },
       }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: deadline(timeoutMs, cancel),
     });
   } catch (error) {
     if (error.name === "TimeoutError") {

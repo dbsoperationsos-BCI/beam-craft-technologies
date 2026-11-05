@@ -8,7 +8,7 @@ import useTableSelection from "@/components/data-table/useTableSelection";
 import DataTableInfoPanel from "@/components/data-table/DataTableInfoPanel";
 import DataTableShell from "@/components/data-table/DataTableShell";
 import TableFooter from "@/components/data-table/TableFooter";
-import { buildTableColumns, defaultVisibilityFor } from "@/components/data-table/tableCells";
+import { buildTableColumns, defaultVisibilityFor, displayValue } from "@/components/data-table/tableCells";
 import Button from "@/components/shared/Button";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import useCompactView from "@/components/shared/useCompactView";
@@ -18,10 +18,16 @@ import DropdownMenu from "@/components/ui/DropdownMenu";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import { usePermissions, useRouteAccess } from "@/components/auth/PermissionsProvider";
 import TaskDetailPanel from "@/components/hrm/TaskDetailPanel";
+import TaskDashboard from "@/components/hrm/TaskDashboard";
+import KanbanBoard from "@/components/data-table/KanbanBoard";
+import { columnCount } from "@/lib/kanbanSummary.mjs";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import TaskFormPanel from "@/components/hrm/TaskFormPanel";
-import { completeTask, deleteTask, getAllTasks, getMyTasks, getTask, getTaskOptions, getTasksGiven, startTask } from "@/services/hrm/tasks.service";
+import { approveTask, completeTask, deleteTask, getAllTasks, getMyTasks, getTask, getTaskOptions, getTasksGiven, startTask } from "@/services/hrm/tasks.service";
 import {
   ALL_STATUSES,
+  OVERDUE,
+  daysOverdue,
   DEFAULT_TASK_VIEW,
   TASK_PRIORITIES,
   TASK_STATUS_FILTERS,
@@ -35,7 +41,16 @@ import {
   taskStatusStyles,
   taskTableFields,
   tasksForStatus,
+  taskStatusFiltersFor,
+  rowForView,
+  taskTab,
 } from "@/constants/taskConfig";
+
+// A task's flow, left to right: waiting, being worked, sent back for approval, done - then the two
+// it leaves by (passed to somebody else, called off).
+const TASK_BOARD_ORDER = ["PENDING", "IN_PROGRESS", "SUBMITTED", "COMPLETED", "REASSIGNED", "CANCELLED"];
+// The Board columns with nothing left to chase: no Overdue count under them, and no Overdue tag on their cards.
+const CLOSED_TASK_COLUMNS = ["COMPLETED", "CANCELLED", "SUBMITTED", "REASSIGNED"];
 
 /**
  * Tasks: what the studio has asked of you, what you have asked of it, and — for the people who may
@@ -124,12 +139,19 @@ export default function TasksPage() {
    * view that is no longer listed and see an empty table with nothing chosen in the dropdown.
    */
   const view = views.find((entry) => entry.id === activeView) || views[0];
+  // The tag on a Board card its column's Overdue count includes, with how late it is; the count is these cards.
+  const overdueFlag = (task, column) => {
+    if (CLOSED_TASK_COLUMNS.includes(column.value)) return "";
+    const late = daysOverdue(task, view?.id);
+    return late > 0 ? `Overdue ${late} ${late === 1 ? "day" : "days"}` : "";
+  };
   useEffect(() => {
     if (view && view.id !== activeView) setActiveView(view.id);
   }, [activeView, setActiveView, view]);
 
   const load = useCallback(async () => {
-    if (!view) return;
+    // The Dashboard reads its own endpoint; there is no list to fetch behind it.
+    if (!view || view.dashboard) return;
     setLoading(true);
     try {
       /*
@@ -210,8 +232,10 @@ export default function TasksPage() {
    */
   const act = useCallback(async (task, action) => {
     try {
-      const response = action === "start" ? await startTask(task.id) : await completeTask(task.id);
-      showSuccess(`${task.taskCode} ${action === "start" ? "is now in progress" : "marked complete"}.`);
+      const response = await ({ start: startTask, complete: completeTask, approve: approveTask })[action](task.id);
+      showSuccess(action === "start" ? `${task.taskCode} is now in progress.`
+        : action === "complete" && task.completeSendsBack ? `${task.taskCode} finished and sent back to ${task.assignedByName}.`
+          : `${task.taskCode} marked as completed.`);
       // The info panel beside the table holds a snapshot, so it is replaced rather than left
       // showing the status the task had a moment ago.
       if (response?.data) setInfoTask((current) => current?.id === task.id ? response.data : current);
@@ -224,7 +248,10 @@ export default function TasksPage() {
   // What the open tab shows, and how many sit behind each of them. Both read the whole view — see
   // `tasksForStatus` and `taskStatusCounts`, which is where the reasoning for filtering here rather
   // than at the server lives.
-  const visibleTasks = useMemo(() => tasksForStatus(tasks, statusFilter), [statusFilter, tasks]);
+  // The tabs this view offers; a remembered tab the view does not have reads as All.
+  const statusFilters = useMemo(() => taskStatusFiltersFor(view?.id), [view?.id]);
+  const shownFilter = statusFilters.some((filter) => filter.id === statusFilter) ? statusFilter : ALL_STATUSES;
+  const visibleTasks = useMemo(() => tasksForStatus(tasks, shownFilter, view?.id).map((task) => rowForView(task, view?.id)), [shownFilter, tasks, view?.id]);
   /*
    * The tick boxes, for a role holding `ADMIN / Table Select All`.
    *
@@ -241,7 +268,43 @@ export default function TasksPage() {
     showError,
     onDeleted: () => load(),
   });
-  const statusCounts = useMemo(() => taskStatusCounts(tasks), [tasks]);
+  const statusCounts = useMemo(() => taskStatusCounts(tasks, view?.id), [tasks, view?.id]);
+
+  /*
+   * The Board: the same view's tasks in a column per status tab, in the tab order. A card opens the
+   * task; dropping one runs the same action its ⋮ menu would, and only where the task offers it -
+   * Start, Finish & Send Back, Mark as Completed - or opens the task where that action asks
+   * something first (Reassign, Revoke, Cancel).
+   */
+  const [layout, setLayout] = useTableBoardLayout("hrm-tasks");
+  const onBoard = layout === "board" && !view?.dashboard;
+  // Overdue is an overlay over the statuses, not a column a card could sit in or be dropped on. The
+  // columns run in a task's own flow (`TASK_BOARD_ORDER`), not the tabs' order.
+  const boardColumns = useMemo(() => statusFilters.filter((filter) => filter.id !== ALL_STATUSES && filter.id !== OVERDUE)
+    .sort((a, b) => TASK_BOARD_ORDER.indexOf(a.id) - TASK_BOARD_ORDER.indexOf(b.id)).map((filter) => ({
+    value: filter.id,
+    label: filter.label,
+    className: `${taskStatusStyles[filter.label] || "bg-slate-400"} text-white`,
+  })), [statusFilters]);
+  const boardRows = useMemo(() => tasks.map((task) => rowForView(task, view?.id)), [tasks, view?.id]);
+  const boardStatusOf = useCallback((task) => taskTab(task, view?.id), [view?.id]);
+  const canDropAt = useCallback((task, to) => {
+    if (!canWrite) return false;
+    if (to === "IN_PROGRESS") return task.canStart;
+    if (to === "SUBMITTED") return task.canComplete && task.completeSendsBack;
+    if (to === "COMPLETED") return task.canApprove || task.canComplete;
+    if (to === "REASSIGNED") return task.canReassign;
+    if (to === "PENDING") return task.canRevoke;
+    if (to === "CANCELLED") return task.canCancel;
+    return false;
+  }, [canWrite]);
+  const dropTask = useCallback((task, to) => {
+    if (to === "IN_PROGRESS") return void act(task, "start");
+    if (to === "SUBMITTED" || (to === "COMPLETED" && task.canComplete)) return void act(task, "complete");
+    if (to === "COMPLETED") return void act(task, "approve");
+    // Reassigning, revoking and cancelling ask who or why, so the task opens on its own buttons.
+    return setDetailTask(task);
+  }, [act]);
 
   const defaultVisibility = useMemo(() => {
     const visibility = defaultVisibilityFor(taskTableFields);
@@ -249,55 +312,72 @@ export default function TasksPage() {
     return visibility;
   }, []);
 
+  /*
+   * One task's ⋮ - the table row's and the Board card's, so the two never drift. What a row offers
+   * is the server's answer per task, not a guess from who is signed in: whoever holds it gets
+   * Start, Reassign and - once started - Mark Complete, whoever set it gets Cancel, and a
+   * supervisor reading through All Tasks gets neither because neither is theirs.
+   *
+   * Without `canWrite` the whole menu goes, and the table's column with it, rather than a ⋮ that
+   * only ever says "View" beside a row you can already double-click.
+   */
+  const taskActionItems = useCallback((task) => {
+    if (!canWrite) return undefined;
+    const items = [{ label: "View", onSelect: () => setDetailTask(task) }];
+    // Only the two verbs that need nothing typed act from the menu. Reassigning needs a person
+    // and a reason and cancelling needs a reason, so they open the panel that can ask. No trailing
+    // ellipsis on any entry: the studio reads "…" after a label as a stray third dot beside the ⋮.
+    if (task.canStart) items.push({ label: "Start", onSelect: () => void act(task, "start") });
+    // The holder finishes and sends it back to whoever assigned it; the assigner then marks it completed.
+    if (task.canComplete) items.push({ label: task.completeSendsBack ? "Finish & Send Back" : "Mark as Completed", onSelect: () => void act(task, "complete") });
+    if (task.canApprove) items.push({ label: "Mark as Completed", onSelect: () => void act(task, "approve") });
+    // Revoking asks who it goes to next, so it opens the task and its dialog.
+    if (task.canRevoke) items.push({ label: "Revoke Task", onSelect: () => setDetailTask(task) });
+    // Reassigning asks for a person and a reason, and cancelling asks for a reason, so both open
+    // the task rather than acting from the menu. Reassigning is not a danger action — it keeps the
+    // work moving — so only cancelling is toned as one.
+    if (task.canReassign) items.push({ label: "Reassign", onSelect: () => setDetailTask(task) });
+    /*
+     * Delete asks nothing but "are you sure", so it acts from the menu behind a confirmation
+     * rather than opening the panel the way Reassign and Cancel do. Last in the list and toned as
+     * a danger: it is the one entry here that takes the task off every list in the studio.
+     */
+    /*
+     * Correcting what the task says, for whoever wrote it down - the giver, or a Super Admin.
+     * `canEdit` is the server's own answer, from the same function the write path refuses with,
+     * so the menu cannot offer an Edit that would then be turned down. The receiver is not among
+     * them: they act on a task through the verbs above, not by rewriting what they were asked.
+     */
+    if (task.canEdit) items.push({ label: "Edit Task", onSelect: () => setFormTask({ task, mode: "edit" }) });
+    /*
+     * Duplicating is a create that starts from this task, which is what the studio does with
+     * anything recurring. Offered to anybody who may raise a task at all rather than only to the
+     * giver - the copy is theirs, and it takes nothing away from the original. Only on a task
+     * written by hand: one raised from a speak-up or a feedback issue says `canDuplicate: false`.
+     */
+    if (canWrite && task.canDuplicate) items.push({ label: "Duplicate Task", onSelect: () => setFormTask({ task, mode: "duplicate" }) });
+    // The two that end a task come last, Cancel then Delete: View, Edit Task, Cancel Task, Delete
+    // Task is the order the studio reads Tasks Given in.
+    if (task.canCancel) items.push({ label: "Cancel Task", tone: "danger", onSelect: () => setDetailTask(task) });
+    if (task.canDelete) items.push({ label: "Delete Task", tone: "danger", onSelect: () => setPendingDelete(task) });
+    return items;
+  }, [act, canWrite]);
+
   const columns = useMemo(() => buildTableColumns({
     fields: taskTableFields,
-    startIndex: 0,
     statusStyles: taskStatusStyles,
-    /*
-     * What a row offers is the server's answer per task, not a guess from who is signed in: whoever
-     * holds it gets Start, Reassign and - once started - Mark Complete, whoever set it gets Cancel,
-     * and a supervisor reading through All Tasks gets neither because neither is theirs.
-     * Reassigning and cancelling both ask a question, so both open the task rather than acting from
-     * the menu.
-     *
-     * Without `canWrite` the whole menu goes and the column with it, rather than a ⋮ that only ever
-     * says "View" beside a row you can already double-click.
-     */
-    renderActions: canWrite ? (task) => {
-      const items = [{ label: "View", onSelect: () => setDetailTask(task) }];
-      // Only the two verbs that need nothing typed act from the menu. Reassigning needs a person
-      // and a reason and cancelling needs a reason, so they live on the panel that can ask — a menu
-      // row labelled "Reassign" that only opened a panel would be a label that lies. The ellipsis
-      // says so: this one leads somewhere that asks a question.
-      if (task.canStart) items.push({ label: "Start", onSelect: () => void act(task, "start") });
-      if (task.canComplete) items.push({ label: "Mark Complete", onSelect: () => void act(task, "complete") });
-      // Reassigning asks for a person and a reason, and cancelling asks for a reason, so both open
-      // the task rather than acting from the menu. Reassigning is not a danger action — it keeps the
-      // work moving — so only cancelling is toned as one.
-      if (task.canReassign) items.push({ label: "Reassign...", onSelect: () => setDetailTask(task) });
-      if (task.canCancel) items.push({ label: "Cancel Task...", tone: "danger", onSelect: () => setDetailTask(task) });
-      /*
-       * Delete asks nothing but "are you sure", so it acts from the menu behind a confirmation
-       * rather than opening the panel the way Reassign and Cancel do. Last in the list and toned as
-       * a danger: it is the one entry here that takes the task off every list in the studio.
-       */
-      /*
-       * Correcting what the task says, for whoever wrote it down - the giver, or a Super Admin.
-       * `canEdit` is the server's own answer, from the same function the write path refuses with,
-       * so the menu cannot offer an Edit that would then be turned down. The receiver is not among
-       * them: they act on a task through the verbs above, not by rewriting what they were asked.
-       */
-      if (task.canEdit) items.push({ label: "Edit Task...", onSelect: () => setFormTask({ task, mode: "edit" }) });
-      /*
-       * Duplicating is a create that starts from this task, which is what the studio does with
-       * anything recurring. Offered to anybody who may raise a task at all rather than only to the
-       * giver - the copy is theirs, and it takes nothing away from the original.
-       */
-      if (canWrite) items.push({ label: "Duplicate Task...", onSelect: () => setFormTask({ task, mode: "duplicate" }) });
-      if (task.canDelete) items.push({ label: "Delete Task...", tone: "danger", onSelect: () => setPendingDelete(task) });
-      return <OptionsMenu ariaLabel={`Actions for ${task.taskCode || "task"}`} items={items} />;
-    } : undefined,
-  }), [act, canWrite]);
+    // The ⋮ is `taskActionItems` - the Board card offers the same.
+    renderActions: canWrite ? (task) => <OptionsMenu ariaLabel={`Actions for ${task.taskCode || "task"}`} items={taskActionItems(task)} /> : undefined,
+  }).map((column) => (column.accessorKey === "dueOn" ? {
+    ...column,
+    // A due day that has passed on work still owed reads in red with how late it is, under every
+    // tab - not only under Overdue.
+    cell: ({ row }) => {
+      const late = daysOverdue(row.original, view?.id);
+      if (!late) return column.cell({ getValue: () => row.original.dueOn });
+      return <span className="font-medium text-red-600" title={`${late} ${late === 1 ? "day" : "days"} past its due date`}>{displayValue(row.original.dueOn, "date")} · {late} {late === 1 ? "day" : "days"} late</span>;
+    },
+  } : column)), [canWrite, taskActionItems, view?.id]);
 
   const updatedText = lastUpdated ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(lastUpdated) : "—";
 
@@ -389,17 +469,45 @@ export default function TasksPage() {
           views out of the row, the statuses take it and read as the only filter here. */}
       <ModulePageHeader
         title="Tasks"
-        titleAddon={<div className="border-l border-slate-200 pl-3"><DropdownMenu ariaLabel="Task view" items={views.map((entry) => ({ label: entry.label, value: entry.id }))} value={view?.id} onChange={setActiveView} /></div>}
-        tabs={TASK_STATUS_FILTERS.map((filter) => ({ id: filter.id, label: filter.label, count: statusCounts[filter.id] || 0 }))}
-        tabValue={statusFilter}
+        // The divider only where the view switch sits beside the title, not when it wraps under it.
+        titleAddon={<div className="sm:border-l sm:border-slate-200 sm:pl-3"><DropdownMenu ariaLabel="Task view" items={views.map((entry) => ({ label: entry.label, value: entry.id }))} value={view?.id} onChange={setActiveView} sorted={false} /></div>}
+        // The Dashboard's cards are its filters, so it carries no status tabs.
+        tabs={view?.dashboard || layout === "board" ? undefined : statusFilters.map((filter) => ({ id: filter.id, label: filter.label, count: statusCounts[filter.id] || 0 }))}
+        tabValue={shownFilter}
         onTabChange={setStatusFilter}
         tabsAriaLabel="Filter tasks by status"
-        actions={canWrite ? <Button type="button" variant="primary" onClick={() => setAssigning(true)}>Assign Task</Button> : null}
+        /*
+         * "Assign Task" in words on every screen - the header sizes its buttons compactly on a phone,
+         * and it never shrinks or wraps; on the narrowest phone it drops below the title rather than
+         * squeezing. No `aria-label`: `globals.css` squares every header button that carries one into
+         * a 36px icon button (`.module-page-header-actions button[aria-label]`).
+         */
+        actions={<>
+          {!view?.dashboard && <TableBoardSwitch value={layout} onChange={setLayout} />}
+          {canWrite && <Button type="button" variant="primary" onClick={() => setAssigning(true)} className="shrink-0 whitespace-nowrap">Assign Task</Button>}
+        </>}
       />
 
       <FloatingNotice notice={notice} onClose={clearNotice} />
 
-      <DataTableShell className="min-h-0 flex-1" footer={<TableFooter spread className="z-30">
+      {/* A row double-clicked on the Dashboard opens that task here, through the bell's own link. */}
+      {view?.dashboard ? <TaskDashboard onOpen={(row) => router.replace(`/hrm/tasks?task=${row.id}`, { scroll: false })} onError={showError} /> : onBoard ? <KanbanBoard
+        rows={boardRows}
+        columns={boardColumns}
+        statusOf={boardStatusOf}
+        // Under each open column: how many of its tasks are past their due day. A finished column has none to chase.
+        columnAmount={(rows, column) => (CLOSED_TASK_COLUMNS.includes(column.value) ? null : columnCount(rows, (task) => Boolean(overdueFlag(task, column)), "Overdue"))}
+        cardFlag={overdueFlag}
+        card={{ title: (task) => task.title, subtitle: (task) => `${task.taskCode} · ${task.assignedToName}`, meta: (task) => [task.priorityLabel, task.dueOn ? `Due ${String(task.dueOn).slice(0, 10)}` : ""].filter(Boolean).join(" · ") }}
+        onOpen={setDetailTask}
+        // The card's ⋮ is the row's ⋮.
+        cardActions={taskActionItems}
+        canDropAt={canDropAt}
+        onDrop={dropTask}
+        loading={loading}
+        noun="tasks"
+        ariaLabel="Tasks board"
+      /> : <DataTableShell className="min-h-0 flex-1" footer={<TableFooter spread className="z-30">
         <span>Last updated: {updatedText}</span>
         <span>Total rows: {infiniteStats.total}</span>
       </TableFooter>}>
@@ -408,13 +516,13 @@ export default function TasksPage() {
             <DataTable
               // Keyed on both, so switching view or status draws a fresh table rather than
               // scrolling the previous one's rows.
-              key={`${view?.id}-${statusFilter}`}
+              key={`${view?.id}-${shownFilter}`}
               columns={columns}
               data={visibleTasks}
               density={density}
               loading={loading}
               loadingMessage="Loading tasks..."
-              emptyMessage={statusFilter === ALL_STATUSES ? (view?.emptyMessage || "No tasks yet.") : "No tasks with that status."}
+              emptyMessage={shownFilter === ALL_STATUSES ? (view?.emptyMessage || "No tasks yet.") : "No tasks with that status."}
               noMatchMessage="No matching tasks found."
               selectedRowId={infoTask?.id}
               onRowClick={openInfoPanel}
@@ -445,7 +553,7 @@ export default function TasksPage() {
             onToggle={toggleInfoPanel}
           />
         </div>
-      </DataTableShell>
+      </DataTableShell>}
 
       {/* Opened by the row menu, by a double-click and by the bell's link, so it takes `canWrite`
           as a prop rather than relying on the control that opened it having been hidden. */}

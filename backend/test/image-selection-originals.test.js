@@ -108,7 +108,7 @@ function fakeRepository({ registered = [], selected = [] } = {}) {
     createUpload: async (data) => { const row = { id: `image-${state.created.length + 1}`, ...data }; state.created.push(row); return row; },
     listSelectedOriginals: async () => state.selected,
     findDeliverableConfig: async (projectId, configId) => (configId === "config-1" ? { id: configId, name: "Retouches" } : null),
-    // The dashboard reads this stamp as "downloaded"; a copy that wrote anything writes it.
+    // The dashboard reads this stamp as "downloaded"; a copy that wrote every original writes it.
     markSelectedDownloaded: async (projectId, at = new Date()) => { state.downloaded = { projectId, at }; return { id: projectId, selectedDownloadedAt: at }; },
   };
 }
@@ -284,7 +284,7 @@ test("copies a selected original into the Selected Output Path and leaves the so
   assert.equal(result.copied[0].path, "D:\\DBS-Selections\\John & Priya Wedding\\Retouches\\Wedding\\Engagement\\DSC_4582.CR3");
   // Copied, never moved: the fake filesystem throws on rename and rm, so reaching here proves it.
   assert.deepEqual(fs.written.map((entry) => entry.source), ["D:\\DBS-Originals\\Wedding\\Engagement\\DSC_4582.CR3"]);
-  // A copy that wrote something is a download, and the dashboard reads the stamp it leaves.
+  // A complete copy is a download, and the dashboard reads the stamp it leaves.
   assert.equal(repo.state.downloaded?.projectId, "project-1");
   assert.ok(repo.state.downloaded?.at instanceof Date);
 });
@@ -309,6 +309,8 @@ test("reports a missing original against that photo and copies the rest", async 
   assert.equal(result.copied.length, 1);
   assert.deepEqual(result.failed.map((item) => [item.fileName, item.reason]), [["DSC_4583.CR3", "Original file unavailable"]]);
   assert.equal(result.total, 2);
+  // Not every original copied, so it is not a download: the project stays on Yet to Download.
+  assert.equal(repo.state.downloaded, undefined);
 });
 
 test("refuses to copy an original recorded outside the configured root", async () => {

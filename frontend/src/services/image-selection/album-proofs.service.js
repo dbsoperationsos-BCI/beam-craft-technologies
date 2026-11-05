@@ -23,6 +23,10 @@ export const deleteAlbumProofingProject = (projectId) => apiRequest(projectPath(
 // Where an album project's pages upload: the shared dock, mounted under this module's routes.
 export const albumProofingUploadsBase = (projectId) => `${projectPath(projectId)}/uploads`;
 
+// The dashboard, one request: the ten figures, the trend, the period, every album as a row, the
+// correction work and the link figures. Reads with either Album Proofing grant, as the list does.
+export const getAlbumProofingDashboard = ({ range } = {}) => apiRequest(`${base}/dashboard${range ? `?${new URLSearchParams({ range })}` : ""}`);
+
 export function listAlbumProofs({ projectId, search = "", status, archived = false } = {}) {
   const query = new URLSearchParams({ archived: String(archived) });
   if (projectId) query.set("projectId", projectId);

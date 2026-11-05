@@ -119,9 +119,15 @@ After `npm run seed`, use this local development account:
 
 - Email: `admin@dontblinkstudio.com`
 - Username: `admin`
-- Password: `Admin@12345`
+- Password: the one written at the top of `backend/prisma/seed.js` (`Admin@cxzdsa1`)
 
-This is a seeded local-only credential, not a production credential. The seed is idempotent: it upserts this account, restores the known local password, and keeps it active. It does not create sample Employee, Sales, or Project records. Re-running it is the supported way to recover local login access.
+This is a seeded local-only credential, not a production credential. The seed sets the password
+**only when it creates the account**: re-running it keeps the account a Super Admin and active, but
+does not put a changed password back. A login that says the password is wrong on a fresh database
+usually means the seed never ran — the `user` table is empty.
+
+`npm run seed` creates no sample Employee, Sales or Project records, and the repository carries no
+demo data set: every record on screen is one entered through the app.
 
 ## Quick health and database checks
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import WhatsAppLinkCard from "@/components/shared/WhatsAppLinkCard";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
 import MicRoundedIcon from "@mui/icons-material/MicRounded";
 import StopRoundedIcon from "@mui/icons-material/StopRounded";
@@ -13,6 +14,9 @@ import DoneRoundedIcon from "@mui/icons-material/DoneRounded";
 import ScheduleRoundedIcon from "@mui/icons-material/ScheduleRounded";
 import DoneAllRoundedIcon from "@mui/icons-material/DoneAllRounded";
 import InsertDriveFileRoundedIcon from "@mui/icons-material/InsertDriveFileRounded";
+import ImageRoundedIcon from "@mui/icons-material/ImageRounded";
+import MovieRoundedIcon from "@mui/icons-material/MovieRounded";
+import HeadphonesRoundedIcon from "@mui/icons-material/HeadphonesRounded";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import { createPortal } from "react-dom";
 import Button from "@/components/shared/Button";
@@ -34,6 +38,9 @@ import {
   sendWhatsappAttachment,
   sendWhatsappMessage,
 } from "@/services/sales/whatsapp-chat.service";
+import { saveToDownloads } from "@/lib/projectStorage.mjs";
+import { mediaFileName, mediaKindLabel, mediaSummary, mediaViewMode } from "@/lib/whatsappMedia.mjs";
+import { useImageViewer } from "@/components/shared/ImageViewer";
 
 /**
  * The conversation with one client, inside the lead it belongs to.
@@ -123,32 +130,31 @@ function QuotedMessage({ message, leadName }) {
 }
 
 /**
- * A photo or a video at full size, over the page.
+ * A photo, a video or a PDF at full size, over the page.
  *
  * The same shape Image Selection's preview uses - dark, full screen, one row of controls - so a
- * picture opens the same way wherever it is opened from. It shows what the bubble already fetched
- * rather than fetching again: the blob belongs to the bubble behind it, which stays mounted while
- * this is open.
+ * picture opens the same way wherever it is opened from. It shows the file View just fetched from
+ * WhatsApp; the blob lives only in this browser tab and is released when the viewer closes.
  */
 function MediaViewer({ message, url, onClose }) {
   // Escape leaves the photo, not the chat panel behind it.
   useEscapeKey(onClose);
 
-  const name = message.mediaName || `${message.mediaType}-${message.id}`;
+  const name = mediaFileName(message);
+  const isPdf = String(message.mediaMime || "").startsWith("application/pdf");
 
   return createPortal(
     <div
       className="fixed inset-0 z-[220] flex flex-col bg-slate-950/95"
       role="dialog"
       aria-modal="true"
-      aria-label={`${message.mediaType} preview`}
+      aria-label={`${mediaKindLabel(message)} preview`}
       onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
     >
       <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-white/10 px-4 text-white">
         <p className="min-w-0 truncate text-sm font-medium">{name}</p>
         <div className="flex shrink-0 items-center gap-2">
-          {/* A real download rather than a new tab: the blob is the file, and the name is the
-              one the client sent it under. */}
+          {/* Saved to this computer from the copy already open - nothing is fetched again. */}
           <a
             href={url}
             download={name}
@@ -165,6 +171,8 @@ function MediaViewer({ message, url, onClose }) {
       <div className="flex min-h-0 flex-1 items-center justify-center p-4 sm:p-6">
         {message.mediaType === "video" ? (
           <video src={url} controls autoPlay className="max-h-full max-w-full rounded-lg" />
+        ) : isPdf ? (
+          <iframe src={url} title={name} className="h-full w-full max-w-4xl rounded-lg bg-white" />
         ) : (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={url} alt={name} className="max-h-full max-w-full rounded-lg object-contain" />
@@ -175,71 +183,87 @@ function MediaViewer({ message, url, onClose }) {
   );
 }
 
+const MEDIA_ICONS = {
+  image: ImageRoundedIcon,
+  sticker: ImageRoundedIcon,
+  video: MovieRoundedIcon,
+  audio: HeadphonesRoundedIcon,
+};
+
 /**
- * A file in the thread.
+ * A file in the thread: what it is, and View / Download.
  *
- * Fetched rather than linked: the endpoint is behind the same login as the rest of the API, and a
- * bare src carries no token. The blob is released when the bubble goes, so a long conversation
- * does not leave a pile of them behind.
+ * Nothing is loaded until a button is pressed. The CRM keeps no copy of chat files, so each press
+ * asks WhatsApp for the file through the server and the browser holds it only as long as it is
+ * open - Download saves it to this computer, View shows it over the page (or plays a voice note in
+ * the bubble). A photo or a video shows the small blurred preview WhatsApp sends inside the message
+ * itself. WhatsApp keeps files for a few weeks, so an old one says to open it on the phone.
  */
-function MediaBubble({ message, onOpen }) {
-  const [url, setUrl] = useState("");
-  const [failed, setFailed] = useState(false);
+function MediaBubble({ message, onView }) {
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [audioUrl, setAudioUrl] = useState("");
+  const outgoing = message.direction === "out";
+  const mode = mediaViewMode(message);
+  const name = mediaFileName(message);
+  const Icon = MEDIA_ICONS[message.mediaType] || InsertDriveFileRoundedIcon;
 
-  useEffect(() => {
-    let revoked = "";
-    let cancelled = false;
-    fetchWhatsappMedia(message.id)
-      .then((objectUrl) => {
-        if (cancelled) {
-          URL.revokeObjectURL(objectUrl);
-          return;
-        }
-        revoked = objectUrl;
-        setUrl(objectUrl);
-      })
-      .catch(() => {
-        if (!cancelled) setFailed(true);
-      });
-    return () => {
-      cancelled = true;
-      if (revoked) URL.revokeObjectURL(revoked);
-    };
-  }, [message.id]);
+  // The voice note's blob goes with the bubble.
+  useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl); }, [audioUrl]);
 
-  const name = message.mediaName || message.mediaType;
-
-  if (failed) return <p className="text-xs italic opacity-80">[{message.mediaType} no longer stored]</p>;
-  if (!url) return <p className="text-xs italic opacity-80">Loading {message.mediaType}...</p>;
-
-  if (message.mediaType === "image" || message.mediaType === "sticker") {
-    return (
-      // A photo opens; that is what a photo in a chat does.
-      <button type="button" onClick={() => onOpen?.(url)} className="block w-full" aria-label={`Open ${name}`}>
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={url} alt={name} className="max-h-64 w-full rounded-lg object-cover" />
-      </button>
-    );
+  async function run(action) {
+    if (busy) return;
+    setBusy(action);
+    setError("");
+    try {
+      const blob = await fetchWhatsappMedia(message.id);
+      if (action === "download") saveToDownloads(blob, name);
+      else if (mode === "player") setAudioUrl(URL.createObjectURL(blob));
+      else onView?.(URL.createObjectURL(blob));
+    } catch (fetchError) {
+      setError(fetchError.message);
+    } finally {
+      setBusy("");
+    }
   }
-  if (message.mediaType === "video") {
-    return (
-      <div className="space-y-1">
-        <video src={url} controls className="max-h-64 w-full rounded-lg" />
-        <button type="button" onClick={() => onOpen?.(url)} className="text-xs underline opacity-90">
-          Open full screen
-        </button>
-      </div>
-    );
+
+  if (message.mediaAvailable === false) {
+    return <p className={`text-xs italic ${outgoing ? "text-emerald-100" : "text-slate-500"}`}>{mediaKindLabel(message)} - open it on your phone.</p>;
   }
-  if (message.mediaType === "audio") {
-    return <audio src={url} controls className="w-full" />;
-  }
+
   return (
-    <a href={url} download={name} className="flex items-center gap-2 underline" title={`Download ${name}`}>
-      <InsertDriveFileRoundedIcon sx={{ fontSize: 18 }} />
-      <span className="min-w-0 flex-1 truncate">{name}</span>
-      <DownloadRoundedIcon sx={{ fontSize: 16 }} />
-    </a>
+    <div className="flex min-w-0 flex-col gap-2">
+      {message.mediaThumbnail && mode === "viewer" && (
+        <Button type="button" variant="plain" size="none" className="relative block w-full overflow-hidden rounded-lg" onClick={() => void run("view")} aria-label={`View ${name}`}>
+          {/* WhatsApp's own preview: tiny, so it is shown soft rather than pretending to be the photo. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={message.mediaThumbnail} alt="" className="h-36 w-full scale-110 object-cover blur-[2px]" />
+          <span className="absolute inset-0 flex items-center justify-center">
+            <span className="rounded-full bg-black/50 p-2 text-white"><Icon sx={{ fontSize: 22 }} /></span>
+          </span>
+        </Button>
+      )}
+      <div className="flex min-w-0 items-center gap-2">
+        {!message.mediaThumbnail && <Icon sx={{ fontSize: 22 }} className={`shrink-0 ${outgoing ? "text-emerald-100" : "text-slate-500"}`} />}
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{name}</p>
+          <p className={`text-xs ${outgoing ? "text-emerald-100" : "text-slate-500"}`}>{mediaSummary(message)}</p>
+        </div>
+      </div>
+      {audioUrl && <audio src={audioUrl} controls autoPlay className="w-full" />}
+      <div className="flex flex-wrap gap-2">
+        {mode && !audioUrl && (
+          <Button type="button" size="sm" onClick={() => void run("view")} disabled={Boolean(busy)} busy={busy === "view"} busyLabel="Opening...">
+            {mode === "player" ? "Play" : "View"}
+          </Button>
+        )}
+        <Button type="button" size="sm" className="gap-1.5" onClick={() => void run("download")} disabled={Boolean(busy)} busy={busy === "download"} busyLabel="Downloading...">
+          <DownloadRoundedIcon sx={{ fontSize: 16 }} />
+          Download
+        </Button>
+      </div>
+      {error && <p role="alert" className={`text-xs ${outgoing ? "text-white" : "text-red-600"}`}>{error}</p>}
+    </div>
   );
 }
 
@@ -462,7 +486,7 @@ function ForwardDialog({ onClose, onForward }) {
           <p className="mt-1 text-xs text-slate-500">The Enquiry ID of the lead to send this to.</p>
         </header>
         <div className="px-5 py-4">
-          <TextField label="Enquiry ID" value={enquiryId} onChange={(event) => setEnquiryId(event.target.value)} placeholder="DBS-EID-DD-ERD-000001" />
+          <TextField label="Enquiry ID" helperText="The lead this message is forwarded to, as shown in the CRM." value={enquiryId} onChange={(event) => setEnquiryId(event.target.value)} placeholder="DBS-EID-DD-ERD-000001" />
         </div>
         <footer className="flex justify-end gap-3 px-5 py-4">
           <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
@@ -523,6 +547,21 @@ export default function WhatsAppChatPanel({ leadId, leadName, draftPhone = "", o
   const [deleting, setDeleting] = useState(null);
   const [editing, setEditing] = useState(null);
   const [viewing, setViewing] = useState(null);
+  /*
+   * A photo opens in the application's one image viewer; a video or a PDF keeps this panel's own
+   * preview, which can play or page it. The photo's object URL is let go when the next one opens.
+   */
+  const openImages = useImageViewer();
+  const lastImageUrl = useRef("");
+  const viewMedia = useCallback((message, url) => {
+    if (openImages && (message.mediaType === "image" || message.mediaType === "sticker")) {
+      if (lastImageUrl.current) URL.revokeObjectURL(lastImageUrl.current);
+      lastImageUrl.current = url;
+      openImages([{ src: url, name: message.mediaName || mediaKindLabel(message) }]);
+      return;
+    }
+    setViewing({ message, url });
+  }, [openImages]);
   // Logging out ends the link and sends this CRM back to scanning a code, so it is asked first.
   const [confirmLogout, setConfirmLogout] = useState(false);
   /*
@@ -958,43 +997,12 @@ export default function WhatsAppChatPanel({ leadId, leadName, draftPhone = "", o
        * the height it is given instead, and the code takes whatever is left after the words and
        * the button, which is the one part that can be any size and still be scannable.
        */
-      <div className="flex h-full min-h-0 flex-1 items-center justify-center overflow-hidden p-4">
-        <section className="flex h-full max-h-[24rem] w-full max-w-[17rem] flex-col items-center overflow-hidden rounded-xl border border-slate-200 bg-white p-4 text-center">
-          <h4 className="shrink-0 text-sm font-semibold text-slate-700">Link your WhatsApp</h4>
-          <p className="mt-1 shrink-0 text-xs leading-4 text-slate-500">
-            On your phone: <span className="font-medium text-slate-600">WhatsApp → Settings → Linked devices</span>,
-            then scan this code.
-          </p>
-
-          {/* Square, and sized by what is left rather than by a number, so the card never grows
-              past the tab. The code and the line that stands in for it share the same frame, so
-              nothing moves as WhatsApp rotates it. */}
-          <div className="mt-3 flex aspect-square min-h-0 w-auto max-w-full flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white p-1.5">
-            {session.qr ? (
-              // A QR is a data URL generated per pairing attempt and thrown away seconds later,
-              // so there is nothing for next/image to optimise or cache.
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={session.qr} alt="WhatsApp pairing code" className="h-full w-full object-contain" />
-            ) : (
-              <span className="px-2 text-xs text-slate-500">
-                {session.status === "pairing" ? "Preparing your code..." : "Not linked"}
-              </span>
-            )}
-          </div>
-
-          <p className="mt-2 shrink-0 text-[11px] leading-4 text-slate-400">
-            Only your conversations with CRM leads appear here.
-          </p>
-          {session.error && (
-            <p role="alert" className="mt-2 shrink-0 text-xs leading-4 text-red-600">
-              {session.error}
-            </p>
-          )}
-          <Button type="button" variant="primary" className="mt-3 w-full shrink-0" onClick={() => void connect()} disabled={connecting}>
-            {connecting ? "Starting..." : session.status === "pairing" ? "Refresh code" : "Connect WhatsApp"}
-          </Button>
-        </section>
-      </div>
+      <WhatsAppLinkCard
+        session={session}
+        connecting={connecting}
+        onConnect={connect}
+        note="Only your conversations with CRM leads appear here."
+      />
     );
   }
 
@@ -1124,7 +1132,7 @@ export default function WhatsAppChatPanel({ leadId, leadName, draftPhone = "", o
                       <QuotedMessage message={message} leadName={leadName} />
                       {message.mediaType && (
                         <div className="mb-1.5">
-                          <MediaBubble message={message} onOpen={(url) => setViewing({ message, url })} />
+                          <MediaBubble message={message} onView={(url) => viewMedia(message, url)} />
                         </div>
                       )}
                       {message.body && <p className="whitespace-pre-wrap break-words">{message.body}</p>}
@@ -1179,7 +1187,7 @@ export default function WhatsAppChatPanel({ leadId, leadName, draftPhone = "", o
         />
       )}
 
-      {viewing && <MediaViewer message={viewing.message} url={viewing.url} onClose={() => setViewing(null)} />}
+      {viewing && <MediaViewer message={viewing.message} url={viewing.url} onClose={() => { URL.revokeObjectURL(viewing.url); setViewing(null); }} />}
 
       {info && <MessageInfoDialog message={info} onClose={() => setInfo(null)} />}
 

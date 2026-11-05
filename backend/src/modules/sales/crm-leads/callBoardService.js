@@ -1,4 +1,5 @@
 const prisma = require("../../../config/db");
+const { likeLiteral, wordChunks } = require("../../../services/wordChunks");
 const { ensureCallIds, callerIsALeadSql } = require("./callLogService");
 
 /*
@@ -115,6 +116,13 @@ END`;
  * box sits directly under the heading, and a filter that matched a raw second count while the
  * column showed "2m 14s" reads as a filter that does not work.
  */
+/*
+ * The Calls board joins the repository so a handset reads under the name the studio uses. LEFT,
+ * because a call from a phone matched to nobody is still a call on the board.
+ */
+const CALL_EMPLOYEE_JOIN = " LEFT JOIN `employee` AS `e` ON `e`.`id` = `c`.`matched_employee_id`";
+const CALL_CRM_SQL = "COALESCE(NULLIF(TRIM(`e`.`employee_name`), ''), `c`.`employee_name`, '')";
+
 const CALL_DURATION_SQL = `CASE
   WHEN \`c\`.\`duration_seconds\` <= 0 THEN '-'
   WHEN \`c\`.\`duration_seconds\` < 60 THEN CONCAT(\`c\`.\`duration_seconds\`, 's')
@@ -187,7 +195,17 @@ const CALL_COLUMN_SQL = {
   addedTime: "COALESCE(LEFT(`c`.`call_time`, 5), '')",
   name: "COALESCE(`c`.`client_name`, '')",
   phone: "COALESCE(`c`.`client_number`, '')",
-  crm: "COALESCE(`c`.`employee_name`, '')",
+  /*
+   * The employee the handset belongs to, spelled the way the repository spells it.
+   *
+   * Read through `matched_employee_id` - what the webhook worked out from Callyzer's Employee Code
+   * and then the handset's label - rather than off the label itself. This column pre-fills the CRM
+   * on Add Lead when a call is triaged, and `crm` on a lead is a name copy of `owner_employee_id`
+   * (see `nameCopies.js`): the label resolved to nobody whenever a phone was named anything but its
+   * owner, so the lead was created owned by no one. Callyzer's label stays the fallback for a
+   * handset the repository cannot place.
+   */
+  crm: CALL_CRM_SQL,
   callType: "COALESCE(`c`.`call_type`, '')",
   duration: CALL_DURATION_SQL,
   status: CALL_STATUS_SQL,
@@ -280,16 +298,25 @@ function buildCallWhere({ view = "all", filters = {}, dateFrom = "", dateTo = ""
    * nothing at all. Each value keeps the substring `LIKE` it has always had, and several are OR'd:
    * ticking two means either, not both at once in one string. A single value builds exactly the
    * clause it built before.
+   *
+   * A value *typed* into the box (a string, not a ticked list) is Word Chunk Search: one `LIKE ?`
+   * per word, all of them required, in any order.
    */
   for (const [columnId, rawValue] of Object.entries(filters)) {
-    const values = (Array.isArray(rawValue) ? rawValue : [rawValue])
-      .map((entry) => String(entry ?? "").trim())
-      .filter(Boolean);
-    if (!values.length) continue;
     const sql = callColumnSql(columnId);
     if (!sql) continue;
+    if (!Array.isArray(rawValue)) {
+      for (const chunk of wordChunks(rawValue)) {
+        clauses.push(`${sql} LIKE ?`);
+        // The chunk as typed: `%`, `_` and `\` matched as themselves, never as wildcards.
+        params.push(`%${likeLiteral(chunk)}%`);
+      }
+      continue;
+    }
+    const values = rawValue.map((entry) => String(entry ?? "").trim()).filter(Boolean);
+    if (!values.length) continue;
     clauses.push(`(${values.map(() => `${sql} LIKE ?`).join(" OR ")})`);
-    params.push(...values.map((entry) => `%${entry}%`));
+    params.push(...values.map((entry) => `%${likeLiteral(entry)}%`));
   }
 
   // Never empty now that the queue clause leads it, so there is no `1=1` case left to get wrong.
@@ -362,7 +389,7 @@ const SELECT_COLUMNS = [
   `${CALL_COLUMN_SQL.addedTime} AS \`addedTime\``,
   "COALESCE(`c`.`client_name`, '') AS `name`",
   "COALESCE(`c`.`client_number`, '') AS `phone`",
-  "COALESCE(`c`.`employee_name`, '') AS `crm`",
+  `${CALL_CRM_SQL} AS \`crm\``,
   "COALESCE(`c`.`call_type`, '') AS `callType`",
   `${CALL_DURATION_SQL} AS \`duration\``,
   "`c`.`duration_seconds` AS `durationSeconds`",
@@ -409,7 +436,7 @@ async function listCallBoardPage({
   const start = Math.max(Number(offset) || 0, 0);
 
   const rows = await prisma.$queryRawUnsafe(
-    `SELECT ${SELECT_COLUMNS} FROM \`sales_crm_call_log\` \`c\` WHERE ${where}`
+    `SELECT ${SELECT_COLUMNS} FROM \`sales_crm_call_log\` \`c\`${CALL_EMPLOYEE_JOIN} WHERE ${where}`
     // `id` breaks the tie, so paging is stable: two calls delivered in the same second must not
     // swap places between one page and the next and hide a row behind the offset.
     + ` ORDER BY ${orderSql} ${direction}, \`c\`.\`id\` DESC LIMIT ${size} OFFSET ${start}`,
@@ -419,7 +446,7 @@ async function listCallBoardPage({
   if (!withTotal) return { rows, total: null };
 
   const [{ total }] = await prisma.$queryRawUnsafe(
-    `SELECT COUNT(*) AS total FROM \`sales_crm_call_log\` \`c\` WHERE ${where}`,
+    `SELECT COUNT(*) AS total FROM \`sales_crm_call_log\` \`c\`${CALL_EMPLOYEE_JOIN} WHERE ${where}`,
     ...params,
   );
   return { rows, total: Number(total || 0) };
@@ -434,7 +461,7 @@ async function listCallBoardIds({ view = "all", filters = {}, dateFrom = "", dat
   }
   const { where, params } = buildCallWhere({ view, filters, dateFrom, dateTo });
   const rows = await prisma.$queryRawUnsafe(
-    `SELECT \`c\`.\`call_id\` AS \`callId\` FROM \`sales_crm_call_log\` \`c\` WHERE ${where} ORDER BY \`c\`.\`called_at\` DESC`,
+    `SELECT \`c\`.\`call_id\` AS \`callId\` FROM \`sales_crm_call_log\` \`c\`${CALL_EMPLOYEE_JOIN} WHERE ${where} ORDER BY \`c\`.\`called_at\` DESC`,
     ...params,
   );
   return rows.map((row) => row.callId).filter(Boolean);
@@ -472,7 +499,7 @@ async function callBoardTabCounts({ filters = {}, dateFrom = "", dateTo = "" } =
   });
 
   const [row] = await prisma.$queryRawUnsafe(
-    `SELECT ${parts.join(", ")} FROM \`sales_crm_call_log\` \`c\` WHERE ${where}`,
+    `SELECT ${parts.join(", ")} FROM \`sales_crm_call_log\` \`c\`${CALL_EMPLOYEE_JOIN} WHERE ${where}`,
     // The SELECT's own parameters come first, because the SELECT comes first.
     ...countParams,
     ...params,
@@ -534,7 +561,7 @@ async function callBoardColumnValues({ column, view = "all", filters = {}, dateF
     const { where, params } = buildCallWhere({ view, filters: others, dateFrom, dateTo });
     const rows = await prisma.$queryRawUnsafe(
       `SELECT DISTINCT ${valueSql} AS \`value\`
-         FROM \`sales_crm_call_log\`
+         FROM \`sales_crm_call_log\` \`c\`${CALL_EMPLOYEE_JOIN}
         WHERE ${where}
         ORDER BY \`value\` ASC
         LIMIT ${CALL_COLUMN_VALUES_LIMIT}`,

@@ -34,6 +34,8 @@ function createGroupLinkService(repo = repository, dependencies = {}) {
   const sessions = () => dependencies.sessions || require("../../sales/whatsapp-chat/sessionManager");
   const publishShare = dependencies.publishShare || createPublishShareService();
   const now = dependencies.now || (() => new Date());
+  // Settings → WhatsApp Activity Log: one row per invite, beside this module's own notification row.
+  const activity = () => dependencies.activity || require("../../../services/whatsappActivity");
 
   async function requireProject(projectId) {
     const project = await repo.findProject(projectId);
@@ -131,7 +133,13 @@ function createGroupLinkService(repo = repository, dependencies = {}) {
       }
     }
     try {
-      const sent = await sessions().sendMessageToGroup({ userId, jid: project.whatsappGroupJid, body: text });
+      const sent = await activity().track({
+        mode: "MANUAL", provider: "baileys", trigger: "IMAGE_SELECTION_GROUP_INVITE",
+        logicalKey: `isel-group-invite:${notification.id}`, eventRef: `isel-group-invite:${notification.id}`,
+        initiatedByUserId: userId, senderUserId: userId, links: { imageSelectionProjectId: project.id, salesProjectId: project.salesProjectId || null, imageSelectionNotificationId: notification.id },
+        recipient: { kind: "GROUP", address: project.whatsappGroupJid, name: project.whatsappGroupSubject || null },
+        body: text, resendable: true,
+      }, () => sessions().sendMessageToGroup({ userId, jid: project.whatsappGroupJid, body: text }));
       return { preview: prepared, notification: await repo.update(notification.id, { status: "SENT", providerMessageId: sent.waMessageId || null, sentAt: now() }) };
     } catch (error) {
       await repo.update(notification.id, { status: "FAILED", errorCode: error.code || "SEND_FAILED", errorMessage: String(error.message || "WhatsApp send failed.").slice(0, 2000) }).catch(() => {});

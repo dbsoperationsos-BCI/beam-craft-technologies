@@ -1,6 +1,7 @@
 const prisma = require("../../../config/db");
 const { readableProject } = require("../../../services/projectScope");
 const { projectClientNames, clientNameOf } = require("../../../services/projectClientNames");
+const { projectHandedFrom, withHandedFrom } = require("../../../services/handoverNames");
 
 /*
  * The two gifts a project owes its client, and the three places one can be.
@@ -119,13 +120,16 @@ async function listGiftProjects(giftKey, { where: extraWhere } = {}) {
   // The client's name is not a column on the project - it is read off the lead the project came
   // from, the same way every other project screen reads it.
   const names = await projectClientNames(projects);
+  // A gift or Project Manager handed over at offboarding reads "New (Old)" while still theirs.
+  const handed = await projectHandedFrom(projects.map((project) => project.id));
   return projects.map((project) => ({
     ...project,
     gift: gift.key,
     giftLabel: gift.label,
     clientName: clientNameOf(project, names) || "",
     status: readStatus(project[gift.status]),
-    assignee: project[gift.assignee] || "",
+    projectManager: withHandedFrom(project.projectManager, handed.get(project.id)?.projectManager),
+    assignee: withHandedFrom(project[gift.assignee] || "", handed.get(project.id)?.[gift.assignee]),
     assigneeEmployeeId: project[gift.employeeId] || null,
     sentAt: project[gift.sentAt],
     receivedAt: project[gift.receivedAt],

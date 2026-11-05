@@ -1,9 +1,11 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useMemo } from "react";
 import Dropdown from "@/components/shared/Dropdown";
 import TextField from "@/components/shared/TextField";
 import Button from "@/components/shared/Button";
+import HelpTip from "@/components/shared/HelpTip";
 import IconButton from "@/components/shared/IconButton";
 import ArrowUpwardRoundedIcon from "@mui/icons-material/ArrowUpwardRounded";
 import ArrowDownwardRoundedIcon from "@mui/icons-material/ArrowDownwardRounded";
@@ -55,7 +57,7 @@ export default function SheetAssignmentRulesPanel({
   ownerLabel = "CRM",
 }) {
   const employeeOptions = useMemo(
-    () => employees.map((employee) => ({ value: String(employee.id), label: employee.employeeName || employee.employeeId || String(employee.id) })),
+    () => employees.map((employee) => ({ value: String(employee.id), label: employee.employeeName || employee.employeeId || String(employee.id), avatar: avatarOf(employee) })),
     [employees],
   );
   /*
@@ -106,11 +108,10 @@ export default function SheetAssignmentRulesPanel({
     <div className={`rounded-lg border border-slate-200 bg-slate-50/60 p-3 sm:p-4 ${className}`}>
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
-          <h4 className="text-xs font-semibold text-slate-700 sm:text-sm">Assign {nounPlural} to</h4>
-          <p className="mt-0.5 text-[11px] leading-4 text-slate-500 sm:text-xs">
-            Checked top to bottom on every sync; the first rule that matches assigns the {noun}. A {noun}
-            whose sheet names {/^[aeiou]/i.test(ownerLabel) ? "an" : "a"} {ownerLabel}, or that somebody has already reassigned here, is left alone.
-          </p>
+          <h4 className="flex items-center text-xs font-semibold text-slate-700 sm:text-sm">
+            Assign {nounPlural} to
+            <HelpTip text={`Checked top to bottom on every sync; the first rule that matches assigns the ${noun}. A ${noun} whose sheet names ${/^[aeiou]/i.test(ownerLabel) ? "an" : "a"} ${ownerLabel}, or that somebody has already reassigned here, is left alone.`} />
+          </h4>
         </div>
         <Button
           type="button"
@@ -143,6 +144,7 @@ export default function SheetAssignmentRulesPanel({
                     <TextField
                       label="Sheet column"
                       placeholder="Column heading"
+                      helperText="The heading at the top of the column this rule reads."
                       value={rule.columnHeader}
                       disabled={disabled}
                       suggestions={headerSuggestions}
@@ -151,6 +153,7 @@ export default function SheetAssignmentRulesPanel({
                     <TextField
                       label="Value"
                       placeholder="Chennai"
+                      helperText="A row whose cell says exactly this, in any case, goes below."
                       value={rule.matchValue}
                       disabled={disabled}
                       onChange={(event) => update(index, { matchValue: event.target.value })}

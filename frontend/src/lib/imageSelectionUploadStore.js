@@ -4,11 +4,13 @@
 // registration and the progress stream keep running when the user navigates to
 // another route (which unmounts the workspace) or when a route is hidden.
 //
-// Nothing here sends a photo. The studio's masters stay on its own drive or NAS, and what this
-// posts is each file's path relative to the folder that was picked — the server joins it onto the
-// configured Original Storage Path, reads the master in place to build the thumbnail and preview,
-// and uploads only those to R2. The chunked byte upload it replaced is still on the server for
-// galleries filled before this existed.
+// Nothing here sends an original. The studio's masters stay on its own drive or NAS: each photo is
+// decoded on this computer, the thumbnail and preview are cut from that one decode to the studio's
+// preset for the module (Visual Curation Settings → Processing / Compression - Image Selection's
+// pair, or Album Proofing's when the dock is mounted under its routes), and only those two files
+// are posted, with the file's path relative to the folder that was picked so the same browser can
+// find the master again. The chunked byte upload this replaced is still on the server for
+// galleries filled before it existed.
 import {
   cancelImageUpload,
   createImageUploadBatch,
@@ -16,9 +18,12 @@ import {
   subscribeImageUploadBatch,
   uploadPreparedImage,
 } from "@/services/image-selection/image-selection.service";
+import { studioCompressionFor } from "@/services/image-selection/compression.service";
 import { fileIdentity, fileRelativePath, isUploadableImage, resolveImageMimeType } from "@/lib/imageUploadValidation.mjs";
 import { buildDerivatives } from "@/lib/imageDerivatives.mjs";
-import { QUALITY_PRESETS, readProcessingSettings } from "@/lib/imageSelectionProcessingSettings.mjs";
+import { captureDateOfFile } from "@/lib/aiMediaUpload/exifDate.mjs";
+import { derivativeOptionsFor } from "@/lib/visualCurationCompression.mjs";
+import { readProcessingSettings } from "@/lib/imageSelectionProcessingSettings.mjs";
 // How many times a photo is re-sent before it is reported as failed, and how long to wait
 // between attempts. Three attempts covers the dropped request or brief server stall that used
 // to strand a whole batch on its last photo.
@@ -80,8 +85,19 @@ function localWorkRemaining(session) {
 function isFinished(session) {
   return Boolean(session.batch) && FINISHED_STATUSES.includes(session.batch.status);
 }
+// The server's batch knows only the photos that reached it. A photo this browser could not send -
+// a refused derivative, a dropped request - is a failure the batch never hears of, and a photo still
+// waiting here is queue it cannot see, so both are folded into the figures the panel shows and they
+// agree with the "Retry N failed" button. The Signature Album's queue builds its batch from these
+// same local counters itself, so it needs no fold and gets none.
+function batchWithLocalCounts(batch, pending, failed) {
+  if (!batch) return batch;
+  return { ...batch, failedFiles: (batch.failedFiles || 0) + failed, remainingQueue: (batch.remainingQueue || 0) + pending };
+}
+
 function toPublicSession(session) {
   const remaining = localWorkRemaining(session);
+  const failedLocal = [...session.runtimes.values()].filter((runtime) => runtime.state === "error").length;
   return {
     key: session.key,
     projectId: session.projectId,
@@ -92,13 +108,13 @@ function toPublicSession(session) {
     folderName: session.folderName,
     projectName: session.projectName,
     batchId: session.batchId,
-    batch: session.batch,
+    batch: batchWithLocalCounts(session.batch, remaining, failedLocal),
     paused: session.paused,
     streamError: session.streamError,
     finished: isFinished(session),
     transferring: remaining > 0 && !session.paused,
     pendingLocalFiles: remaining,
-    failedLocalFiles: [...session.runtimes.values()].filter((runtime) => runtime.state === "error").length,
+    failedLocalFiles: failedLocal,
     inline: (inlineClaims.get(session.key) || 0) > 0,
   };
 }
@@ -202,8 +218,9 @@ function createRuntime(session, file, upload) {
     sessionKey: session.key,
     file,
     // `webkitRelativePath` — "Wedding/Day 1/IMG_0001.CR3" — is the only location a browser will
-    // give, and it is all the server needs: it joins the trail onto the Original Storage Path.
-    // A file dropped on its own has no trail, so its name stands in.
+    // give. The server stores it as the photo's `originalPath`, as given: the original never
+    // leaves this computer, and "Download Selected" later reads it back from the folder the
+    // studio picked here. A file dropped on its own has no trail, so its name stands in.
     relativePath: fileRelativePath(file) || file.name,
     uploadId: upload?.id || null,
     chunkSize: upload?.chunkSize || DEFAULT_CHUNK_SIZE,
@@ -225,8 +242,7 @@ function enqueue(session, runtimes) {
 
 function pump() {
   // Read on every pump rather than held in a constant: the concurrency is derived from this
-  // machine's cores and memory, and a quality change made in ⋮ → Project Settings → Processing
-  // applies to the very next photo, mid-run included.
+  // machine's cores and memory.
   const { concurrency } = readProcessingSettings();
   while (activeCount < concurrency && queue.length) {
     const runtime = queue.shift();
@@ -252,13 +268,9 @@ async function runFile(session, runtime) {
     if (!runtime.uploadId) {
       // The photo is decoded and re-encoded here, on this computer, and only the two small
       // derivatives are sent. The original is read and dropped — it is never uploaded, never
-      // written anywhere, and never leaves the machine it is sitting on. The preview follows
-      // this machine's Processing quality preset.
-      const preset = QUALITY_PRESETS[readProcessingSettings().quality];
-      const { thumbnail, preview, width, height } = await buildDerivatives(runtime.file, {
-        previewLongEdge: preset.previewLongEdge,
-        previewMaxBytes: preset.previewTargetKb * 1024,
-      });
+      // written anywhere, and never leaves the machine it is sitting on. Both derivatives follow
+      // the studio's preset pair for the module, fixed for the batch when it started.
+      const { thumbnail, preview, width, height } = await buildDerivatives(runtime.file, session.compression || derivativeOptionsFor(session.compressionModule));
       const response = await uploadPreparedImage(uploadScope(session), {
         thumbnail,
         preview,
@@ -273,6 +285,9 @@ async function runFile(session, runtime) {
         // A revision is the same spread done again: it must write over the row it corrects rather
         // than be waved through as a duplicate, which silently threw the corrected pixels away.
         replaceExisting: session.replaceExisting === true,
+        // When it was taken, off the original's EXIF header (the re-encoded preview keeps none):
+        // the folder's order, and what bursts, similar series and story moments are read from.
+        capturedAt: await captureDateOfFile(runtime.file),
       });
       // A photo already in this project is not a failure: re-picking a folder to add the few new
       // frames in it is an ordinary thing to do, and the rest of the batch carries on. Its id is
@@ -326,7 +341,7 @@ async function runFile(session, runtime) {
   }
 }
 
-function createSession({ projectId, folderId, folderName, projectName, batchId, uploadsBase, replaceExisting = false }) {
+function createSession({ projectId, folderId, folderName, projectName, batchId, uploadsBase, replaceExisting = false, compressionModule = "imageSelection" }) {
   const key = uploadSessionKey(projectId, folderId);
   const session = {
     key,
@@ -338,6 +353,11 @@ function createSession({ projectId, folderId, folderName, projectName, batchId, 
     batchId,
     // Every photo of this session is a corrected one: see the call to uploadPreparedImage.
     replaceExisting: replaceExisting === true,
+    // Which of the studio's preset pairs this batch follows, and the recipe resolved from it when
+    // the batch started (`withCompression`). Fixed for the batch: a preset changed mid-run
+    // applies to the next batch, never to half of this one.
+    compressionModule,
+    compression: null,
     batch: null,
     paused: false,
     cancelled: false,
@@ -356,7 +376,21 @@ function dropSession(session) {
   sessions.delete(session.key);
 }
 
-export async function startUpload({ projectId, folderId, folderName, projectName, files, uploadsBase, replaceExisting = false }) {
+/**
+ * The studio's preset pair for the session's module, turned into the options every photo of the
+ * batch is built with. Asked once per batch; the answer is cached by the service, and when the
+ * server cannot be asked the module's recommended presets stand, so a batch never waits on a
+ * setting and never fails for want of one.
+ */
+async function withCompression(session) {
+  const presets = await studioCompressionFor(session.compressionModule);
+  session.compression = derivativeOptionsFor(session.compressionModule, presets);
+  return session;
+}
+
+// Every batch here is Photo Selection's (or Album Proofing's own section's): the browser never
+// uploads for AI Culling or AI Editing - the desktop app imports for those, from the originals.
+export async function startUpload({ projectId, folderId, folderName, projectName, files, uploadsBase, replaceExisting = false, compressionModule = "imageSelection" }) {
   // Callers normally pre-validate, but this guard keeps system files and non-photos out of the
   // queue no matter who calls in. Same single-pass rules the picker uses — no second scan.
   const accepted = Array.from(files || []).filter(isUploadableImage);
@@ -370,7 +404,7 @@ export async function startUpload({ projectId, folderId, folderName, projectName
 
   const response = await createImageUploadBatch(uploadsBase ? { projectId, uploadsBase } : projectId, { totalFiles: accepted.length, folderId: folderId || null });
   const batchId = response.data.id;
-  const session = createSession({ projectId, folderId, folderName, projectName, batchId, uploadsBase, replaceExisting });
+  const session = await withCompression(createSession({ projectId, folderId, folderName, projectName, batchId, uploadsBase, replaceExisting, compressionModule }));
   session.batch = response.data;
   writeSavedUpload(projectId, folderId, {
     batchId,
@@ -390,7 +424,7 @@ export async function startUpload({ projectId, folderId, folderName, projectName
   return accepted.length;
 }
 
-export async function resumeUpload({ projectId, folderId, folderName, projectName, files, uploadsBase, replaceExisting = false }) {
+export async function resumeUpload({ projectId, folderId, folderName, projectName, files, uploadsBase, replaceExisting = false, compressionModule = "imageSelection" }) {
   const saved = readSavedUpload(projectId, folderId);
   if (!saved?.files?.length) return { resumed: 0, message: "There is no interrupted upload to resume." };
   const byKey = new Map(Array.from(files || []).map((file) => [uploadFileKey(file), file]));
@@ -408,7 +442,7 @@ export async function resumeUpload({ projectId, folderId, folderName, projectNam
   }
   if (existing) dropSession(existing);
 
-  const session = createSession({
+  const session = await withCompression(createSession({
     projectId,
     folderId,
     folderName: folderName || saved.folderName,
@@ -416,7 +450,8 @@ export async function resumeUpload({ projectId, folderId, folderName, projectNam
     batchId: saved.batchId,
     uploadsBase: uploadsBase || saved.uploadsBase || null,
     replaceExisting,
-  });
+    compressionModule,
+  }));
   connect(session);
   // Ask the server which uploads are already finished so we only re-send unfinished files.
   const work = await Promise.all(

@@ -8,17 +8,22 @@ import { firstPermittedRoute } from "@/constants/modulePermissions";
 import { initialsOf } from "@/lib/initials";
 import { profileReturnTo } from "@/lib/profileReturn";
 import EmployeeOrgChart from "@/components/employees/EmployeeOrgChart";
+import { MyPayslipList } from "@/components/hrm/MyPayslipPage";
+import MyOfferLetter from "@/components/hrm/MyOfferLetter";
 import ProfilePhotoViewer from "@/components/profile/ProfilePhotoViewer";
 import OnboardingDetailsView from "@/components/profile/OnboardingDetailsView";
 import ModulePageHeader from "@/components/layout/ModulePageHeader";
 import Button from "@/components/shared/Button";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import TextField from "@/components/shared/TextField";
+import useFormErrors from "@/components/shared/useFormErrors";
 import { PageLoader } from "@/components/shared/Loader";
 import Tabs from "@/components/ui/Tabs";
 import { compressImageFile } from "@/lib/imageCompression";
 import { changeMyPassword, getMyOrgChart, getMyProfile, updateMyProfilePhoto } from "@/services/user/profile.service";
+import WorkHistoryFlow from "@/components/employees/WorkHistoryFlow";
 import { announceProfilePhotoChanged } from "@/lib/profilePhoto";
+import { AUTH_EXPIRED_EVENT, clearAccessToken } from "@/lib/auth";
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const ACCEPTED_LABEL = "JPG, PNG, WEBP, AVIF, or GIF up to 5 MB.";
@@ -50,9 +55,9 @@ function formatDate(value) {
 }
 
 /**
- * One's own password, changed on the strength of knowing the current one. Only the match between
- * the two new fields is checked here — the policy itself is the server's answer, and it names the
- * first rule the password fails.
+ * One's own password, changed on the strength of knowing the current one. Only blanks and the match
+ * between the two new fields are checked here — the policy itself is the server's answer, and it
+ * names the first rule the password fails, under the New Password box.
  */
 function ChangePassword({ onChanged }) {
   const [currentPassword, setCurrentPassword] = useState("");
@@ -60,37 +65,48 @@ function ChangePassword({ onChanged }) {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const fields = useFormErrors();
 
   async function submit(event) {
     event.preventDefault();
-    if (newPassword !== confirmPassword) {
-      setError("The new passwords do not match.");
-      return;
-    }
-    setSaving(true);
     setError("");
+    if (!fields.check({
+      currentPassword: currentPassword ? "" : "Enter your current password.",
+      newPassword: newPassword ? "" : "Enter a new password.",
+      confirmPassword: !confirmPassword ? "Confirm the new password." : newPassword !== confirmPassword ? "The new passwords do not match." : "",
+    })) return;
+    setSaving(true);
     try {
-      await changeMyPassword(currentPassword, newPassword);
+      const answer = await changeMyPassword(currentPassword, newPassword);
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
-      onChanged();
+      onChanged(answer?.message);
+      /*
+       * The change signs the account out of every device, this one included, so the app says so and
+       * goes to the sign-in rather than waiting for the next request to come back 401 - which it
+       * would, mid-screen, looking like something had broken.
+       */
+      if (answer?.signedOut) {
+        clearAccessToken();
+        window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+      }
     } catch (requestError) {
-      setError(requestError.message || "Unable to change your password.");
+      // A 400 is about one box: the current password, or the policy the new one fails.
+      if (requestError.status === 400 && requestError.message) {
+        fields.check({ [/current password/i.test(requestError.message) ? "currentPassword" : "newPassword"]: requestError.message });
+      } else setError(requestError.message || "Unable to change your password.");
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <form onSubmit={submit} className="mx-auto max-w-lg space-y-4">
-      <TextField label="Current Password" required type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" />
-      <div>
-        <TextField label="New Password" required type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} autoComplete="new-password" />
-        <p className="mt-1.5 text-xs text-slate-500">{PASSWORD_HINT}</p>
-      </div>
-      <TextField label="Confirm New Password" required type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" />
-      {error && <p role="alert" className="text-xs text-red-600 sm:text-sm">{error}</p>}
+    <form noValidate onSubmit={submit} className="mx-auto max-w-lg space-y-4">
+      <TextField label="Current Password" helperText="The password you sign in with today, to confirm it is you." required type="password" value={currentPassword} onChange={(event) => { setCurrentPassword(event.target.value); fields.clear("currentPassword"); }} autoComplete="current-password" error={fields.errors.currentPassword} />
+      <TextField label="New Password" helperText={`The password you will sign in with from now on. ${PASSWORD_HINT}`} required type="password" value={newPassword} onChange={(event) => { setNewPassword(event.target.value); fields.clear("newPassword"); }} autoComplete="new-password" error={fields.errors.newPassword} />
+      <TextField label="Confirm New Password" helperText="Type the new password again to catch any typing mistake." required type="password" value={confirmPassword} onChange={(event) => { setConfirmPassword(event.target.value); fields.clear("confirmPassword"); }} autoComplete="new-password" error={fields.errors.confirmPassword} />
+      {(error || fields.summary) && <p role="alert" className="text-xs text-red-600 sm:text-sm">{error || fields.summary}</p>}
       <Button type="submit" variant="primary" disabled={saving}>{saving ? "Changing..." : "Change Password"}</Button>
     </form>
   );
@@ -177,10 +193,15 @@ export default function ProfilePage() {
   // Org Chart is offered to everyone: a login with an employee record opens the chart at
   // themselves, one without (the standalone Super Admin) opens it at the top of the studio and
   // walks it the same way the Employee Repository's record view does.
+  // Payslip only where `HRM / My Payslip` is held, next to My Details; Change Password last. The offer
+  // letter is a card on My Details for every employee - their own letter is on their profile by default.
   const tabs = [
     { id: "personal", label: "My Details" },
-    { id: "password", label: "Change Password" },
+    ...(hasPermission("HRM", "My Payslip", "READ") ? [{ id: "payslip", label: "Payslip" }] : []),
+    // Their own Work History - each stint, for a login with an employee record.
+    ...(profile?.employment ? [{ id: "work-history", label: "Work History" }] : []),
     { id: "org-chart", label: "Org Chart" },
+    { id: "password", label: "Change Password" },
   ];
 
   return (
@@ -255,11 +276,14 @@ export default function ProfilePage() {
                 header and the tabs off the top of the screen. */}
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
               {tab === "personal" && (
-                <OnboardingDetailsView onboarding={profile.onboarding} />
+                /* Their offer letter as one more card among the details, beside References. */
+                <OnboardingDetailsView onboarding={profile.onboarding} aside={profile.employeeId ? { after: "references", node: <MyOfferLetter /> } : null} />
               )}
+              {tab === "payslip" && hasPermission("HRM", "My Payslip", "READ") && <MyPayslipList />}
               {tab === "password" && (
-                <ChangePassword onChanged={() => showSuccess("Password changed. Use the new one next time you sign in.")} />
+                <ChangePassword onChanged={(said) => showSuccess(said || "Password changed. Use the new one next time you sign in.")} />
               )}
+              {tab === "work-history" && profile?.employment && <WorkHistoryFlow employee={profile.employment} />}
               {tab === "org-chart" && (
                 <EmployeeOrgChart employeeId={profile.employeeId || null} employeeName={profile.employeeId ? profile.name : "the top"} fetchChart={getMyOrgChart} />
               )}

@@ -1,3 +1,5 @@
+import { ALBUM_STATE_LABELS, CORRECTION_STATE_LABELS } from "@/lib/albumProofingStates.mjs";
+
 /**
  * The Album Proofing status vocabulary rendered one way, everywhere. The label maps double as
  * the module's dictionary — the dashboard filters read `ALBUM_STATE_LABELS`, so a chip and a
@@ -14,24 +16,9 @@ const tones = {
   cyan: "bg-cyan-50 text-cyan-700",
 };
 
-export const ALBUM_STATE_LABELS = {
-  DRAFT: "Draft",
-  PROCESSING: "Processing",
-  PROCESSING_FAILED: "Processing Failed",
-  READY_FOR_QC: "Ready for QC",
-  QC_REVIEW: "QC Review",
-  QC_CHANGES_REQUESTED: "QC Corrections",
-  QC_REVISION_IN_PROGRESS: "QC Fixes in Progress",
-  QC_APPROVED: "QC Approved",
-  READY_FOR_CLIENT: "Ready for Client",
-  CLIENT_REVIEW: "Client Review",
-  CLIENT_CHANGES_REQUESTED: "Client Corrections",
-  REVISION_IN_PROGRESS: "Revision in Progress",
-  REVISION_READY_FOR_QC: "Revision Ready for QC",
-  CLIENT_APPROVED: "Client Approved",
-  COMPLETED: "Completed",
-  ARCHIVED: "Archived",
-};
+// The words live in `lib/albumProofingStates.mjs` (pure, so the dashboard's vocabulary and its
+// tests can read them); re-exported here so every screen that imports them from the chip still can.
+export { ALBUM_STATE_LABELS };
 
 const styles = {
   DRAFT: "slate", PROCESSING: "blue", PROCESSING_FAILED: "rose", READY_FOR_QC: "cyan",
@@ -43,10 +30,7 @@ const styles = {
   OPEN: "rose", IN_PROGRESS: "amber", RESOLVED: "emerald", REOPENED: "violet",
 };
 
-const labels = {
-  ...ALBUM_STATE_LABELS,
-  OPEN: "Open", IN_PROGRESS: "In Progress", RESOLVED: "Resolved", REOPENED: "Reopened",
-};
+const labels = { ...ALBUM_STATE_LABELS, ...CORRECTION_STATE_LABELS };
 
 export default function ProofingStatusChip({ status }) {
   return <span className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-semibold sm:text-[11px] ${tones[styles[status]] || tones.slate}`}>{labels[status] || status}</span>;

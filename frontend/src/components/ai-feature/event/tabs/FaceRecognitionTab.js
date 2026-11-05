@@ -75,7 +75,7 @@ export default function FaceRecognitionTab({ eventId, faceAccess, mediaRevision,
     </p>}
 
     <div className="flex flex-wrap items-end justify-between gap-2">
-      <Dropdown label="Show" options={STATUS_OPTIONS} value={status} onChange={setStatus} sorted={false} className="w-full sm:w-52" />
+      <Dropdown label="Show" helperText="Lists only the matches with this review status." options={STATUS_OPTIONS} value={status} onChange={setStatus} sorted={false} className="w-full sm:w-52" />
       <p className="text-xs text-slate-500">{formatCount(list.total)} {list.total === 1 ? "match" : "matches"}</p>
     </div>
     {list.error && <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{list.error}</p>}

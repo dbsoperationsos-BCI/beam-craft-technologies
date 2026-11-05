@@ -32,12 +32,17 @@ import RecordDetails, { sectionsWithContent } from "./RecordDetails";
  */
 const DETAILS_TAB = "details";
 
-export default function RecordViewPanel({ title, description, entity, sections = [], extraTabs = [], formatters, onClose, hideEmpty = true, sidebarAriaLabel = "Record sections", zIndexClassName }) {
-  const [activeTab, setActiveTab] = useState(DETAILS_TAB);
+// `detailsLabel` names the first tab where a module calls its record something else (Projects: Identification).
+export default function RecordViewPanel({ title, titleAddon, description, entity, sections = [], extraTabs = [], detailsLabel = "Details", formatters, onClose, hideEmpty = true, sidebarAriaLabel = "Record sections", zIndexClassName, aside, asideAriaLabel, footer, initialTab }) {
+  // `initialTab` opens the panel on one of its extra tabs (a row menu's "View activity"); an id the
+  // record does not have falls back to the details below, like any other stale tab.
+  const [activeTab, setActiveTab] = useState(initialTab || DETAILS_TAB);
 
   const detailSections = useMemo(() => sectionsWithContent(entity, sections, hideEmpty).map((section) => ({
     id: section.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "section",
     title: section.title,
+    // A locked section (`RecordDetails`) is listed in the rail, shut, with its reason, and not drawn.
+    disabled: section.locked || false,
     render: () => <RecordDetails entity={entity} sections={[section]} formatters={formatters} variant="rows" hideEmpty={hideEmpty} />,
   })), [entity, formatters, hideEmpty, sections]);
 
@@ -46,13 +51,14 @@ export default function RecordViewPanel({ title, description, entity, sections =
   // and a record with no extra tabs must fall back to its details rather than to a blank pane.
   const openExtra = extraTabs.find((tab) => tab.id === activeTab) || null;
   const tabItems = extraTabs.length
-    ? [{ id: DETAILS_TAB, label: "Details" }, ...extraTabs.map((tab) => ({ id: tab.id, label: tab.label }))]
+    ? [{ id: DETAILS_TAB, label: detailsLabel }, ...extraTabs.map((tab) => ({ id: tab.id, label: tab.label }))]
     : null;
 
   if (!entity) return null;
 
   return <SchemaFormPanel
     title={title}
+    titleAddon={titleAddon}
     description={description}
     /*
      * Left to the panel's own default in the ordinary case: a record opened from a table is the only
@@ -63,6 +69,10 @@ export default function RecordViewPanel({ title, description, entity, sections =
      * underneath the thing that opened it is a click that appears to do nothing at all.
      */
     zIndexClassName={zIndexClassName}
+    // What belongs to the whole record rather than to this view of it, beside the body — see
+    // `SchemaFormPanel`'s `aside`.
+    aside={aside}
+    asideAriaLabel={asideAriaLabel}
     tabs={tabItems && <Tabs
       tabs={tabItems}
       value={openExtra ? activeTab : DETAILS_TAB}
@@ -80,7 +90,9 @@ export default function RecordViewPanel({ title, description, entity, sections =
     onClose={onClose}
     closeAriaLabel={`Close ${title}`}
     sidebarAriaLabel={sidebarAriaLabel}
-    footer={<Button className="ml-auto max-sm:w-full" type="button" variant="primary" onClick={onClose}>Close</Button>}
+    // A record with something to be decided passes its own verbs, the way a task's panel does; the
+    // × still closes it. Everything else gets the one Close.
+    footer={footer ?? <Button className="max-sm:w-full" type="button" variant="primary" onClick={onClose}>Close</Button>}
   >
     {/* Full width, unlike the record's own sections. Those are label-and-value pairs that get harder
         to read the wider the line, which is what the 1040px cap on a section is for. A tab is

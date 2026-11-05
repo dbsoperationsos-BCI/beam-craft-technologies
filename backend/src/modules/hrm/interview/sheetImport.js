@@ -82,8 +82,26 @@ const CANDIDATE_FIELD_ALIASES = {
 };
 
 const CANDIDATE_FIELD_ORDER = Object.keys(CANDIDATE_FIELD_ALIASES);
-/** The date fields, folded to `YYYY-MM-DD` where they parse and checked where they do not. */
+/**
+ * The fields folded to `YYYY-MM-DD` where the cell parses as a day, and left exactly as written
+ * where it does not. Every one of these is a `VARCHAR` on the candidate, so neither shape is a
+ * problem to store.
+ */
 const CANDIDATE_DATE_FIELDS = ["appliedDate", "interviewDate", "lastFollowUpDate", "nextFollowUpDate", "dateOfBirth", "availableFrom"];
+
+/**
+ * The subset a row is **refused** over. Narrower than the list above, and deliberately so.
+ *
+ * "When Can You Join" is not a date question. The studio's own screening form asks whether somebody
+ * is an immediate joiner and writes a *word* into `availableFrom` when they are - the column has
+ * always held either a day or an answer like "Immediate", "15 days" or "Negotiable", which is why
+ * it is free text. Validating it as a day refused whole rows for carrying exactly what the
+ * application form puts there, and a sheet of ten candidates could import none of them.
+ *
+ * The others stay refused, for the reason that rule was written: "next week" in Interview Date is a
+ * note in the wrong column, and filing it as a day would put the candidate in no tab.
+ */
+const CANDIDATE_REQUIRED_DAY_FIELDS = CANDIDATE_DATE_FIELDS.filter((field) => field !== "availableFrom");
 const CANDIDATE_PHONE_FIELDS = ["phone", "whatsappNumber"];
 
 const normalizeEmail = (value) => String(value || "").trim().toLowerCase();
@@ -309,6 +327,28 @@ function mapRowToCandidate(row = [], mapping = {}, link = {}, rowNumber = 0, cod
 }
 
 /** What has to be true of a row before it is written. */
+/**
+ * A cell the importer cannot read is **emptied**, and the rest of the row is kept.
+ *
+ * The register's counterpart of the CRM's rule, and it exists for the same reason: one unreadable
+ * cell used to cost the whole candidate. The cells at fault are the ones an applicant answers in
+ * their own words - "Immediate" in When Can You Join, a note where a date was expected - and a
+ * candidate is worth more than a tidy column.
+ *
+ * Every column this touches is nullable text, so a blank is a value the table already holds.
+ * `null` rather than `""`, because on this schema `""` never means "none".
+ */
+function clearUnreadableFields(record, issues = []) {
+  const cleared = [];
+  for (const issue of issues) {
+    const field = issue?.field;
+    if (!field) continue;
+    if (record?.candidate && field in record.candidate) record.candidate[field] = null;
+    cleared.push({ field, reason: issue.reason });
+  }
+  return cleared;
+}
+
 function validateCandidateRecord(record) {
   const issues = [];
   const candidate = record?.candidate || {};
@@ -324,8 +364,9 @@ function validateCandidateRecord(record) {
   }
 
   // A cell that is not a day is refused rather than stored as one: "next week" in Interview Date
-  // is a note in the wrong column, and filing it as a date would put the candidate in no tab.
-  for (const field of CANDIDATE_DATE_FIELDS) {
+  // is a note in the wrong column, and filing it as a date would put the candidate in no tab. Not
+  // `availableFrom` - see `CANDIDATE_REQUIRED_DAY_FIELDS`, which is why this list is its own.
+  for (const field of CANDIDATE_REQUIRED_DAY_FIELDS) {
     const value = String(candidate[field] || "").trim();
     if (value && !toIsoDay(value)) issues.push({ field, reason: "Invalid date value." });
   }
@@ -336,36 +377,37 @@ function validateCandidateRecord(record) {
 /**
  * Whether this row is new, an edit of a candidate already here, or a repeat within the same sheet.
  *
- * Matched in the order the CRM importer matches: the row's own source id, its position on the
- * sheet, then the phone, then the email. `seenInBatch` is the rows already read this pass, so the
- * same person twice in one sheet is reported as a duplicate rather than written twice.
+ * ── The phone number decides, and nothing else ───────────────────────────────────────────────
+ *
+ * A row whose phone is already in the register is not imported; a row whose phone is new **is**
+ * imported, whatever else about it disagrees - a respelled name, an email shared with a relative, a
+ * source id that changed, a row that has moved up the sheet. Those are the spreadsheet being untidy,
+ * not a second person.
+ *
+ * It used to fall through `phone || email || sourceRowId` and match live records on four keys in
+ * turn, which got both halves wrong: two real people sharing an office email were read as one, and
+ * one real person whose row id changed was read as two.
+ *
+ * A row with **no phone** is refused outright. Every other unreadable value here is blanked and the
+ * row still goes in - "cells, not rows" - but a row with no phone is the one case where the rule
+ * cannot be applied at all, so it is reported instead of guessed at.
+ *
+ * `seenInBatch` is the rows already read this pass, so the same number twice in one sheet is
+ * imported once and the second is reported as a duplicate.
  */
 function classifyAgainstExisting(record, indexes, seenInBatch = new Map()) {
   const candidate = record?.candidate || {};
-  const details = record?.details || {};
-  const sourceId = String(details.sourceRowId || "").trim();
   const phone = normalizePhone(candidate.phone);
-  const email = normalizeEmail(candidate.email);
-  const position = sheetPositionKey(details.spreadsheetId, details.gid || details.targetTab, details.sourceRowNumber);
 
-  const duplicateKey = phone || email || sourceId;
-  if (duplicateKey && seenInBatch.has(duplicateKey)) {
-    return { classification: "DUPLICATE_IN_SHEET", matchedRecord: seenInBatch.get(duplicateKey), matchBy: phone ? "phone" : email ? "email" : "sourceRowId" };
-  }
-  if (duplicateKey) seenInBatch.set(duplicateKey, record);
+  if (!phone) return { classification: "NO_PHONE", matchedRecord: null, matchBy: null };
 
-  const bySource = sourceId ? indexes.byId.get(sourceId) : null;
-  const byPosition = position ? indexes.bySheetPosition.get(position) : null;
-  const byPhone = phone ? indexes.byPhone.get(phone) : null;
-  const byEmail = email ? indexes.byEmail.get(email) : null;
-  const existing = bySource || byPosition || byPhone || byEmail || null;
-  if (existing) {
-    return {
-      classification: "EXISTING",
-      matchedRecord: existing,
-      matchBy: bySource ? "sourceRowId" : byPosition ? "sheetPosition" : byPhone ? "phone" : "email",
-    };
+  if (seenInBatch.has(phone)) {
+    return { classification: "DUPLICATE_IN_SHEET", matchedRecord: seenInBatch.get(phone), matchBy: "phone" };
   }
+  seenInBatch.set(phone, record);
+
+  const existing = indexes.byPhone.get(phone) || null;
+  if (existing) return { classification: "EXISTING", matchedRecord: existing, matchBy: "phone" };
   return { classification: "NEW", matchedRecord: null, matchBy: null };
 }
 
@@ -424,6 +466,7 @@ module.exports = {
   CANDIDATE_FIELD_ALIASES,
   CANDIDATE_FIELD_ORDER,
   CANDIDATE_DATE_FIELDS,
+  CANDIDATE_REQUIRED_DAY_FIELDS,
   resolveColumnMapping,
   getMappedRowValue,
   sheetIdentity,
@@ -431,6 +474,7 @@ module.exports = {
   buildExistingIndexes,
   mapRowToCandidate,
   validateCandidateRecord,
+  clearUnreadableFields,
   classifyAgainstExisting,
   importedRowKey,
   buildDeletedKeySet,

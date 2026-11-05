@@ -84,8 +84,11 @@ test("the stored notifications are gated too, one kind at a time, by their own m
    */
   const store = fs.readFileSync(path.join(__dirname, "..", "src", "services", "notifications.js"), "utf8");
   assert.match(store, /const TYPE_PERMISSIONS = \{/);
-  for (const [type, permission] of Object.entries(notifications.TYPE_PERMISSIONS)) {
-    assert.ok(permission.module && permission.feature, `${type} names no module and feature`);
+  for (const [type, entry] of Object.entries(notifications.TYPE_PERMISSIONS)) {
+    // One permission, or a list of which any one will do - never an empty list.
+    const list = [entry].flat();
+    assert.ok(list.length > 0, `${type} names no permission`);
+    for (const permission of list) assert.ok(permission.module && permission.feature, `${type} names no module and feature`);
   }
   for (const type of Object.values(notifications.TYPES)) {
     assert.ok(notifications.TYPE_PERMISSIONS[type], `${type} can be written and can never be read`);
@@ -95,6 +98,10 @@ test("the stored notifications are gated too, one kind at a time, by their own m
     "TASK_ASSIGNED", "TASK_CANCELLED", "TASK_COMPLETED", "TASK_REASSIGNED", "TASK_REVERTED",
   ]);
   assert.deepEqual(notifications.typesFor([{ module: "SALES", feature: "CRM Leads" }]), ["LEAD_ASSIGNED"]);
+  assert.deepEqual(notifications.typesFor([{ module: "HRM", feature: "Events" }]), ["EVENT_POSTED"]);
+  // A request is read through either permission, so either one reaches its notice.
+  assert.deepEqual(notifications.typesFor([{ module: "HRM", feature: "Requests" }]), ["REQUEST_WAITING"]);
+  assert.deepEqual(notifications.typesFor([{ module: "HRM", feature: "Employee Attendance" }]), ["REQUEST_WAITING"]);
   assert.deepEqual(notifications.typesFor([]), [], "a reader holding nothing is told about something");
 
   assert.match(CONTROLLER, /hasPermission\(req\.user\.id, permission\.module, permission\.feature, "READ"\)/);
@@ -140,11 +147,18 @@ test("a source that fails contributes nothing and takes nothing with it", () => 
 
 test("a source answers with nothing rather than everything when it has nobody to answer about", () => {
   /*
-   * The three personal sources are scoped to the signed-in person. Asked about nobody - a user row
-   * with no name, which the CRM's own name-matching cannot key on - the answer is nothing at all.
-   * Falling through to an unscoped query would put the whole studio's work on one person's bell.
+   * The three personal sources are scoped to the signed-in person. Asked about nobody - a login with
+   * no employee behind it and no name, which nothing on a lead can be keyed on - the answer is nothing
+   * at all. Falling through to an unscoped query would put the whole studio's work on one person's bell.
    */
-  assert.match(SOURCE_FILE, /async function followUps\(\{ userName, everyone = false \}\) \{\s*\n\s*if \(!everyone && !userName\) return \[\];/);
+  assert.match(SOURCE_FILE, /async function followUps\(\{ userName, employeeId = null, everyone = false \}\) \{\s*\n\s*if \(!everyone && !userName && !employeeId\) return \[\];/);
+  /*
+   * And a lead is "mine" by its owner reference - the employee behind the login - not by matching
+   * the login's display name: a rename would otherwise lose every follow-up, and two logins under one
+   * name would share theirs. The name is kept only for a lead whose owner matched nobody.
+   */
+  assert.match(SOURCE_FILE, /\(`owner_employee_id` = \? OR \(`owner_employee_id` IS NULL AND TRIM\(COALESCE\(`crm`, ''\)\) = \?\)\)/);
+  assert.match(SOURCE_FILE, /const mineParams = everyone \? \[\] : employeeId \? \[employeeId, userName\] : \[userName\];/);
   assert.match(SOURCE_FILE, /async function whatsappReplies\(\{ userId, everyone = false \}\) \{\s*\n\s*if \(!everyone && !userId\) return \[\];/);
   assert.match(SOURCE_FILE, /async function callsWaiting\(\{ userName, everyone = false \}\) \{\s*\n\s*if \(!everyone && !userName\) return \[\];/);
   /*
@@ -211,4 +225,43 @@ test("the route asks only that the caller is signed in", () => {
   const routes = read("routes.js");
   assert.match(routes, /router\.use\(protect\);/);
   assert.doesNotMatch(routes, /requireModule/, "the bell now refuses whole roles rather than gating its sources");
+});
+
+test("derived notices are computed at most every ninety seconds and shared by requests that arrive together", async () => {
+  const { _sharedDerived: shared, _clearDerivedCache: clear } = require("../src/modules/notifications/controller");
+  clear();
+  let runs = 0;
+  let release;
+  const slow = () => { runs += 1; return new Promise((resolve) => { release = resolve; }); };
+
+  const first = shared("viewer-1", slow);
+  const second = shared("viewer-1", slow);
+  release(["notice"]);
+  assert.deepEqual(await first, ["notice"]);
+  assert.deepEqual(await second, ["notice"]);
+  assert.equal(runs, 1, "two tabs polling at once ran the heavy queries twice");
+
+  assert.deepEqual(await shared("viewer-1", slow), ["notice"]);
+  assert.equal(runs, 1, "a poll within the minute ran the heavy queries again");
+
+  // Longer than the one-minute poll on purpose, so the next poll finds the answer still good.
+  assert.deepEqual(await shared("viewer-1", slow, Date.now() + 60_001), ["notice"]);
+  assert.equal(runs, 1, "the next once-a-minute poll found the answer already expired");
+
+  shared("viewer-1", slow, Date.now() + 90_001);
+  assert.equal(runs, 2, "an answer older than ninety seconds was served");
+  release([]);
+
+  const failing = () => Promise.reject(new Error("database down"));
+  await assert.rejects(shared("viewer-2", failing));
+  let retried = false;
+  await shared("viewer-2", () => { retried = true; return []; });
+  assert.ok(retried, "a failure was cached and served to the next poll");
+  clear();
+});
+
+test("the bell lists unread notices only, so marking one read takes it off", () => {
+  const store = fs.readFileSync(path.join(__dirname, "..", "src", "services", "notifications.js"), "utf8");
+  // The list and the badge share one filter, so the bell never lists what it does not count.
+  assert.match(store, /prisma\.notification\.findMany\(\{ where: \{ \.\.\.where, readAt: null \}/);
 });

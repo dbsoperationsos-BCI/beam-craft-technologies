@@ -1,5 +1,6 @@
 "use client";
 
+import HelpTip from "./HelpTip";
 import { useEffect, useRef, useState } from "react";
 import Dropdown from "@/components/shared/Dropdown";
 import { DEFAULT_DIAL_CODE, DIAL_CODE_OPTIONS, countryByDial, countryByIso } from "@/lib/countryDialCodes";
@@ -32,7 +33,7 @@ import { nationalNumberLimits, parsePhoneNumber } from "@/lib/phoneNumber";
  * remark about nothing. What it exists for is "this number is already on the register" - worth
  * stopping for, not an error, and something the person filling the form in may well go on with.
  */
-export default function PhoneField({ label, field, required, error, note = "", value, onChange, disabled = false, readOnly = false }) {
+export default function PhoneField({ label, field, required, error, note = "", helperText = "", value, onChange, disabled = false, readOnly = false }) {
   const inert = disabled || readOnly;
   const initialPhone = parsePhoneNumber(value);
   const [countryCode, setCountryCode] = useState(initialPhone.countryCode);
@@ -86,7 +87,7 @@ export default function PhoneField({ label, field, required, error, note = "", v
     || countryByDial(DEFAULT_DIAL_CODE);
 
   return <div className="block text-[11px] font-semibold text-slate-600 sm:text-xs">
-    <span>{label}{required && <span className="text-red-600"> *</span>}</span>
+    <span>{label}{required && <span className="text-red-600"> *</span>}<HelpTip text={helperText} /></span>
     {/* The two controls share one outline so they read as one field, the way they did when the
         code was a text box. The picker keeps its own focus ring off - the wrapper carries it. */}
     <span className={`mt-1.5 flex min-h-9 w-full items-stretch overflow-hidden rounded-lg border transition ${readOnly ? "bg-slate-100" : "bg-white focus-within:ring-2"} ${error ? "border-red-500 focus-within:border-red-500 focus-within:ring-red-100" : "border-slate-300 focus-within:border-blue-500 focus-within:ring-blue-100"}`}>
@@ -136,6 +137,7 @@ export default function PhoneField({ label, field, required, error, note = "", v
       </span>
       <input
         value={displayNumber}
+        aria-invalid={error ? true : undefined}
         inputMode="numeric"
         placeholder={inert ? "" : groupsAsIndian ? "12345-12345" : "Phone number"}
         disabled={disabled}
@@ -147,5 +149,6 @@ export default function PhoneField({ label, field, required, error, note = "", v
     </span>
     {error && <span className="mt-1 block text-[11px] font-normal text-red-600">{error}</span>}
     {!error && note && <span className="mt-1 block text-[11px] font-normal text-amber-700">{note}</span>}
+    
   </div>;
 }

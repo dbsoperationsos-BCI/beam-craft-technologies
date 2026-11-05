@@ -50,7 +50,14 @@ test("Add Lead asks as the number is typed, and again before it writes", () => {
    * number pasted in and confirmed in the same second never gave the first one time to answer.
    */
   const asTyped = BOARD.slice(BOARD.indexOf("const [addLeadDuplicates,"), BOARD.indexOf("const addLeadDuplicateWarning"));
-  assert.match(asTyped, /getDuplicateEnquiries\(\{ phone \}\)/, "Add Lead no longer checks the number as it is typed");
+  assert.match(asTyped, /getDuplicateEnquiries\(\{ phone, excludeId: assigningLeadId \|\| "" \}\)/, "Add Lead no longer checks the number as it is typed");
+  /*
+   * `excludeId` because the form has a third job: assigning a lead that already exists, opened by
+   * dragging an unowned card out of the board's Unassigned column. That lead already holds the number
+   * in the box - itself - so without this the form would open warning that this client is already an
+   * enquiry, naming the very lead on screen, and the only way past would be to acknowledge a clash
+   * with itself. Empty for the other two jobs, where there is no lead yet to exclude.
+   */
   // Only a whole number, so nothing is asked on the way to typing one.
   assert.match(asTyped, /isCompletePhoneNumber\(phone\)/);
   // And Confirm refuses to write while a warning is outstanding.
@@ -230,4 +237,12 @@ test("a decision made in one form does not carry into the next", () => {
   const close = BOARD.slice(BOARD.indexOf("function closeAddLead"), BOARD.indexOf("function closeAddLead") + 900);
   assert.match(close, /setDuplicateAckPhone\(""\);/);
   assert.match(close, /setAddLeadDuplicates\(null\);/);
+});
+
+test("each enquiry names who it is assigned to", () => {
+  /*
+   * The reader stopped by this dialog usually needs a person, not a record: whoever already works
+   * the client. An enquiry with nobody on it says so, rather than leaving the reader to guess.
+   */
+  assert.match(DIALOG, /entry\.assignedTo \? `Assigned to \$\{entry\.assignedTo\}` : "Not assigned"/);
 });

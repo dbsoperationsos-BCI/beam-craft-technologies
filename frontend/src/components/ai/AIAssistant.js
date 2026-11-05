@@ -1,10 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import Button from "@/components/shared/Button";
-import { readThread, writeThread, historyFor } from "@/lib/ai/sessionChats";
-import { streamAi, confirmAiAction, fetchAiHealth } from "@/services/ai/ai.service";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { readThread, writeThread, historyFor, markActive, expiresAt, clearThread } from "@/lib/ai/sessionChats";
+import { moduleLabel } from "@/lib/ai/moduleContext";
+import { streamAi, fetchAiHealth } from "@/services/ai/ai.service";
 import { getActiveVertical, onVerticalChange } from "@/lib/ai/activeVertical";
+import AddCommentOutlinedIcon from "@mui/icons-material/AddCommentOutlined";
+import Button from "@/components/shared/Button";
+import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import NebulaComposer from "./NebulaComposer";
 
 /**
@@ -15,8 +18,9 @@ import NebulaComposer from "./NebulaComposer";
  * knowledge follow from that decision. A second implementation would be a second place for the
  * boundary to be got wrong.
  *
- * The panel is deliberately plain - the module's own Button, the same spacing and type as the rest
- * of the app - because it appears inside other screens and should read as part of them.
+ * The panel is deliberately plain - the same spacing and type as the rest of the app - because it
+ * appears inside other screens and should read as part of them. It only answers: Nebula is
+ * read-only, so there is nothing here to confirm or apply.
  */
 
 const OPENERS = {
@@ -25,15 +29,28 @@ const OPENERS = {
   GLOBAL: ["What needs my attention today?", "Give me a status across the business"],
 };
 
+/** Whether this question was asked in a different section from the question before it. */
+function movedSection(turns, index) {
+  const here = turns[index].module;
+  for (let at = index - 1; at >= 0; at -= 1) {
+    if (turns[at].role === "user") return Boolean(here && turns[at].module && turns[at].module !== here);
+  }
+  return false;
+}
+
 export default function AIAssistant({ module = "SALES", title = "Nebula AI", onError }) {
   const [status, setStatus] = useState(null);
   const [question, setQuestion] = useState("");
   /*
-   * Seeded from the page's own memory, so closing the panel and reopening it continues the
-   * conversation rather than starting a new one. A refresh clears it - see `lib/ai/sessionChats`.
+   * Seeded from the page's own memory, so closing the panel, reopening it or moving to another
+   * section continues the conversation rather than starting a new one. A refresh, or 30 minutes
+   * without a question, clears it - see `lib/ai/sessionChats`.
    */
-  const [turns, setTurns] = useState(() => readThread(module));
+  const [turns, setTurns] = useState(() => readThread());
   const [busy, setBusy] = useState(false);
+  const { notice, showUndo, clearNotice } = useNotice();
+  // The thread was cleared for 30 minutes of quiet while the panel was open.
+  const [clearedForQuiet, setClearedForQuiet] = useState(false);
   const [vertical, setVertical] = useState("");
   const threadRef = useRef(null);
   // Lets the reader stop a generation that is going nowhere.
@@ -72,32 +89,27 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
     return () => { cancelled = true; };
   }, []);
 
-  /*
-   * Which module the turns currently in state belong to.
-   *
-   * Needed because a module change arrives one render before the turns catch up: on that render
-   * `module` is already the new one while `turns` is still the old one's conversation.
-   */
-  const belongsTo = useRef(module);
+  // Kept for as long as the page is open, across every section - one conversation, not one per screen.
+  useEffect(() => {
+    writeThread(turns);
+  }, [turns]);
 
   /*
-   * Kept for as long as the page is open, and no longer.
-   *
-   * Declared before the swap below on purpose - effects run in declaration order, so on the render
-   * where the module has just changed this one sees the mismatch and skips, rather than filing the
-   * previous module's conversation under the new module's key.
+   * Forgotten after 30 minutes without a question, while the panel is open as well as while it is
+   * closed - so what is on screen is never a conversation the next question will not be sent with.
+   * Not while an answer is still arriving: that is activity, and the count restarts when it ends.
    */
   useEffect(() => {
-    if (belongsTo.current !== module) return;
-    writeThread(module, turns);
-  }, [turns, module]);
-
-  // A different module is a different session, so its own thread is loaded rather than carried over.
-  useEffect(() => {
-    if (belongsTo.current === module) return;
-    belongsTo.current = module;
-    setTurns(readThread(module));
-  }, [module]);
+    const expiry = expiresAt();
+    if (!expiry || busy) return undefined;
+    const timer = setTimeout(() => {
+      clearThread();
+      setTurns([]);
+      // Said, not silently emptied - somebody may have been reading the answer when it went.
+      setClearedForQuiet(true);
+    }, Math.max(0, expiry - Date.now()));
+    return () => clearTimeout(timer);
+  }, [turns.length, busy]);
 
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
@@ -107,6 +119,9 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
     const text = String(asked || "").trim();
     if (!text || busy) return;
     setBusy(true);
+    setClearedForQuiet(false);
+    // A new question is the new chat being used: an Undo still showing would throw it away.
+    clearNotice();
     setQuestion("");
     lastAskedRef.current = text;
 
@@ -114,7 +129,12 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
      * The question and an empty answer go in together, so the reply has somewhere to appear as it
      * arrives rather than the thread jumping when it lands.
      */
-    setTurns((current) => [...current, { role: "user", content: text }, { role: "assistant", content: "" }]);
+    // A thread that went quiet while the computer slept - its timer late - is not carried into this one.
+    // Reading the store forgets an expired thread, so a thread on screen and none stored is stale.
+    const stale = turns.length > 0 && readThread().length === 0;
+    markActive();
+    // Each question remembers the section it was asked in, so the thread can show where it moved.
+    setTurns((current) => [...(stale ? [] : current), { role: "user", content: text, module }, { role: "assistant", content: "" }]);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -134,7 +154,7 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
          * That is what makes this ephemeral: the server writes nothing down, so there is no record
          * to find after a refresh rather than a record the panel merely declines to show.
          */
-        { module, message: text, history: historyFor(module), vertical, signal: controller.signal },
+        { module, message: text, history: historyFor(), vertical, signal: controller.signal },
         {
           token: (data) => appendToLast((last) => ({ content: last.content + (data.t || "") })),
           /*
@@ -142,7 +162,6 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
            * before there is anything to say - so it replaces whatever is there instead of appending.
            */
           answer: (data) => appendToLast(() => ({ content: data.answer || "" })),
-          done: (data) => appendToLast(() => ({ proposals: data.proposals || [] })),
           error: (data) => {
             appendToLast((last) => (last.content ? {} : { error: data.message }));
             onError?.(data.message);
@@ -157,6 +176,8 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
         onError?.(message);
       }
     } finally {
+      // The answer arriving is activity too: the 30 minutes count from the end of it.
+      markActive();
       abortRef.current = null;
       setBusy(false);
     }
@@ -165,6 +186,24 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
   /** Stops a generation. What has arrived stays on screen. */
   function stop() {
     abortRef.current?.abort();
+  }
+
+  /**
+   * Starts again with an empty thread, at once, with Undo on the notice - the previous conversation
+   * is one press away, so a mis-press costs nothing and no "are you sure" is needed. An answer still
+   * arriving is stopped first, so it cannot land in the new chat.
+   */
+  function newChat() {
+    abortRef.current?.abort();
+    const previous = turns;
+    clearThread();
+    setTurns([]);
+    setClearedForQuiet(false);
+    showUndo("Started a new chat.", () => {
+      setTurns(previous);
+      // Brought back is in use again: the 30 minutes start from the undo.
+      markActive();
+    });
   }
 
   /** Sends the last question again, dropping the answer that did not work. */
@@ -195,6 +234,16 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* Above the thread rather than in it, so it stays where it is however long the thread grows -
+          and only once there is a conversation to leave. */}
+      {turns.length > 0 && (
+        <div className="flex shrink-0 justify-end border-b border-slate-100 px-3 py-1.5">
+          <Button variant="ghost" size="sm" onClick={newChat} className="gap-1.5">
+            <AddCommentOutlinedIcon fontSize="small" aria-hidden="true" />
+            New chat
+          </Button>
+        </div>
+      )}
       <div ref={threadRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4">
         {turns.length === 0 && (
           /*
@@ -211,6 +260,11 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
               <p className="mt-1 text-sm text-slate-500">
                 {module === "GLOBAL" ? "Ask across the whole business." : "Ask about this module."}
               </p>
+              {clearedForQuiet && (
+                <p className="mt-2 text-xs text-slate-500">
+                  The earlier conversation was cleared after 30 minutes without a question.
+                </p>
+              )}
             </div>
             <div className="flex flex-wrap justify-center gap-2">
               {openers.map((opener) => (
@@ -228,36 +282,40 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
         )}
 
         {turns.map((turn, index) => (
-          <div key={index} className={turn.role === "user" ? "flex justify-end" : "flex justify-start"}>
-            {/* `nebula-bubble` on the received side is a marker for globals.css and nothing else: on a
-                dark ground the pale slate a reply sits on maps to the sunken tone, which is within a
-                shade of the panel behind it - so the answer read as unbubbled text floating on the
-                drawer. It is lifted rather than sunk there, which is what a reply from somebody else
-                should look like in a thread. */}
-            <div className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm ${turn.role === "user" ? "bg-blue-50 text-blue-900" : "nebula-bubble bg-slate-50 text-slate-700"}`}>
-              {turn.error ? (
-                <span className="text-red-700">
-                  {turn.error}
-                  <button type="button" onClick={retry} className="ml-2 underline hover:no-underline">
-                    Try again
-                  </button>
-                </span>
-              ) : (
-                <span className="whitespace-pre-line">
-                  {turn.content}
-                  {/* A cursor while the answer is still arriving, so a pause reads as thinking
-                      rather than as a panel that has stopped. */}
-                  {busy && index === turns.length - 1 && (
-                    <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-slate-400 align-middle" />
-                  )}
-                </span>
-              )}
+          <Fragment key={index}>
+            {/* Where the conversation moved to another section: what an answer may read is that
+                section's, so the thread says which one each question was asked in. */}
+            {turn.role === "user" && movedSection(turns, index) && (
+              <p className="text-center text-xs text-slate-500">Now in {moduleLabel(turn.module)}</p>
+            )}
+            <div className={turn.role === "user" ? "flex justify-end" : "flex justify-start"}>
+              {/* `nebula-bubble` on the received side is a marker for globals.css and nothing else: on a
+                  dark ground the pale slate a reply sits on maps to the sunken tone, which is within a
+                  shade of the panel behind it - so the answer read as unbubbled text floating on the
+                  drawer. It is lifted rather than sunk there, which is what a reply from somebody else
+                  should look like in a thread. */}
+              <div className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm ${turn.role === "user" ? "bg-blue-50 text-blue-900" : "nebula-bubble bg-slate-50 text-slate-700"}`}>
+                {turn.error ? (
+                  <span className="text-red-700">
+                    {turn.error}
+                    <button type="button" onClick={retry} className="ml-2 underline hover:no-underline">
+                      Try again
+                    </button>
+                  </span>
+                ) : (
+                  <span className="whitespace-pre-line">
+                    {turn.content}
+                    {/* A cursor while the answer is still arriving, so a pause reads as thinking
+                        rather than as a panel that has stopped. */}
+                    {busy && index === turns.length - 1 && (
+                      <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-slate-400 align-middle" />
+                    )}
+                  </span>
+                )}
 
-              {turn.proposals?.map((proposal) => (
-                <ProposedAction key={proposal.token} module={module} proposal={proposal} onError={onError} />
-              ))}
+              </div>
             </div>
-          </div>
+          </Fragment>
         ))}
 
       </div>
@@ -273,41 +331,8 @@ export default function AIAssistant({ module = "SALES", title = "Nebula AI", onE
           placeholder={`Ask ${title}`}
         />
       </form>
-    </div>
-  );
-}
 
-/**
- * A change the assistant proposes, waiting for a person.
- *
- * Nothing has happened when this appears. The token is what carries it out, it is single-use, and
- * it expires - so a tab left open overnight cannot act in the morning.
- */
-function ProposedAction({ module, proposal, onError }) {
-  const [state, setState] = useState("idle");
-
-  if (state === "done") {
-    return <p className="mt-2 rounded-lg bg-green-50 px-3 py-2 text-xs text-green-900">Done.</p>;
-  }
-
-  async function run() {
-    setState("running");
-    try {
-      await confirmAiAction({ module, token: proposal.token });
-      setState("done");
-    } catch (error) {
-      setState("idle");
-      onError?.(error.message || "That action could not be carried out.");
-    }
-  }
-
-  return (
-    <div className="mt-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5">
-      <p className="text-xs font-medium text-slate-800">This will change a record.</p>
-      <p className="mt-0.5 break-words text-[11px] text-slate-500">{proposal.summary}</p>
-      <Button variant="primary" className="mt-2 rounded-md" disabled={state === "running"} onClick={run}>
-        {state === "running" ? "Working..." : "Confirm"}
-      </Button>
+      <FloatingNotice notice={notice} onClose={clearNotice} />
     </div>
   );
 }

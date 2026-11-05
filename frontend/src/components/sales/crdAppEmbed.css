@@ -1,0 +1,336 @@
+/*
+ * The CRD document inside the client's app and client website (`#embed=app`, PublicCrdDocumentForm
+ * sets `html[data-embed="app"]`). The app shows its own header, so the form's logo bar goes; the rest
+ * takes the app's look - Poppins, gold for the studio's blue, white cards on a soft page - in one
+ * centred column at any width, the sections as pills along the top and the choices as tiles. Only how
+ * it looks: every field, rule, save and submit is the form's own. Nothing here applies to the link
+ * opened on its own.
+ */
+@import url("https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap");
+
+html[data-embed="app"] {
+  --crd-gold: #a87528;
+  --crd-gold-deep: #8f6322;
+  --crd-tint: #fdf9f3;
+  --crd-page: #f7f5f2;
+  --crd-line: #e8e0d6;
+  --crd-ink: #1f2b28;
+  --crd-muted: #7b8481;
+  --crd-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  color-scheme: light;
+}
+
+html[data-embed="app"] body,
+html[data-embed="app"] input,
+html[data-embed="app"] select,
+html[data-embed="app"] textarea,
+html[data-embed="app"] button {
+  font-family: "Poppins", system-ui, sans-serif !important;
+}
+
+/* The app has the header: the form's logo bar goes. */
+html[data-embed="app"] main.crd-public-form > header {
+  display: none !important;
+}
+
+html[data-embed="app"] main.crd-public-form,
+html[data-embed="app"] main.crd-public-form > form,
+html[data-embed="app"] main.crd-public-form > form > div:first-child,
+html[data-embed="app"] main.crd-public-form main {
+  background: var(--crd-page) !important;
+}
+
+/* One column at every width: the section list on top, the sections below it. */
+html[data-embed="app"] main.crd-public-form > form > div:first-child {
+  flex-direction: column !important;
+}
+html[data-embed="app"] main.crd-public-form aside {
+  width: 100% !important;
+  border: 0 !important;
+  background: var(--crd-page) !important;
+}
+html[data-embed="app"] main.crd-public-form aside nav {
+  position: static !important;
+  display: flex !important;
+  gap: 8px !important;
+  /* The card's width plus its side margins, so the first pill lines up with the card's edge. */
+  max-width: 852px;
+  margin: 0 auto;
+  padding: 14px 16px 2px !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+html[data-embed="app"] main.crd-public-form aside nav button {
+  width: auto !important;
+  margin: 0 !important;
+  min-height: 38px !important;
+  padding: 7px 18px !important;
+  border: 1px solid var(--crd-line) !important;
+  border-radius: 999px !important;
+  background: #fff !important;
+  color: var(--crd-ink) !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  white-space: nowrap;
+  transition: background 0.2s var(--crd-ease), color 0.2s var(--crd-ease), border-color 0.2s var(--crd-ease);
+}
+html[data-embed="app"] main.crd-public-form aside nav button[aria-current="true"],
+html[data-embed="app"] main.crd-public-form aside nav button.bg-blue-50 {
+  border-color: var(--crd-ink) !important;
+  background: var(--crd-ink) !important;
+  color: #fff !important;
+}
+html[data-embed="app"] main.crd-public-form aside nav button.cursor-not-allowed {
+  opacity: 0.55;
+}
+/* The fade the list draws at its scrolling edge belongs to its old white bar. */
+html[data-embed="app"] main.crd-public-form aside > div[aria-hidden],
+html[data-embed="app"] main.crd-public-form aside > span[aria-hidden] {
+  display: none !important;
+}
+
+/* Each section: a white card in the centred column, rising in. */
+html[data-embed="app"] section[data-schema-section] {
+  max-width: 820px;
+  margin: 14px auto 18px !important;
+  width: calc(100% - 32px) !important;
+  border: 1px solid var(--crd-line);
+  border-radius: 20px;
+  background: #fff !important;
+  overflow: hidden;
+  box-shadow: 0 6px 24px rgba(31, 43, 40, 0.05);
+  animation: crd-rise 0.45s var(--crd-ease) both;
+}
+html[data-embed="app"] section[data-schema-section] > div.sticky {
+  position: static !important;
+  border-bottom: 1px solid var(--crd-line) !important;
+  background: var(--crd-tint) !important;
+}
+html[data-embed="app"] section[data-schema-section] > div {
+  max-width: none !important;
+}
+html[data-embed="app"] section[data-schema-section] > div > div {
+  max-width: none !important;
+}
+html[data-embed="app"] section[data-schema-section] h2 {
+  color: var(--crd-ink) !important;
+  font-size: 17px !important;
+  font-weight: 600 !important;
+}
+@keyframes crd-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Words and fields in the app's colours. */
+html[data-embed="app"] main.crd-public-form label,
+html[data-embed="app"] main.crd-public-form .text-slate-700,
+html[data-embed="app"] main.crd-public-form .text-slate-800,
+html[data-embed="app"] main.crd-public-form .text-slate-900 {
+  color: var(--crd-ink) !important;
+}
+html[data-embed="app"] main.crd-public-form .text-slate-400,
+html[data-embed="app"] main.crd-public-form .text-slate-500,
+html[data-embed="app"] main.crd-public-form .text-slate-600 {
+  color: var(--crd-muted) !important;
+}
+html[data-embed="app"] main.crd-public-form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+html[data-embed="app"] main.crd-public-form select,
+html[data-embed="app"] main.crd-public-form textarea {
+  min-height: 46px;
+  border-color: var(--crd-line) !important;
+  border-radius: 14px !important;
+  background: #fff !important;
+  color: var(--crd-ink) !important;
+  font-size: 15px !important;
+  transition: border-color 0.2s var(--crd-ease), box-shadow 0.2s var(--crd-ease);
+}
+/* Filled in by the studio (Event ID, the group's name): shown, not to be typed in. As specific as the
+   rule above, and after it, so it wins. */
+html[data-embed="app"] main.crd-public-form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):is([readonly], :disabled) {
+  background: var(--crd-page) !important;
+  color: var(--crd-muted) !important;
+}
+html[data-embed="app"] main.crd-public-form input:not([type="checkbox"]):not([type="radio"]):focus,
+html[data-embed="app"] main.crd-public-form select:focus,
+html[data-embed="app"] main.crd-public-form textarea:focus {
+  border-color: var(--crd-gold) !important;
+  box-shadow: 0 0 0 3px rgba(168, 117, 40, 0.18) !important;
+  outline: none !important;
+}
+/* The phone box's country code and number sit as one rounded field. */
+html[data-embed="app"] main.crd-public-form .rounded-md,
+html[data-embed="app"] main.crd-public-form .rounded-lg {
+  border-radius: 14px !important;
+}
+html[data-embed="app"] main.crd-public-form .border-slate-200,
+html[data-embed="app"] main.crd-public-form .border-slate-300 {
+  border-color: var(--crd-line) !important;
+}
+
+/* A choice of one (or several): tiles that wrap, the chosen one in gold. */
+html[data-embed="app"] main.crd-public-form div:has(> label > input[type="radio"]),
+html[data-embed="app"] main.crd-public-form div:has(> label > input[type="checkbox"]):has(> label + label) {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px !important;
+}
+html[data-embed="app"] main.crd-public-form label:has(> input[type="radio"]),
+html[data-embed="app"] main.crd-public-form div:has(> label + label) > label:has(> input[type="checkbox"]) {
+  min-height: 46px;
+  padding: 10px 14px;
+  border: 1px solid var(--crd-line);
+  border-radius: 14px;
+  background: #fff;
+  transition: border-color 0.2s var(--crd-ease), background 0.2s var(--crd-ease), transform 0.15s var(--crd-ease);
+}
+html[data-embed="app"] main.crd-public-form label:has(> input[type="radio"]):hover,
+html[data-embed="app"] main.crd-public-form div:has(> label + label) > label:has(> input[type="checkbox"]):hover {
+  border-color: rgba(168, 117, 40, 0.5);
+}
+html[data-embed="app"] main.crd-public-form label:has(> input:checked) {
+  border-color: var(--crd-gold) !important;
+  background: var(--crd-tint) !important;
+  font-weight: 500;
+}
+html[data-embed="app"] main.crd-public-form label:has(> input[type="radio"]):active {
+  transform: scale(0.98);
+}
+html[data-embed="app"] main.crd-public-form input[type="radio"],
+html[data-embed="app"] main.crd-public-form input[type="checkbox"] {
+  width: 18px !important;
+  height: 18px !important;
+  accent-color: var(--crd-gold) !important;
+  /* The form's tick boxes draw their tick in the text colour. */
+  color: var(--crd-gold) !important;
+}
+/* Checked: the form paints the box itself (blue), so it is painted gold here. */
+html[data-embed="app"] main.crd-public-form input[type="checkbox"]:checked,
+html[data-embed="app"] main.crd-public-form input[type="radio"]:checked {
+  border-color: var(--crd-gold) !important;
+  background-color: var(--crd-gold) !important;
+}
+/* The keyboard's focus ring in gold, not the studio's blue. */
+html[data-embed="app"] main.crd-public-form :focus-visible {
+  outline-color: var(--crd-gold) !important;
+}
+html[data-embed="app"] main.crd-public-form aside nav button:focus:not(:focus-visible) {
+  outline: none !important;
+}
+
+/* The studio's blue becomes the app's gold. */
+html[data-embed="app"] main.crd-public-form .bg-blue-500,
+html[data-embed="app"] main.crd-public-form .bg-blue-600,
+html[data-embed="app"] main.crd-public-form .bg-blue-700,
+html[data-embed="app"] main.crd-public-form button[type="submit"] {
+  border-color: var(--crd-gold) !important;
+  background: var(--crd-gold) !important;
+  color: #fff !important;
+}
+html[data-embed="app"] main.crd-public-form .bg-blue-50,
+html[data-embed="app"] main.crd-public-form .bg-blue-100 {
+  background: var(--crd-tint) !important;
+}
+html[data-embed="app"] main.crd-public-form .text-blue-500,
+html[data-embed="app"] main.crd-public-form .text-blue-600,
+html[data-embed="app"] main.crd-public-form .text-blue-700 {
+  color: var(--crd-gold) !important;
+}
+html[data-embed="app"] main.crd-public-form .border-blue-300,
+html[data-embed="app"] main.crd-public-form .border-blue-400,
+html[data-embed="app"] main.crd-public-form .border-blue-500 {
+  border-color: var(--crd-gold) !important;
+}
+
+/* The bar at the bottom: progress and the buttons, held to the same column. */
+html[data-embed="app"] main.crd-public-form > form > div.shrink-0 {
+  border-top: 1px solid var(--crd-line) !important;
+  background: #fff !important;
+  padding-left: max(16px, calc((100% - 820px) / 2)) !important;
+  padding-right: max(16px, calc((100% - 820px) / 2)) !important;
+}
+html[data-embed="app"] main.crd-public-form > form > div.shrink-0 .bg-slate-200 {
+  background: var(--crd-line) !important;
+}
+html[data-embed="app"] main.crd-public-form > form > div.shrink-0 button {
+  min-height: 42px;
+  padding: 0 22px !important;
+  border-radius: 999px !important;
+  font-weight: 600 !important;
+  transition: background 0.2s var(--crd-ease), transform 0.15s var(--crd-ease);
+}
+html[data-embed="app"] main.crd-public-form > form > div.shrink-0 button:active {
+  transform: scale(0.97);
+}
+html[data-embed="app"] main.crd-public-form > form > div.shrink-0 button[type="button"]:not(.bg-blue-600) {
+  border: 1px solid var(--crd-line) !important;
+  background: #fff !important;
+  color: var(--crd-ink) !important;
+}
+html[data-embed="app"] main.crd-public-form > form > div.shrink-0 button:hover:not(:disabled).bg-blue-600 {
+  background: var(--crd-gold-deep) !important;
+}
+
+/* A computer (the client website): the sections down a column on the left, the form beside it. */
+@media (min-width: 900px) {
+  html[data-embed="app"] main.crd-public-form > form > div:first-child {
+    flex-direction: row !important;
+  }
+  html[data-embed="app"] main.crd-public-form aside {
+    width: 240px !important;
+    flex: none !important;
+    border-right: 1px solid var(--crd-line) !important;
+    background: #fff !important;
+  }
+  html[data-embed="app"] main.crd-public-form aside nav {
+    position: sticky !important;
+    top: 0;
+    flex-direction: column !important;
+    gap: 6px !important;
+    max-width: none;
+    margin: 0;
+    padding: 18px 14px !important;
+    overflow: visible !important;
+  }
+  html[data-embed="app"] main.crd-public-form aside nav button {
+    width: 100% !important;
+    min-height: 44px !important;
+    padding: 10px 16px !important;
+    border-color: transparent !important;
+    border-radius: 12px !important;
+    background: transparent !important;
+    text-align: left !important;
+    white-space: normal;
+  }
+  html[data-embed="app"] main.crd-public-form aside nav button:hover:not(.cursor-not-allowed):not(.bg-blue-50):not([aria-current="true"]) {
+    background: var(--crd-tint) !important;
+  }
+  html[data-embed="app"] main.crd-public-form aside nav button[aria-current="true"],
+  html[data-embed="app"] main.crd-public-form aside nav button.bg-blue-50 {
+    border-color: var(--crd-ink) !important;
+    background: var(--crd-ink) !important;
+    color: #fff !important;
+  }
+  /* The bottom bar lines up with the form, beside the column. */
+  html[data-embed="app"] main.crd-public-form > form > div.shrink-0 {
+    padding-left: calc(240px + max(16px, (100% - 240px - 820px) / 2)) !important;
+    padding-right: max(16px, calc((100% - 240px - 820px) / 2)) !important;
+  }
+}
+
+@media (max-width: 640px) {
+  html[data-embed="app"] main.crd-public-form div:has(> label > input[type="radio"]) {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  html[data-embed="app"] section[data-schema-section] {
+    width: calc(100% - 24px) !important;
+    margin: 10px auto 14px !important;
+    border-radius: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-embed="app"] section[data-schema-section] {
+    animation: none;
+  }
+}

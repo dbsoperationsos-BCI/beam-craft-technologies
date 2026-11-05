@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { defaultDurationFor, duplicatePricingLines, matchServiceSize, pricedServiceSizeOptions, pricedTimingModesFor, pricingForSave, pricingFormLines, servicePriceForShoot } from "../src/lib/servicePricing.mjs";
+import { defaultDurationFor, duplicatePricingLines, matchServiceSize, pricedServiceSizeOptions, pricedTimingModesFor, pricingForSave, pricingFormLines, servicePriceForShoot, defaultSessionOptionId, serviceSessionOptions, serviceTimingModes } from "../src/lib/servicePricing.mjs";
 
 /*
  * A service priced per shoot type and session timing, and the price a quotation's shoot takes.
@@ -27,7 +27,7 @@ test("a service opens on its stored lines, hours included, or on one empty line 
   assert.deepEqual(lines.map((line) => line.price), ["5000", "9000", "2000", "2800", "12000"]);
   assert.deepEqual(lines.map((line) => line.hours), ["", "", "2", "3", ""]);
   // A session line reads the length it was saved with, or the studio's own where none was.
-  assert.deepEqual(lines.map((line) => line.duration), ["5-6 Hours", "10-12 Hours (Full)", "", "", "10-12 Hours (Full)"]);
+  assert.deepEqual(lines.map((line) => line.duration), ["5-6 Hours", "8-10 Hours (Full)", "", "", "8-10 Hours (Full)"]);
   const fresh = pricingFormLines(null);
   assert.equal(fresh.length, 1);
   // `deliverables` is the variants this booking brings with it, empty until any are mapped.
@@ -36,7 +36,7 @@ test("a service opens on its stored lines, hours included, or on one empty line 
 
 test("a session line starts on the studio's own length, and an hourly line on none", () => {
   assert.equal(defaultDurationFor("HALF_SESSION"), "4-5 Hours (Half)");
-  assert.equal(defaultDurationFor("FULL_SESSION"), "10-12 Hours (Full)");
+  assert.equal(defaultDurationFor("FULL_SESSION"), "8-10 Hours (Full)");
   assert.equal(defaultDurationFor("HOURS_MINUTES"), "");
 });
 
@@ -58,7 +58,7 @@ test("only complete lines with a figure are saved; an hourly line needs its hour
     { shootType: "STUDIO", timingMode: "HOURS_MINUTES", hours: 3, price: 2800 },
   ]);
   // A session line with its duration left blank is saved with the studio's own length.
-  assert.equal(pricingForSave([{ shootType: "OUTDOOR", timingMode: "FULL_SESSION", duration: "", price: "1" }])[0].duration, "10-12 Hours (Full)");
+  assert.equal(pricingForSave([{ shootType: "OUTDOOR", timingMode: "FULL_SESSION", duration: "", price: "1" }])[0].duration, "8-10 Hours (Full)");
   // Two hours and three hours are two bookings; three hours twice is one booking priced twice.
   assert.deepEqual(duplicatePricingLines(lines).sort(), ["STUDIO:HALF_SESSION", "STUDIO:HOURS_MINUTES:3"]);
   assert.deepEqual(duplicatePricingLines(lines.slice(0, 7)), []);
@@ -87,10 +87,10 @@ test("a service sold by size prices the same booking once per size, and a line o
   assert.equal(matchServiceSize("55 INCH", values)?.id, "tv55");
   assert.equal(matchServiceSize("50 inch", values), null);
   const lines = [
-    { id: "a", shootType: "STUDIO", timingMode: "FULL_SESSION", hours: "", duration: "10-12 Hours (Full)", size: "55 inch", sizeOptionValueId: "tv55", price: "9000" },
-    { id: "b", shootType: "STUDIO", timingMode: "FULL_SESSION", hours: "", duration: "10-12 Hours (Full)", size: "65 inch", sizeOptionValueId: "tv65", price: "12000" },
-    { id: "c", shootType: "STUDIO", timingMode: "FULL_SESSION", hours: "", duration: "10-12 Hours (Full)", size: "", sizeOptionValueId: "", price: "1" },
-    { id: "d", shootType: "STUDIO", timingMode: "FULL_SESSION", hours: "", duration: "10-12 Hours (Full)", size: " 55 Inch ", sizeOptionValueId: "tv55", price: "9500" },
+    { id: "a", shootType: "STUDIO", timingMode: "FULL_SESSION", hours: "", duration: "8-10 Hours (Full)", size: "55 inch", sizeOptionValueId: "tv55", price: "9000" },
+    { id: "b", shootType: "STUDIO", timingMode: "FULL_SESSION", hours: "", duration: "8-10 Hours (Full)", size: "65 inch", sizeOptionValueId: "tv65", price: "12000" },
+    { id: "c", shootType: "STUDIO", timingMode: "FULL_SESSION", hours: "", duration: "8-10 Hours (Full)", size: "", sizeOptionValueId: "", price: "1" },
+    { id: "d", shootType: "STUDIO", timingMode: "FULL_SESSION", hours: "", duration: "8-10 Hours (Full)", size: " 55 Inch ", sizeOptionValueId: "tv55", price: "9500" },
     { id: "e", shootType: "STUDIO", timingMode: "HALF_SESSION", hours: "", duration: "4-5 Hours (Half)", size: "Custom 70", sizeOptionValueId: "", price: "3000" },
   ];
   // Two sizes of one booking are two prices; a line with no size is not a booking; a size twice is a repeat.
@@ -113,4 +113,25 @@ test("a shoot the pricing does not cover falls back, rather than pricing at zero
   assert.equal(servicePriceForShoot({ pricing }, { shootTypes: ["Outdoor / On-Location"], sessionTimings: ["Half Session"] }), null);
   assert.equal(servicePriceForShoot({ pricing: [] }, { shootTypes: ["Studio / In-House"], sessionTimings: ["Half Session"] }), null);
   assert.equal(servicePriceForShoot({}, { shootTypes: ["Studio / In-House"], sessionTimings: ["Half Session"] }), null);
+});
+
+// The studio's Service Session Timing set, as the API attaches it to a service.
+const SESSIONS = { values: [{ id: "t-full", code: "FULL_SESSION", label: "Full Session" }, { id: "t-half", code: "HALF_SESSION", label: "Half Session" }, { id: "t-old", code: "HALF_SESSION", label: "Old half", isActive: false }] };
+const sessionService = (timingModes) => ({ timingModes, timingOptionSet: SESSIONS });
+
+test("a new service line starts on the shoot's own session, where the service offers exactly that one", () => {
+  const both = sessionService(["HALF_SESSION", "FULL_SESSION"]);
+  assert.equal(defaultSessionOptionId(both, { sessionTimings: ["Half Session"] }), "t-half");
+  assert.equal(defaultSessionOptionId(both, { sessionTimings: ["Full Session"] }), "t-full");
+  assert.equal(defaultSessionOptionId(both, { sessionTiming: "Half Session" }), "t-half", "the single field of an older shoot reads the same");
+  // Nothing the service does not offer, and no nearest guess.
+  assert.equal(defaultSessionOptionId(sessionService(["FULL_SESSION"]), { sessionTimings: ["Half Session"] }), "");
+  assert.equal(defaultSessionOptionId(sessionService(["HOURS_MINUTES"]), { sessionTimings: ["Half Session"] }), "");
+  // An hourly shoot has no session to pick: the line's Hours / Minutes box is its timing.
+  assert.equal(defaultSessionOptionId(both, { sessionTimings: ["Hourly"] }), "");
+  assert.equal(defaultSessionOptionId(sessionService(["NONE"]), { sessionTimings: ["Half Session"] }), "", "a service with no timing has none to start on");
+  assert.equal(defaultSessionOptionId(both, {}), "");
+  // It is always one of the choices the line's dropdown lists.
+  assert.deepEqual(serviceSessionOptions(sessionService(["HALF_SESSION"])).map((option) => option.id), ["t-half"]);
+  assert.deepEqual(serviceTimingModes({ timingMode: "FULL_SESSION" }), ["FULL_SESSION"]);
 });

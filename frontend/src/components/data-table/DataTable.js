@@ -8,21 +8,26 @@ import ManageColumnsDialog from "./ManageColumnsDialog";
 import { useSelectionActions } from "./TableSelectionActions";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import TextAreaField from "@/components/shared/TextAreaField";
+import useFormErrors from "@/components/shared/useFormErrors";
 import ChevronIcon from "@/components/ui/ChevronIcon";
 import Loader from "@/components/shared/Loader";
 import useCompactView from "@/components/shared/useCompactView";
 import { usePreference } from "@/components/preferences/PreferencesProvider";
 import { createExportFileName, exportToCsv } from "@/lib/tableExport";
+import { createDoubleTap } from "@/lib/doubleTap.mjs";
 import { edgeScrollSpeed } from "@/lib/dragEdgeScroll.mjs";
 import { CELL_CLIP, EXPAND_COLUMN_ID, FILTER_CLIP, HEADER_CLIP, SELECT_COLUMN_ID, effectiveFreezeCount as resolveFreezeCount, reorderColumnOrder, slugify, tableLayoutKey, weaveColumnOrder } from "./tableLayout";
 import { selectionHeaderState, toggleAllIds, toggleId } from "./tableSelection";
 import Checkbox from "@/components/shared/Checkbox";
+import HelpTip from "@/components/shared/HelpTip";
 import { importTableRows } from "@/services/api/tableImport.service";
 import FilterMultiSelect from "@/components/shared/FilterMultiSelect";
 import FilterCombobox from "@/components/shared/FilterCombobox";
 import FilterDateInput from "@/components/shared/FilterDateInput";
 import FilterTimeInput from "@/components/shared/FilterTimeInput";
-import { distinctFilterValues } from "./tableCells";
+import { distinctFilterValues, knownFilterValues, knownListFor } from "./tableCells";
+import useKnownFilterLists from "./useKnownFilterLists";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 const DEFAULT_PAGE_SIZE = 50;
 
@@ -112,7 +117,14 @@ const setSelectionModel = ({ selectedIds, onSelectionChange }) => ({
   clear: () => onSelectionChange(new Set()),
 });
 
-function selectColumn({ model, rowId, rowLabel, canSelectRow, width = 40, headerLabel }) {
+/*
+ * `subRows`: the rows under a row are records of this register too - Accounts Manager's cash entries
+ * under their project - so each gets its own box, the row above them a box that ticks or clears all of
+ * them (showing part-ticked when some are), and "select all" takes them in. Off by default: on most
+ * expandable tables a sub-row is part of the row above it (a project's shoot), not a record of its own.
+ */
+function selectColumn({ model, rowId, rowLabel, canSelectRow, width = 40, headerLabel, subRows = false }) {
+  const selectableIds = (rows) => rows.filter((row) => !canSelectRow || canSelectRow(row.original)).map((row) => rowId(row));
   return {
     id: SELECT_COLUMN_ID,
     header: ({ table }) => {
@@ -125,9 +137,10 @@ function selectColumn({ model, rowId, rowLabel, canSelectRow, width = 40, header
        * Depth 0 only. A sub-row belongs to the row above it and is not a record of this register, so
        * a selection of ten rows must not answer forty because some of them opened.
        */
-      const ids = table.getRowModel().rows
-        .filter((row) => row.depth === 0 && (!canSelectRow || canSelectRow(row.original)))
-        .map((row) => rowId(row));
+      const topRows = table.getRowModel().rows.filter((row) => row.depth === 0);
+      const ids = subRows
+        ? [...new Set(topRows.flatMap((row) => [...selectableIds([row]), ...selectableIds(row.subRows || [])]))]
+        : selectableIds(topRows);
       const { checked, indeterminate } = model.headerState(ids);
       // A paged table can say what "all" means - "Select all 5,769 leads in Dum Dum" - where a
       // table holding every row can only say "every row shown". The page passes the words.
@@ -161,7 +174,20 @@ function selectColumn({ model, rowId, rowLabel, canSelectRow, width = 40, header
        * invites beside employees, and an invite is not a row of the employee register - ticking one
        * would send an id the bulk route can only reject.
        */
-      if (canSelectRow && !canSelectRow(row.original)) return null;
+      if (canSelectRow && !canSelectRow(row.original)) {
+        // A row standing for the records under it: its box ticks or clears all of them.
+        const childIds = subRows ? selectableIds(row.subRows || []) : [];
+        if (!childIds.length) return null;
+        const { checked, indeterminate } = model.headerState(childIds);
+        return <span className="flex items-center" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+          <Checkbox
+            ariaLabel={`${checked ? "Clear" : "Select"} the ${childIds.length} under ${rowLabel?.(row.original) || "this row"}`}
+            checked={checked}
+            indeterminate={indeterminate}
+            onChange={() => model.toggleAll(childIds)}
+          />
+        </span>;
+      }
       const id = rowId(row);
       return <span className="flex items-center" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
         <Checkbox
@@ -184,6 +210,16 @@ const MENU_COLUMN = { id: "actions", header: "", label: "Actions", fixed: true, 
 
 function columnId(definition) {
   return definition.id || definition.accessorKey;
+}
+
+/**
+ * The columns that hold values, under any headings that group them. A table may lay its columns
+ * out under group headings - `{ id, header, columns: [...] }`, a band over the columns it names, as
+ * on Payroll's sheet - and everything that asks about *columns* (what is configured, what can be
+ * hidden, what is visible) asks about these, never about the headings.
+ */
+function leafDefinitions(columns) {
+  return columns.flatMap((column) => (Array.isArray(column.columns) ? leafDefinitions(column.columns) : [column]));
 }
 
 /** The control a column asked for under its heading, if it asked: `date`, `time` or `combobox`. */
@@ -213,8 +249,18 @@ const MIN_RESIZE_PX = 60;
 const resolveUpdater = (next, current) => (typeof next === "function" ? next(current) : next);
 
 function humanizeFieldName(field) {
-  return String(field).replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()).replace(/\bId\b/g, "ID");
+  // A person's name sent beside a user id reads as the person: `createdByName` is "Created By".
+  const shown = /ByName$/.test(field) ? String(field).replace(/Name$/, "") : field;
+  return String(shown).replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()).replace(/\bId\b/g, "ID");
 }
+
+/*
+ * A field holding a user id - `createdBy`, `updatedByUserId`, `decidedById` - is never offered as a
+ * column: a number is nobody. The server sends the person's name beside it (`createdByName`, from the
+ * user's linked employee - `services/userNames`), and that is the column.
+ */
+const USER_ID_FIELD = /(?:By|ByUserId|ById)$/;
+const isUserIdField = (field, rows) => USER_ID_FIELD.test(field) && rows.every((row) => row?.[field] === null || row?.[field] === undefined || typeof row[field] === "number");
 
 function displayBackendValue(value) {
   if (value === null || value === undefined || value === "") return "—";
@@ -237,7 +283,9 @@ function displayBackendValue(value) {
  * One value behaves exactly as it always did: contained, ignoring case. A list matches a row whose
  * value is any of the ticked ones - equal first, since that is what picking from a list means, and
  * contained as a fallback so a column whose options are drawn from a formatted value still matches.
- * An empty list is not a filter and keeps every row.
+ * An empty list is not a filter and keeps every row. Typed text is a word-chunk search
+ * (`matchesWordChunks`): a row is kept when every chunk typed is found in it, each anywhere - inside
+ * a word too - in any order: "we ot" keeps "WED other", not "WED second". One chunk is as it always was.
  */
 function defaultFilterFn(row, columnId, filterValue) {
   const text = String(row.getValue(columnId) ?? "").trim().toLowerCase();
@@ -248,27 +296,62 @@ function defaultFilterFn(row, columnId, filterValue) {
       return wanted === text || (Boolean(wanted) && text.includes(wanted));
     });
   }
-  const wanted = String(filterValue ?? "").trim().toLowerCase();
-  return !wanted || text.includes(wanted);
+  return matchesWordChunks(text, filterValue);
 }
 
-function normalizeColumns(columns, renderActions) {
+/*
+ * Filtering a table of projects with their shoots under them, where either can be what is being
+ * looked for. A shoot is kept when **it** matches or when its project does: searching a project
+ * brings the whole project, shoots and all, and searching a shoot id brings that shoot alone. The
+ * table filters from the leaves up (`filterFromLeafRows`), so a project kept only by a shoot of its
+ * own stays listed and the rest of its shoots do not.
+ *
+ * The parent is read from the **core** rows, never `row.getParentRow()`: that reads the model being
+ * built and hangs the table.
+ */
+const keepingSubRows = (filterFn, tableRef) => {
+  const wrapped = (row, columnId, filterValue, addMeta) => {
+    if (filterFn(row, columnId, filterValue, addMeta)) return true;
+    const parent = row.depth > 0 && row.parentId ? tableRef.current?.getCoreRowModel().rowsById[row.parentId] : null;
+    return Boolean(parent) && filterFn(parent, columnId, filterValue, addMeta);
+  };
+  if (filterFn.autoRemove) wrapped.autoRemove = filterFn.autoRemove;
+  if (filterFn.resolveFilterValue) wrapped.resolveFilterValue = filterFn.resolveFilterValue;
+  return wrapped;
+};
+
+function normalizeColumns(columns, renderActions, tableRef = null) {
   return columns.map((column) => {
     const id = columnId(column);
+    // A group heading: its columns normalised in turn, and the heading itself a label - nothing to
+    // sort, filter, resize, drag or hide on its own (`fixed`).
+    if (Array.isArray(column.columns)) {
+      return {
+        ...column,
+        id,
+        header: column.header ?? column.label ?? id,
+        columns: normalizeColumns(column.columns, renderActions, tableRef),
+        enableSorting: false,
+        enableColumnFilter: false,
+        enableResizing: false,
+        meta: { ...column.meta, group: true, fixed: true },
+      };
+    }
     const accessorFn = column.accessorFn
       || column.value
       || (column.accessorKey ? (row) => row?.[column.accessorKey] : undefined);
     const cell = column.cell || (column.render ? ({ row }) => column.render(row.original) : undefined);
+    /*
+     * A column that wrote its own filter keeps it - those are deliberate, and the ones that exist
+     * already understand a list. Everything else, including a column that named one of TanStack's
+     * by string, takes the one above, which handles a typed value and a picked list alike.
+     */
+    const filterFn = typeof column.filterFn === "function" ? column.filterFn : defaultFilterFn;
     return {
       ...column,
       id,
       header: column.header ?? column.label ?? id,
-      /*
-       * A column that wrote its own filter keeps it - those are deliberate, and the ones that exist
-       * already understand a list. Everything else, including a column that named one of TanStack's
-       * by string, takes the one above, which handles a typed value and a picked list alike.
-       */
-      ...(typeof column.filterFn === "function" ? {} : { filterFn: defaultFilterFn }),
+      filterFn: tableRef ? keepingSubRows(filterFn, tableRef) : filterFn,
       ...(accessorFn ? { accessorFn } : {}),
       // Only set when there is one to set. Passing `cell: undefined` does not mean "no opinion" -
       // it overwrites the table's own default renderer, and the column then draws nothing at all.
@@ -280,7 +363,9 @@ function normalizeColumns(columns, renderActions) {
       enableSorting: column.enableSorting ?? column.sortable !== false,
       enableColumnFilter: column.enableColumnFilter ?? column.filterable !== false,
       enableResizing: column.enableResizing ?? column.resizable !== false,
-      meta: { ...column.meta, fixed: column.meta?.fixed ?? column.fixed, exportKey: column.meta?.exportKey ?? column.exportKey },
+      // `baseFilterFn` is the column's own filter, before the wrapper above: what a row matching on
+      // its own means, which is how `openedByFilter` knows a project was kept by a shoot of its own.
+      meta: { ...column.meta, fixed: column.meta?.fixed ?? column.fixed, exportKey: column.meta?.exportKey ?? column.exportKey, baseFilterFn: filterFn },
     };
   });
 }
@@ -348,17 +433,51 @@ export const TABLE_DENSITIES = {
 const WINDOW_OVERSCAN = 20;
 const WINDOW_MIN_ROWS = 120;
 
-const DataTableRow = memo(function DataTableRow({ row, original, selected, nested, scale, sizedStyle, stickyStyle, onRowClick, onRowDoubleClick, onRowContextMenu, hoverClassName }) {
+/*
+ * A row that opens on double click has to open on a phone too, where two taps rarely arrive as a
+ * `dblclick` (iOS Safari zooms instead). The taps are counted by hand; a native `dblclick` that
+ * does follow them (Chrome on Android) is then ignored, so the record is not opened twice.
+ */
+const rowTaps = createDoubleTap();
+let tapOpenedAt = 0;
+
+const DataTableRow = memo(function DataTableRow({ row, original, selected, nested, scale, sizedStyle, stickyStyle, onRowClick, onRowDoubleClick, onRowContextMenu, hoverClassName, focusable }) {
   return <tr
     // Marks a real record row, so the measurer can find one to take a height from without
     // catching a spacer, the loader or the empty-state line.
     data-row=""
     onClick={() => onRowClick?.(original)}
-    onDoubleClick={() => onRowDoubleClick?.(original)}
+    /*
+     * A row that is the only way into its record (`focusableRows`) is reachable by Tab and opened
+     * by Enter or Space, the way a button would be - without being one: a `<tr>` cannot hold a
+     * button, and a button inside every cell would be a nested control inside a clickable row. A
+     * key pressed on a control inside the row (a checkbox, a menu) is that control's own.
+     */
+    tabIndex={focusable && onRowClick ? 0 : undefined}
+    onKeyDown={focusable && onRowClick ? (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      if (event.target !== event.currentTarget) return;
+      event.preventDefault();
+      onRowClick(original);
+    } : undefined}
+    onDoubleClick={() => {
+      if (Date.now() - tapOpenedAt < 600) return;
+      onRowDoubleClick?.(original);
+    }}
+    onTouchStart={onRowDoubleClick ? (event) => rowTaps.start(event.changedTouches[0].clientX, event.changedTouches[0].clientY) : undefined}
+    onTouchEnd={onRowDoubleClick ? (event) => {
+      // A tap on the ⋮ menu or a checkbox belongs to that control, not to the row.
+      if (event.target.closest?.("button, a, input, label, [role='menu']")) return;
+      const touch = event.changedTouches[0];
+      if (!rowTaps.end(touch.clientX, touch.clientY, original, Date.now())) return;
+      tapOpenedAt = Date.now();
+      event.preventDefault();
+      onRowDoubleClick(original);
+    } : undefined}
     // A right-click, for a table whose rows carry a menu of their own - the CRM board's. The page
     // decides what it does, including whether the browser's own menu is suppressed.
     onContextMenu={onRowContextMenu ? (event) => onRowContextMenu(original, event) : undefined}
-    className={`group border-b border-slate-100 ${onRowClick || onRowDoubleClick ? "cursor-pointer" : ""} ${selected ? "bg-blue-50" : nested ? "data-table-subrow" : hoverClassName}`}
+    className={`group border-b border-slate-100 ${onRowClick || onRowDoubleClick ? "cursor-pointer" : ""} ${onRowDoubleClick ? "touch-manipulation" : ""} ${focusable && onRowClick ? "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500" : ""} ${selected ? "bg-blue-50" : nested ? "data-table-subrow" : hoverClassName}`}
   >{row.getVisibleCells().map((cell, index) => <td
     key={cell.id}
     /*
@@ -397,6 +516,7 @@ const DataTableRow = memo(function DataTableRow({ row, original, selected, neste
   && prev.onRowDoubleClick === next.onRowDoubleClick
   && prev.onRowContextMenu === next.onRowContextMenu
   && prev.hoverClassName === next.hoverClassName
+  && prev.focusable === next.focusable
   && prev.scale === next.scale
   && prev.sizedStyle === next.sizedStyle
   && prev.stickyStyle === next.stickyStyle);
@@ -428,6 +548,16 @@ export default function DataTable({
   emptyMessage = "No records found.",
   noMatchMessage = "No matching records found.",
   selectedRowId,
+  /*
+   * One filter to put in the row of filter boxes, when this changes.
+   *
+   * For arriving from somewhere else: a "Navigate to" from another board names its project, and the
+   * board answers by filtering to it - the row stands alone on screen, the filter box says why, and
+   * clearing it gives the whole board back. Scrolling to the row instead was the first attempt and
+   * a poor one: on a board of hundreds it moved a highlight somewhere below the fold, which is
+   * exactly the hunting it was meant to spare the reader.
+   */
+  filterPreset,
   onRowClick,
   onRowDoubleClick,
   /*
@@ -442,6 +572,10 @@ export default function DataTable({
    * the reader's hand on the day they moved here.
    */
   rowHoverClassName = "hover:bg-slate-50",
+  // Rows reachable by Tab and opened by Enter or Space, for a table where the row click is the only
+  // way into a record. Off by default: a table whose rows also carry a ⋮ menu or a double-click
+  // already has a keyboard path through those.
+  focusableRows = false,
   renderActions,
   getRowId,
   /*
@@ -471,6 +605,13 @@ export default function DataTable({
   // table sharing its `ariaLabel` with another, or a page reusing one DataTable for two logically
   // different tables, needs to pass this.
   columnOrderKey,
+  /*
+   * Told the table's own sort whenever a header changes it - `[{ id, desc }]`, or `[]` once it is
+   * back to the order the rows came in. Only for a page that needs to know the rows on screen are no
+   * longer in their own order (a row-reorder grip, which would move rows the reader cannot see
+   * move); a page that sorts the rows itself passes `features.sorting.onChange` instead.
+   */
+  onSortChange,
 }) {
   const filtering = features.filtering !== false;
   const sortingEnabled = features.sorting !== false;
@@ -501,6 +642,13 @@ export default function DataTable({
    * first filter to stop exactly that shake (see `pinCurrentWidths`), and lives with it on append.
    */
   const autoLayout = features.layout === "auto";
+  /*
+   * `layout: "fill"` is the fixed layout stretched to the pane: the columns keep the widths they
+   * declare as their minimum, and a pane wider than their sum shares the spare width out in
+   * proportion to them rather than leaving a blank strip beside the last column. For a paged table
+   * of a few columns - User Activity Logs - on a wide screen. A pulled column still fixes widths.
+   */
+  const fillLayout = features.layout === "fill";
   /*
    * On unless a table says otherwise, which is how `filtering`, `sorting` and `columnReorder` above
    * already read. It was opt-in and almost nothing opted in - and the reason was the layout switch
@@ -540,7 +688,11 @@ export default function DataTable({
   const storedOrder = Array.isArray(layout.columnOrder) ? layout.columnOrder : null;
   const storedFreezeCount = Number.isInteger(layout.freezeCount) ? layout.freezeCount : Math.max(0, features.frozenColumns?.count || 0);
   const columnSizing = layout.columnSizing || EMPTY_LAYOUT;
-  // Widths while an edge is being dragged, before they are saved on release; null otherwise.
+  /*
+   * The widths while a column's edge is being dragged: drawn at most once a frame and saved to the
+   * stored layout once, when the edge is let go (`startResize`). Saved on every pixel, the drag wrote
+   * the preference every screen reading preferences re-renders on, dozens of times a second.
+   */
   const [draftSizing, setDraftSizing] = useState(null);
   const [resizingId, setResizingId] = useState(null);
   const shownSizing = draftSizing || columnSizing;
@@ -566,6 +718,13 @@ export default function DataTable({
   const menuEnabled = features.tableOptions !== false;
   const csv = features.csvExport && typeof features.csvExport === "object" ? features.csvExport : {};
   const csvEnabled = menuEnabled && features.csvExport !== false && csv.enabled !== false;
+  /*
+   * Excel is offered only where a table hands over its own exporter (`features.excelExport.onExport`)
+   * - the table has no workbook writer of its own, so everywhere else the menu keeps showing it as
+   * not yet available. The User Activity Logs export theirs from the server.
+   */
+  const excel = features.excelExport && typeof features.excelExport === "object" ? features.excelExport : null;
+  const excelEnabled = menuEnabled && typeof excel?.onExport === "function";
   const visibilityEnabled = menuEnabled && features.columnVisibility !== false;
   const freezeEnabled = menuEnabled && features.frozenColumns !== false;
   const freezeControlled = Boolean(features.frozenColumns?.onChange);
@@ -607,6 +766,8 @@ export default function DataTable({
   // Which rows may be ticked at all, where a table mixes records it can act on with rows it cannot.
   // Absent on almost every table, which means every row.
   const canSelectRow = features.selection?.canSelectRow;
+  // Whether the rows under a row are records to tick as well - see `selectColumn`.
+  const selectSubRows = Boolean(features.selection?.subRows);
   // How wide the column of boxes is, and what its header box calls itself - see `selectColumn`.
   const selectionWidth = features.selection?.width;
   const selectionHeaderLabel = features.selection?.headerLabel;
@@ -618,6 +779,10 @@ export default function DataTable({
    * `publish: false`, or the header would replace those with these the moment a row was ticked.
    */
   const publishSelectionActions = features.selection?.publish !== false;
+  // What the module itself does with a selection, drawn before Export - see `TableSelectionActions`.
+  const selectionActions = features.selection?.actions;
+  // `exportable: false` leaves Export off the selection's actions - the table's own Export stays.
+  const selectionExportable = features.selection?.exportable !== false;
   /*
    * A paged table's own answer to "what is ticked", where the set of ids is not the selection.
    * Absent on every table that holds all its rows, which is all but the Interview register.
@@ -681,10 +846,23 @@ export default function DataTable({
   // selection rather than per row, because it is one decision.
   const selectionRequiresReason = Boolean(features.selection?.requireReason);
   const selectionReasonLabel = features.selection?.reasonLabel || "Reason";
+  const selectionDeleteMessage = features.selection?.deleteMessage || "This cannot be undone. Anything that cannot be deleted is left alone and stays ticked.";
   const [pendingSelectionDelete, setPendingSelectionDelete] = useState(false);
   const [selectionReason, setSelectionReason] = useState("");
+  const selectionReasonFields = useFormErrors();
   const [exportingSelection, setExportingSelection] = useState(false);
   const [localColumnFilters, setLocalColumnFilters] = useState([]);
+  /*
+   * A filter the caller asks for - a "Navigate to" naming its project - put in the filter row as if it
+   * had been typed. Only when it changes, so the reader can clear it or type over it afterwards;
+   * and only on a table that holds its own filters, since a page holding them sets its own.
+   */
+  const presetKey = filterPreset ? `${filterPreset.id}\u0000${filterPreset.value}` : "";
+  useEffect(() => {
+    if (!presetKey || controlledFilters) return;
+    const [id, value] = presetKey.split("\u0000");
+    setLocalColumnFilters([{ id, value }]);
+  }, [controlledFilters, presetKey]);
   // TanStack's shape, from the page's where the page holds them. A blank is no filter, the way
   // TanStack itself drops one - so the two readings of "nothing typed here" cannot differ.
   const columnFilters = useMemo(() => (controlledFilters
@@ -717,19 +895,38 @@ export default function DataTable({
    * thousand rows costs forty reads rather than ten thousand. Memoised on the data, because that is
    * the only thing it depends on: typing in one filter must not recount every column.
    */
+  // The reference lists this table's known columns name (branches, departments, verticals), fetched
+  // once for every table on the page - see `knownListFor` in `tableCells.js`.
+  const knownKinds = useMemo(() => (filtering && !filterValues
+    ? columns.filter((column) => column.accessorKey && column.enableColumnFilter !== false && filterKindFor(column) !== "text").map(knownListFor).filter(Boolean)
+    : []), [columns, filterValues, filtering]);
+  const knownLists = useKnownFilterLists(knownKinds);
   const filterChoices = useMemo(() => {
     if (!filtering || filterValues) return {};
     const choices = {};
     for (const column of columns) {
       const key = column.accessorKey;
-      if (!key || column.enableColumnFilter === false) continue;
+      // `filter: "text"` keeps the typed box whatever the column holds: an ID, an amount or a note is
+      // looked up, not picked from a list, however few of them a page happens to hold.
+      if (!key || column.enableColumnFilter === false || filterKindFor(column) === "text") continue;
+      // A known-value column always lists its answers, whatever the rows on screen hold.
+      const ownList = Array.isArray(column.meta?.filterOptions) ? column.meta.filterOptions : null;
+      const listKind = knownListFor(column);
+      if (ownList || listKind) {
+        choices[key] = knownFilterValues(data, key, column.meta?.type, [ownList, knownLists[listKind]]);
+        continue;
+      }
       const values = distinctFilterValues(data, key, column.meta?.type);
       if (values) choices[key] = values;
     }
     return choices;
-  }, [columns, data, filtering, filterValues]);
+  }, [columns, data, filtering, filterValues, knownLists]);
   const [expanded, setExpanded] = useState({});
+  // The table itself, for the filters that need to read a sub-row's parent (`keepingSubRows`).
+  const tableRef = useRef(null);
   const [localSorting, setLocalSorting] = useState([]);
+  // Every change to the table's own sort goes through here, so `onSortChange` hears all of them.
+  const setOwnSorting = (next) => { setLocalSorting(next); onSortChange?.(next); };
   // TanStack's shape, derived from the page's where the page owns the order - so the arrows read
   // the one order there is rather than a copy of it.
   const sorting = controlledSort
@@ -755,6 +952,9 @@ export default function DataTable({
    */
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
+  // The scroller's visible width, so a message drawn across every column - loading, nothing to show -
+  // can be held to the part of the table on screen rather than centred across all of it.
+  const [viewportWidth, setViewportWidth] = useState(0);
   const [rowHeight, setRowHeight] = useState(0);
   const [bodyTop, setBodyTop] = useState(0);
   const bodyRef = useRef(null);
@@ -832,9 +1032,9 @@ export default function DataTable({
   const rowKey = (row) => getRowId?.(row.original) ?? row.original?.id ?? row.id;
 
   const backendColumns = useMemo(() => {
-    const configured = new Set(columns.map(columnId));
+    const configured = new Set(leafDefinitions(columns).map(columnId));
     const fields = [...new Set(data.flatMap((row) => row && typeof row === "object" ? Object.keys(row) : []))];
-    return fields.filter((field) => !configured.has(field)).map((field) => ({ id: field, header: humanizeFieldName(field), accessorFn: (row) => displayBackendValue(row?.[field]), cell: ({ row }) => displayBackendValue(row.original?.[field]), meta: { backendDynamic: true } }));
+    return fields.filter((field) => !configured.has(field) && !isUserIdField(field, data)).map((field) => ({ id: field, header: humanizeFieldName(field), accessorFn: (row) => displayBackendValue(row?.[field]), cell: ({ row }) => displayBackendValue(row.original?.[field]), meta: { backendDynamic: true } }));
   }, [columns, data]);
   const tableColumns = useMemo(() => {
     const actionIndex = columns.findIndex((column) => columnId(column) === "actions");
@@ -846,16 +1046,19 @@ export default function DataTable({
     // what hangs under it, and a reader ticking down a stage should not have to aim past a control
     // about something else.
     const withSelect = selectable
-      ? [selectColumn({ model: resolvedSelection, rowId: rowKey, rowLabel: selectionRowLabel, canSelectRow, width: selectionWidth, headerLabel: selectionHeaderLabel }), ...withExpand]
+      ? [selectColumn({ model: resolvedSelection, rowId: rowKey, rowLabel: selectionRowLabel, canSelectRow, width: selectionWidth, headerLabel: selectionHeaderLabel, subRows: selectSubRows }), ...withExpand]
       : withExpand;
     const withMenuColumn = actionIndex < 0 && menuEnabled ? [...withSelect, MENU_COLUMN] : withSelect;
-    return normalizeColumns(withMenuColumn, renderActions);
+    return normalizeColumns(withMenuColumn, renderActions, expandable ? tableRef : null);
     // `rowKey` is a plain closure over `getRowId`, which is what it actually depends on; listing it
     // would rebuild every column on every render for a page that passes an inline function.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendColumns, columns, expandable, menuEnabled, renderActions, selectable, resolvedSelection, selectionRowLabel, canSelectRow, selectionWidth, selectionHeaderLabel, getRowId]);
+  }, [backendColumns, columns, expandable, menuEnabled, renderActions, selectable, resolvedSelection, selectionRowLabel, canSelectRow, selectionWidth, selectionHeaderLabel, selectSubRows, getRowId]);
   const effectiveColumnVisibility = { ...Object.fromEntries(backendColumns.map((column) => [column.id, false])), ...columnVisibility };
-  const columnOrder = useMemo(() => weaveColumnOrder(tableColumns, storedOrder), [tableColumns, storedOrder]);
+  // The value columns, under any group headings - the order, the visibility and the column chooser
+  // are about these; a heading is a label, not a column to move or hide.
+  const tableLeaves = useMemo(() => leafDefinitions(tableColumns), [tableColumns]);
+  const columnOrder = useMemo(() => weaveColumnOrder(tableLeaves, storedOrder), [tableLeaves, storedOrder]);
 
   /** Where `sourceId` lands relative to `targetId`, remembered and drawn from immediately. */
   function reorderColumns(sourceId, targetId, side) {
@@ -876,9 +1079,13 @@ export default function DataTable({
     if (!reorderEnabled || column.columnDef.meta?.fixed) return {};
     return {
       draggable: true,
+      // A press on the column's resize edge is a resize, never a move.
       onDragStart: (event) => { if (resizeCleanupRef.current) { event.preventDefault(); return; } setDraggingColumnId(column.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", column.id); },
       onDragOver: (event) => {
         if (!draggingColumnId || draggingColumnId === column.id) return;
+        // A column moves within its own group heading: carried into another, the band would split
+        // in two under the same label.
+        if ((table.getColumn(draggingColumnId)?.parent?.id ?? null) !== (column.parent?.id ?? null)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "move";
         const rect = event.currentTarget.getBoundingClientRect();
@@ -986,7 +1193,7 @@ export default function DataTable({
       Object.assign(header.style, { width, minWidth: width, maxWidth: width });
       const total = `${leafColumns.reduce((sum, leaf) => sum + (latest[leaf.id] ?? leaf.getSize()), 0)}px`;
       tableNode.style.minWidth = total;
-      tableNode.style.width = total;
+      if (!fillLayout) tableNode.style.width = total;
       if (pinnedAfter.length) {
         const shift = latest[column.id] - from;
         // Every row drawing one cell per column: the header, the filters and the body.
@@ -1032,7 +1239,6 @@ export default function DataTable({
     setResizingId(column.id);
   }
 
-
   // TanStack Table intentionally exposes dynamic instance methods.
   // eslint-disable-next-line react-hooks/incompatible-library
   const table = useReactTable({
@@ -1058,7 +1264,7 @@ export default function DataTable({
     onSortingChange: (next) => {
       const resolved = resolveUpdater(next, sorting);
       setVisibleCount(pageSize);
-      if (!controlledSort) { setLocalSorting(resolved); return; }
+      if (!controlledSort) { setOwnSorting(resolved); return; }
       /*
        * Reported in the page's own shape, with the column that was pressed. TanStack proposes
        * the next state from the current one - asc, desc, then none - and on "none" the proposal
@@ -1081,26 +1287,11 @@ export default function DataTable({
       saveLayout({ columnVisibility: resolveUpdater(next, effectiveColumnVisibility) });
       setVisibleCount(pageSize);
     },
-    /*
-     * ── The first pull freezes the whole row, not just the column pulled ──────────────────────
-     *
-     * A browser laying a table out automatically sizes every column to its contents. Handed one
-     * explicit width it shares the rest out evenly and rearranges itself under the reader's hands -
-     * so a table that had fitted its content suddenly reflows the moment anybody drags anything.
-     *
-     * TanStack answers 150 for every column that declares no `size`, and none of this application's
-     * do. So the first resize measures what is actually on screen and stores that: every column
-     * keeps the width it already had, the pulled one takes its new width, and nothing else moves.
-     * From then on the stored widths are the whole answer and this costs nothing.
-     *
-     * The CRM board's own table did the same on its first pull, for the same reason, before it
-     * became a `DataTable`. It is here so every table gets it.
-     */
+    // Widths are changed by `startResize` above; anything else asking TanStack for a change is stored.
     onColumnSizingChange: (next) => saveLayout({ columnSizing: resolveUpdater(next, shownSizing) }),
     enableColumnFilters: filtering,
     enableSorting: sortingEnabled,
     enableColumnResizing: resizeEnabled,
-    columnResizeMode: "onChange",
     getRowId,
     getCoreRowModel: getCoreRowModel(),
     // Not filtered here where the page does it: running both would narrow the server's answer a
@@ -1115,11 +1306,47 @@ export default function DataTable({
       // offer a chevron, because "has sub-rows" is asked of the array and an empty array is one.
       getRowCanExpand: (row) => (expandable.canExpand ? expandable.canExpand(row.original) : (expandable.getSubRows?.(row.original) || []).length > 0),
       getExpandedRowModel: getExpandedRowModel(),
+      // From the leaves up, so a project kept only by a shoot of its own stays listed with that
+      // shoot alone. `keepingSubRows` is what keeps the whole project when the project is the match.
+      filterFromLeafRows: true,
     } : {}),
   });
 
+  tableRef.current = table;
+
+  /*
+   * A project kept by a shoot of its own is opened on it. Searching a shoot id leaves the project
+   * closed otherwise, with the one row that answered the search hidden inside it. A project that
+   * matched the search itself is left as the reader left it, open or shut.
+   *
+   * The ids are joined into a string so the effect below runs when the set changes and not on every
+   * render; the filtered rows are read, never the expanded ones, so opening a row cannot feed back.
+   */
+  const openedByFilter = useMemo(() => {
+    if (!expandable || !columnFilters.length || serverFiltered || !filtering) return "";
+    const matchesItself = (row) => columnFilters.every(({ id, value }) => {
+      const own = table.getColumn(id)?.columnDef.meta?.baseFilterFn;
+      return !own || own(row, id, value);
+    });
+    return table.getFilteredRowModel().rows.filter((row) => row.subRows?.length && !matchesItself(row)).map((row) => row.id).join("\u0000");
+    // `table` is the one instance; `data` is what its rows are built from.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandable, columnFilters, serverFiltered, filtering, table, data]);
+  useEffect(() => {
+    if (!openedByFilter) return;
+    setExpanded((previous) => {
+      if (previous === true) return previous;
+      const ids = openedByFilter.split("\u0000");
+      if (ids.every((id) => previous[id])) return previous;
+      return { ...previous, ...Object.fromEntries(ids.map((id) => [id, true])) };
+    });
+  }, [openedByFilter]);
+
   const leafColumns = table.getVisibleLeafColumns();
+  // The rows of headings: one, unless the columns sit under group headings.
+  const headerGroups = table.getHeaderGroups();
   const allRows = table.getRowModel().rows;
+
   /*
    * The ticked rows, counted against every row the table *holds* rather than the ones surviving its
    * column filters.
@@ -1131,7 +1358,8 @@ export default function DataTable({
    */
   const selectedTableRows = useMemo(
     () => (selectable
-      ? table.getCoreRowModel().rows.filter((row) => resolvedSelection.isSelected(rowKey(row)) && (!canSelectRow || canSelectRow(row.original)))
+      // The records under a row count too where they are records of their own (`subRows`).
+      ? (selectSubRows ? table.getCoreRowModel().flatRows : table.getCoreRowModel().rows).filter((row) => resolvedSelection.isSelected(rowKey(row)) && (!canSelectRow || canSelectRow(row.original)))
       : EMPTY_ROWS),
     /*
      * `data` stands in for the row model, which TanStack rebuilds behind a `table` that is itself
@@ -1143,7 +1371,7 @@ export default function DataTable({
      * walk every row of the table to count the ticked ones.
      */
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectable, resolvedSelection, data, canSelectRow],
+    [selectable, resolvedSelection, data, canSelectRow, selectSubRows],
   );
   /*
    * What the footer counts, and what "no matching records" is decided against: the records, not the
@@ -1228,11 +1456,7 @@ export default function DataTable({
    */
   function pinCurrentWidths() {
     if (Object.keys(shownSizing).length) return;
-    const measured = {};
-    table.getVisibleLeafColumns().forEach((column, index) => {
-      const node = headerCellRefs.current[index];
-      if (node) measured[column.id] = Math.round(node.getBoundingClientRect().width);
-    });
+    const measured = measureHeaderWidths();
     if (Object.keys(measured).length) saveLayout({ columnSizing: measured });
   }
 
@@ -1278,7 +1502,8 @@ export default function DataTable({
     if (!cells.length) return undefined;
     // Compared before it is stored: ResizeObserver fires on every layout, and setting an identical
     // array would re-render the table on each one.
-    // Not mid-drag: the drag moves frozen cells itself, and measuring here would redraw the table per frame.
+    // Not mid-drag: the drag moves the frozen cells itself, and a measurement per frame would
+    // re-render the whole table on each one. The drag ending changes `shownSizing`, which measures.
     const measure = () => !resizeCleanupRef.current && setMeasuredWidths((current) => {
       const next = cells.map((cell) => cell.offsetWidth);
       return current && current.length === next.length && current.every((width, index) => width === next[index]) ? current : next;
@@ -1336,7 +1561,10 @@ export default function DataTable({
             // than the table's - otherwise the tint stops dead at the ⋮ column.
             ? "var(--employee-table-subrow, #eef2f7)"
             : "var(--employee-table-cell, #ffffff)",
-      boxShadow: frozen && index === effectiveFreezeCount - 1 ? "2px 0 0 var(--employee-table-divider, #cbd5e1), 8px 0 12px -10px rgba(15, 23, 42, 0.55)" : undefined,
+      // The divider marks where frozen columns end. The tick box pinned on its own is not a frozen
+      // column - it simply stays put - so it wears no divider and reads like any other column.
+      // A hairline and a faint shade: the 2px line under a dark blur read as a thick blue bar.
+      boxShadow: frozen && index === effectiveFreezeCount - 1 && column.id !== SELECT_COLUMN_ID ? "1px 0 0 var(--employee-table-divider, #e2e8f0), 6px 0 8px -6px rgba(15, 23, 42, 0.12)" : undefined,
     };
   }, [effectiveFreezeCount, frozenOffsets]);
 
@@ -1347,6 +1575,10 @@ export default function DataTable({
   // Under `autoLayout` a column that names no width takes none, not the density's floor: the point
   // of sizing to content is that a narrow column is narrow.
   const sizedStyle = useCallback((column) => fixedWidth ? { width: column.getSize(), minWidth: column.getSize(), maxWidth: column.getSize(), boxSizing: "border-box" } : { width: column.columnDef.width, minWidth: column.columnDef.minWidth || (autoLayout ? undefined : scale.minColumnWidth), maxWidth: column.columnDef.maxWidth }, [fixedWidth, autoLayout, scale.minColumnWidth]);
+
+  // A group heading is as wide as the columns under it - the sum of their sizes, not a column's own -
+  // and sits above the body's frozen cells (10) as they scroll up under it, below the sticky headers (20).
+  const spanStyle = (header) => (fixedWidth ? { width: header.getSize(), minWidth: header.getSize(), maxWidth: header.getSize() } : { width: undefined, minWidth: undefined, maxWidth: undefined });
   /*
    * The sticky header's fill has to be an inline style - it scrolls under nothing and must stay
    * opaque - but a hardcoded hex is a colour no stylesheet can reach, so this header stayed white
@@ -1407,10 +1639,11 @@ export default function DataTable({
   }
 
   function applyVisibility(next) {
-    const fixed = Object.fromEntries(tableColumns.filter((column) => column.meta?.fixed).map((column) => [column.id, true]));
+    const fixed = Object.fromEntries(tableLeaves.filter((column) => column.meta?.fixed).map((column) => [column.id, true]));
     saveLayout({ columnVisibility: { ...next, ...fixed } });
     // A sort on a column just hidden is dropped. The page's own sort is the page's to drop.
-    if (!controlledSort) setLocalSorting((current) => current.filter((item) => next[item.id] !== false));
+    // A column hidden while it is the one sorted by stops sorting the rows.
+    if (!controlledSort && localSorting.some((item) => next[item.id] === false)) setOwnSorting(localSorting.filter((item) => next[item.id] !== false));
     setVisibleCount(pageSize);
   }
 
@@ -1439,6 +1672,7 @@ export default function DataTable({
     if (!element) return undefined;
     const measure = () => {
       setViewportHeight((current) => (current === element.clientHeight ? current : element.clientHeight));
+      setViewportWidth((current) => (current === element.clientWidth ? current : element.clientWidth));
       const first = bodyRef.current?.querySelector("tr[data-row]");
       if (first) {
         const height = first.offsetHeight;
@@ -1492,9 +1726,9 @@ export default function DataTable({
     }
   }
 
-  const manageableColumns = tableColumns.filter((column) => !column.meta?.fixed).map((column) => ({ id: column.id, label: columnLabel(column) }));
-  const resolvedVisibility = Object.fromEntries(tableColumns.map((column) => [column.id, effectiveColumnVisibility[column.id] !== false]));
-  const resolvedDefaultVisibility = Object.fromEntries(tableColumns.map((column) => [column.id, column.meta?.backendDynamic ? false : defaultColumnVisibility?.[column.id] !== false]));
+  const manageableColumns = tableLeaves.filter((column) => !column.meta?.fixed).map((column) => ({ id: column.id, label: columnLabel(column) }));
+  const resolvedVisibility = Object.fromEntries(tableLeaves.map((column) => [column.id, effectiveColumnVisibility[column.id] !== false]));
+  const resolvedDefaultVisibility = Object.fromEntries(tableLeaves.map((column) => [column.id, column.meta?.backendDynamic ? false : defaultColumnVisibility?.[column.id] !== false]));
   /*
    * Whether this table has been arranged at all, which is what decides if there is anything to
    * undo. Any of the four counts: a table with two columns hidden and none moved still needs the
@@ -1530,7 +1764,7 @@ export default function DataTable({
         setExportingSelection(true);
         try { await exportRows(selectedTableRows); } finally { setExportingSelection(false); }
       },
-      remove: () => { setSelectionReason(""); setPendingSelectionDelete(true); },
+      remove: () => { setSelectionReason(""); selectionReasonFields.clearAll(); setPendingSelectionDelete(true); },
     };
   });
   const clearSelection = useCallback(() => selectionHandlers.current?.clear(), []);
@@ -1551,25 +1785,35 @@ export default function DataTable({
     deleting: selectionDeleting,
     exporting: exportingSelection,
     onClear: clearSelection,
-    onExport: csvEnabled ? exportSelection : undefined,
+    onExport: csvEnabled && selectionExportable ? exportSelection : undefined,
     onDelete: deletableSelection ? deleteSelection : undefined,
-  } : null), [selectionCount, publishSelectionActions, selectionNoun, selectionPlural, selectionDeleting, exportingSelection, csvEnabled, deletableSelection, clearSelection, exportSelection, deleteSelection]));
+    actions: selectionActions,
+  } : null), [selectionCount, publishSelectionActions, selectionNoun, selectionPlural, selectionDeleting, exportingSelection, csvEnabled, selectionExportable, deletableSelection, clearSelection, exportSelection, deleteSelection, selectionActions]));
 
   return <>
     <div ref={(node) => { scrollRef.current = node; if (scrollerRef) scrollerRef.current = node; }} onScroll={onScroll} className={`h-full min-h-0 min-w-0 flex-1 overflow-auto ${className}`}>
       {/* `min-w-max` under auto layout, so thirty columns sized to their contents grow past the
           viewport and scroll rather than being squeezed into it. */}
-      <table id={tableId} aria-label={ariaLabel} className={`border-separate border-spacing-0 text-left text-slate-600 ${scale.table} ${fixedWidth ? "" : autoLayout ? "min-w-max w-full" : "w-full"} ${tableClassName}`} style={fixedWidth ? { width: table.getTotalSize(), minWidth: table.getTotalSize(), tableLayout: "fixed" } : undefined}>
+      <table id={tableId} aria-label={ariaLabel} className={`border-separate border-spacing-0 text-left text-slate-600 ${scale.table} ${fixedWidth ? "" : autoLayout ? "min-w-max w-full" : "w-full"} ${tableClassName}`} style={fixedWidth ? { width: fillLayout ? "100%" : table.getTotalSize(), minWidth: table.getTotalSize(), tableLayout: "fixed" } : undefined}>
         {fixedWidth && <colgroup>{leafColumns.map((column) => <col key={column.id} style={{ width: column.getSize() }} />)}</colgroup>}
         <thead className="bg-slate-50 text-[10px] font-semibold uppercase tracking-wide text-slate-500 sm:text-[11px]">
-          {table.getHeaderGroups().map((group) => <tr key={group.id}>{group.headers.map((header, index) => <th key={header.id} colSpan={header.colSpan} ref={(node) => { headerCellRefs.current[index] = node; }} {...dragHandlersFor(header.column)} className={`relative ${HEADER_CLIP} border-b border-slate-200 ${scale.headerY} ${header.column.id === "actions" ? "px-0 text-center text-base normal-case text-slate-400" : scale.headerX} ${reorderEnabled && !header.column.columnDef.meta?.fixed ? "cursor-grab active:cursor-grabbing" : ""} ${draggingColumnId === header.column.id ? "opacity-40" : ""}`} style={headerStyle(index, header.column, 0)}>
-            {header.isPlaceholder ? null : header.column.id === "actions" ? (showMenu ? <DataTableMoreMenu onImport={importConfig ? () => setImportOpen(true) : undefined} onExportCsv={csvEnabled ? exportRows : undefined} disableExport={!csvEnabled || allRows.length === 0} onManageColumns={visibilityEnabled ? () => setManageColumnsOpen(true) : undefined} onFreezeColumnsChange={onFreezeChange} freezeCount={freezeCount} onResetColumnOrder={hasCustomLayout ? resetLayout : undefined} onToggleCompact={toggleCompact} compact={resolvedDensity === "compact"} menuZIndexClassName={menuZIndexClassName} ariaLabel={`${ariaLabel} options`} /> : <span className="block">{flexRender(header.column.columnDef.header, header.getContext())}</span>) : <div className="flex items-center justify-between gap-1"><span className="block truncate">{flexRender(header.column.columnDef.header, header.getContext())}</span>{header.column.getCanSort() && <button type="button" onClick={header.column.getToggleSortingHandler()} aria-label={`Sort ${columnLabel(header.column.columnDef)}`} className={`shrink-0 ${scale.sortToggle} ${header.column.getIsSorted() ? "text-blue-600" : "text-slate-400 hover:text-slate-700"}`}>{header.column.getIsSorted() === "asc" ? "↑" : header.column.getIsSorted() === "desc" ? "↓" : "↕\uFE0E"}</button>}</div>}
+          {/*
+            * One row per level of heading. With no group headings that is the one row of column names
+            * it always was; with them, the group row sits above and every row sticks below the one
+            * before it - each the height of a header row - so they stack rather than overlap. A group
+            * heading spans its columns, centred, and is a label (`scope="colgroup"`, so a screen reader
+            * ties the names under it to it): no drag, no resize, no sort, and it is not frozen with the
+            * columns under it. The empty cell above an ungrouped column is that column's, and is frozen
+            * or pinned right with it.
+            */}
+          {headerGroups.map((group, groupIndex) => { const leafRow = groupIndex === headerGroups.length - 1; return <tr key={group.id}>{group.headers.map((header, index) => { const heading = !leafRow; const band = heading && !header.isPlaceholder; return <th key={header.id} colSpan={header.colSpan} scope={band ? "colgroup" : undefined} title={band ? columnLabel(header.column.columnDef) : undefined} ref={leafRow ? (node) => { headerCellRefs.current[index] = node; } : undefined} {...(heading ? {} : dragHandlersFor(header.column))} className={`relative ${HEADER_CLIP} border-b border-slate-200 ${scale.headerY} ${heading ? `${scale.headerX} text-center ${band ? "border-x border-x-slate-200 font-semibold text-slate-700" : ""}` : header.column.id === "actions" ? "px-0 text-center text-base normal-case text-slate-400" : scale.headerX} ${!heading && reorderEnabled && !header.column.columnDef.meta?.fixed ? "cursor-grab active:cursor-grabbing" : ""} ${draggingColumnId === header.column.id ? "opacity-40" : ""}`} style={heading ? { ...headerStyle(band ? Number.MAX_SAFE_INTEGER : leafColumns.findIndex((leaf) => leaf.id === header.column.id), header.column, groupIndex * scale.filterRowTop), ...spanStyle(header), ...(band ? { zIndex: 19 } : {}) } : headerStyle(index, header.column, groupIndex * scale.filterRowTop)}>
+            {header.isPlaceholder ? null : band ? <span className="block truncate">{flexRender(header.column.columnDef.header, header.getContext())}</span> : header.column.id === "actions" ? (showMenu ? <DataTableMoreMenu onImport={importConfig ? () => setImportOpen(true) : undefined} onExportCsv={csvEnabled ? exportRows : undefined} onExportExcel={excelEnabled ? () => excel.onExport({ table }) : undefined} excelEnabled={excelEnabled && allRows.length > 0} disableExport={!csvEnabled || allRows.length === 0} onManageColumns={visibilityEnabled ? () => setManageColumnsOpen(true) : undefined} onFreezeColumnsChange={onFreezeChange} freezeCount={freezeCount} onResetColumnOrder={hasCustomLayout ? resetLayout : undefined} onToggleCompact={toggleCompact} compact={resolvedDensity === "compact"} menuZIndexClassName={menuZIndexClassName} ariaLabel={`${ariaLabel} options`} /> : <span className="block">{flexRender(header.column.columnDef.header, header.getContext())}</span>) : <div className="flex items-center justify-between gap-1"><span className="flex min-w-0 items-center"><span className="block truncate">{flexRender(header.column.columnDef.header, header.getContext())}</span>{header.column.columnDef.meta?.help && <HelpTip text={header.column.columnDef.meta.help} />}</span>{header.column.getCanSort() && <button type="button" onClick={header.column.getToggleSortingHandler()} aria-label={`Sort ${columnLabel(header.column.columnDef)}`} className={`shrink-0 ${scale.sortToggle} ${header.column.getIsSorted() ? "text-blue-600" : "text-slate-400 hover:text-slate-700"}`}>{header.column.getIsSorted() === "asc" ? "↑" : header.column.getIsSorted() === "desc" ? "↓" : "↕\uFE0E"}</button>}</div>}
             {/* The drop indicator: a bar on whichever edge of the hovered header the pointer is
                 closer to, so releasing there reads unambiguously as "before this column" or "after
                 it" rather than as a swap. */}
             {dropTarget?.id === header.column.id && <span aria-hidden="true" className={`pointer-events-none absolute inset-y-0 z-40 w-0.5 bg-blue-500 ${dropTarget.side === "before" ? "left-0" : "right-0"}`} />}
-            {resizeEnabled && header.column.getCanResize() && <div aria-hidden="true" draggable={false} onMouseDown={(event) => startResize(header.column, event)} onTouchStart={(event) => startResize(header.column, event)} onClick={(event) => event.stopPropagation()} className="group/resize absolute inset-y-0 right-0 z-30 flex w-3 cursor-col-resize touch-none select-none justify-end"><span className={`h-full w-px transition-colors duration-150 ${resizingId === header.column.id ? "bg-slate-500" : "bg-transparent group-hover/resize:bg-slate-300"}`} /></div>}
-          </th>)}</tr>)}
+            {resizeEnabled && !heading && header.column.getCanResize() && <div aria-hidden="true" draggable={false} onMouseDown={(event) => startResize(header.column, event)} onTouchStart={(event) => startResize(header.column, event)} onClick={(event) => event.stopPropagation()} className="group/resize absolute inset-y-0 right-0 z-30 flex w-3 cursor-col-resize touch-none select-none justify-end"><span className={`h-full w-px transition-colors duration-150 ${resizingId === header.column.id ? "bg-slate-500" : "bg-transparent group-hover/resize:bg-slate-300"}`} /></div>}
+          </th>; })}</tr>; })}
           {/*
             * The filter row: a **list to pick from** where the column holds a closed set, and the
             * plain box everywhere else.
@@ -1581,14 +1825,26 @@ export default function DataTable({
             * which is which from the values actually loaded, so no module has to declare it and a
             * column stops being a picker by itself the day its values stop being a set.
             */}
-          {filtering && <tr>{leafColumns.map((column, index) => <th key={column.id} className={`${FILTER_CLIP} border-b border-slate-200 ${scale.filterY} ${column.id === "actions" ? "px-0" : scale.filterX}`} style={headerStyle(index, column, scale.filterRowTop)}>
+          {filtering && <tr>{leafColumns.map((column, index) => <th key={column.id} className={`${FILTER_CLIP} border-b border-slate-200 ${scale.filterY} ${column.id === "actions" ? "px-0" : scale.filterX}`} style={headerStyle(index, column, headerGroups.length * scale.filterRowTop)}>
             {/*
               * What kind of control a column's filter is, where the column says: a calendar for a
-              * `date`, a clock for a `time`, a list that still takes typing for a `combobox`. A
+              * `date`, a From and a To with their times for a `dateTimeRange` (the column hands it
+              * how it writes and reads a time, and which text is not a range yet), a clock for a `time`, a list that still takes typing for a `combobox`. A
               * column that says nothing gets the list where its values are a set and the plain box
               * everywhere else, which is what every table here has always had.
               */}
-            {column.getCanFilter() && filterKindFor(column.columnDef) === "date"
+            {column.getCanFilter() && filterKindFor(column.columnDef) === "dateTimeRange"
+              ? <FilterDateInput
+                range
+                ariaLabel={`Filter ${columnLabel(column.columnDef)}`}
+                placeholder={column.columnDef.filterPlaceholder || "From - To"}
+                formatRangeEnd={column.columnDef.filterFormatRangeEnd}
+                parseRangeEnd={column.columnDef.filterParseRangeEnd}
+                invalid={Boolean(column.columnDef.filterIsInvalid?.(column.getFilterValue()))}
+                value={typeof column.getFilterValue() === "string" ? column.getFilterValue() : ""}
+                onChange={(next) => column.setFilterValue(next)}
+              />
+              : column.getCanFilter() && filterKindFor(column.columnDef) === "date"
               ? <FilterDateInput ariaLabel={`Filter ${columnLabel(column.columnDef)}`} value={typeof column.getFilterValue() === "string" ? column.getFilterValue() : ""} onChange={(next) => column.setFilterValue(next)} />
               : column.getCanFilter() && filterKindFor(column.columnDef) === "time"
               ? <FilterTimeInput ariaLabel={`Filter ${columnLabel(column.columnDef)}`} value={typeof column.getFilterValue() === "string" ? column.getFilterValue() : ""} onChange={(next) => column.setFilterValue(next)} />
@@ -1619,8 +1875,12 @@ export default function DataTable({
           </th>)}</tr>}
         </thead>
         <tbody ref={bodyRef}>
-          {loading && <tr><td colSpan={leafColumns.length} className="px-4"><Loader label={loadingMessage} /></td></tr>}
-          {!loading && recordCount === 0 && <tr><td colSpan={leafColumns.length} className="px-4 py-10 text-center text-sm text-slate-500">{data.length === 0 ? emptyMessage : noMatchMessage}</td></tr>}
+          {/* Loading and nothing-to-show span every column, so on a table wider than the screen they
+              were centred across all of it - off to the side, found only by scrolling. Each is held
+              to the visible width and pinned to the scroller's left edge, so it stays in view
+              however far the table is scrolled across. */}
+          {loading && <tr><td colSpan={leafColumns.length} className="p-0"><div className="sticky left-0 px-4" style={viewportWidth ? { width: viewportWidth } : undefined}><Loader label={loadingMessage} /></div></td></tr>}
+          {!loading && recordCount === 0 && <tr><td colSpan={leafColumns.length} className="p-0"><div className="sticky left-0 px-4 py-10 text-center text-sm text-slate-500" style={viewportWidth ? { width: viewportWidth } : undefined}>{data.length === 0 ? emptyMessage : noMatchMessage}</div></td></tr>}
           {/* The rows above the window, as one spacer of their exact height - so the scrollbar is
               the length it would be if every row were drawn, and the reader's position in it means
               what it says. */}
@@ -1647,6 +1907,7 @@ export default function DataTable({
             onRowDoubleClick={onRowDoubleClick}
             onRowContextMenu={onRowContextMenu}
             hoverClassName={rowHoverClassName}
+            focusable={focusableRows}
           />)}
           {!loading && padBottom > 0 && <tr aria-hidden="true"><td colSpan={leafColumns.length} style={{ height: padBottom, padding: 0, border: 0 }} /></tr>}
           {!loading && renderedRows.length < allRows.length && <tr><td colSpan={leafColumns.length} className="px-4 py-2 text-center text-xs text-slate-400">Scroll to load more…</td></tr>}
@@ -1659,13 +1920,13 @@ export default function DataTable({
         behind the dialog is counted as it actually is. */}
     {pendingSelectionDelete && <ConfirmDialog
       title={`Delete ${selectedTableRows.length} ${selectedTableRows.length === 1 ? selectionNoun : selectionPlural || `${selectionNoun}s`}?`}
-      message="This cannot be undone. Anything that cannot be deleted is left alone and stays ticked."
+      message={selectionDeleteMessage}
       confirmLabel="Delete"
       busyLabel="Deleting…"
       loading={selectionDeleting}
-      confirmDisabled={selectionRequiresReason && !selectionReason.trim()}
       onCancel={() => { if (!selectionDeleting) setPendingSelectionDelete(false); }}
       onConfirm={async () => {
+        if (selectionRequiresReason && !selectionReasonFields.check({ reason: selectionReason.trim() ? "" : "Enter a reason." })) return;
         await onSelectionDelete(selectedTableRows.map((row) => row.original), selectionRequiresReason ? selectionReason.trim() : undefined);
         setPendingSelectionDelete(false);
       }}
@@ -1674,7 +1935,8 @@ export default function DataTable({
         required
         label={selectionReasonLabel}
         value={selectionReason}
-        onChange={(event) => setSelectionReason(event.target.value)}
+        onChange={(event) => { setSelectionReason(event.target.value); selectionReasonFields.clear("reason"); }}
+        error={selectionReasonFields.errors.reason}
         disabled={selectionDeleting}
         rows={4}
       />}

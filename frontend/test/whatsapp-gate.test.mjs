@@ -83,6 +83,19 @@ test("one lapse asks to pair once, and never faster than the cooldown", () => {
   assert.match(GATE, /disabled=\{starting \|\| waiting > 0\}/);
 });
 
+test("it reads whether it is holding somebody from the route every signed-in account may read", () => {
+  /*
+   * `/session` sits behind `SALES / CRM Leads` - it is the CRM dashboard's own read, over every
+   * CRM at once. This gate is a different question, about the one account asking, and has to be
+   * answerable by anybody `whatsappRequired` can be ticked for - which is not only Sales. Reading
+   * `/session` instead meant a poll from outside CRM Leads came back 403, which this gate reads
+   * exactly like a network hiccup and holds nobody for - so a tick that should have held somebody
+   * silently did nothing, for as long as they lacked that one unrelated permission.
+   */
+  assert.match(GATE, /getMyWhatsappSession/, "the gate must read /my-session, which sits above the CRM Leads guard");
+  assert.doesNotMatch(GATE, /getWhatsappSession\b/, "the gate must not read /session, which CRM Leads guards");
+});
+
 test("it cannot be dismissed, and gates from the shell", () => {
   const dialog = GATE.slice(GATE.indexOf("return <Dialog"));
   assert.doesNotMatch(dialog, /onClose=/, "the gate can be dismissed again");

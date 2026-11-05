@@ -2,7 +2,8 @@ const prisma = require("../../../config/db");
 
 // `originalPath` decides where the worker reads from: the studio's own drive or NAS for a
 // registered photo, the upload root for one that came through the browser.
-const findUpload = (id) => prisma.imageSelectionUpload.findUnique({ where: { id }, select: { id: true, batchId: true, storageName: true, originalPath: true, status: true, fileName: true, folderId: true, projectId: true, project: { select: { projectName: true } } } });
+// `project.albumProofing` decides which of the studio's compression presets the worker follows.
+const findUpload = (id) => prisma.imageSelectionUpload.findUnique({ where: { id }, select: { id: true, batchId: true, storageName: true, originalPath: true, status: true, fileName: true, folderId: true, projectId: true, project: { select: { projectName: true, albumProofing: true } } } });
 
 // Object keys embed the folder path, and folders are a self-referencing tree of unknown
 // depth, so the ancestor chain is walked one level at a time. Depth is 2-3 in practice;
@@ -56,4 +57,23 @@ async function finalize(id, batchId, uploadData, batchField, { countUploaded = f
 const markReady = (id, batchId, data, options) => finalize(id, batchId, { ...data, status: "READY", processingCompletedAt: new Date(), processingError: null }, "compressedFiles", options);
 const markFailed = (id, batchId, message) => finalize(id, batchId, { status: "PROCESSING_FAILED", processingCompletedAt: new Date(), processingError: message.slice(0, 2000) }, "failedFiles");
 
-module.exports = { findUpload, folderChain, markStarted, markReady, markFailed };
+// Every READY photo with the columns recovery and the derivative audit decide on - its keys, where
+// its original is, and the project's name and module for the renderer. Read in pages on the id so
+// a studio's whole table never arrives in one query; `projectId` narrows it to one project.
+async function listReadyWithKeys({ projectId = null } = {}) {
+  const select = { id: true, projectId: true, folderId: true, fileName: true, thumbnailKey: true, previewKey: true, originalPath: true, storageRootId: true, storageName: true, createdAt: true, project: { select: { projectName: true, albumProofing: true } } };
+  const rows = [];
+  let cursor = null;
+  for (;;) {
+    const page = await prisma.imageSelectionUpload.findMany({
+      where: { status: "READY", ...(projectId ? { projectId } : {}) },
+      select, orderBy: { id: "asc" }, take: 1000,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    rows.push(...page);
+    if (page.length < 1000) return rows;
+    cursor = page[page.length - 1].id;
+  }
+}
+
+module.exports = { findUpload, folderChain, listReadyWithKeys, markStarted, markReady, markFailed };

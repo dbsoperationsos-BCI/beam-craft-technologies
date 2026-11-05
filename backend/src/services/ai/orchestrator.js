@@ -1,6 +1,5 @@
 const provider = require("./provider");
 const registry = require("./tools/registry");
-const { planAction } = require("./actions");
 const { retrieve, renderPassages } = require("./knowledge/retriever");
 const { classify, INTENT } = require("./intent");
 const { candidateNames, looksLikeAboutSomeone } = require("./mentions");
@@ -160,7 +159,43 @@ function renderRecord(row) {
  * `trace` records names and durations only. Results are deliberately absent: they are the business
  * data, and they belong in the answer rather than in a log or a stored message.
  */
-async function answerWithTools({ system, messages, context, maxTokens, onToken }) {
+/*
+ * How the figures beside a question are to be used. In the system prompt on every question, data or
+ * not, so the system prompt is the same text every time and Ollama reads it once - written beside
+ * the figures it was ~60 tokens re-read on every question, ~2 seconds on a CPU.
+ */
+const FIGURE_RULES = [
+  "When a question comes with current figures, they are already counted for you. Quote them exactly.",
+  "You have no other source of numbers. If a figure is not there and you did not look it up,",
+  "say you do not have it - never estimate one, and never fill a gap with a plausible number.",
+  "Write your own sentences; do not copy the figures block back.",
+].join("\n");
+
+/**
+ * The conversation as the model reads it: the standing instructions, what has been said, and this
+ * question's figures beside the question itself.
+ *
+ * **The order is the speed.** Ollama keeps the last prompt it read and reuses whatever the next one
+ * begins with; on a CPU it reads a reused prefix at ~650 tokens a second and a new one at ~28. The
+ * figures used to sit in the system message, ahead of the history - and since they change with
+ * every question, everything after them was new each time: a follow-up re-read the whole
+ * conversation, ~9 seconds for three earlier exchanges before the first word. Here the system prompt
+ * and the history are the same as the request before, and only the figures and the question are new.
+ */
+function withFigures(system, messages, figures) {
+  const block = String(figures || "").trim();
+  const last = messages[messages.length - 1];
+  if (!block || last?.role !== "user") {
+    return [{ role: "system", content: system + (block ? `\n${block}` : "") }, ...messages];
+  }
+  return [
+    { role: "system", content: system },
+    ...messages.slice(0, -1),
+    { role: "user", content: `${block}\n\nThe question: ${last.content}` },
+  ];
+}
+
+async function answerWithTools({ system, messages, context, maxTokens, onToken, signal }) {
   const asked = messages.filter((turn) => turn.role === "user").slice(-1)[0]?.content || "";
   const priorTurns = messages.slice(0, -1);
 
@@ -210,12 +245,40 @@ async function answerWithTools({ system, messages, context, maxTokens, onToken }
   const summaries = [];
   let prefetched = false;
   // Only for a question about records. Grounding a brainstorm in the pipeline is what made it drift.
-  const summaryTools = intent.needsTools ? registry.summaryToolsFor(context) : [];
+  /*
+   * Asked about attendance with no attendance in this session - the person does not hold it - the
+   * answer is said here. Left to the model, a question with nothing to look at was answered anyway,
+   * from nothing.
+   */
+  if (intent.aboutAttendance && !registry.toolsFor(context).some((tool) => tool.module === "ATTENDANCE")) {
+    return {
+      answer: "I cannot see attendance with your access. The Attendance screens show what you may see, "
+        + "or ask somebody who looks after attendance.",
+      trace,
+      steps: 0,
+    };
+  }
+  // The same for HRM requests, asked by somebody who holds neither of the Requests screen's permissions.
+  if (intent.aboutRequests && !registry.toolsFor(context).some((tool) => tool.module === "REQUESTS")) {
+    return {
+      answer: "I cannot see HRM requests with your access. HRM → Requests shows what you may see, "
+        + "or ask somebody who looks after attendance.",
+      trace,
+      steps: 0,
+    };
+  }
+
+  // A summary that is about one kind of question (`summaryWhen`) is gathered only for that kind -
+  // judged on the question and on what the classifier decided, so a follow-up keeps its topic.
+  const summaryTools = intent.needsTools
+    ? registry.summaryToolsFor(context).filter((tool) => !tool.summaryWhen || tool.summaryWhen(asked, intent))
+    : [];
   for (const tool of summaryTools) {
     const startedAt = Date.now();
     try {
       // Through executeTool, so a summary is authorized exactly like any other tool.
-      const result = await registry.executeTool(tool.name, {}, context);
+      const args = tool.prefetchArgs ? tool.prefetchArgs({ asked, priorTurns }) : {};
+      const result = await registry.executeTool(tool.name, args, context);
       /*
        * A brief when several modules are in play, the full page when only one is.
        *
@@ -347,16 +410,9 @@ async function answerWithTools({ system, messages, context, maxTokens, onToken }
       ].join("\n")
     : "";
 
+  // The rules for these figures live in the system prompt (`FIGURE_RULES`), read once and reused.
   const grounding = summaries.length
-    ? [
-        "",
-        "Current figures, already counted for you. Quote them exactly.",
-        "You have no other source of numbers. If a figure is not here and you did not look it up,",
-        "say you do not have it - never estimate one, and never fill a gap with a plausible number.",
-        "Write your own sentences; do not copy this block back.",
-        ...summaries,
-        mentionedBlock,
-      ].filter(Boolean).join("\n")
+    ? ["", "Current figures, already counted for you:", ...summaries, mentionedBlock].filter(Boolean).join("\n")
     : mentionedBlock;
 
   /*
@@ -386,19 +442,12 @@ async function answerWithTools({ system, messages, context, maxTokens, onToken }
       answer: "I do not have a document covering that in this module, so I cannot tell you what the "
         + "policy says. Someone with access to that area would know, or it may not be written down yet.",
       trace,
-      proposals: [],
       steps: 0,
     };
   }
   if (passages.length) trace.push({ knowledge: passages.length, titles: [...new Set(passages.map((p) => p.title))] });
 
-  const conversation = [
-    { role: "system", content: system + grounding + renderPassages(passages) },
-    ...messages,
-  ];
-  // Changes the model wants to make, held for a person to confirm.
-  const proposals = [];
-
+  const conversation = withFigures(`${system}\n\n${FIGURE_RULES}`, messages, grounding + renderPassages(passages));
   /*
    * A question with no tools has nothing to wait for, so it streams from the first token.
    *
@@ -409,10 +458,10 @@ async function answerWithTools({ system, messages, context, maxTokens, onToken }
    */
   if (!tools.length && onToken) {
     const streamed = await provider.streamConversation(
-      { messages: conversation, temperature: 0.3, maxTokens },
+      { messages: conversation, temperature: 0.3, maxTokens, signal },
       onToken,
     );
-    return { answer: String(streamed || "").trim(), trace, proposals, steps: 0, streamed: true };
+    return { answer: String(streamed || "").trim(), trace, steps: 0, streamed: true };
   }
 
   /*
@@ -431,10 +480,10 @@ async function answerWithTools({ system, messages, context, maxTokens, onToken }
   for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
     if (toolsHaveRun && onToken) {
       const streamed = await provider.streamConversation(
-        { messages: conversation, temperature: 0.3, maxTokens },
+        { messages: conversation, temperature: 0.3, maxTokens, signal },
         onToken,
       );
-      return { answer: String(streamed || "").trim(), trace, proposals, steps: step, streamed: true };
+      return { answer: String(streamed || "").trim(), trace, steps: step, streamed: true };
     }
 
     const message = await provider.completeWithTools({
@@ -443,11 +492,12 @@ async function answerWithTools({ system, messages, context, maxTokens, onToken }
       tools: tools.length ? tools : undefined,
       temperature: 0.3,
       maxTokens,
+      signal,
     });
 
     const calls = collectCalls(message, context);
     if (!calls.length) {
-      return { answer: String(message?.content || "").trim(), trace, proposals, steps: step };
+      return { answer: String(message?.content || "").trim(), trace, steps: step };
     }
 
     // The model's own turn goes back in, or the tool results have nothing to attach to.
@@ -467,29 +517,6 @@ async function answerWithTools({ system, messages, context, maxTokens, onToken }
          */
         trace.push({ name: wire, ms: 0, refused: true });
         conversation.push({ role: "tool", content: JSON.stringify({ error: "That action is not available in this session." }) });
-        continue;
-      }
-
-      /*
-       * A tool that changes something is proposed, never run here.
-       *
-       * The model decided to call it; that is not the same as a person deciding to. It becomes a
-       * plan with a token, the panel shows a card, and it runs when the button is pressed - see
-       * `actions.js`.
-       */
-      if (tool.risk !== "READ") {
-        const plan = await planAction({
-          tool: tool.name,
-          args: call.function.arguments || {},
-          context,
-          summary: `${tool.name}: ${JSON.stringify(call.function.arguments || {})}`.slice(0, 300),
-        });
-        proposals.push(plan);
-        trace.push({ name: tool.name, ms: 0, proposed: true });
-        conversation.push({
-          role: "tool",
-          content: JSON.stringify({ proposed: true, note: "Waiting for the user to confirm. Tell them what you propose and ask them to confirm." }),
-        });
         continue;
       }
 
@@ -526,15 +553,15 @@ async function answerWithTools({ system, messages, context, maxTokens, onToken }
     }],
     temperature: 0.3,
     maxTokens,
+    signal,
   });
 
   return {
     answer: String(closing?.content || "").trim(),
     trace,
-    proposals,
     steps: MAX_TOOL_STEPS,
     exhausted: true,
   };
 }
 
-module.exports = { answerWithTools, toolsForModel, wireName, resolveTool, collectCalls, MAX_TOOL_STEPS };
+module.exports = { answerWithTools, withFigures, toolsForModel, wireName, resolveTool, collectCalls, MAX_TOOL_STEPS };

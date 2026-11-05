@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import Dropdown from "./Dropdown";
 
 /**
  * The month grid itself, without any opinion about what opens it.
@@ -49,6 +49,16 @@ const SLASH_DATE = /^(\d{2})\/(\d{2})\/(\d{4})$/;
  * and no day at all. `new Date(2026, 1, 31)` rolls forward into March rather than refusing, so the
  * only honest test is to build the date and ask whether it kept the three numbers it was handed.
  */
+/*
+ * How tall the month and year menus may be.
+ *
+ * They were native `<select>`s, and a native list of eighty-odd years is drawn by the browser: on
+ * Windows and on a phone that is a list as tall as the window, over the calendar that opened it.
+ * The shared `Dropdown` draws its own menu instead, measured against the room the trigger has and
+ * capped here, so the years scroll inside a box the size of the calendar rather than taking the page.
+ */
+const MENU_MAX_HEIGHT = 240;
+
 const dayOrNull = (year, month, day) => {
   const date = new Date(year, month - 1, day);
   return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day ? date : null;
@@ -120,21 +130,32 @@ export default function CalendarPanel({ maxDate = "", minDate = "", onCancel, on
     <>
       <span className="flex items-center justify-between gap-2">
         <button type="button" onClick={() => changeMonth(-1)} aria-label="Previous month" className="rounded p-1 hover:bg-slate-100">‹</button>
-        <span className="relative">
-          <select aria-label="Calendar month" value={viewDate.getMonth()} onChange={(event) => setViewDate((current) => new Date(current.getFullYear(), Number(event.target.value), 1))} className="appearance-none rounded bg-transparent py-1 pl-1 pr-6 text-sm font-medium outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200">
-            {monthNames.map((month, index) => <option key={month} value={index}>{month}</option>)}
-          </select>
-          <ExpandMoreIcon aria-hidden="true" className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2" fontSize="small" />
-        </span>
+        <Dropdown
+          mode="switch"
+          hideLabel
+          label="Calendar month"
+          value={String(viewDate.getMonth())}
+          onChange={(value) => setViewDate((current) => new Date(current.getFullYear(), Number(value), 1))}
+          options={monthNames.map((month, index) => ({ value: String(index), label: month }))}
+          sorted={false}
+          searchable={false}
+          menuMaxHeight={MENU_MAX_HEIGHT}
+        />
         <button type="button" onClick={() => changeMonth(1)} aria-label="Next month" className="rounded p-1 hover:bg-slate-100">›</button>
         <span className="mx-1 h-5 border-l border-slate-200" />
         <button type="button" onClick={() => changeYear(-1)} aria-label="Previous year" className="rounded p-1 hover:bg-slate-100">‹</button>
-        <span className="relative">
-          <select aria-label="Calendar year" value={viewDate.getFullYear()} onChange={(event) => setViewDate((current) => new Date(Number(event.target.value), current.getMonth(), 1))} className="appearance-none rounded bg-transparent py-1 pl-1 pr-6 text-sm font-medium outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200">
-            {calendarYears.map((year) => <option key={year} value={year}>{year}</option>)}
-          </select>
-          <ExpandMoreIcon aria-hidden="true" className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2" fontSize="small" />
-        </span>
+        {/* Typed into rather than scrolled through: eighty-odd years is a long way to drag to 1994. */}
+        <Dropdown
+          mode="switch"
+          hideLabel
+          label="Calendar year"
+          value={String(viewDate.getFullYear())}
+          onChange={(value) => setViewDate((current) => new Date(Number(value), current.getMonth(), 1))}
+          options={calendarYears.map((year) => ({ value: String(year), label: String(year) }))}
+          sorted={false}
+          searchable
+          menuMaxHeight={MENU_MAX_HEIGHT}
+        />
         <button type="button" onClick={() => changeYear(1)} aria-label="Next year" className="rounded p-1 hover:bg-slate-100">›</button>
       </span>
 

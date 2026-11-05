@@ -1,5 +1,7 @@
 const { z } = require("zod");
 const service = require("./service");
+const ingest = require("./ingest");
+const { imageSelectionIngestSchema } = require("../../desktop/descriptors");
 
 const paramsSchema = z.object({ projectId: z.string().trim().min(1).max(191) });
 
@@ -23,4 +25,13 @@ async function queueProject(req, res) {
   try { return res.status(202).json({ data: await service.queueProject(params.data.projectId) }); } catch (error) { return handle(error, res); }
 }
 
-module.exports = { getStatus, queueProject };
+/** POST /ingest - the desktop's faces for one photo, found with this server's own engine on the original file. Synchronous: the people are updated by the time it answers. */
+async function ingestFaces(req, res) {
+  const params = paramsSchema.safeParse(req.params);
+  if (!params.success) return res.status(404).json({ message: "Image Selection project not found." });
+  const body = imageSelectionIngestSchema.safeParse(req.body);
+  if (!body.success) return res.status(400).json({ message: "Invalid face descriptors.", errors: body.error.flatten() });
+  try { return res.json({ data: await ingest.ingest(params.data.projectId, body.data) }); } catch (error) { return handle(error, res); }
+}
+
+module.exports = { getStatus, queueProject, ingestFaces };

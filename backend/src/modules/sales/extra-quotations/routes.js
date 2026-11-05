@@ -16,6 +16,9 @@ router.use(protect);
 router.use(requireModule("PROJECT", "Projects"));
 // Keep this static route above the identifier routes below it.
 router.get("/options", controller.options);
+// The two long pickers, searched on the server - `options` carries only a page to open on.
+router.get("/projects", controller.searchProjectOptions);
+router.get("/shoots", controller.searchShootOptions);
 router.get("/", controller.listExtras);
 router.post("/", controller.createExtra);
 // Correcting one is an ordinary edit and stays a PATCH; only a decision is its own verb below.

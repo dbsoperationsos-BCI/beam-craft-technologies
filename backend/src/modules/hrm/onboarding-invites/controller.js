@@ -10,6 +10,14 @@ const { storeImages, discardUploads } = require("../../../services/imageStorage"
 const { storeDocument } = require("../../../services/documentStorage");
 const { SHORT_CODE_PATTERN, generateShortCode } = require("../../../services/shortCode");
 const { nextIdentifier } = require("../../../services/identifiers");
+const employeeReferences = require("../../../services/employeeReferences");
+// Sending on WhatsApp belongs to the WhatsApp module and is reused whole from here; this file
+// never learns what a session or a socket is. See `directSend` for why it is not an endpoint.
+const { sendWhatsAppToPerson } = require("../../sales/whatsapp-chat/directSend");
+const whatsappActivity = require("../../../services/whatsappActivity");
+// WhatsApp's own cap, named once in the module that owns it - `directSend` enforces the same
+// constant, and a literal here would drift from it the day WhatsApp changes.
+const { MAX_MESSAGE_LENGTH } = require("../../sales/whatsapp-chat/security");
 
 const ONBOARDING_PROOF_FOLDER = "hrm/onboarding/proof";
 const ONBOARDING_PHOTO_FOLDER = "hrm/onboarding/photo";
@@ -99,6 +107,9 @@ function onboardingUrlFor(invite, heldToken = null) {
 }
 // Either identifier proves the caller holds the link: the original 64-hex token, or the short
 // code the shortened URL carries (which is what the dialog reads back off the link it shows).
+// The wording as the sender left it in the dialog's box. The link is already inside it - they were
+// shown the whole message - so nothing here rebuilds one, and the cap is WhatsApp's own limit.
+const sendInviteWhatsAppSchema = z.object({ message: z.string().trim().min(1).max(MAX_MESSAGE_LENGTH) });
 const sendInviteEmailSchema = z.object({
   token: z.string().trim().refine((value) => classifyInviteIdentifier(value) !== null, "A valid onboarding token is required"),
 });
@@ -108,6 +119,9 @@ const optionalSubmissionText = (max = 5000) => z.string().trim().max(max).option
 // that HR is then unable to edit. Phone numbers are judged on their digits, since the country code
 // is optional on the public form and normalised on the way in.
 const submissionPhone = z.string().trim().refine((value) => /^[6-9]\d{9}$/.test(value.replace(/\D/g, "").slice(-10)) && value.replace(/\D/g, "").length <= 13, "Enter a 10-digit mobile number");
+// The same check, but for a number most candidates do not have yet - a company-issued phone,
+// which the studio gives out after somebody joins rather than before.
+const optionalSubmissionPhone = z.string().trim().refine((value) => !value || (/^[6-9]\d{9}$/.test(value.replace(/\D/g, "").slice(-10)) && value.replace(/\D/g, "").length <= 13), "Enter a 10-digit mobile number").optional();
 // A proof is either a freshly picked image, which arrives as a compressed data URI, or a link the
 // browser is echoing back from an earlier attempt at the same submission.
 const proofImage = z.string().trim().min(1).max(12_000_000)
@@ -193,6 +207,7 @@ const onboardingSubmissionSchema = z.object({
     "Choose a gender from the list",
   ),
   contactNumber: submissionPhone,
+  companyGivenNumber: optionalSubmissionPhone,
   emailId: z.string().trim().email().max(191),
   dateOfJoining: z.coerce.date(),
   workType: requiredSubmissionText.max(100),
@@ -370,6 +385,7 @@ function employeePrefill(employee) {
     gender: employee.gender,
     dateOfBirth: dateOnly(employee.dateOfBirth),
     contactNumber: employee.contactNumber,
+    companyGivenNumber: employee.companyGivenNumber,
     emailId: employee.emailId,
     dateOfJoining: dateOnly(employee.dateOfJoining),
     workType: employee.workType,
@@ -615,6 +631,65 @@ async function updateInvite(req, res) {
   } catch (error) {
     console.error("[hrm] Unable to update onboarding invite:", error.message);
     return res.status(500).json({ message: "Unable to update this onboarding invite." });
+  }
+}
+
+/**
+ * The same invite, handed over on WhatsApp instead of by email, from the sender's own account.
+ *
+ * ── Why the message comes from the browser ────────────────────────────────────────────────────
+ *
+ * The dialog shows the finished wording in an editable box, and that box is the point: somebody
+ * adds a line about when to start, or writes it in the candidate's own language. So the text sent
+ * is the text they are looking at, not one rebuilt here from the record - a server that composed
+ * its own would quietly discard whatever they had typed.
+ *
+ * ── What is *not* taken from the browser ──────────────────────────────────────────────────────
+ *
+ * The number. It is read off the invite, so this cannot be used to message anybody who is not the
+ * candidate this invite is for - which is what keeps a signed-in HR account from being a way to
+ * send WhatsApp to any number in the world from the studio's paired phone.
+ *
+ * The invite's own state is checked exactly as the email checks it: a cancelled, submitted or
+ * expired invite is not one to send, whichever way it would have gone out.
+ *
+ * Nothing is recorded, which is what the email does too - there is no sent stamp on an invite and
+ * no screen that shows one, so writing one here would be this module's only claim of a kind.
+ */
+async function sendInviteWhatsApp(req, res) {
+  const parsedId = inviteIdSchema.safeParse(req.params.id);
+  const parsedBody = sendInviteWhatsAppSchema.safeParse(req.body);
+  if (!parsedId.success || !parsedBody.success) return validationError(res, (!parsedId.success ? parsedId : parsedBody).error);
+
+  try {
+    const invite = await prisma.employeeOnboardingInvite.findUnique({ where: { id: parsedId.data } });
+    if (!invite) return res.status(404).json({ message: "Onboarding invite not found" });
+    if (invite.status === "Cancelled" || invite.status === "Submitted") return res.status(400).json({ message: "This onboarding invite can no longer be sent." });
+    if (invite.expiresAt <= new Date()) {
+      if (invite.status !== "Expired") await prisma.employeeOnboardingInvite.update({ where: { id: invite.id }, data: { status: "Expired" } });
+      return res.status(400).json({ message: "This onboarding invite has expired." });
+    }
+
+    // Recorded in Settings → WhatsApp Activity Log, where a failed one can be sent again.
+    await whatsappActivity.track({
+      mode: "MANUAL", provider: "baileys", trigger: "ONBOARDING_INVITE", eventRef: `onboarding-invite:${invite.id}`,
+      initiatedByUserId: req.user.id, senderUserId: req.user.id,
+      recipient: { kind: "PERSON", address: invite.candidatePhone, name: invite.candidateName },
+      body: parsedBody.data.message, resendable: true,
+    }, () => sendWhatsAppToPerson({
+      userId: req.user.id,
+      phone: invite.candidatePhone,
+      body: parsedBody.data.message,
+      noNumberMessage: "This invite has no phone number to send to. Edit it and add one.",
+    }));
+    return res.json({ message: `Onboarding invite sent on WhatsApp to ${invite.candidateName}.` });
+  } catch (error) {
+    // The send's own refusals carry a status and a sentence worth reading - WhatsApp not linked,
+    // switched off for the studio, the number not on WhatsApp - so they are passed through rather
+    // than folded into one "could not send".
+    if (error?.status) return res.status(error.status).json({ message: error.message });
+    console.error(`[hrm] Onboarding invite WhatsApp refused for invite ${parsedId.data}:`, error.message);
+    return res.status(502).json({ message: "Unable to send this onboarding invite on WhatsApp." });
   }
 }
 
@@ -867,10 +942,15 @@ async function createSubmittedEmployee(tx, data, invite, proofUrls, experiences)
    * stays on HR Onboarding Pending for review. Only a first submission creates.
    */
   const existingId = invite.employeeId ? Number(invite.employeeId) : null;
+  // The candidate's answers, once, plus the references beside them (`services/employeeReferences.js`):
+  // gender, work type, blood group, marital status and relationship as ids, and the skill and
+  // language rows written by `syncLists` after the row exists.
+  const submitted = await submittedEmployeeData(data, proofUrls);
+  const references = await employeeReferences.referenceColumns(submitted);
   if (existingId) {
     const existing = await tx.employee.findUnique({ where: { id: existingId }, select: { id: true, employmentStatus: true } });
     if (existing && ["HR Onboarding Pending", "Employee Submission Pending"].includes(existing.employmentStatus)) {
-      return tx.employee.update({
+      const updated = await tx.employee.update({
         where: { id: existingId },
         // A resubmission carries the whole of each list, so the stored rows are replaced by them —
         // which is also how a candidate who has corrected their marital status is left with no
@@ -878,18 +958,22 @@ async function createSubmittedEmployee(tx, data, invite, proofUrls, experiences)
         data: {
           // No designation, department or vertical: see `submittedEmployeeData`. A resubmission is
           // the candidate's answers again, and must not undo what HR settled while reviewing.
-          ...(await submittedEmployeeData(data, proofUrls)),
+          ...submitted,
+          ...references,
           children: { deleteMany: {}, create: await submittedChildren(data) },
           qualifications: { deleteMany: {}, create: submittedQualifications(data) },
           experiences: { deleteMany: {}, create: submittedExperiences(experiences) },
         },
       });
+      await employeeReferences.syncLists(tx, updated.id, submitted);
+      return updated;
     }
   }
-  return tx.employee.create({
+  const created = await tx.employee.create({
     data: {
       employeeId: await nextEmployeeId(tx),
-      ...(await submittedEmployeeData(data, proofUrls)),
+      ...submitted,
+      ...references,
       /*
        * The one studio answer seeded here, because the invite already carries it: Intended
        * Designation is required to send an invite at all, so a new record starts with the job it
@@ -898,11 +982,14 @@ async function createSubmittedEmployee(tx, data, invite, proofUrls, experiences)
        * that is on none of its lists.
        */
       designation: invite.intendedDesignation || null,
+      ...(await employeeReferences.referenceColumns({ designation: invite.intendedDesignation || null })),
       children: { create: await submittedChildren(data) },
       qualifications: { create: submittedQualifications(data) },
       experiences: { create: submittedExperiences(experiences) },
     },
   });
+  await employeeReferences.syncLists(tx, created.id, submitted);
+  return created;
 }
 
 /** The children to store: only a married candidate is asked for any, so only theirs are kept. */
@@ -990,6 +1077,7 @@ async function submittedEmployeeData(data, proofUrls) {
           employmentStatus: "HR Onboarding Pending",
           gender: data.gender,
           contactNumber: toStoredPhone(data.contactNumber),
+          companyGivenNumber: toStoredPhone(data.companyGivenNumber),
           emailId: data.emailId,
           dateOfJoining: data.dateOfJoining,
           workType: data.workType,
@@ -1107,4 +1195,4 @@ async function submitPublicInvite(req, res) {
   }
 }
 
-module.exports = { phonesMatch, onboardingUrlFor, updateInvite, onboardingSubmissionSchema, createInvite, listInvites, cancelInvite, sendInviteEmail, sendBackOnboarding, getPublicInvite, verifyPublicInvite, submitPublicInvite, onboardingLinkCode };
+module.exports = { phonesMatch, onboardingUrlFor, updateInvite, onboardingSubmissionSchema, createInvite, listInvites, cancelInvite, sendInviteEmail, sendInviteWhatsApp, sendBackOnboarding, getPublicInvite, verifyPublicInvite, submitPublicInvite, onboardingLinkCode };

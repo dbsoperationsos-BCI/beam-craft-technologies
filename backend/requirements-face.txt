@@ -1,10 +1,31 @@
-# The AI Feature's face engine (backend/src/modules/ai-feature/face-engine/face_engine.py).
-# Open-source only: InsightFace's SCRFD detector and ArcFace recogniser, fetched from the Hugging
-# Face Hub (public-data/insightface) on first run. CPU inference; no GPU needed.
+# The face engine's Python environment (backend/src/modules/ai-feature/face-engine/face_engine.py),
+# shared by the AI Feature and the client gallery's People filter.
 #
-#   python3 -m pip install -r backend/requirements-face.txt
-insightface>=0.7.3
-onnxruntime>=1.17
-opencv-python-headless>=4.9
-huggingface_hub>=0.23
-numpy>=1.26
+# Installed by backend/scripts/face-engine-setup.sh into backend/.venv-face - a virtualenv of its
+# own, apart from the Node backend and from the call-transcript environment (faster-whisper, the
+# repository-root .venv). The deploy runs that script every time, so nothing here is ever pip
+# installed by hand on the server.
+#
+# Every package the engine imports, and every package insightface itself needs, is named here on
+# purpose. insightface declares a dependency on `opencv-python`, the desktop build that wants
+# libGL and an X display a server does not have - so the script installs the `insightface` line
+# below with `--no-deps` and takes the rest from this file, where the OpenCV named is the headless
+# build. Do not add `opencv-python`: two OpenCV builds in one environment fight over `cv2`.
+#
+# insightface 1.0.1 is the version this engine was written against and ships a pure-Python wheel
+# (no compiler on the server). The others are floors with a ceiling on the next major, so pip
+# picks the newest build for whatever Python the server has (3.9 and up).
+
+# --- the engine's own imports -----------------------------------------------------------------
+insightface==1.0.1
+onnxruntime>=1.19,<2
+opencv-python-headless>=4.9,<6
+numpy>=1.26,<3
+huggingface_hub>=0.23,<2
+
+# --- what insightface 1.0.1 imports at runtime (its own requires_dist, minus opencv-python) ------
+onnx>=1.16,<2
+scipy>=1.11
+scikit-image>=0.22
+requests>=2.31
+tqdm>=4.66

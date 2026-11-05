@@ -23,13 +23,32 @@
 /** The group name fields emptied — the shape the form holds them in, not nulls. */
 const CLEARED = { whatsappGroupNameId: "", whatsappGroupName: "", groupType: "", vertical: "" };
 
+const VERTICAL_CODES = ["WED", "QQ", "CORP"];
+const CODE_FOR_GROUP_TYPE = { "Dum Dum": "WED", "Qua Qua": "QQ", Corp: "CORP" };
+
+/** The verticals a project can be — what the form asks for when a typed group name brings none. */
+export const GROUP_TYPES = Object.keys(CODE_FOR_GROUP_TYPE);
+
+/**
+ * The project vertical a saved group name stands for, always as the code a project stores.
+ *
+ * New group names hold the code (`WED`, `QQ`), but older ones spelled the vertical out ("Dum Dum"),
+ * and a project accepts only the code - handed over as written, those were refused with "vertical:
+ * expected one of WED|QQ|CORP". The group type ("Dum Dum", "Qua Qua", "Corp") is the answer either way.
+ */
+export function projectVerticalFor(groupName = {}) {
+  const stored = String(groupName?.vertical || "").trim().toUpperCase();
+  if (VERTICAL_CODES.includes(stored)) return stored;
+  return CODE_FOR_GROUP_TYPE[String(groupName?.groupType || "").trim()] || CODE_FOR_GROUP_TYPE[String(groupName?.vertical || "").trim()] || "";
+}
+
 export function groupNameFieldsForEnquiry({ currentEnquiryId, nextEnquiryId, savedForEnquiry } = {}) {
   if (savedForEnquiry) {
     return {
       whatsappGroupNameId: savedForEnquiry.id,
       whatsappGroupName: savedForEnquiry.generatedName,
       groupType: savedForEnquiry.groupType,
-      vertical: savedForEnquiry.vertical,
+      vertical: projectVerticalFor(savedForEnquiry),
     };
   }
   // Compared as written: the ids are the studio's own strings and are never re-cased on the way in,

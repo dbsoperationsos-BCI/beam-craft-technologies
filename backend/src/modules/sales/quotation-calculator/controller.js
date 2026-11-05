@@ -1,4 +1,5 @@
 const prisma = require("../../../config/db");
+const { DEFINITION_ORDER } = require("../../../services/definitionOrder");
 
 /**
  * What the CRM's Quotation Calculator can quote for, and what is already booked on a date.
@@ -29,15 +30,6 @@ function sessionModesFor(service) {
   return service?.timingMode ? [service.timingMode] : [];
 }
 
-/**
- * How a service's pricing line reads on the calculator: the booking it prices, in words.
- *
- * "Studio / In-House · Full Session · 10-12 Hours (Full) · 55 inch" - the shoot type, the timing,
- * how long it runs (the typed hours for an hourly line), and the size where the service is sold by
- * size. Every part is what Settings → Project → Services holds for the line; nothing is invented.
- */
-const SHOOT_TYPE_LABEL = { STUDIO: "Studio / In-House", OUTDOOR: "Outdoor / On-Location" };
-const TIMING_LABEL = { HALF_SESSION: "Half Session", FULL_SESSION: "Full Session", HOURS_MINUTES: "Hours / Minutes" };
 const money = (value) => {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
@@ -45,41 +37,43 @@ const money = (value) => {
 };
 
 /**
- * The deliverable variants one pricing line brings with it, each named by its three ids.
+ * The deliverable variants a service brings with it, each named by its three ids.
  *
  * Only where the service answered **Deliverable Added** in Settings - the rule the Quotation
- * Generator's `serviceMappedDeliverableRows` applies, so a service answered No keeps its mapping
- * stored and brings nothing. Anything without all three ids is dropped, as the settings form drops
- * it (`pricingLineDeliverables`), so a half-written mapping cannot reach a quotation.
+ * Generator's `serviceMappedDeliverableRows` applies, so a service answered No keeps its list
+ * stored and brings nothing. The list is the service's own `deliverables`; a service saved before
+ * that existed reads as every variant its pricing lines named, each once - the same reading as
+ * `serviceDeliverables` in the frontend. Anything without all three ids is dropped.
  */
-function lineDeliverables(service, row) {
+function serviceDeliverables(service) {
   if (service?.deliverableAdded !== true) return [];
-  return (Array.isArray(row?.deliverables) ? row.deliverables : [])
+  const source = Array.isArray(service?.deliverables)
+    ? service.deliverables
+    : (Array.isArray(service?.pricing) ? service.pricing : []).flatMap((row) => (Array.isArray(row?.deliverables) ? row.deliverables : []));
+  const seen = new Set();
+  return source
     .map((entry) => ({
       deliverableId: String(entry?.deliverableId || ""),
       brandId: String(entry?.brandId || ""),
       variantId: String(entry?.variantId || ""),
     }))
-    .filter((entry) => entry.deliverableId && entry.brandId && entry.variantId);
+    .filter((entry) => {
+      const key = `${entry.deliverableId}::${entry.brandId}::${entry.variantId}`;
+      if (!entry.deliverableId || !entry.brandId || !entry.variantId || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
+/**
+ * A service as the calculator quotes it: one line at its one price in Settings, on any shoot.
+ *
+ * Settings no longer asks Shoot Type, Session Timing, Duration or Size, so the per-booking pricing
+ * lines a service may still store are not read; a service with no price is listed unpriced rather
+ * than left out.
+ */
 function serviceLines(service) {
-  const rows = (Array.isArray(service?.pricing) ? service.pricing : []).filter((row) => row && money(row.price) !== null);
-  if (rows.length) {
-    return rows.map((row, index) => ({
-      id: `${service.id}:${index}`,
-      shootType: SHOOT_TYPE_LABEL[row.shootType] || row.shootType || "",
-      timing: TIMING_LABEL[row.timingMode] || row.timingMode || "",
-      duration: row.timingMode === "HOURS_MINUTES" ? (row.hours ? `${row.hours} hour${Number(row.hours) === 1 ? "" : "s"}` : "") : (row.duration || ""),
-      size: service.sizeEnabled === true ? (row.size || "") : "",
-      price: money(row.price),
-      // What this booking brings with it, so the calculator adds the same deliverables the
-      // Quotation Generator adds when this line is chosen - see `lineDeliverables`.
-      deliverables: lineDeliverables(service, row),
-    }));
-  }
-  // A service with no pricing lines is quoted at its flat price, where it has one.
-  return [{ id: `${service.id}:flat`, shootType: "", timing: "", duration: "", size: "", price: money(service?.price), deliverables: [] }];
+  return [{ id: `${service.id}:flat`, shootType: "", timing: "", duration: "", size: "", price: money(service?.price), deliverables: serviceDeliverables(service) }];
 }
 
 /**
@@ -102,11 +96,9 @@ function dayRange(date) {
 function shapeCatalogue(services, deliverables = []) {
   return {
     /*
-     * One row per pricing line under each service, carrying the price Settings gave it, so the
-     * calculator can count how many of each booking the client is taking and total it. Half and
-     * Full Session used to be two quantity columns per service; the lines say which bookings the
-     * service is actually sold as, at what figure, and a service priced nowhere still appears -
-     * unpriced - rather than vanishing from the list.
+     * One line under each service at the price Settings gives it, so the calculator can count how
+     * many the client is taking and total it - see `serviceLines`. A service priced nowhere still
+     * appears, unpriced, rather than vanishing from the list.
      */
     services: (services || []).map((service) => ({
       id: service.id,
@@ -168,14 +160,14 @@ async function catalogue(req, res) {
     const [services, deliverables] = await Promise.all([
       prisma.projectServiceDefinition.findMany({
         where: { isActive: true },
-        // Alphabetical, the way Project Settings now lists them: Sort Order was a number nobody
-        // maintained, and two screens ordering the same services differently is worse than either.
-        orderBy: [{ name: "asc" }],
-        select: { id: true, name: true, price: true, pricing: true, sizeEnabled: true, deliverableAdded: true },
+        // The order Project Settings sets by dragging, the same one every other list of them reads:
+        // two screens ordering the same services differently is worse than either.
+        orderBy: DEFINITION_ORDER,
+        select: { id: true, name: true, price: true, pricing: true, deliverableAdded: true, deliverables: true },
       }),
       prisma.projectDeliverableDefinition.findMany({
         where: { isActive: true },
-        orderBy: [{ name: "asc" }],
+        orderBy: DEFINITION_ORDER,
         select: {
           id: true, name: true, mediaType: true, brandName: true, imageSize: true, videoLength: true, frameInches: true, price: true,
           photoCountEnabled: true, remarksEnabled: true,
@@ -309,4 +301,4 @@ async function saveQuote(req, res) {
   }
 }
 
-module.exports = { catalogue, bookings, getQuote, saveQuote, dayRange, shapeCatalogue, shapeBookings, sessionModesFor, serviceLines, lineDeliverables, quoteSchema };
+module.exports = { catalogue, bookings, getQuote, saveQuote, dayRange, shapeCatalogue, shapeBookings, sessionModesFor, serviceLines, serviceDeliverables, quoteSchema };

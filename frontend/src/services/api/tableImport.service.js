@@ -10,5 +10,7 @@ import { apiRequest } from "@/services/api/client";
  */
 export const getImportTemplate = (prefix) => apiRequest(`${prefix}/import/template`);
 
-export const importTableRows = (prefix, { headers, rows, startRow }) =>
-  apiRequest(`${prefix}/import`, { method: "POST", body: JSON.stringify({ headers, rows, startRow }) });
+// `options` carries what a module's import asks beyond the rows - Pre Production's `replace` and
+// `preview` - and is sent as it is.
+export const importTableRows = (prefix, { headers, rows, startRow }, options = {}) =>
+  apiRequest(`${prefix}/import`, { method: "POST", body: JSON.stringify({ ...options, headers, rows, startRow }) });

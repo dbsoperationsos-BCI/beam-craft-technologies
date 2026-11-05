@@ -16,7 +16,7 @@ import { verticalFieldRows } from "./quotationVerticalConfig";
  * same field heights, the same three-column grid and the same behaviour on a phone. Rows collapse
  * to a single column below `md`, which is what keeps the form usable at ~360px.
  */
-export default function QuotationVerticalFields({ vertical, values, onChange }) {
+export default function QuotationVerticalFields({ vertical, values, onChange, errors = {} }) {
   const rows = verticalFieldRows[vertical] || [];
   /*
    * The studio's branches, not a list written into this file. It held its own copy of the CRM's
@@ -31,7 +31,7 @@ export default function QuotationVerticalFields({ vertical, values, onChange }) 
 
   function renderField(item) {
     const value = values[item.key] || "";
-    const shared = { label: item.label, required: item.required, value };
+    const shared = { label: item.label, helperText: item.helperText, required: item.required, value, error: errors[item.key] || "" };
 
     if (item.type === "phone") {
       return <PhoneField key={item.key} {...shared} onChange={(_field, phone) => onChange(item.key, phone)} />;
@@ -45,7 +45,11 @@ export default function QuotationVerticalFields({ vertical, values, onChange }) 
     if (item.type === "select") {
       // The studio's own list where there is one for this field - Offer Type - and the list the
       // row was written with otherwise, exactly as the combo above does it.
-      return <Dropdown key={item.key} {...shared} mode="input" ariaLabel={item.label} options={suggestions[item.key] || item.options} onChange={(next) => onChange(item.key, next)} />;
+      //
+      // `searchable` is the field's own answer rather than every select's: a list the studio keeps
+      // adding to is typed into (Category), and a short fixed one is not (Offer Type). Still a
+      // closed list either way - typing filters the options and cannot write a new one.
+      return <Dropdown key={item.key} {...shared} mode="input" searchable={Boolean(item.searchable)} ariaLabel={item.label} options={suggestions[item.key] || item.options} onChange={(next) => onChange(item.key, next)} />;
     }
     if (item.type === "branch") {
       return <Dropdown key={item.key} {...shared} mode="input" searchable ariaLabel={item.label} options={branchOptions} onChange={(next) => onChange(item.key, next)} />;

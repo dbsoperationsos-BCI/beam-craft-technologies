@@ -1,6 +1,7 @@
 const { GetObjectCommand, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
 const { r2Client, bucket, isConfigured } = require("../config/r2");
 const { IDENTIFIER_PATTERN } = require("./identifiers");
+const { compressImage } = require("./imageCompression");
 
 /**
  * Private per-client files in R2, filed so a person can read the bucket.
@@ -117,19 +118,47 @@ function storageReady() {
   return isConfigured;
 }
 
+// The CRM's own uploads already sit behind a multer `fileSize` limit (25MB) before they ever
+// reach here, but WhatsApp's inbound media does not - a photo a client's phone sends arrives
+// through `downloadMediaMessage` with no ceiling of its own. Compressing is a saving, not
+// something owed to every buffer regardless of size, so anything this large skips the sharp
+// decode entirely and is stored as received - the same outcome as a compression failure, just
+// without spending the CPU to find out.
+const MAX_COMPRESSIBLE_BYTES = 25 * 1024 * 1024;
+
 /**
  * Puts one file in the bucket.
  *
  * Private and uncached: this is one client's material, not an asset. `no-store` keeps it out of
  * any proxy between the bucket and the server.
+ *
+ * A photo - a remark's attachment, what a client sent over WhatsApp, what the studio sent back -
+ * is compressed the same way every other image in the app is (`compressImage`) before it lands in
+ * the bucket; a client's own device photo can run past 10MB, and nothing downstream ever needed
+ * the original bytes. The key keeps whatever extension the caller gave it even though the stored
+ * bytes are now WebP - harmless, since every reader sets its response type from the object's own
+ * stored `ContentType`, never from the key. Audio, video and other files pass through untouched:
+ * this is an image-only step. A photo `compressImage` cannot read (corrupt, a format it does not
+ * decode) is stored as received rather than lost - compression is a saving, not a gate.
  */
 async function putObject({ key, buffer, contentType }) {
   if (!isConfigured || !key || !buffer?.length) return "";
+  let body = buffer;
+  let type = contentType || "application/octet-stream";
+  if (type.startsWith("image/") && buffer.length <= MAX_COMPRESSIBLE_BYTES) {
+    try {
+      const compressed = await compressImage(buffer);
+      body = compressed.buffer;
+      type = compressed.mimeType;
+    } catch (error) {
+      console.warn("[crm-media] Image not compressed, storing as received:", error.message);
+    }
+  }
   await r2Client().send(new PutObjectCommand({
     Bucket: bucket,
     Key: key,
-    Body: buffer,
-    ContentType: contentType || "application/octet-stream",
+    Body: body,
+    ContentType: type,
     CacheControl: "no-store",
   }));
   return key;

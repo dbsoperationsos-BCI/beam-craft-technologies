@@ -5,7 +5,19 @@
  * out from these rows by the server rather than typed in, which is why none of them appear here.
  */
 
+/**
+ * The two kinds of review. **Cyclic** is the regular one on the employee's schedule: it may award
+ * an increment and it sets the next review date. **Spot** is an outcome and a remark recorded
+ * between them - it touches neither the schedule nor the salary.
+ */
+export const REVIEW_TYPES = [
+  { value: "SPOT", label: "Spot Review" },
+  { value: "CYCLIC", label: "Cyclic Review" },
+];
+export const isSpotReview = (review) => review?.reviewType === "SPOT";
+
 export const emptyReview = () => ({
+  reviewType: "CYCLIC",
   reviewDate: "",
   outcome: "",
   incrementAmount: "",
@@ -113,12 +125,19 @@ export const reviewListColumns = [
  */
 export function reviewPayload({ key, ...review }) {
   const increment = String(review.incrementAmount ?? "").trim();
+  // Trimmed, not just checked for blank: a remark typed with a leading or trailing space carried
+  // it into the record and, now that the timeline sizes a card to its content, into the card's own
+  // height - a stray space at the end being why one review's box was taller than every other's.
+  const remarks = String(review.remarks ?? "").trim();
   return {
     ...review,
     incrementAmount: increment === "" ? null : Number(increment),
     outcome: review.outcome || null,
     nextReviewDate: review.nextReviewDate || null,
-    remarks: review.remarks || null,
+    remarks: remarks === "" ? null : remarks,
+    reviewType: review.reviewType || "CYCLIC",
+    // A spot review awards nothing and schedules nothing.
+    ...(isSpotReview(review) ? { incrementAmount: null, nextReviewDate: null } : {}),
   };
 }
 
@@ -128,7 +147,9 @@ export const sortReviews = (reviews) => [...reviews].sort((first, second) => new
 export const totalIncrement = (reviews) => reviews.reduce((sum, review) => sum + Number(review.incrementAmount || 0), 0);
 
 /** What the server will store, so the panel can show the same figures before it saves. */
-export function reviewTotals(reviews, joiningSalary) {
+export function reviewTotals(allReviews, joiningSalary) {
+  // Spot reviews are neither the schedule nor the salary: only cyclic ones count here.
+  const reviews = allReviews.filter((review) => !isSpotReview(review));
   if (!reviews.length) return { totalIncrement: null, totalSalary: joiningSalary === "" ? null : Number(joiningSalary), lastReviewDate: "", nextReviewDate: "" };
   const sorted = sortReviews(reviews);
   const latest = sorted[sorted.length - 1];
@@ -142,7 +163,7 @@ export function reviewTotals(reviews, joiningSalary) {
 }
 
 /**
- * What a review must have, which is its date and nothing else.
+ * What a review must have, which is its date and nothing else - each problem keyed by its field.
  *
  * The increment used to be required, and that was wrong twice over: reviews are held without one -
  * a confirmation, a year with no raises, a conversation minuted before the figure is agreed - and
@@ -150,10 +171,19 @@ export function reviewTotals(reviews, joiningSalary) {
  * employee's totals for ever afterwards. Left empty it is simply not answered. A figure that *is*
  * given still has to be a sensible one.
  */
-export function validateReview(review) {
-  if (!review.reviewDate) return "Enter the review date.";
+export function reviewProblems(review) {
   const increment = String(review.incrementAmount ?? "").trim();
-  if (increment !== "" && !(Number(increment) >= 0)) return "Enter a valid increment amount, or leave it empty.";
-  if (review.nextReviewDate && new Date(review.nextReviewDate) < new Date(review.reviewDate)) return "The next review date cannot fall before the review date.";
-  return "";
+  // A spot review is its outcome; the rest of it is not asked.
+  if (isSpotReview(review)) return { outcome: review.outcome ? "" : "Choose the review outcome." };
+  return {
+    reviewDate: review.reviewDate ? "" : "Enter the review date.",
+    incrementAmount: increment !== "" && !(Number(increment) >= 0) ? "Enter a valid increment amount, or leave it empty." : "",
+    nextReviewDate: review.reviewDate && review.nextReviewDate && new Date(review.nextReviewDate) < new Date(review.reviewDate)
+      ? "The next review date cannot fall before the review date." : "",
+  };
+}
+
+/** The first of those problems, or "" when the review can be saved. */
+export function validateReview(review) {
+  return Object.values(reviewProblems(review)).find(Boolean) || "";
 }

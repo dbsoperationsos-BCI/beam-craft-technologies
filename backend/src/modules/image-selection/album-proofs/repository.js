@@ -1,4 +1,5 @@
 const prisma = require("../../../config/db");
+const { everyChunk } = require("../../../services/wordChunks");
 
 const albumSelect = {
   id: true, projectId: true, rootFolderId: true, name: true, albumType: true, status: true,
@@ -48,10 +49,14 @@ function createRepository(client = prisma) {
     listAlbums: ({ projectId, search, status, archived }) => client.albumProof.findMany({
       where: {
         deletedAt: null,
+        // Not an album of a gallery that is deleted - which is what deleting a project to Resource
+        // Management → Recycling Bin does to its galleries; Restore brings both back.
+        project: { deletedAt: null },
         archivedAt: archived ? { not: null } : null,
         ...(projectId ? { projectId } : {}),
         ...(status ? { status } : {}),
-        ...(search ? { OR: [{ name: { contains: search } }, { project: { projectName: { contains: search } } }, { project: { clientName: { contains: search } } }] } : {}),
+        // Word Chunk Search: every word typed, any order.
+        ...(search ? { AND: everyChunk(search, (chunk) => ({ OR: [{ name: { contains: chunk } }, { project: { projectName: { contains: chunk } } }, { project: { clientName: { contains: chunk } } }] })) } : {}),
       },
       select: {
         ...albumSelect,
@@ -61,7 +66,7 @@ function createRepository(client = prisma) {
       },
       orderBy: [{ updatedAt: "desc" }],
     }),
-    findAlbum: (id) => client.albumProof.findFirst({ where: { id, deletedAt: null }, select: { ...albumSelect, project: { select: albumProjectSelect } } }),
+    findAlbum: (id) => client.albumProof.findFirst({ where: { id, deletedAt: null, project: { deletedAt: null } }, select: { ...albumSelect, project: { select: albumProjectSelect } } }),
     findAlbumByName: (projectId, name, excludeId) => client.albumProof.findFirst({ where: { projectId, name, deletedAt: null, ...(excludeId ? { id: { not: excludeId } } : {}) }, select: { id: true } }),
     createAlbum: (data) => client.albumProof.create({ data, select: { ...albumSelect, project: { select: albumProjectSelect } } }),
     updateAlbum: (id, data) => client.albumProof.update({ where: { id }, data, select: { ...albumSelect, project: { select: albumProjectSelect } } }),

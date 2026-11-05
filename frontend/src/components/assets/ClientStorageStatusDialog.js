@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
 import { clientStorageStatusSteps, emptyValues } from "@/constants/formPanelConfig";
+import { dropUnansweredYesNo } from "@/constants/yesNoField";
 
 /**
  * The three steps along the storage flow that ask for details, plus the sale. Which fields are
@@ -15,7 +16,9 @@ export default function ClientStorageStatusDialog({ record, nextStatus, options,
 
   function submit(event) {
     event.preventDefault();
-    onSubmit({ nextStatus, details: form });
+    // A check nobody answered is left out rather than sent as the empty string the form holds for it -
+    // see `dropUnansweredYesNo`.
+    onSubmit({ nextStatus, details: dropUnansweredYesNo(step.sections, form) });
   }
 
   return <SchemaFormPanel

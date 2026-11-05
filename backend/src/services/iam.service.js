@@ -4,6 +4,7 @@
  */
 
 const prisma = require("../config/db");
+const { remember, forgetRequestCache } = require("./requestCache");
 
 /**
  * The permission the **Branch Admin** tick carries, and which the role editor therefore does not
@@ -23,7 +24,15 @@ class IAMService {
   // GET USER WITH PERMISSIONS
   // ============================================
 
-  async getUserWithPermissions(userId) {
+  /*
+   * Read once per request (`services/requestCache.js`): every guard and scope check on the way to
+   * a handler asks for the same user, and this is where each of them used to query it again.
+   */
+  getUserWithPermissions(userId) {
+    return remember(`iam:user:${userId}`, () => this._loadUserWithPermissions(userId));
+  }
+
+  async _loadUserWithPermissions(userId) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
       include: {
@@ -61,7 +70,12 @@ class IAMService {
   // GET USER PERMISSIONS (flattened)
   // ============================================
 
-  async getUserPermissions(userId) {
+  // Once per request, like the user above: the merged grants are what every guard compares against.
+  getUserPermissions(userId) {
+    return remember(`iam:permissions:${userId}`, () => this._loadUserPermissions(userId));
+  }
+
+  async _loadUserPermissions(userId) {
     const user = await this.getUserWithPermissions(userId);
 
     // SUPER_ADMIN bypass: has all permissions
@@ -87,81 +101,35 @@ class IAMService {
     });
 
     /*
-     * The Admin Permission set, for somebody carrying a role marked as a branch administrator.
+     * `ADMIN / Branch Administration` comes with the Branch Admin tick itself.
      *
-     * One set for the studio rather than one per role: two branch administrators in two branches do
-     * the same job in two places, and what differs between them is the branch list on their own
-     * role, which this does not touch. So it is read here, once, and merged through the same
-     * most-permissive rule every other grant goes through - which means it can only ever widen
-     * somebody. A branch administrator whose own role already grants a permission at Read / Write
-     * keeps Read / Write when the set names it at Read.
+     * It is the permission that makes a branch administrator one - it is what widens somebody from
+     * the work their name is on to every record in the branches their roles reach (`dataScope`) -
+     * so a role marked Branch Admin without it was a contradiction. It is granted here rather than
+     * left to be ticked, under a name ("Administer Branches") that reads like the right to edit the
+     * branch register, which is `SETTINGS / Organization` and something else entirely.
      *
-     * Read only when somebody actually is one: this is on the path of every permission check in the
-     * application, and a second query for the great majority of logins that are not branch
-     * administrators would be a cost paid for nothing.
+     * What such a role may **do** is its own matrix and nothing else. Ticking Branch Admin fills
+     * that matrix with every permission, on screen, where it can then be cut back to the job this
+     * particular administrator has - and what is left is what they hold. There used to be a shared
+     * Admin Permission set merged in here as well, which meant unticking a permission on the role
+     * changed nothing: the set handed it straight back at the next sign-in. A grant somebody can
+     * see and remove is worth more than one they cannot.
+     *
+     * Granted at READ_WRITE and merged like everything else, so it can only widen: a role that
+     * already holds it keeps whatever level it has.
      */
     if (active.some((entry) => entry.role?.isBranchManager)) {
-      const [shared, administerBranches] = await Promise.all([
-        prisma.branchAdminPermission.findMany({ include: { permission: true } }),
-        prisma.permission.findFirst({ where: { module: TICK_CARRIES.module, feature: TICK_CARRIES.feature, isActive: true } }),
-      ]);
-      /*
-       * `ADMIN / Branch Administration` comes with the tick itself, not from the set and not from
-       * the role's own matrix.
-       *
-       * It is the permission that makes a branch administrator one - it is what widens somebody
-       * from the work their name is on to every record in the branches they reach - so a role
-       * marked Branch Admin without it was a contradiction the Roles page could not show. It was
-       * grantable on its own, under a name ("Administer Branches") that reads like the right to
-       * edit the branch register, which is `SETTINGS / Organization` and something else entirely.
-       * People ticked Branch Admin, watched nothing change, and had no way to tell why.
-       *
-       * Granted here at READ_WRITE and merged like everything else, so it can only widen: a role
-       * that already holds it keeps whatever level it has.
-       */
-      // `permissionId` as well as `permission`: the merge below keys on it, and an entry without one
-      // lands under `undefined` instead of collapsing into the role's own grant of the same thing -
-      // which left a role holding it at READ *and* this at READ_WRITE as two separate rows, with
-      // `hasPermission` answering from whichever came first.
+      const administerBranches = await prisma.permission.findFirst({ where: { module: TICK_CARRIES.module, feature: TICK_CARRIES.feature, isActive: true } });
+      // `permissionId` as well as `permission`: the merge keys on it, and an entry without one
+      // lands under `undefined` instead of collapsing into the role's own grant of the same thing.
       const carried = administerBranches
         ? [{ permissionId: administerBranches.id, permission: administerBranches, accessLevel: "READ_WRITE" }]
         : [];
-      return this._mergeMostPermissive([...grants, ...shared, ...carried]);
+      return this._mergeMostPermissive([...grants, ...carried]);
     }
 
     return this._mergeMostPermissive(grants);
-  }
-
-  // ============================================
-  // ADMIN PERMISSION SET (branch administrators)
-  // ============================================
-
-  /** The studio-wide set, as the editor draws it and as `getUserPermissions` merges it. */
-  async branchAdminPermissions() {
-    return prisma.branchAdminPermission.findMany({
-      include: { permission: true },
-      orderBy: [{ permission: { module: "asc" } }, { permission: { feature: "asc" } }],
-    });
-  }
-
-  /**
-   * Replaces the set whole.
-   *
-   * Whole rather than merged, for the same reason a role's own matrix is replaced whole: the editor
-   * sends what the set should now be, and a grant the user cleared has to disappear rather than
-   * survive because it was not mentioned. In one transaction, so a failure halfway cannot leave
-   * every branch administrator holding a set nobody chose.
-   */
-  async saveBranchAdminPermissions(grants) {
-    await prisma.$transaction(async (tx) => {
-      await tx.branchAdminPermission.deleteMany({});
-      if (grants.length) {
-        await tx.branchAdminPermission.createMany({
-          data: grants.map((grant) => ({ permissionId: grant.permissionId, accessLevel: grant.accessLevel })),
-        });
-      }
-    });
-    return this.branchAdminPermissions();
   }
 
   // Collapses many grants of the same permission into one, keeping the strongest. Reaching a
@@ -289,9 +257,21 @@ class IAMService {
     }
 
     const active = user.roles.filter((entry) => entry.role?.isActive);
+    /*
+     * A role marked Branch Admin grants `ADMIN / Branch Administration` through the tick, not
+     * through a row in its matrix - so asking "which roles grant it" by reading `role_permission`
+     * answered *none*, and the branches came back empty. Which meant the one permission whose
+     * whole job is "see every record in these branches" widened nobody: `dataScope` found the
+     * person held it, found no branches to apply it to, and left them with the work their own name
+     * was on. The tick is read here, beside the grants, so the two ways of holding it reach the
+     * same branches.
+     */
+    const ticked = wanted.some((one) => one.module === TICK_CARRIES.module && one.feature === TICK_CARRIES.feature)
+      ? active.filter((entry) => entry.role?.isBranchManager).map((entry) => entry.roleId)
+      : [];
     const roleIds = anyRole
       ? active.map((entry) => entry.roleId)
-      : await this._roleIdsGranting(active.map((entry) => entry.roleId), wanted, scope.level || "READ");
+      : [...new Set([...await this._roleIdsGranting(active.map((entry) => entry.roleId), wanted, scope.level || "READ"), ...ticked])];
     if (!roleIds.length) return [];
 
     const fromRoles = await prisma.roleBranch.findMany({ where: { roleId: { in: roleIds } }, select: { branchId: true } });
@@ -558,12 +538,57 @@ class IAMService {
     });
   }
 
+  /**
+   * The employees whose login holds one permission at all - the same three ways `hasPermission`
+   * answers for one person, asked once for everybody: a Super Admin, an active role granting it,
+   * and - since a branch administrator's permissions are their own role's matrix - nothing else.
+   *
+   * For a picker that has to say who a thing would actually reach. Asking `hasPermission` per
+   * employee is a query each and drifts the moment one of the three rules changes, which is why
+   * the rule is written once, here, beside the one it mirrors.
+   */
+  async employeeIdsHoldingPermission(module, feature) {
+    const permission = await prisma.permission.findFirst({ where: { module, feature, isActive: true }, select: { id: true } });
+    if (!permission) return new Set();
+    const granted = { permissionId: permission.id, NOT: { accessLevel: "DISABLED" } };
+    // A branch administrator holds what their own role's matrix holds - ticking Branch Admin fills
+    // it with everything, and what is left after it has been cut back is theirs - so there is no
+    // second place to look.
+    const users = await prisma.user.findMany({
+      where: {
+        linkedEmployeeId: { not: null },
+        OR: [
+          { role: "SUPER_ADMIN" },
+          { roles: { some: { role: { isActive: true, permissions: { some: granted } } } } },
+        ],
+      },
+      select: { linkedEmployeeId: true },
+    });
+    return new Set(users.map((row) => row.linkedEmployeeId));
+  }
+
   async getUserRoles(userId) {
     return prisma.userRole.findMany({
       where: { userId },
       include: { role: { include: { branches: { include: { branch: { select: { id: true, name: true } } } } } } }
     });
   }
+}
+
+/*
+ * Every write to a user, a role or a grant forgets what this request had read about them - **after**
+ * the write lands, so a read between the two cannot put the old answer back. Done here for all of
+ * them at once, so a writer added later is covered by being listed rather than by remembering.
+ */
+for (const name of ["createUser", "updateUser", "assignRoleToUser", "removeRoleFromUser", "createRole", "updateRole", "addPermissionToRole", "updateRolePermission", "removePermissionFromRole"]) {
+  const write = IAMService.prototype[name];
+  IAMService.prototype[name] = async function forgetsAfterWriting(...args) {
+    try {
+      return await write.apply(this, args);
+    } finally {
+      forgetRequestCache();
+    }
+  };
 }
 
 const service = new IAMService();

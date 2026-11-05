@@ -1,21 +1,28 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import RecordSummaryCard from "@/components/shared/RecordSummaryCard";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
 import Button from "@/components/shared/Button";
-import { createCashEntry, updateCashEntry } from "@/services/accounts/cash-entries.service";
+import useFormErrors from "@/components/shared/useFormErrors";
+import useRemoteOptions from "@/components/shared/useRemoteOptions";
+import { createCashEntry, searchCashEntryProjects, searchCashEntryShoots, updateCashEntry } from "@/services/accounts/cash-entries.service";
+import { getOpenScheduledPayments } from "@/services/accounts/scheduled-payments.service";
 import usePaymentModes from "@/components/accounts/usePaymentModes";
 import {
   OTHER_HANDLER,
+  settleChange,
+  settleNotes,
+  withSettledPayment,
   cashEntryFormSections,
   cashEntryLeadFields,
   cashEntryInitialValues,
   cashEntryPayload,
   entryTypeChoices,
   projectFor,
+  cashEntryFieldProblems,
   shootFor,
-  validateCashEntry,
 } from "@/constants/accountsConfig";
 
 const toDateInput = (value) => value ? new Date(value).toISOString().slice(0, 10) : "";
@@ -72,12 +79,15 @@ function LinkSummary({ received, fixed = false, shoot, project }) {
   />;
 }
 
-function toForm(entry, entryType, { projectId = "" } = {}) {
-  if (!entry) return { ...cashEntryInitialValues, entryType, projectId };
+function toForm(entry, entryType, { projectId = "", ...values } = {}) {
+  if (!entry) return { ...cashEntryInitialValues, entryType, projectId, ...values };
   return {
     entryType: entry.entryType || entryType,
     shootId: entry.shootId || "",
     projectId: entry.projectId || "",
+    // A transfer's two ends; the entry's own branch is the one the money left.
+    fromBranchId: entry.entryType === "Transfer" && entry.branchId ? String(entry.branchId) : "",
+    toBranchId: entry.toBranchId ? String(entry.toBranchId) : "",
     category: entry.category || "",
     amount: entry.amount === null || entry.amount === undefined ? "" : String(entry.amount),
     entryDate: toDateInput(entry.entryDate),
@@ -109,12 +119,22 @@ function toForm(entry, entryType, { projectId = "" } = {}) {
  * Which fields each direction asks for lives in the field list rather than in this file; this owns
  * the direction, validation, and saving.
  *
+ * `preset.entryTypeOpen` keeps the kind choosable while `preset.entryType` pre-selects it - Import
+ * from PDF reads a likely direction off the statement, but the person recording the row decides
+ * whether it was money received, money spent or a branch transfer.
+ *
  * `preset` is for a form opened from somewhere that has already answered part of it — a project's
  * Payments tab, where the button pressed says the direction and the screen says the project. Both
  * are then read back rather than asked for, and the project is handed over as a whole record, not
  * an id: the picker holds the most recent projects only and cannot be relied on to contain it.
+ * `preset.values` fills in more of it (a category, an amount), and `preset.amountFixed` keeps the
+ * amount as given.
+ *
+ * `onRecord(payload)`, when given, records the entry instead of the cash book's own endpoint - a
+ * scheduled payment cleared from Accounts -> Scheduled Payments is recorded through its own route,
+ * which links the receipt to it. The panel then saves once and leaves the rest to the caller.
  */
-export default function CashEntryFormPanel({ entry, preset, options, onClose, onSaved, zIndexClassName }) {
+export default function CashEntryFormPanel({ entry, preset, options, onClose, onSaved, onRecord, submitLabel, zIndexClassName }) {
   const [direction, setDirection] = useState(entry?.entryType || preset?.entryType || "");
   const received = direction === "Received";
   /*
@@ -122,13 +142,36 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
    * picker to answer it in. Kept as its own value rather than read off `preset` at save, so Save &
    * Next starts the next entry against the same project.
    */
-  const presetSeed = useMemo(() => (preset?.project ? { projectId: preset.project.id } : {}), [preset]);
+  const presetSeed = useMemo(() => ({ ...(preset?.project ? { projectId: preset.project.id } : {}), ...(preset?.values || {}) }), [preset]);
   const [form, setForm] = useState(() => toForm(entry, entry?.entryType || preset?.entryType || "", presetSeed));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const fields = useFormErrors();
+  const { clear, clearAll } = fields;
   // Bumped by Save & Next to remount the panel, which is what makes the next entry start at the top
   // of the form on its first section rather than wherever the last one was left scrolled to.
   const [formKey, setFormKey] = useState(0);
+
+  /*
+   * The chosen project's payments still open, for "Settles Payment" - asked for money received being
+   * recorded, never on an edit (a receipt keeps the payment it settled) nor where the screen records
+   * the entry itself (`onRecord`: the Due tab's Clear and Partially paid already name the payment).
+   * A read that fails leaves the list empty and the form as it always was.
+   */
+  const presetProjectId = preset?.project?.id || "";
+  const settlesProjectId = received && !entry && !onRecord ? form.projectId || presetProjectId : "";
+  const [openPayments, setOpenPayments] = useState({ projectId: "", rows: [] });
+  // Bumped by Save & Next, so a payment the entry just settled leaves the list for the next one.
+  const [openPaymentsRead, setOpenPaymentsRead] = useState(0);
+  useEffect(() => {
+    if (!settlesProjectId) return undefined;
+    let current = true;
+    getOpenScheduledPayments(settlesProjectId)
+      .then((response) => { if (current) setOpenPayments({ projectId: settlesProjectId, rows: response?.data || [] }); })
+      .catch(() => { if (current) setOpenPayments({ projectId: settlesProjectId, rows: [] }); });
+    return () => { current = false; };
+  }, [settlesProjectId, openPaymentsRead]);
+  const openRows = useMemo(() => (settlesProjectId && openPayments.projectId === settlesProjectId ? openPayments.rows : []), [openPayments, settlesProjectId]);
 
   /**
    * Switching direction empties the answers that only make sense in the direction being left — the
@@ -137,19 +180,41 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
    * step so the labels and validation below follow the radio as it changes.
    */
   const update = useCallback((field, value) => {
-    setForm((current) => ({ ...current, [field]: value }));
+    setForm((current) => {
+      const next = settleChange(current, field, value, openRows);
+      // Another project has other payments: what was chosen for the last one goes.
+      if (field === "projectId") Object.assign(next, { settlesPayment: "", settleMode: "", pendingDueDate: "" });
+      return next;
+    });
+    clear(field);
     if (field === "entryType") {
       setDirection(value);
       setError("");
+      clearAll();
     }
-  }, []);
+  }, [clear, clearAll, openRows]);
+
+  /*
+   * Both pickers are searched on the server: `options` carries a page for them to open on and typing
+   * reaches every project and every shoot. The cap used to be the limit of what an entry could be
+   * **filed** against, not just what the picker opened showing - see `services/pickerSearch.js`.
+   *
+   * The shoot search is narrowed to the project the entry is filed against where there is one, which
+   * is this form's own rule rather than a cap: the server refuses a shoot from another project, so
+   * offering them would only be offering the way to a rejected save.
+   */
+  const remoteProjects = useRemoteOptions(searchCashEntryProjects, { read: (data) => data.projects });
+  const remoteShoots = useRemoteOptions(searchCashEntryShoots, {
+    read: (data) => data.shoots,
+    args: { projectId: preset?.project?.id || entry?.projectId || "" },
+  });
 
   /**
-   * The server offers the most recent shoots and projects only, so an entry filed against an older
-   * one would open on an empty picker and lose its link the moment it was saved. Its own linked
-   * record is put back at the top of the list from what the entry carries — the same fallback the
-   * Client Storage shoot picker makes — with the client and branch the entry itself stored, since
-   * those are the two the picker fills in and the entry keeps a copy of.
+   * And the record the form was **opened on** is put back at the top of the page it opens with, from
+   * what the entry carries — the client and branch the entry itself stored, since those are the two
+   * the picker fills in. Still needed with the search in place: the form opens before anybody types,
+   * and an entry against a shoot from last year would otherwise open on a picker that does not list
+   * it and lose the link the moment it was saved.
    */
   const shootList = useMemo(() => {
     const list = options.shoots || [];
@@ -169,6 +234,16 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
 
   // Only the projects are a ready-made list: the shoots are narrowed to the project chosen, so the
   // field list builds those itself from `lookups` as the answer changes.
+  const branchList = useMemo(() => {
+    const list = options.branches || [];
+    if (entry?.entryType !== "Transfer") return list;
+    const missing = [
+      entry.branchId && { id: entry.branchId, name: entry.branch, accounts: entry.paidFromAccount ? [entry.paidFromAccount] : [] },
+      entry.toBranchId && { id: entry.toBranchId, name: entry.toBranchName, accounts: entry.receivedAccount ? [entry.receivedAccount] : [] },
+    ].filter((branch) => branch && !list.some((item) => item.id === branch.id));
+    return [...missing, ...list];
+  }, [entry, options]);
+
   const projectOptions = useMemo(() => projectList.map((item) => ({ value: item.id, label: `${item.eventId} — ${item.clientName || "Unnamed client"}` })), [projectList]);
 
   // The employees the entry can be credited to, plus the way out for anyone who is not one.
@@ -192,10 +267,13 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
     // An entry keeps the direction it was filed under — its identifier carries it — so an edit
     // reads the direction back rather than offering it. A form opened by "record money in" or
     // "record money out" was answered the same way, by the button that opened it.
-    locked: Boolean(entry) || Boolean(preset?.entryType),
+    locked: Boolean(entry) || (Boolean(preset?.entryType) && !preset?.entryTypeOpen),
     // The project this form was opened from, if it was opened from one. Read by the field list to
     // drop the project picker, to narrow the shoots to that project's own, and to name it instead.
     fixedProject,
+    amountFixed: Boolean(preset?.amountFixed),
+    // The project's payments still open - "Settles Payment" is asked only when there are some.
+    openPayments: openRows,
     // What each mode asks for, cut from the one list, so the fields and the checks agree.
     modesWithTransactionId: paymentModeOptions.modesWithTransactionId,
     modesWithAccount: paymentModeOptions.modesWithAccount,
@@ -208,6 +286,7 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
         ...(options.employees || []).map((employee) => ({
           value: String(employee.id),
           label: `${employee.employeeName}${employee.employeeId ? ` · ${employee.employeeId}` : ""}`,
+          avatar: avatarOf(employee),
         })),
         { value: OTHER_HANDLER, label: "Other" },
       ],
@@ -215,7 +294,12 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
     // The records behind the two pickers, which is what the field list reads to fill the rest of the
     // form in and what the summary below them is drawn from. `options` carries only what a dropdown
     // needs, a value and a label.
-    lookups: { shoots: shootList, projects: projectList },
+    // A transfer's branches, each with its own accounts. An edited transfer's branches are put back
+    // if the person can no longer reach them, so the form opens on what the entry says.
+    lookups: { shoots: shootList, projects: projectList, branches: branchList },
+    // Both long pickers are searched on the server; `accountsConfig` reads this to build their
+    // options and to pass `Dropdown` its remote-search props.
+    remote: { shoots: remoteShoots, projects: remoteProjects },
     renderers: {
       entryTypeLocked: () => <div className="flex min-h-9 items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
         <div>
@@ -231,7 +315,7 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
         project={projectFor(values, fieldContext)}
       />,
     },
-  }), [direction, entry, fixedProject, options, paymentModeOptions, preset, projectList, projectOptions, received, shootList]);
+  }), [branchList, direction, entry, fixedProject, openRows, options, paymentModeOptions, preset, projectList, projectOptions, received, remoteProjects, remoteShoots, shootList]);
 
   /**
    * Shared with the advance on Create Project, which records the same entry through the same
@@ -239,7 +323,9 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
    */
   // The screen's own context, so what is checked here and what was asked for on screen cannot
   // disagree about which payment modes want a reference or an account.
-  const validate = () => validateCashEntry(form, { context });
+  // The form against the payments open now - see `withSettledPayment` - is what is drawn, checked and sent.
+  const shown = withSettledPayment(form, openRows);
+  const problems = () => cashEntryFieldProblems(shown, { context });
 
   /**
    * Records the entry, and either closes or clears down for the next one.
@@ -255,46 +341,40 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
   async function save({ keepOpen = false } = {}) {
     setError("");
 
-    const problem = validate();
-    if (problem) {
-      setError(problem);
-      return;
-    }
+    // Each problem under its own box; the top says only how many.
+    if (!fields.check(problems())) return;
 
     setSaving(true);
     try {
       // The same context the fields were drawn with, so what is sent matches what was asked for.
-      const payload = cashEntryPayload({ ...form, entryType: direction }, {}, context);
+      const payload = cashEntryPayload({ ...shown, entryType: direction }, {}, context);
+      if (onRecord) {
+        await onRecord(payload);
+        return;
+      }
       const saved = entry ? await updateCashEntry(entry.id, payload) : await createCashEntry(payload);
       const entryId = saved?.data?.entryId || entry?.entryId || "";
-      /*
-       * The table behind reloads either way, so the entry just filed is in the list whether or not
-       * the panel closes on top of it.
-       *
-       * The receipt goes up with it rather than being shown from here: Save & Close takes this
-       * panel down, so a dialog owned by it would be unmounted in the same breath as being opened.
-       * The screen that outlives the form is the one that shows the message. It is only ever there
-       * for money received, and only when the studio has a wording for it.
-       */
-      onSaved(entry ? `Entry ${entryId} updated.` : `Entry ${entryId} recorded.`, {
-        keepOpen,
-        entryId,
-        receiptMessage: saved?.receiptMessage || null,
-      });
+      // The table behind reloads either way, so the entry just filed is in the list whether or not
+      // the panel closes on top of it. Its receipt goes to the project's group from the server.
+      onSaved(entry ? `Entry ${entryId} updated.` : `Entry ${entryId} recorded.`, { keepOpen });
       if (keepOpen) {
         // The project is kept alongside the direction: a run of entries started from one project's
         // Payments tab is a run against that project.
         setForm(toForm(null, direction, presetSeed));
         setFormKey((current) => current + 1);
+        setOpenPaymentsRead((current) => current + 1);
       }
     } catch (requestError) {
+      if (fields.fromServer(requestError)) return;
       setError(errorMessage(requestError, "Unable to save this cash entry."));
     } finally {
       setSaving(false);
     }
   }
 
-  const noun = received ? "Cash Received" : "Cash Spent";
+  const transfer = direction === "Transfer";
+  const noun = received ? "Cash Received" : transfer ? "Branch Transfer" : "Cash Spent";
+  const addDescription = received ? "Money received from a client." : transfer ? "Money moved from one branch's account to another's." : "Money paid out against a client.";
 
   /**
    * An edit is one correction to one record, so it keeps the single Save the panel draws itself.
@@ -304,8 +384,10 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
    * button beside it rather than a second submit, because which one was pressed then needs no
    * guessing at from the event.
    */
-  const addFooter = <div className="flex w-full flex-col-reverse gap-2 sm:flex-row sm:items-center sm:gap-3">
-    <Button className="w-full sm:mr-auto sm:w-auto" type="button" onClick={onClose} disabled={saving}>Cancel</Button>
+  // The three together at the right, as every panel's footer sits (`SchemaFormPanel`); stacked on a
+  // phone, where `flex-col-reverse` keeps the primary one under the thumb.
+  const addFooter = <div className="flex w-full flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end sm:gap-3">
+    <Button className="w-full sm:w-auto" type="button" onClick={onClose} disabled={saving}>Cancel</Button>
     <Button className="w-full sm:w-auto" type="button" onClick={() => void save({ keepOpen: true })} disabled={saving}>{saving ? "Saving..." : "Save & Next"}</Button>
     <Button className="w-full sm:w-auto" variant="primary" disabled={saving}>{saving ? "Saving..." : "Save & Close"}</Button>
   </div>;
@@ -313,21 +395,23 @@ export default function CashEntryFormPanel({ entry, preset, options, onClose, on
   return <SchemaFormPanel
     key={formKey}
     title={entry ? `Edit ${noun}` : `Record ${noun}`}
-    description={entry ? `${entry.entryId} · ${entry.clientName}` : received ? "Money received from a client." : "Money paid out against a client."}
+    description={entry ? `${entry.entryId} · ${transfer ? `${entry.branch} → ${entry.toBranchName || "—"}` : entry.clientName}` : addDescription}
     sections={cashEntryFormSections}
     leadFields={cashEntryLeadFields}
-    values={form}
+    values={shown}
+    notes={settleNotes(shown, context)}
     onChange={update}
     context={context}
     sidebarAriaLabel="Cash entry form sections"
     closeAriaLabel="Close cash entry form"
     onClose={onClose}
     onSubmit={(event) => { event.preventDefault(); void save(); }}
-    error={error}
+    error={error || fields.summary}
+    errors={fields.errors}
     saving={saving}
     zIndexClassName={zIndexClassName}
-    submitLabel={entry ? "Update Entry" : undefined}
+    submitLabel={entry ? "Update Entry" : submitLabel}
     savingLabel="Saving..."
-    footer={entry ? undefined : addFooter}
+    footer={entry || onRecord ? undefined : addFooter}
   />;
 }

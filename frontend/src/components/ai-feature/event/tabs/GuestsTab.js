@@ -79,9 +79,9 @@ export default function GuestsTab({ eventId, event, canWrite, reloadEvent, showS
     <div className="mb-3 flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
       <div className="grid flex-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
         <TextField label="Search" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, phone or email" />
-        <Dropdown label="Group" options={[{ label: "Any group", value: ALL }, { label: "No group", value: "none" }, ...groups.map((group) => ({ label: group.name, value: group.id }))]} value={groupId} onChange={setGroupId} sorted={false} />
-        <Dropdown label="RSVP" options={RSVP_FILTER} value={rsvp} onChange={setRsvp} sorted={false} />
-        <Dropdown label="Selfie" options={SELFIE_FILTER} value={selfie} onChange={setSelfie} sorted={false} />
+        <Dropdown label="Group" helperText="Lists only the guests in this group." options={[{ label: "Any group", value: ALL }, { label: "No group", value: "none" }, ...groups.map((group) => ({ label: group.name, value: group.id }))]} value={groupId} onChange={setGroupId} sorted={false} />
+        <Dropdown label="RSVP" helperText="Lists only the guests with this RSVP answer." options={RSVP_FILTER} value={rsvp} onChange={setRsvp} sorted={false} />
+        <Dropdown label="Selfie" helperText="Lists only the guests whose selfie is in this state." options={SELFIE_FILTER} value={selfie} onChange={setSelfie} sorted={false} />
       </div>
       {canWrite && <div className="flex flex-wrap gap-2">
         <Button type="button" size="sm" onClick={() => setDialog({ kind: "groups" })}>Groups</Button>
@@ -139,7 +139,7 @@ export default function GuestsTab({ eventId, event, canWrite, reloadEvent, showS
 
     {canWrite && (dialog?.kind === "add" || dialog?.kind === "edit") && <GuestFormDialog eventId={eventId} guest={dialog.guest || null} groups={groups} onClose={() => setDialog(null)} onSaved={(saved) => { setDialog(null); showSuccess(dialog.kind === "edit" ? "Guest updated." : "Guest added."); if (dialog.kind === "edit") list.patch(saved.id, saved); else refresh(); }} />}
     {canWrite && dialog?.kind === "import" && <ImportGuestsDialog eventId={eventId} groups={groups} onClose={() => setDialog(null)} onImported={(result) => { setDialog(null); showSuccess(`${formatCount(result.created || 0)} added, ${formatCount(result.updated || 0)} updated.`); refresh(); }} />}
-    {canWrite && dialog?.kind === "groups" && <GuestGroupsDialog eventId={eventId} groups={groups} subEvents={event?.subEvents || []} onClose={() => setDialog(null)} onChanged={() => { loadGroups(); refresh(); }} />}
+    {canWrite && dialog?.kind === "groups" && <GuestGroupsDialog eventId={eventId} groups={groups} onClose={() => setDialog(null)} onChanged={() => { loadGroups(); refresh(); }} />}
     <ConfirmDialog
       open={canWrite && dialog?.kind === "delete"}
       title="Remove this guest?"

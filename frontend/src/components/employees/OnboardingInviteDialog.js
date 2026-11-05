@@ -1,8 +1,9 @@
 "use client";
 
-import SimpleTable from "@/components/data-table/SimpleTable";
+import OnboardingInviteTable from "@/components/employees/OnboardingInviteTable";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { cancelOnboardingInvite, createOnboardingInvite, getOnboardingInvites, sendOnboardingInviteEmail, updateOnboardingInvite } from "@/services/hrm/onboarding-invites.service";
 import Button from "@/components/shared/Button";
 import DateField from "@/components/shared/DateField";
@@ -11,9 +12,14 @@ import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import Loader from "@/components/shared/Loader";
 import PhoneField from "@/components/shared/PhoneField";
 import ShareableMessage from "@/components/shared/ShareableMessage";
+import SendWhatsAppButton from "@/components/shared/SendWhatsAppButton";
+import useWhatsappSender from "@/components/shared/useWhatsappSender";
+import { sendOnboardingInviteWhatsApp } from "@/services/hrm/onboarding-invites.service";
 import useMessageTemplate from "@/components/shared/useMessageTemplate";
 import { renderMessageOr } from "@/lib/messageTemplate.mjs";
 import TextField from "@/components/shared/TextField";
+import useFormErrors from "@/components/shared/useFormErrors";
+import { emailProblem, isBlankText, phoneProblem } from "@/lib/formErrors.mjs";
 import Dialog from "@/components/ui/Dialog";
 import { copyToClipboard } from "@/lib/clipboard";
 import { designationOptions } from "@/constants/employeeOptions";
@@ -44,15 +50,10 @@ function formatDate(value) {
   return value ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—";
 }
 
-function statusClass(status) {
-  if (status === "Created") return "bg-blue-50 text-blue-700";
-  if (status === "Verified") return "bg-emerald-50 text-emerald-700";
-  if (status === "Cancelled") return "bg-slate-100 text-slate-600";
-  if (status === "Expired") return "bg-amber-50 text-amber-700";
-  return "bg-slate-100 text-slate-700";
-}
-
-export default function OnboardingInviteDialog({ initialMode = "create", initialEditInvite = null, prefill = null, onClose, onBack, backAriaLabel, onInviteCreated, onInviteCancelled, onInviteSent, onInviteSendFailed }) {
+// `layer` is where the dialog stacks (`constants/layers`): "dialog" from a page, "dialogOverPanel"
+// when opened from inside a full-screen form - the Interview popup's Onboarded pill - which would
+// otherwise sit over it and hide the invite.
+export default function OnboardingInviteDialog({ initialMode = "create", initialEditInvite = null, prefill = null, onClose, onBack, backAriaLabel, onInviteCreated, onInviteCancelled, onInviteSent, onInviteSendFailed, layer = "dialog" }) {
   const [mode, setMode] = useState(initialMode);
   /*
    * The invite this dialog was opened to correct, when it was opened from the repository's own row
@@ -73,6 +74,21 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
    */
   const [form, setForm] = useState(() => (initialEditInvite ? formFromInvite(initialEditInvite) : { ...initialForm(), ...(prefill || {}) }));
   const [createdInvite, setCreatedInvite] = useState(null);
+  // Whether this person has a WhatsApp of their own to send from, and what to say if not.
+  // Absent while WhatsApp is not linked, or this message is switched off under Settings → Templates.
+  const { canSend } = useWhatsappSender("EMPLOYEE_ONBOARDING_INVITE");
+  // The wording as the box holds it, so the footer's Send WhatsApp sends what is on screen - the
+  // box owns it and publishes it; this is what the button acts on rather than a second copy.
+  const [messageText, setMessageText] = useState("");
+  /*
+   * The WhatsApp send's own result, kept apart from the email's.
+   *
+   * `sendMessage` is what disables Send Form and relabels it "Sent", so writing a WhatsApp result
+   * into it would claim the email had gone and shut the button that sends it. The two are
+   * different acts and a reader may well do both.
+   */
+  const [whatsappNotice, setWhatsappNotice] = useState("");
+  const [whatsappError, setWhatsappError] = useState("");
   /*
    * The studio's wording, from Settings → Employee Invite Template, filled in with this invite.
    *
@@ -114,6 +130,7 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
   const [savedAnEdit, setSavedAnEdit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const fields = useFormErrors();
   const [copyMessage, setCopyMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [sendMessage, setSendMessage] = useState("");
@@ -123,13 +140,16 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
   const { notice, showSuccess, showError, clearNotice } = useNotice();
   const [cancellingId, setCancellingId] = useState("");
   const [resendingId, setResendingId] = useState("");
-  const [openCandidates, setOpenCandidates] = useState(() => new Set());
 
   function updateField(event) {
+    fields.clear(event.target.name);
     setForm((current) => ({ ...current, [event.target.name]: event.target.value }));
   }
 
-  const setField = (name, value) => setForm((current) => ({ ...current, [name]: value }));
+  const setField = (name, value) => {
+    fields.clear(name);
+    setForm((current) => ({ ...current, [name]: value }));
+  };
 
   /**
    * The designations HR maintains for itself, from the Employee Repository's Settings dialog — the
@@ -169,29 +189,21 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
   }, [initialMode, showError]);
 
   /*
-   * Every field on this form is answered before an invite is created.
-   *
-   * The browser refuses the empty text boxes itself - they carry `required` - but the designation
-   * and the expiry are a `Dropdown` and a `DateField`, neither of which is a native input the form
-   * can validate, so they are checked here. Named rather than counted: "fill in the required
-   * fields" on a form of five is a sentence somebody has to solve.
+   * Every field on this form is answered, and well formed, before an invite is created - each
+   * problem said under its own box (`useFormErrors`), the top saying only how many.
    */
-  const OUTSTANDING = [
-    ["candidateName", "Candidate Name"],
-    ["candidateEmail", "Candidate Email"],
-    ["candidatePhone", "Candidate Phone"],
-    ["intendedDesignation", "Intended Designation"],
-    ["expiresAt", "Expiry Date"],
-  ];
-  const missingFields = () => OUTSTANDING.filter(([field]) => !String(form[field] ?? "").trim()).map(([, label]) => label);
+  const inviteProblems = () => ({
+    candidateName: isBlankText(form.candidateName) ? "Enter the candidate's name." : "",
+    candidateEmail: emailProblem(form.candidateEmail, "Enter the candidate's email."),
+    candidatePhone: phoneProblem(form.candidatePhone, "Enter the candidate's phone number."),
+    intendedDesignation: isBlankText(form.intendedDesignation) ? "Choose the designation." : "",
+    expiresAt: isBlankText(form.expiresAt) ? "Choose when the invite expires." : "",
+  });
 
   async function createInvite(event) {
     event.preventDefault();
-    const missing = missingFields();
-    if (missing.length) {
-      setError(`Fill in ${missing.join(", ")}.`);
-      return;
-    }
+    setError("");
+    if (!fields.check(inviteProblems())) return;
     setSubmitting(true);
     setError("");
     const answers = {
@@ -220,6 +232,8 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
       setEditingInvite(null);
       setMode("success");
     } catch (requestError) {
+      // A field the server refused is marked on its box, like the ones checked here.
+      if (fields.fromServer(requestError)) return;
       setError(requestError.status === 401 || requestError.status === 403
         ? "Your session has expired. Please sign in again."
         : requestError.message || (editingInvite ? "Unable to update this onboarding invite." : "Unable to create onboarding invite."));
@@ -232,6 +246,7 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
   function editInvite(invite) {
     clearNotice();
     setError("");
+    fields.clearAll();
     setEditingInvite(invite);
     setSavedAnEdit(false);
     setForm(formFromInvite(invite));
@@ -281,6 +296,28 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
    * then dismiss it. The reason goes to the page behind through `onInviteSendFailed`, the same way
    * the send-back reports its own, and for the same reason: the snackbar has to outlive the dialog.
    */
+  /**
+   * The same invite, sent on WhatsApp instead of by email.
+   *
+   * Takes the text from the box rather than rebuilding it, so a line somebody added goes with it.
+   * The candidate's number is not sent - the server reads it off the invite - so this can only ever
+   * reach the person the invite is for.
+   *
+   * Reported in the card like the email's result rather than closing the dialog: the link is often
+   * sent both ways, and closing after the first would make the second a hunt through the list.
+   */
+  async function sendInviteOnWhatsApp(text) {
+    if (!createdInvite?.id) return;
+    setWhatsappNotice("");
+    setWhatsappError("");
+    try {
+      const result = await sendOnboardingInviteWhatsApp(createdInvite.id, text);
+      setWhatsappNotice(result?.message || "Onboarding invite sent on WhatsApp.");
+    } catch (requestError) {
+      setWhatsappError(requestError.data?.message || requestError.message || "Unable to send this invite on WhatsApp.");
+    }
+  }
+
   async function sendInvite() {
     if (!createdInvite?.onboardingUrl) return;
     setSending(true);
@@ -393,16 +430,9 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
    * What can still be done to an invite, which depends on how far it got.
    *
    * A live invite can be cancelled. A cancelled or expired one can be sent again. A submitted one
-   * is finished — the person is in the repository — and offers nothing, shown as a dash rather than
-   * as a control that would only refuse.
+   * is finished — the person is in the repository — and offers nothing; its ⋮ says so rather than
+   * holding a control that would only refuse.
    */
-  /** Edit, offered wherever the invite's details are still the studio's to correct. */
-  const editAction = (invite) => <button
-    type="button"
-    onClick={() => editInvite(invite)}
-    className="whitespace-nowrap text-sm font-medium text-blue-600 hover:text-blue-700"
-  >Edit</button>;
-
   function inviteAction(invite) {
     /*
      * Correcting an invite, beside cancelling it.
@@ -416,38 +446,34 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
      * forward is how a lapsed invite is brought back without a new link. **Submitted** is not -
      * those details are what the candidate filled the form in against - and neither is
      * **Cancelled**, because cancelling is a decision and an edit must not quietly undo it.
+     *
+     * The choices are the row's ⋮ menu, as on every other table, rather than a run of links in a
+     * column of their own. A submitted invite is finished - the person is in the repository - and
+     * offers nothing, so its ⋮ explains that rather than holding a control that would only refuse.
      */
+    const edit = { label: "Edit", onSelect: () => editInvite(invite) };
+    const resend = {
+      label: resendingId === invite.id ? "Inviting..." : "Resend Invite",
+      disabled: Boolean(resendingId),
+      // Greyed because another row's invite is on its way, which is worth a word: a disabled item
+      // with no reason reads as a row that cannot be re-invited at all.
+      ...(resendingId && resendingId !== invite.id ? { detail: "Another invite is being sent" } : {}),
+      onSelect: () => void resendInvite(invite),
+    };
     if (invite.status === "Created" || invite.status === "Verified") {
-      return <span className="flex items-center gap-3">
-        {editAction(invite)}
-        <button
-          type="button"
-          disabled={cancellingId === invite.id}
-          onClick={() => void cancelInvite(invite.id)}
-          className="whitespace-nowrap text-sm font-medium text-red-600 hover:text-red-700 disabled:cursor-not-allowed disabled:text-slate-400"
-        >{cancellingId === invite.id ? "Cancelling..." : "Cancel Invite"}</button>
-      </span>;
+      return [edit, {
+        label: cancellingId === invite.id ? "Cancelling..." : "Cancel Invite",
+        tone: "danger",
+        disabled: cancellingId === invite.id,
+        onSelect: () => void cancelInvite(invite.id),
+      }];
     }
-    if (invite.status === "Expired") {
-      return <span className="flex items-center gap-3">
-        {editAction(invite)}
-        <button
-          type="button"
-          disabled={Boolean(resendingId)}
-          onClick={() => void resendInvite(invite)}
-          className="whitespace-nowrap text-sm font-medium text-blue-600 hover:text-blue-700 disabled:cursor-not-allowed disabled:text-slate-400"
-        >{resendingId === invite.id ? "Inviting..." : "Resend Invite"}</button>
-      </span>;
-    }
-    if (invite.status === "Cancelled") {
-      return <button
-        type="button"
-        disabled={Boolean(resendingId)}
-        onClick={() => void resendInvite(invite)}
-        className="whitespace-nowrap text-sm font-medium text-blue-600 hover:text-blue-700 disabled:cursor-not-allowed disabled:text-slate-400"
-      >{resendingId === invite.id ? "Inviting..." : "Resend Invite"}</button>;
-    }
-    return <span className="text-sm text-slate-400">—</span>;
+    if (invite.status === "Expired") return [edit, resend];
+    if (invite.status === "Cancelled") return [resend];
+    // Said rather than left blank: a row with no menu at all reads as a row the table forgot, and
+    // the reason there is nothing to do is worth a line - the same way an older invite's Copy Link
+    // explains itself on the repository.
+    return [{ description: "Submitted. The candidate is in the repository." }];
   }
 
   /**
@@ -477,14 +503,17 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
       .sort((first, second) => newestFirst(first.current, second.current));
   }, [invites]);
 
-  const toggleCandidate = (key) => setOpenCandidates((current) => {
-    const next = new Set(current);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    return next;
-  });
-
   const isList = mode === "list";
+  /*
+   * The invite list as a table or a Board. On the Board a card is dropped only where its own ⋮
+   * offers that move, and the drop runs the entry: Cancel Invite onto Cancelled for a live invite,
+   * Resend Invite onto Created for an expired or cancelled one. Opening a card is Edit where the ⋮
+   * offers it; a submitted or cancelled invite has nothing to open.
+   */
+  const [layout, setLayout] = useTableBoardLayout("onboarding-invites");
+  const DROP_ENTRY = { Cancelled: "Cancel Invite", Created: "Resend Invite" };
+  const dropEntry = (invite, to) => (DROP_ENTRY[to] ? inviteAction(invite).find((item) => item.label === DROP_ENTRY[to] && !item.disabled) : null);
+  const openEntry = (invite) => inviteAction(invite).find((item) => item.label === "Edit");
   const isSuccess = mode === "success";
 
   /*
@@ -505,6 +534,7 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
     <Dialog
       title={title}
       description={description}
+      layer={layer}
       size={isList ? "full" : "md"}
       // The list holds its size whether it is loading, empty, or long; the rows scroll inside it.
       height={isList ? "tall" : "auto"}
@@ -516,10 +546,17 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
       onSubmit={isList || isSuccess ? undefined : createInvite}
       // The list is reached from the repository's own options menu, so the create form does not
       // repeat that route; only the list offers the way across to creating one.
-      headerActions={isList ? <Button type="button" onClick={() => { setEditingInvite(null); setSavedAnEdit(false); setForm(initialForm()); setError(""); setMode("create"); }}>Create Invite</Button> : null}
+      headerActions={isList ? <>
+        <TableBoardSwitch value={layout} onChange={setLayout} />
+        <Button type="button" onClick={() => { setEditingInvite(null); setSavedAnEdit(false); setForm(initialForm()); setError(""); fields.clearAll(); setMode("create"); }}>Create Invite</Button>
+      </> : null}
       footer={isList ? null : isSuccess ? <>
         <Button className="max-sm:flex-1" type="button" onClick={onClose}>Close</Button>
         {sendError && <Button className="max-sm:flex-1" type="button" onClick={() => void copyLink()}>Copy Link</Button>}
+        {/* Beside Send Invite, because it is the same act by another route - the invite handed
+            over on WhatsApp instead of by email - and the reader choosing between them should
+            meet both in the one place a dialog keeps what to do next. */}
+        {canSend && <SendWhatsAppButton className="max-sm:flex-1" message={messageText} onSend={sendInviteOnWhatsApp} />}
         <Button className="max-sm:flex-1" type="button" variant="primary" disabled={sending || Boolean(sendMessage)} onClick={() => void sendInvite()}>{sendMessage ? "Invite Sent" : sending ? "Sending..." : "Send Invite"}</Button>
       </> : <>
         <Button className="max-sm:flex-1" type="button" disabled={submitting} onClick={onClose}>Cancel</Button>
@@ -529,59 +566,20 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
       {/* The three states each fill the card, so it reads as one box that is loading, empty, or
           full rather than as a box that changes size depending on which of the three it is. */}
       {isList ? <div className="flex h-full flex-col">
-        {loadingInvites && <div className="flex flex-1 items-center justify-center"><Loader label="Loading invites..." /></div>}
-        {!loadingInvites && invites.length === 0 && <p className="flex flex-1 items-center justify-center text-sm text-slate-500">No onboarding invites created yet.</p>}
-        {/* Scrolling belongs to the table rather than to the dialog body, so the header row can hold
-            its place at the top of it. A collapsed border would not paint while stuck, hence the
-            shadow standing in for the rule under the header. */}
-        {!loadingInvites && invites.length > 0 && <SimpleTable
-          variant="plain"
-          classNames={{ table: "min-w-[760px]" }}
-          columns={[{ key: "candidatename", label: "Candidate Name" }, { key: "email", label: "Email" }, { key: "phone", label: "Phone" }, { key: "intendeddesignation", label: "Intended Designation" }, { key: "status", label: "Status" }, { key: "expiresat", label: "Expires At" }, { key: "createdat", label: "Created At" }, { key: "action", label: "Action" }]}
-          rows={candidateGroups}
-          rowKey={(group) => group.key}
-          /* One record is the current invite and, folded under it, the earlier attempts - so a
-             record is more than one row, and the rows are drawn here rather than by the table. */
-          renderRow={({ key, current, earlier }) => {
-          const showingEarlier = openCandidates.has(key);
-          return <Fragment key={key}>
-            <tr className="border-b border-slate-100 text-slate-700">
-              <td className="whitespace-nowrap px-3 py-3 font-medium">
-                {current.candidateName}
-                {/* The attempts behind this one, counted rather than listed: the count is the whole
-                    reason to open it, and a candidate invited once says nothing at all. */}
-                {earlier.length > 0 && <button
-                  type="button"
-                  onClick={() => toggleCandidate(key)}
-                  aria-expanded={showingEarlier}
-                  className="ml-2 whitespace-nowrap rounded text-xs font-medium text-blue-600 hover:text-blue-700"
-                >
-                  {showingEarlier ? "Hide" : `${earlier.length} earlier`}
-                </button>}
-              </td>
-              <td className="whitespace-nowrap px-3 py-3">{current.candidateEmail}</td>
-              <td className="whitespace-nowrap px-3 py-3">{current.candidatePhone}</td>
-              <td className="whitespace-nowrap px-3 py-3">{current.intendedDesignation || "—"}</td>
-              <td className="px-3 py-3"><span className={`rounded-full px-2 py-1 text-xs font-medium ${statusClass(current.status)}`}>{current.status}</span></td>
-              <td className="whitespace-nowrap px-3 py-3">{formatDate(current.expiresAt)}</td>
-              <td className="whitespace-nowrap px-3 py-3">{formatDate(current.createdAt)}</td>
-              <td className="whitespace-nowrap px-3 py-3">{inviteAction(current)}</td>
-            </tr>
-            {/* What was tried before. Recessed, and carrying no action of its own: whatever is to be
-                done about this candidate is done to the invite above, which is the live one. */}
-            {showingEarlier && earlier.map((invite) => <tr key={invite.id} className="border-b border-slate-100 bg-slate-50 text-slate-500">
-              <td className="whitespace-nowrap px-3 py-2 pl-8 text-xs">Earlier attempt</td>
-              <td className="whitespace-nowrap px-3 py-2 text-xs">{invite.candidateEmail}</td>
-              <td className="whitespace-nowrap px-3 py-2 text-xs">{invite.candidatePhone}</td>
-              <td className="whitespace-nowrap px-3 py-2 text-xs">{invite.intendedDesignation || "—"}</td>
-              <td className="px-3 py-2"><span className={`rounded-full px-2 py-1 text-xs font-medium ${statusClass(invite.status)}`}>{invite.status}</span></td>
-              <td className="whitespace-nowrap px-3 py-2 text-xs">{formatDate(invite.expiresAt)}</td>
-              <td className="whitespace-nowrap px-3 py-2 text-xs">{formatDate(invite.createdAt)}</td>
-              <td className="whitespace-nowrap px-3 py-2 text-xs">—</td>
-            </tr>)}
-          </Fragment>;
-        }}
-        />}
+        {/* The repository's own table, with the invite's columns: it loads, says it is empty, sorts,
+            filters and scrolls inside the card exactly as the register beside it does, and folds a
+            candidate's earlier attempts under their current invite. */}
+        <OnboardingInviteTable
+          invites={candidateGroups}
+          loading={loadingInvites}
+          menuItemsFor={inviteAction}
+          layer={layer}
+          layout={layout}
+          canDropAt={(invite, to) => Boolean(dropEntry(invite, to))}
+          onDrop={(invite, to) => dropEntry(invite, to)?.onSelect()}
+          onOpen={(invite) => openEntry(invite)?.onSelect()}
+          canOpen={(invite) => Boolean(openEntry(invite))}
+        />
       </div> : isSuccess ? <div>
         {/*
           * The invite as the message that sends it, and nothing else.
@@ -597,21 +595,26 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
           label="Message to send them"
           rows={9}
           message={inviteMessage}
+          onTextChange={setMessageText}
         />
-        {sendMessage && <p role="status" className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">Onboarding invite email sent successfully.</p>}
+        {sendMessage && <p role="status" className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{sendMessage}</p>}
         {sendError && <p role="alert" className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{sendError}</p>}
+        {/* The WhatsApp send says how it went in its own line, beside the email's: the two are
+            different acts and a reader may well do both. */}
+        {whatsappNotice && <p role="status" className="mt-2 text-sm text-emerald-700">{whatsappNotice}</p>}
+        {whatsappError && <p role="alert" className="mt-2 text-sm text-red-600">{whatsappError}</p>}
         {copyMessage && <p className={`mt-2 text-sm ${copyMessage === "Link copied." ? "text-emerald-700" : "text-red-600"}`}>{copyMessage}</p>}
       </div> : <div className="space-y-4">
-        {error && <p role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
-        <TextField required label="Candidate Name" name="candidateName" value={form.candidateName} onChange={updateField} />
-        <TextField required type="email" label="Candidate Email" name="candidateEmail" value={form.candidateEmail} onChange={updateField} />
+        {(error || fields.summary) && <p role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error || fields.summary}</p>}
+        <TextField required label="Candidate Name" helperText="Their full name as it should appear on the invite and their record." name="candidateName" value={form.candidateName} onChange={updateField} error={fields.errors.candidateName} />
+        <TextField required type="email" label="Candidate Email" helperText="The onboarding link is emailed here, and they can sign in to the form with it." name="candidateEmail" value={form.candidateEmail} onChange={updateField} error={fields.errors.candidateEmail} />
         {/* The application's phone control, with its country picker, rather than a bare text box.
             It was the one number in the studio typed as free text, which let an invite be created
             for "98765 43210" and the same candidate invited again as "+91 9876543210" — two numbers
             to the duplicate check and one number to everybody else. It stores the `+91 9876543210`
             shape the employee record is validated against, so the number the candidate is invited
             on is already the number their record will carry. */}
-        <PhoneField required label="Candidate Phone" field="candidatePhone" value={form.candidatePhone} onChange={setField} />
+        <PhoneField required label="Candidate Phone" helperText="Used to send the link on WhatsApp and to check it is them." field="candidatePhone" value={form.candidatePhone} onChange={setField} error={fields.errors.candidatePhone} />
         {/* Searchable, because the list runs to two dozen roles. There is no "Not specified" entry
             any more: it existed to put the field back to unanswered while the designation was
             optional, and an option whose whole job is to leave a required field empty is a way
@@ -620,14 +623,16 @@ export default function OnboardingInviteDialog({ initialMode = "create", initial
           searchable
           required
           label="Intended Designation"
+          helperText="The role they are joining as; it becomes their designation on the record."
           value={form.intendedDesignation}
           onChange={(value) => setField("intendedDesignation", value)}
           options={designations}
           placeholder="Select the designation"
+          error={fields.errors.intendedDesignation}
         />
         {/* Prefilled a week out, which is what the server used to fall back to. Required does not
             have to mean empty: the studio still has to look at it, and almost never has to type. */}
-        <DateField required label="Expiry Date" value={form.expiresAt} onChange={(value) => setField("expiresAt", value)} />
+        <DateField required label="Expiry Date" helperText="The last day the onboarding link works; a week from today by default." value={form.expiresAt} onChange={(value) => setField("expiresAt", value)} error={fields.errors.expiresAt} />
       </div>}
     </Dialog>
   </>;

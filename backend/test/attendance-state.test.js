@@ -21,9 +21,10 @@ test("every state the vocabulary names can actually be reached", () => {
     attendanceState(null, { dayKind: "Holiday", today }),
     attendanceState(null, { dayKind: "Weekly off", today }),
     attendanceState(null, { dayKind: "On leave", today }),
-    attendanceState({ workDate: day("2026-09-14"), logoutAt: null }, { today }),
+    attendanceState({ workDate: day("2026-09-14"), loginAt: new Date("2026-09-14T09:00:00"), logoutAt: null }, { today }),
     attendanceState({ workDate: day("2026-09-14"), logoutAt: new Date() }, { today }),
-    attendanceState({ workDate: day("2026-09-11"), logoutAt: null }, { today }),
+    attendanceState({ workDate: day("2026-09-11"), loginAt: new Date("2026-09-11T09:00:00"), logoutAt: null }, { today }),
+    attendanceState(null, { today, override: "Present" }),
   ]);
   // No state is declared that nothing can produce, and nothing produces a state not declared.
   assert.deepEqual([...reached].sort(), [...ATTENDANCE_STATES].sort());
@@ -37,12 +38,13 @@ test("an unmarked working day is not yet an absence", () => {
   assert.equal(attendanceDayStatus(null, { settings: {}, dayKind: "Working" }).status, "Absent");
 });
 
-test("an open session today is somebody at work; the same row next week is a fault", () => {
-  const open = { workDate: day("2026-09-14"), logoutAt: null };
+test("a login is at work for 18 hours; the same row past them is an Incorrect login", () => {
+  const open = { workDate: day("2026-09-14"), loginAt: new Date("2026-09-14T09:00:00"), logoutAt: null };
   assert.equal(attendanceState(open, { today }), "CHECKED_IN");
-  assert.equal(attendanceState({ ...open, workDate: day("2026-09-11") }, { today }), "MISSED_CHECKOUT");
-  // With no day to read against, the safe reading is the un-accusing one.
-  assert.equal(attendanceState({ ...open, workDate: day("2026-09-11") }, {}), "CHECKED_IN");
+  const old = { workDate: day("2026-09-11"), loginAt: new Date("2026-09-11T09:00:00"), logoutAt: null };
+  assert.equal(attendanceState(old, { today }), "INCORRECT_LOGIN");
+  // With no instant to read against, the safe reading is the un-accusing one.
+  assert.equal(attendanceState(old, {}), "CHECKED_IN");
 });
 
 test("a session outranks the calendar, because it is what actually happened", () => {

@@ -1,8 +1,10 @@
 "use client";
 
 import SimpleTable from "@/components/data-table/SimpleTable";
+import HelpTip from "@/components/shared/HelpTip";
 
 import { fieldLabels, onboardingFormSections } from "@/constants/onboardingFormConfig";
+import { useImageViewer } from "@/components/shared/ImageViewer";
 
 /**
  * The record somebody filled in when they joined, read back to them.
@@ -53,6 +55,18 @@ const PAIRED_IMAGES = new Set(Object.values(DOCUMENT_PAIRS));
 /** The onboarding form's own name for a field, so nothing here writes a label a second time. */
 const labelOf = (name) => fieldLabels[name] || name;
 
+/**
+ * The ⓘ beside each label: the onboarding form's own helper text for the field, so the note read
+ * here is the one given when it was filled in. The three lists carry none on the form (their hint
+ * lives with the list), so theirs are written here.
+ */
+const LIST_HELP = {
+  qualifications: "Your education as given at onboarding - each degree or course, the college and the year passed.",
+  experiences: "The companies you worked at before joining, with your role there and how long.",
+  children: "Your children's names and dates of birth, as given at onboarding.",
+};
+const helpOf = (field) => field.helperText || LIST_HELP[field.name] || "";
+
 /** The two fields the form collects as tick-lists, stored joined by ", ". */
 const CHIP_FIELDS = new Set(["skills", "languagesKnown"]);
 
@@ -87,18 +101,30 @@ function ListTable({ name, rows }) {
 }
 
 function DocumentFact({ field, value, image, imageLabel }) {
+  const openImages = useImageViewer();
   return (
     // Its own boxed unit, and never narrower than half a row: a number beside a thumbnail needs
     // the width, and two of them side by side read as the two cards they are.
     <div className="sm:col-span-1 lg:col-span-1">
       <div className="flex h-full items-start justify-between gap-4 rounded-lg border border-slate-200 p-3">
         <div className="min-w-0">
-          <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-500">{field.label}</dt>
+          <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-500">{field.label}<HelpTip text={helpOf(field)} /></dt>
           <dd className="mt-0.5 break-words font-mono text-sm tracking-wide text-slate-800">{String(value)}</dd>
         </div>
         {/* The card itself, beside its number. Fixed-width and `shrink-0`, so a long number pushes
             nothing off the row and the two proofs line up down the page. */}
-        {image ? (
+        {/* In the app the card opens in the image viewer; outside it (no viewer mounted) it stays a link. */}
+        {image && openImages ? (
+          <button
+            type="button"
+            onClick={() => openImages([{ src: image, name: imageLabel }])}
+            className="block shrink-0 cursor-zoom-in overflow-hidden rounded-md border border-slate-200 transition hover:border-slate-400"
+            title={`View ${imageLabel}`}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={image} alt={imageLabel} className="h-16 w-24 bg-slate-50 object-contain sm:h-20 sm:w-32" />
+          </button>
+        ) : image ? (
           <a
             href={image}
             target="_blank"
@@ -119,7 +145,7 @@ function Fact({ field, value }) {
   const wide = field.colSpan === 2 || field.type === "textarea" || field.type === "custom" || field.type === "image";
   return (
     <div className={wide ? "sm:col-span-2" : ""}>
-      <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-500">{field.label}</dt>
+      <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-500">{field.label}<HelpTip text={helpOf(field)} /></dt>
       <dd className="mt-0.5 text-sm text-slate-800">
         {CHIP_FIELDS.has(field.name) ? <Chips value={value} />
             : LIST_COLUMNS[field.name] ? <ListTable name={field.name} rows={value} />
@@ -137,7 +163,12 @@ function answered(field, value) {
   return String(value).trim() !== "";
 }
 
-export default function OnboardingDetailsView({ onboarding }) {
+/**
+ * `aside` is one more card to draw among the details - `{ after, node }`: beside the section `after`
+ * names, which then takes half the row instead of the whole of it, or at the end where that section is
+ * not filled in. My Profile puts the offer letter beside References this way.
+ */
+export default function OnboardingDetailsView({ onboarding, aside = null }) {
   if (!onboarding) {
     return (
       <p className="mx-auto max-w-3xl rounded-lg border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
@@ -162,14 +193,21 @@ export default function OnboardingDetailsView({ onboarding }) {
     // A card is wide if anything in it is: an address, one of the three lists, or a tick-list.
     .map((section) => ({
       ...section,
-      wide: section.fields.some((field) => field.colSpan === 2 || field.type === "textarea" || field.type === "custom"),
+      // The section the aside sits beside gives up half its row to it.
+      beside: Boolean(aside) && section.id === aside.after,
+      wide: !(aside && section.id === aside.after) && section.fields.some((field) => field.colSpan === 2 || field.type === "textarea" || field.type === "custom"),
     }));
+  const asideCard = aside && <div key="aside" className="min-w-0">{aside.node}</div>;
+  const asidePlaced = sections.some((section) => section.beside);
 
   if (!sections.length) {
     return (
-      <p className="mx-auto max-w-3xl rounded-lg border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
-        Nothing has been filled in on your onboarding form yet.
-      </p>
+      <div className="mx-auto max-w-6xl space-y-4">
+        {asideCard}
+        <p className="rounded-lg border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
+          Nothing has been filled in on your onboarding form yet.
+        </p>
+      </div>
     );
   }
 
@@ -178,7 +216,7 @@ export default function OnboardingDetailsView({ onboarding }) {
        A record of forty-odd facts read as one narrow strip down the middle of a 1280px screen with
        most of the page empty on either side - and the narrower the column, the longer the scroll. */
     <div className="mx-auto grid max-w-6xl gap-4 lg:grid-cols-2">
-      {sections.map((section) => (
+      {sections.flatMap((section) => [(
         <section
           key={section.id}
           /* A card holding a full-width field - an address, a table, a tick-list - takes the whole
@@ -206,9 +244,10 @@ export default function OnboardingDetailsView({ onboarding }) {
             )))}
           </dl>
         </section>
-      ))}
+      ), ...(section.beside ? [asideCard] : [])])}
+      {!asidePlaced && asideCard}
       <p className="text-xs text-slate-500 lg:col-span-2">
-        Maintained by HR in the Employee Repository — ask HR to correct anything here.
+        Maintained by HR in User Management — ask HR to correct anything here.
       </p>
     </div>
   );

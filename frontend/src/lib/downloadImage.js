@@ -50,6 +50,20 @@ function saveFromHref(href, fileName) {
 }
 
 /**
+ * Saves a blob a caller already fetched, under `fileName`.
+ *
+ * The one place that turns a blob into a saved file, so a service that fetches an attachment never
+ * has to build its own anchor or decide when it is safe to revoke the object URL. Revoked on the
+ * next tick, same as below: the click only queues the download, and revoking sooner can cancel or
+ * empty it in Firefox and Safari.
+ */
+export function saveBlob(blob, fileName) {
+  const objectUrl = URL.createObjectURL(blob);
+  saveFromHref(objectUrl, fileName);
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+}
+
+/**
  * Saves `source` as a file named after `baseName`.
  *
  * `readBytes` is asked for the file whenever the source is not already the bytes. It answers with

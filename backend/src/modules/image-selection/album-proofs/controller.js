@@ -11,16 +11,21 @@ const {
 
 const { createAlbumClientService } = require("./client.service");
 const { createAlbumFinalizeService } = require("./finalize.service");
+const { createAlbumDashboardService } = require("./dashboard.service");
+const { dashboardQuerySchema } = require("../../../services/dashboardRange");
 
 const service = createAlbumProofService();
 const pipeline = createAlbumPipelineService(undefined, { base: service });
 const qc = createAlbumQcService(undefined, { base: service });
 const clientSide = createAlbumClientService(undefined, { base: service });
 const finalize = createAlbumFinalizeService(undefined, { base: service });
+const dashboardService = createAlbumDashboardService();
 
 function parse(schema, value, res, message) { const result = schema.safeParse(value); if (result.success) return result.data; res.status(400).json({ message, errors: result.error.flatten() }); return null; }
 function handleError(error, res, action) { if (error.status) return res.status(error.status).json({ message: error.message, ...(error.details ? { details: error.details } : {}) }); console.error(`Unable to ${action}:`, error); return res.status(500).json({ message: `Unable to ${action}.` }); }
 
+// The dashboard reads with the same grant as the list it summarises; the only thing read from the caller is the range key.
+async function dashboard(req, res) { const query = parse(dashboardQuerySchema, req.query, res, "Invalid dashboard request."); if (!query) return; try { return res.json({ data: await dashboardService.build(query) }); } catch (error) { return handleError(error, res, "load the Album Proofing dashboard"); } }
 async function listAlbums(req, res) { const query = parse(listAlbumsSchema, req.query, res, "Invalid album list request."); if (!query) return; try { return res.json({ data: await service.list({ ...query, archived: query.archived === "true" }) }); } catch (error) { return handleError(error, res, "load the albums"); } }
 async function createAlbum(req, res) { const body = parse(createAlbumSchema, req.body, res, "Pick a project and enter an album name."); if (!body) return; try { return res.status(201).json({ data: await service.create(body, req.user) }); } catch (error) { return handleError(error, res, "create the album"); } }
 async function getAlbum(req, res) { const params = parse(albumIdSchema, req.params, res, "Invalid album request."); if (!params) return; try { return res.json({ data: await service.get(params.albumId) }); } catch (error) { return handleError(error, res, "load the album"); } }
@@ -74,6 +79,7 @@ async function completeAlbum(req, res) { const params = parse(albumIdSchema, req
 async function downloadFinal(req, res) { const params = parse(albumIdSchema, req.params, res, "Invalid album request."); if (!params) return; try { return res.json({ data: await finalize.downloadFinal(params.albumId, req.user) }); } catch (error) { return handleError(error, res, "copy the final originals"); } }
 
 module.exports = {
+  dashboard,
   listAlbums, createAlbum, getAlbum, editAlbum, archiveAlbum, restoreAlbum, deleteAlbum,
   folderTree, createFolder, renameFolder, deleteFolder, listActivity,
   browseOriginals, importPages, pagesUploaded, processingStatus, retryFailed, listPages, sendToQc,

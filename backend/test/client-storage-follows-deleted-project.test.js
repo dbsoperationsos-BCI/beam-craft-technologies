@@ -18,12 +18,16 @@ const { removeProjectClientStorage, PROJECT_DELETED_REASON } = require("../src/m
 const STAMP = String(Date.now()).slice(-6);
 const tag = (name) => `TCD-${STAMP}-${name}`;
 const F = {};
+// A project is keyed to its lead (20260924150000), so every enquiry a fixture names gets one.
+const leadFor = (enquiryId) => prisma.salesCrmLead.upsert({ where: { enquiryId }, create: { enquiryId, name: enquiryId }, update: {} });
 
 before(async () => {
-  const project = (name) => prisma.salesProject.create({ data: {
+  // `updated_by` is a foreign key to `user`, so the sweep's actor has to be a login that exists.
+  F.actor = await prisma.user.create({ data: { name: "Deleted project sweep", email: `${tag("actor")}@test.local`.toLowerCase(), username: tag("actor").toLowerCase(), password: "x", role: "ADMIN" } });
+  const project = async (name) => { await leadFor(tag(`enq-${name}`)); return prisma.salesProject.create({ data: {
     enquiryId: tag(`enq-${name}`), eventId: tag(name), whatsappGroupName: `WED ${name}`, clientMainNumber: "+919876543210",
     sourceBranch: "Erode TN", deliverables: "[]", initialConvertedValue: 0, crmName: "Test",
-  } });
+  } }); };
   F.deleted = await project("p-deleted");
   F.kept = await project("p-kept");
 
@@ -43,12 +47,14 @@ before(async () => {
 after(async () => {
   await prisma.clientStorage.deleteMany({ where: { storageId: { startsWith: `TCD-${STAMP}-` } } });
   await prisma.salesProject.deleteMany({ where: { eventId: { startsWith: `TCD-${STAMP}-` } } });
+  await prisma.salesCrmLead.deleteMany({ where: { enquiryId: { startsWith: `TCD-${STAMP}-` } } });
+  await prisma.user.deleteMany({ where: { email: { startsWith: `tcd-${STAMP}-` } } });
 });
 
 const read = (id) => prisma.clientStorage.findUnique({ where: { id }, select: { isDeleted: true, deletedReason: true, deletedAt: true, updatedBy: true } });
 
 test("every record on the project goes, and says why", async () => {
-  const count = await removeProjectClientStorage(prisma, F.deleted.id, { userId: 1 });
+  const count = await removeProjectClientStorage(prisma, F.deleted.id, { userId: F.actor.id });
   assert.equal(count, 2, "both live records on the project, and only those");
 
   for (const id of [F.onDeleted.id, F.alsoOnDeleted.id]) {
@@ -58,7 +64,7 @@ test("every record on the project goes, and says why", async () => {
     // reads as though whoever last touched it took the disc off the register.
     assert.equal(row.deletedReason, PROJECT_DELETED_REASON);
     assert.ok(row.deletedAt instanceof Date);
-    assert.equal(row.updatedBy, 1);
+    assert.equal(row.updatedBy, F.actor.id);
   }
 });
 
@@ -93,5 +99,5 @@ test("running it again changes nothing", async () => {
 });
 
 test("a project with no storage is not an error", async () => {
-  assert.equal(await removeProjectClientStorage(prisma, F.kept.id + "-nope", { userId: 1 }), 0);
+  assert.equal(await removeProjectClientStorage(prisma, F.kept.id + "-nope", { userId: F.actor.id }), 0);
 });

@@ -53,7 +53,7 @@ Identity/bank validation:
 - **Review Employee Details closes with a question.** Changing anything and then pressing the ×, or
   Escape, asks *Save draft* / *Discard* / *Keep editing* rather than throwing the corrections away.
   Save draft is the same save the footer's own Save Draft button makes — the record is kept and the
-  submission stays under review; nobody is approved. Only Review and the Login Credentials page ask
+  submission stays under review; nobody is approved. Only Review and the Employee Preference page ask
   this; Add Employee and Edit close as they always have.
 - After approval, HR can skip credential creation or create login credentials. An Active employee
   with no login keeps a **Create Login Credentials** entry in its row menu, so a skipped offer can

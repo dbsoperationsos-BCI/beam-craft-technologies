@@ -27,14 +27,15 @@
  * Mirrors `SIDEBAR_MODULES` in `frontend/src/constants/navigation.mjs` — see above.
  */
 const SIDEBAR_STRUCTURE = {
+  // Beam Craft: Subscribe and Client Management first; the order here *is* the default order.
   subscribe: ["media-studio-operations", "subscribe-account-manager"],
-  "client-management": ["employee-repository"],
-  hrm: ["employee-attendance", "attendance-register", "employee-referral", "tasks", "interview"],
+  "client-management": ["client-details", "client-offers", "client-chats", "invitation-cards", "client-requests"],
+  hrm: ["employee-repository", "employee-attendance", "attendance-register", "requests", "events", "employee-referral", "tasks", "interview", "payroll", "payslip"],
   "sales-crm": ["leads-followups", "reports-analytics", "contacts", "bookings-converted", "quotations"],
-  "project-management": ["projects", "crd-documents", "client-gifts"],
-  "visual-curation": ["ai-feature", "image-selection", "album-proofing"],
+  "project-management": ["projects", "pre-production", "production", "shoot-board", "crd-documents", "client-gifts", "feedback"],
+  "visual-curation": ["ai-feature", "photo-selling", "image-selection", "ai-culling", "ai-editing", "signature-album", "album-proofing"],
   accounts: ["accounts-manager", "payment-requests"],
-  "resource-management": ["assets", "vendors", "client-storage"],
+  "resource-management": ["assets", "vendors", "client-storage", "recycling-bin"],
 };
 
 /** Which module owns each screen: the relationship a saved layout may never contradict. */

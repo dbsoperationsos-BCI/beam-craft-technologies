@@ -16,13 +16,14 @@ const iamService = require("../src/services/iam.service");
  * accounts happen to exist.
  */
 
-function withUser({ role = "USER", permitted = true, branches = [] }, run) {
+function withUser({ role = "USER", permitted = true, branches = [], holds = null }, run) {
   const realUser = iamService.getUserWithPermissions;
   const realPerm = iamService.hasPermission;
   const realBranches = iamService.reachableBranchIds;
 
   iamService.getUserWithPermissions = async () => ({ id: 24, name: "Test User", role });
-  iamService.hasPermission = async () => (role === "SUPER_ADMIN" ? true : permitted);
+  // `holds` names the exact "MODULE/Feature" grants, for the tests about which ones a session gets.
+  iamService.hasPermission = async (_user, module, feature) => (role === "SUPER_ADMIN" ? true : holds ? holds.includes(`${module}/${feature}`) : permitted);
   iamService.reachableBranchIds = async () => (role === "SUPER_ADMIN" ? null : branches);
 
   return Promise.resolve()
@@ -41,8 +42,18 @@ test("a permitted user gets exactly one module", () => withUser({ permitted: tru
   assert.strictEqual(context.scope, "SALES");
   assert.strictEqual(context.feature, "CRM Leads");
   assert.strictEqual(context.isSuperAdmin, false);
-  // One, and only one: a normal session cannot widen past the module it was opened in.
-  assert.deepStrictEqual(context.modules, ["SALES"]);
+  // One panel module, and only one: a normal session cannot widen past the module it was opened in.
+  // Beside it, attendance and HRM requests - companions - because this person holds their permissions too.
+  assert.deepStrictEqual(context.modules, ["SALES", "ATTENDANCE", "REQUESTS"]);
+}));
+
+test("attendance comes with a session only for somebody who holds it", () => withUser({ holds: ["SALES/CRM Leads"] }, async () => {
+  const context = await buildAccessContext({ userId: 24, requestedModule: "SALES" });
+  assert.deepStrictEqual(context.modules, ["SALES"], "no HRM / Employee Attendance, no attendance");
+}));
+
+test("attendance cannot be opened as a panel of its own", () => withUser({ permitted: true }, async () => {
+  await assert.rejects(() => buildAccessContext({ userId: 24, requestedModule: "ATTENDANCE" }), refusedWith("AI_MODULE_UNKNOWN"));
 }));
 
 test("a user without the permission is refused their own module", () => withUser({ permitted: false }, async () => {
@@ -77,7 +88,7 @@ test("a Super Admin opening one module stays in that module", () => withUser({ r
   // Opening CRM deliberately should not quietly become a cross-module session.
   const context = await buildAccessContext({ userId: 1, requestedModule: "SALES" });
   assert.strictEqual(context.scope, "SALES");
-  assert.deepStrictEqual(context.modules, ["SALES"]);
+  assert.deepStrictEqual(context.modules, ["SALES", "ATTENDANCE", "REQUESTS"]);
 }));
 
 test("an unregistered module is refused before any permission is consulted", () => withUser({ permitted: true }, async () => {

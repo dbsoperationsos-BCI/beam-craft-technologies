@@ -16,7 +16,7 @@ const findProject = (projectId) => prisma.imageSelectionProject.findFirst({ wher
  * The batch and status come back too: a photo the batch itself left half-finished has to be finished
  * rather than waved through as a duplicate.
  */
-const findByOriginalPath = (projectId, folderId, originalPath) => prisma.imageSelectionUpload.findFirst({ where: { projectId, folderId: folderId || null, originalPath }, select: { id: true, batchId: true, status: true, storageName: true } });
+const findByOriginalPath = (projectId, folderId, originalPath) => prisma.imageSelectionUpload.findFirst({ where: { projectId, folderId: folderId || null, originalPath }, select: { id: true, batchId: true, status: true, storageName: true, sizeBytes: true } });
 const findFolder = (projectId, folderId) => prisma.imageSelectionFolder.findFirst({ where: { id: folderId, projectId, deletedAt: null }, select: { id: true } });
 const findUpload = (projectId, uploadId) => prisma.imageSelectionUpload.findFirst({ where: { id: uploadId, projectId }, select: { ...uploadSelect, storageName: true } });
 const listUploads = (projectId, folderId) => prisma.imageSelectionUpload.findMany({ where: { projectId, folderId: folderId || null, status: { not: "CANCELLED" } }, select: uploadSelect, orderBy: { createdAt: "desc" } });

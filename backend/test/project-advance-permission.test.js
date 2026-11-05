@@ -134,7 +134,12 @@ test("it serves the two lists the advance needs, and not the studio's lookups", 
     CONTROLLER.indexOf("\nasync function recordProjectAdvance("),
   );
   assert.match(handler, /prisma\.employee\.findMany/);
-  assert.match(handler, /prisma\.bankAccount\.findMany/);
+  /*
+   * The accounts come from the branch register through `receivedIntoOptions`, which is the one place
+   * they are kept since Accounts' own bank-account list was retired - and the one place the label
+   * these three screens store on their records is built.
+   */
+  assert.match(handler, /receivedIntoOptions\(\)/);
   assert.doesNotMatch(handler, /salesProject\.findMany|projectShoot\.findMany/, "the advance options leak the studio's project and shoot lookups");
   // Working employees only, the same rule every other employee picker follows.
   assert.match(handler, /employmentStatus: \{ in: await workingEmployeeStatuses\(\) \}/);

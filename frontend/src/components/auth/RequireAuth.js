@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { PageLoader } from "@/components/shared/Loader";
-import { AUTH_EXPIRED_EVENT, hasAccessToken } from "@/lib/auth";
+import { AUTH_EXPIRED_EVENT, CLIENT_ROUTE, hasAccessToken, isClientAccount } from "@/lib/auth";
 
 /*
  * Signed in. Nothing more.
@@ -20,7 +20,18 @@ export default function RequireAuth({ children }) {
   const router = useRouter();
   const [checking, setChecking] = useState(true);
   const [authorized, setAuthorized] = useState(false);
-  useEffect(() => { const timer = window.setTimeout(() => { const hasToken = hasAccessToken(); setAuthorized(hasToken); setChecking(false); if (!hasToken) router.replace("/login"); }, 0); return () => window.clearTimeout(timer); }, [router]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const hasToken = hasAccessToken();
+      // A client's sign-in never draws the studio's shell: it is sent to its own page instead.
+      const client = hasToken && isClientAccount();
+      setAuthorized(hasToken && !client);
+      setChecking(false);
+      if (!hasToken) router.replace("/login");
+      else if (client) router.replace(CLIENT_ROUTE);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [router]);
   useEffect(() => {
     const handleExpiredSession = () => {
       setAuthorized(false);

@@ -224,8 +224,8 @@ export const candidateStatusStyles = {
  * not relearning their own register. Everything the module also holds follows after it, and
  * Manage Columns moves any of it out of the way.
  *
- * `Sl. No.` is not here: the shared table numbers its own rows, which is why the sheet's own serial
- * column is the one heading the importer leaves unread.
+ * `Sl. No.` is not here: no table carries a row number, and the sheet's own serial column is the one
+ * heading the importer leaves unread.
  *
  * The headers are the studio's words rather than the module's where the two differ - Current Salary
  * for `currentCtc`, When Can You Join for `availableFrom` - because these are the questions their
@@ -457,21 +457,24 @@ export const candidateFormSections = [
     id: "application",
     title: "The Role",
     fields: [
-      { name: "position", label: "Position Applied For", type: "combobox", required: true, options: "positions", placeholder: "Select or type a position" },
+      /* Asked, and never refused for being blank - see the `REQUIRED` note in Add Application. The
+         mark has to come off here as well as out of the validator, or the field wears a red asterisk
+         over a save that goes through. */
+      { name: "position", label: "Position Applied For", type: "combobox", options: "positions", placeholder: "Select or type a position", helperText: "The job they applied for; pick one or type a new title." },
       // `sorted: false` because the order of the list is the order the studio hires in.
-      { name: "employmentType", label: "Employment Type", type: "select", options: "employmentTypes", placeholder: "Select a type", props: { sorted: false } },
+      { name: "employmentType", label: "Employment Type", type: "select", options: "employmentTypes", placeholder: "Select a type", props: { sorted: false }, helperText: "Whether they want full time, part time, intern or freelance work." },
       /*
        * The studio's own four, which the application deliberately never asks. Department is the
        * studio's answer about a hire rather than a candidate's guess; branch, source and the ad
        * columns are set here, by a linked sheet's rules, or by a CSV.
        */
-      { name: "department", label: "Department", type: "combobox", options: "departments", placeholder: "Select or type a department" },
-      { name: "branch", label: "Branch Applied For", type: "select", options: "branches", placeholder: "Select a branch", props: { searchable: true } },
-      { name: "source", label: "Source", type: "combobox", options: "sources", placeholder: "Select or type a source" },
-      { name: "campaignName", label: "Campaign Name", type: "text" },
-      { name: "adsetName", label: "Adset Name", type: "text" },
-      { name: "adName", label: "Ad Name", type: "text" },
-      { name: "appliedDate", label: "Applied On", type: "date" },
+      { name: "department", label: "Department", type: "combobox", options: "departments", placeholder: "Select or type a department", helperText: "The team this hire would join; the studio decides this, not the candidate." },
+      { name: "branch", label: "Branch Applied For", type: "select", options: "branches", placeholder: "Select a branch", props: { searchable: true }, helperText: "The studio branch this candidate is being considered for." },
+      { name: "source", label: "Source", type: "combobox", options: "sources", placeholder: "Select or type a source", helperText: "Where the application came from, such as an ad or a referral." },
+      { name: "campaignName", label: "Campaign Name", type: "text", helperText: "The ad campaign the application came through, as the sheet recorded it." },
+      { name: "adsetName", label: "Adset Name", type: "text", helperText: "The ad set within that campaign, as the sheet recorded it." },
+      { name: "adName", label: "Ad Name", type: "text", helperText: "The individual ad the candidate responded to, as the sheet recorded it." },
+      { name: "appliedDate", label: "Applied On", type: "date", helperText: "The day the application arrived at the studio." },
     ],
   },
   {
@@ -479,23 +482,23 @@ export const candidateFormSections = [
     title: "About You",
     fields: [
       // The application's own order, so a record reads the way the form that filled it in did.
-      { name: "name", label: "Candidate Name", type: "text", required: true, placeholder: "e.g. Anu Priya", colSpan: 2 },
-      { name: "gender", label: "Gender", type: "select", options: "genders", placeholder: "Select" },
-      { name: "dateOfBirth", label: "Date of Birth", type: "date" },
-      { name: "phone", label: "Phone Number", type: "phone", required: true },
-      { name: "whatsappNumber", label: "WhatsApp Number", type: "phone" },
-      { name: "email", label: "Email", type: "text", placeholder: "name@example.com" },
-      { name: "city", label: "City", type: "text" },
+      { name: "name", label: "Candidate Name", type: "text", required: true, placeholder: "e.g. Anu Priya", colSpan: 2, helperText: "The candidate's full name, as they gave it." },
+      { name: "gender", label: "Gender", type: "select", options: "genders", placeholder: "Select", helperText: "The candidate's gender, if they shared it." },
+      { name: "dateOfBirth", label: "Date of Birth", type: "date", helperText: "The candidate's date of birth, if they shared it." },
+      { name: "phone", label: "Phone Number", type: "phone", required: true, helperText: "Their main number; the register matches candidates by it." },
+      { name: "whatsappNumber", label: "WhatsApp Number", type: "phone", helperText: "Their WhatsApp number, if it differs from the phone number." },
+      { name: "email", label: "Email", type: "text", placeholder: "name@example.com", helperText: "Their email address; Google Meet interview invites are sent here." },
+      { name: "city", label: "City", type: "text", helperText: "The city they live in, as the candidate gave it." },
       /*
        * What the screening form now asks in place of a state and a postal address. `state` and
        * `address` stay below them rather than going: a linked sheet and the CSV import still fill
        * those for candidates who arrived that way, and throwing away answers already collected is
        * not what "the form no longer asks" means.
        */
-      { name: "nativePlace", label: "Native Place", type: "text" },
-      { name: "currentLocation", label: "Current Location", type: "text" },
-      { name: "state", label: "State", type: "text" },
-      { name: "address", label: "Address", type: "textarea", props: { rows: 3 }, colSpan: 2 },
+      { name: "nativePlace", label: "Native Place", type: "text", helperText: "Their home town or district, where they are originally from." },
+      { name: "currentLocation", label: "Current Location", type: "text", helperText: "Where they are staying now, as the candidate gave it." },
+      { name: "state", label: "State", type: "text", helperText: "Their state, as an imported sheet or CSV recorded it." },
+      { name: "address", label: "Address", type: "textarea", props: { rows: 3 }, colSpan: 2, helperText: "Their postal address, as an imported sheet or CSV recorded it." },
       /*
        * What the candidate studied, as the rows they submitted rather than as a line of text.
        *
@@ -525,7 +528,7 @@ export const candidateFormSections = [
        * form shows - and written on save the way the form writes it, which is the one place the two
        * screens must not disagree.
        */
-      { name: "experienceLevel", label: "Are you a fresher or experienced?", type: "select", options: "experienceLevels", placeholder: "Select", props: { sorted: false } },
+      { name: "experienceLevel", label: "Are you a fresher or experienced?", type: "select", options: "experienceLevels", placeholder: "Select", props: { sorted: false }, helperText: "Choosing Experienced shows their work history and current job fields." },
       { name: "experience", label: "Total Experience", type: "custom" },
       { name: "experienceEntries", label: "Experience Details", type: "custom", colSpan: 2, when: isRecordExperienced },
       /*
@@ -534,9 +537,9 @@ export const candidateFormSections = [
        * Hidden, never blanked: this record keeps whatever a sheet put in them, and a value that is
        * off screen is still carried back by the save - see `payloadFrom` in the panel.
        */
-      { name: "currentCompany", label: "Current Company", type: "text", when: isRecordExperienced },
-      { name: "currentDesignation", label: "Current Designation", type: "text", when: isRecordExperienced },
-      { name: "currentCtc", label: "Current Salary", type: "text", placeholder: "e.g. 3.5 LPA", when: isRecordExperienced },
+      { name: "currentCompany", label: "Current Company", type: "text", when: isRecordExperienced, helperText: "The company or studio they are working at now." },
+      { name: "currentDesignation", label: "Current Designation", type: "text", when: isRecordExperienced, helperText: "Their job title at their current company." },
+      { name: "currentCtc", label: "Current Salary", type: "text", placeholder: "e.g. 3.5 LPA", when: isRecordExperienced, helperText: "What they earn now per year, for example 3.5 LPA." },
       /*
        * The application's own bands, offered rather than enforced.
        *
@@ -544,9 +547,9 @@ export const candidateFormSections = [
        * may already hold "45-60 days" from a sheet or a CSV, and a closed list would show that back
        * as empty and then save the blank over it. The list is what to pick; the box is what to keep.
        */
-      { name: "noticePeriod", label: "Notice Period", type: "combobox", options: "noticePeriods", placeholder: "Select or type", props: { sorted: false }, when: isRecordExperienced },
-      { name: "minExpectedCtc", label: "Least Expected Salary", type: "text", placeholder: "e.g. 3 LPA" },
-      { name: "expectedCtc", label: "Expected Salary", type: "text", placeholder: "e.g. 5 LPA" },
+      { name: "noticePeriod", label: "Notice Period", type: "combobox", options: "noticePeriods", placeholder: "Select or type", props: { sorted: false }, when: isRecordExperienced, helperText: "How soon they can leave their current job; pick or type." },
+      { name: "minExpectedCtc", label: "Least Expected Salary", type: "text", placeholder: "e.g. 3 LPA", helperText: "The lowest yearly salary they said they would accept." },
+      { name: "expectedCtc", label: "Expected Salary", type: "text", placeholder: "e.g. 5 LPA", helperText: "The yearly salary they are asking for." },
       /*
        * When they can join, as the one column that holds every answer to it.
        *
@@ -556,11 +559,11 @@ export const candidateFormSections = [
        * who answered "Immediate" and pressing Save **erased their answer**. A combobox offering
        * Immediate shows and keeps all three: the word, a day, and a sheet's own "15 days".
        */
-      { name: "availableFrom", label: "When Can You Join", type: "combobox", options: "joiningAnswers", placeholder: "Immediate, a date, or type it" },
-      { name: "skills", label: "Skills", type: "text", placeholder: "Photography, Lightroom, Premiere Pro" },
-      { name: "languagesKnown", label: "Languages Known", type: "text", placeholder: "Tamil, English" },
+      { name: "availableFrom", label: "When Can You Join", type: "combobox", options: "joiningAnswers", placeholder: "Immediate, a date, or type it", helperText: "Immediate, a date, or how long until they can start." },
+      { name: "skills", label: "Skills", type: "text", placeholder: "Photography, Lightroom, Premiere Pro", helperText: "Their skills, separated by commas." },
+      { name: "languagesKnown", label: "Languages Known", type: "text", placeholder: "Tamil, English", helperText: "The languages they speak, separated by commas." },
       // The three the candidate may send, in place of the single Portfolio Link box this had.
-      { name: "portfolioLinks", label: "Portfolio / Links", type: "custom", colSpan: 2 },
+      { name: "portfolioLinks", label: "Portfolio / Links", type: "custom", colSpan: 2, helperText: "Links to the candidate's work, up to three; the first shows in the register." },
       /*
        * The résumé itself, and the address it lives at.
        *
@@ -569,7 +572,7 @@ export const candidateFormSections = [
        * is also where a row imported with the link in the wrong column is put right - reading it
        * and correcting it are both things this screen is for.
        */
-      { name: "resumeUrl", label: "Resume", type: "custom", colSpan: 2 },
+      { name: "resumeUrl", label: "Resume", type: "custom", colSpan: 2, helperText: "The web address of the candidate's résumé; fix it here if it is wrong." },
       /*
        * What else they attached, read rather than edited. HR replaces a file by asking for a new
        * form rather than uploading on the candidate's behalf, so this opens each one and offers no
@@ -582,15 +585,15 @@ export const candidateFormSections = [
     id: "anything-else",
     title: "Anything Else",
     fields: [
-      { name: "referredBy", label: "Referred By", type: "text", placeholder: "Who sent them, where it was a referral" },
-      { name: "howYouKnowUs", label: "How do you know us?", type: "text" },
+      { name: "referredBy", label: "Referred By", type: "text", placeholder: "Who sent them, where it was a referral", helperText: "Who referred them to the studio, if it was a referral." },
+      { name: "howYouKnowUs", label: "How do you know us?", type: "text", helperText: "How the candidate says they heard about the studio." },
       /*
        * The candidate's own words, kept here beside the question above and **out of Screening**,
        * where it briefly sat next to Remarks. Those two are different things: this is what the
        * candidate says about the studio, Remarks is what the studio says about the candidate, and
        * one heading over both loses which is which.
        */
-      { name: "aboutUs", label: "Anything about us?", type: "textarea", props: { rows: 4 }, colSpan: 2 },
+      { name: "aboutUs", label: "Anything about us?", type: "textarea", props: { rows: 4 }, colSpan: 2, helperText: "What the candidate wrote about the studio on their form." },
     ],
   },
 ];
@@ -659,27 +662,27 @@ export const candidateScheduleSections = [
     id: "interview",
     title: "Interview",
     fields: [
-      { name: "interviewDate", label: "Interview Date", type: "date", required: true },
+      { name: "interviewDate", label: "Interview Date", type: "date", required: true, helperText: "The day this interview round takes place." },
       /*
        * Required in the schema because every round has an hour, and refused by the dialog only for a
        * Google Meet - where the server cannot book an event without one. An in-person round noted as
        * "sometime Thursday" is a real thing a studio writes down, and it is not this form's business
        * to refuse it.
        */
-      { name: "interviewTime", label: "Interview Time", type: "time" },
-      { name: "interviewMode", label: "Mode", type: "select", options: "modes", required: true, placeholder: "Select a mode", props: { sorted: false } },
+      { name: "interviewTime", label: "Interview Time", type: "time", helperText: "When the round starts; needed to book a Google Meet." },
+      { name: "interviewMode", label: "Mode", type: "select", options: "modes", required: true, placeholder: "Select a mode", props: { sorted: false }, helperText: "How it happens; Google Meet also creates the calendar invite and link." },
       // Only for a round this application books: the other two modes have no event to give a length to.
-      { name: "durationMinutes", label: "Duration", type: "select", options: "durations", when: isMeetRound, props: { sorted: false } },
+      { name: "durationMinutes", label: "Duration", type: "select", options: "durations", when: isMeetRound, props: { sorted: false }, helperText: "How long the Google Meet calendar event is booked for." },
       /*
        * **Who is taking it.** The register has always held an interviewer - a linked sheet's
        * assignment rules fill it in - and nothing on screen ever asked for one, because the studio
        * has one HR and there was nobody to assign a candidate to. A Meet changes that: somebody has
        * to be *in* the conversation, and their work address is what the invite goes to.
        */
-      { name: "interviewerEmployeeId", label: "Interviewer", type: "select", options: "interviewers", placeholder: "Who is taking this round" },
+      { name: "interviewerEmployeeId", label: "Interviewer", type: "select", options: "interviewers", placeholder: "Who is taking this round", helperText: "Who takes this round; their email is added to the guests." },
       // Who the invite goes to, for a round this application books. There is no Meet Link field at
       // any mode - see the note above this list.
-      { name: "attendees", label: "Guests", type: "custom", colSpan: 2, when: isMeetRound },
+      { name: "attendees", label: "Guests", type: "custom", colSpan: 2, when: isMeetRound, helperText: "Everyone who gets the Google Meet invite; type any email address to add it." },
       /*
        * **No Last Follow-up box.** It asked HR to tell the register something the register already
        * knows, and it was a box that had to be *remembered*: the column means "the day somebody last
@@ -690,10 +693,10 @@ export const candidateScheduleSections = [
        * Next Follow-up stays a box, and the difference is which way it points: the last one is a
        * fact the application can observe, and the next one is a decision only a person can make.
        */
-      { name: "nextFollowUpDate", label: "Next Follow-up", type: "date" },
+      { name: "nextFollowUpDate", label: "Next Follow-up", type: "date", helperText: "When someone should next contact this candidate." },
       // No placeholder: the heading says what the box is for. HR's own note on the candidate, which
       // the application form no longer writes to at all.
-      { name: "remarks", label: "Remarks", type: "textarea", props: { rows: 6 }, colSpan: 2 },
+      { name: "remarks", label: "Remarks", type: "textarea", props: { rows: 6 }, colSpan: 2, helperText: "HR's own notes on this candidate, kept on their record." },
     ],
   },
 ];

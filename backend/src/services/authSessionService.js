@@ -44,10 +44,24 @@ async function touchSession(id, db = prisma) {
   await db.authSession.update({ where: { id }, data: { lastUsedAt: new Date() } });
 }
 
+/**
+ * Whose session a raw refresh token was, for the sign-out line in the activity log - read *after*
+ * the session is revoked, so revoked rows answer too. The few fields that line needs, never the
+ * password hash. Null for an unknown token.
+ */
+async function sessionOwner(token, db = prisma) {
+  if (!token || typeof token !== "string") return null;
+  const session = await db.authSession.findUnique({
+    where: { tokenHash: hashToken(token) },
+    select: { user: { select: { id: true, username: true, email: true, name: true, branchId: true } } },
+  });
+  return session?.user || null;
+}
+
 /** Logout: the row is stamped revoked, not deleted. Unknown and already-revoked tokens are no-ops. */
 async function revokeSession(token, db = prisma) {
   if (!token || typeof token !== "string") return;
   await db.authSession.updateMany({ where: { tokenHash: hashToken(token), revokedAt: null }, data: { revokedAt: new Date() } });
 }
 
-module.exports = { createSession, findLiveSession, touchSession, revokeSession, SESSION_DAYS };
+module.exports = { createSession, findLiveSession, touchSession, revokeSession, sessionOwner, SESSION_DAYS };

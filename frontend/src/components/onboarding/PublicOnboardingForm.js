@@ -11,6 +11,7 @@ import AppLogo from "@/components/shared/AppLogo";
 import useStudioBranding from "@/components/shared/useStudioBranding";
 import { brandNameInProse } from "@/lib/studioBranding.mjs";
 import Button from "@/components/shared/Button";
+import Checkbox from "@/components/shared/Checkbox";
 import RepeatableDetailsField from "@/components/shared/RepeatableDetailsField";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import Loader from "@/components/shared/Loader";
@@ -52,6 +53,7 @@ const renderers = {
   skills: ({ values, onChange, field, error }) => <SearchableMultiSelect
     label="Skills"
     required={field.required}
+    helperText={field.helperText}
     error={typeof error === "string" ? error : ""}
     placeholder="Search skills..."
     emptyText="No matching skills."
@@ -65,6 +67,7 @@ const renderers = {
   languagesKnown: ({ values, onChange, field, error, context }) => <SearchableMultiSelect
     label="Languages Known"
     required={field.required}
+    helperText={field.helperText}
     error={typeof error === "string" ? error : ""}
     placeholder="Search languages..."
     emptyText="No matching languages."
@@ -185,6 +188,11 @@ export default function PublicOnboardingForm({ token }) {
 
   async function verify(event) {
     event.preventDefault();
+    // Checked here rather than sent blank for the server to refuse.
+    if (!identifier.trim()) {
+      setFieldErrors({ identifier: "Enter your email or phone number." });
+      return;
+    }
     setVerifying(true);
     try {
       const result = await verifyOnboardingInvite(token, identifier);
@@ -240,12 +248,12 @@ export default function PublicOnboardingForm({ token }) {
     if (!form.policyAgreementAccepted) {
       /*
        * Not through `refuse`, and deliberately: the agreement is a checkbox under the policy text
-       * rather than one of the config's fields, so there is nothing to mark - and handing `refuse`
-       * an empty set would *clear* the marks already on the form. This check runs before the
-       * required-field one, so that is the ordinary case rather than a corner: a candidate who has
-       * left fields blank and not ticked the box would watch their marks disappear.
+       * rather than one of the config's fields, and `refuse` *replaces* the marks on the form. This
+       * check runs before the required-field one, so a candidate who has left fields blank and not
+       * ticked the box would watch their marks disappear. The box's mark is added beside them, and
+       * said beside the box rather than in a toast.
        */
-      showError("You must accept the Non-Disclosure and Employment Policy Agreement before submitting.");
+      setFieldErrors((current) => ({ ...current, policyAgreementAccepted: "Tick the box to accept the agreement." }));
       scrollToSection(AGREEMENT_SECTION);
       return;
     }
@@ -349,7 +357,7 @@ export default function PublicOnboardingForm({ token }) {
       {!verified ? <form onSubmit={verify} className="mx-auto max-w-lg py-7">
         <h2 className="text-lg font-semibold text-slate-900">Verify your invite</h2>
         <p className="mt-1 text-sm text-slate-600">Enter the email address or phone number used for this invite.</p>
-        <TextField className="mt-5" required label="Email or Phone Number" value={identifier} onChange={(event) => setIdentifier(event.target.value)} />
+        <TextField className="mt-5" required label="Email or Phone Number" helperText="The email or phone the studio sent this invite to, to confirm it is you." value={identifier} onChange={(event) => { setIdentifier(event.target.value); setFieldErrors({}); }} error={fieldErrors.identifier} />
         <Button className="mt-5 w-full" variant="primary" size="lg" disabled={verifying}>{verifying ? "Verifying…" : "Continue"}</Button>
       </form> : <form onSubmit={submit} className="pt-7">
         {/* `data-schema-section` is the anchor `scrollToSection` above finds a heading by - the same
@@ -368,9 +376,10 @@ export default function PublicOnboardingForm({ token }) {
           <p className="mt-3 text-sm leading-6 text-slate-600">Please review the policy agreement before confirming your acceptance.</p>
           <div className="mt-4 h-60 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-700 shadow-inner sm:h-72 sm:p-5"><p className="whitespace-pre-line">{onboardingAgreementText}</p></div>
           <label className="mt-4 flex items-start gap-3 rounded-md border border-slate-200 bg-slate-50 p-4 text-sm font-medium text-slate-700">
-            <input required type="checkbox" checked={form.policyAgreementAccepted} onChange={(event) => update("policyAgreementAccepted", event.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600" />
+            <Checkbox className="mt-0.5 shrink-0" checked={form.policyAgreementAccepted} invalid={Boolean(fieldErrors.policyAgreementAccepted)} onChange={(checked) => update("policyAgreementAccepted", checked)} />
             I have read and agree to the Non-Disclosure and Employment Policy Agreement.
           </label>
+          {fieldErrors.policyAgreementAccepted && <p role="alert" className="mt-1.5 text-xs font-normal text-red-600">{fieldErrors.policyAgreementAccepted}</p>}
         </section>
 
         <div className="flex justify-end border-t border-slate-200 pt-6">

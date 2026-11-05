@@ -10,6 +10,7 @@ import Loader from "@/components/shared/Loader";
 import { usePermissions } from "@/components/auth/PermissionsProvider";
 import { getMasterData } from "@/services/hrm/master-data.service";
 import useBranchRegistry from "@/components/shared/useBranchRegistry";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import UserManagement from "./UserManagement";
 import RoleManagement from "./RoleManagement";
 
@@ -64,16 +65,11 @@ export default function AdminPage({ tab = "users" }) {
   // Only Roles offers a create: a user account is made in the Employee Repository along with the
   // person it belongs to, so an "Add User" here would be a second, competing way in.
   const createAction = tab === "roles" && hasPermission("ADMIN", "Role Management", "READ_WRITE") && "Add Role";
-
-  /*
-   * Admin Permission: the one matrix every role marked Branch Admin carries.
-   *
-   * Offered to anybody who may open this screen rather than to writers alone, because the set is
-   * the answer to "why can that branch admin do this" - a question a reader of Role Management has
-   * every reason to ask and no other way to answer. The dialog opens read-only without
-   * `READ_WRITE`, and the server refuses the save regardless.
-   */
-  const adminPermissionAction = tab === "roles" && hasPermission("ADMIN", "Role Management", "READ");
+  // Users as a table or as a board grouped by home branch; the switch lives in this header, which
+  // is the users list's own.
+  const [userLayout, setUserLayout] = useTableBoardLayout("admin-users");
+  // Roles as a table or as a board grouped Locked / Custom; its own switch, beside Add Role.
+  const [roleLayout, setRoleLayout] = useTableBoardLayout("admin-roles");
 
   return <PermissionGuard
     module={guard.module}
@@ -94,14 +90,16 @@ export default function AdminPage({ tab = "users" }) {
   >
     <div className="flex min-h-0 flex-1 flex-col">
       <ModulePageHeader
-        // Employee Repository on the left across all three screens, so the heading names where you
-        // are in the app and only the control beside it changes as you move between them.
-        title="Employee Repository"
+        // User Management on the left across all three screens, so the heading names where you are
+        // in the app and only the control beside it changes as you move between them.
+        title="User Management"
         titleAccessory={<AdministrationSwitch current={`/admin/${tab}`} />}
-        actions={(adminPermissionAction || createAction) && <div className="flex flex-wrap items-center gap-2">
-          {adminPermissionAction && <Button variant="secondary" onClick={() => rolesRef.current?.openAdminPermission()}>Admin Permission</Button>}
-          {createAction && <Button variant="primary" onClick={() => rolesRef.current?.create()}>{createAction}</Button>}
-        </div>}
+        actions={tab === "users"
+          ? <TableBoardSwitch value={userLayout} onChange={setUserLayout} />
+          : <>
+            <TableBoardSwitch value={roleLayout} onChange={setRoleLayout} />
+            {createAction && <Button variant="primary" onClick={() => rolesRef.current?.create()}>{createAction}</Button>}
+          </>}
       />
 
       {/* No wrapper padding: the table meets the tab bar the way it does in every other module, and
@@ -112,8 +110,8 @@ export default function AdminPage({ tab = "users" }) {
           : branchError
             ? <p className="p-4 text-sm text-red-600">{branchError}</p>
             : <>
-              {tab === "users" && <UserManagement />}
-              {tab === "roles" && <RoleManagement ref={rolesRef} branches={branches} />}
+              {tab === "users" && <UserManagement layout={userLayout} />}
+              {tab === "roles" && <RoleManagement ref={rolesRef} branches={branches} layout={roleLayout} />}
             </>}
       </div>
     </div>

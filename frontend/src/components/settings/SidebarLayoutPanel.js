@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Button from "@/components/shared/Button";
+import HelpTip from "@/components/shared/HelpTip";
 import SortableList from "@/components/shared/SortableList";
 import useSidebarLayout from "@/components/preferences/useSidebarLayout";
 import { applyVisibleOrder, sameLayout } from "@/lib/sidebarLayout.mjs";
@@ -96,18 +97,18 @@ export default function SidebarLayoutPanel({ unsavedRef }) {
   const renderModuleRow = (item) => <span className="block truncate text-sm font-medium text-slate-800">{item.label}</span>;
 
   return <div className="max-w-3xl space-y-4">
-    <p className="text-xs text-slate-500 sm:text-sm">
-      Drag a module — anywhere on its row — to move it up or down your sidebar. Nothing changes until
-      you press Save changes; once saved, your arrangement is kept on your account, so it follows you
-      to any device you sign in on.
-    </p>
-
-    <SortableList
-      label="Sidebar modules"
-      items={moduleRows}
-      onReorder={reorderModules}
-      renderRow={renderModuleRow}
-    />
+    <div className="space-y-2">
+      <h3 className="flex items-center text-sm font-medium text-slate-700">
+        Sidebar modules
+        <HelpTip text="Drag a module — anywhere on its row — to move it up or down your sidebar. Nothing changes until you press Save changes; once saved, it follows you to any device you sign in on." />
+      </h3>
+      <SortableList
+        label="Sidebar modules"
+        items={moduleRows}
+        onReorder={reorderModules}
+        renderRow={renderModuleRow}
+      />
+    </div>
 
     <div className="flex flex-wrap justify-end gap-2 border-t border-slate-200 pt-4">
       {/* Both offered only when they would do something: nothing to put back for somebody who has

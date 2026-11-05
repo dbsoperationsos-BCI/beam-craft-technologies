@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { timeAgo } from "../src/lib/relativeTime.mjs";
+import { timeAgo, updatedAgo } from "../src/lib/relativeTime.mjs";
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
 const ago = (seconds) => timeAgo(new Date(NOW - seconds * 1000), NOW);
@@ -34,4 +34,19 @@ test("a string timestamp is accepted, and nonsense answers nothing", () => {
   assert.equal(timeAgo("not a date", NOW), "");
   assert.equal(timeAgo(null, NOW), "");
   assert.equal(timeAgo(undefined, NOW), "");
+});
+
+const updatedNow = Date.parse("2026-09-26T12:00:00Z");
+const before = (seconds) => new Date(updatedNow - seconds * 1000).toISOString();
+
+test("the workspace's Updated label reads the same for the project and the album", () => {
+  assert.equal(updatedAgo(null, updatedNow), "recently");
+  assert.equal(updatedAgo(before(30), null), "recently");
+  assert.equal(updatedAgo("not a date", updatedNow), "recently");
+  assert.equal(updatedAgo(before(30), updatedNow), "just now");
+  assert.equal(updatedAgo(before(60), updatedNow), "1 min ago");
+  assert.equal(updatedAgo(before(5 * 60), updatedNow), "5 mins ago");
+  assert.equal(updatedAgo(before(3 * 3600), updatedNow), "3 hours ago");
+  assert.equal(updatedAgo(before(26 * 3600), updatedNow), "1 day ago");
+  assert.equal(updatedAgo(new Date(updatedNow + 5000), updatedNow), "just now", "a clock slightly behind the server is still now");
 });

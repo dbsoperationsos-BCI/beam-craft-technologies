@@ -130,7 +130,9 @@ test("a session survives a round trip through the auth state", async () => {
   }
 });
 
-test("session files are created unreadable to other accounts", async () => {
+// Windows has no POSIX permission bits (every file reads back 0o666), so there is nothing to
+// check there; the server this protects runs on Linux.
+test("session files are created unreadable to other accounts", { skip: process.platform === "win32" && "no POSIX permission bits on Windows" }, async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wa-perm-"));
   try {
     await withKey(KEY_A, async () => {
@@ -158,6 +160,9 @@ test("a key id cannot address a file outside its own folder", () => {
   // inside the folder instead of an error - what matters is that it can never point outside it.
   for (const hostile of ["../escaped.json", "../../creds.json", "/etc/passwd", "..\\..\\windows"]) {
     const resolved = secure.resolveInside(root, hostile);
+    // A backslash is an ordinary character on Linux, where it is neutralised into a file name, but a
+    // separator on Windows, where the second check refuses it outright. Refused is contained too.
+    if (resolved === "" && process.platform === "win32" && hostile.includes("\\")) continue;
     assert.notEqual(resolved, "", `${hostile} should resolve to a contained name`);
     assert.ok(
       resolved.startsWith(root + path.sep),

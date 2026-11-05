@@ -259,6 +259,17 @@ function BulkEntryRow({ position, row, options, showErrors, duplicate = "", onCh
   </div>;
 }
 
+/** The ⓘ help for each column of a bulk-entry row, by its field's key. */
+const BULK_ENTRY_HELP = {
+  name: "Their full name, as it should appear on the interview register.",
+  phone: "The number HR calls or messages them on; it must be new to the register.",
+  position: "Pick a studio designation, or type the role they asked for.",
+  experience: "How much work experience they have, in your own words.",
+  source: "Where the candidate heard about us, such as a job portal or referral.",
+  nextFollowUpDate: "The day to contact them next; it brings them back on the register.",
+  remarks: "Anything worth remembering about this candidate, saved on their record.",
+};
+
 /**
  * One field, drawn through the control its `type` names - all of them the application's own.
  *
@@ -270,18 +281,18 @@ function BulkEntryField({ field, value, options, invalid, clash = false, onChang
   const error = clash ? "Already on the register." : invalid ? `${field.label} is required.` : "";
 
   if (field.type === "phone") {
-    return <PhoneField label={field.label} field={field.key} required={field.required} error={error} value={value} onChange={(_field, next) => onChange(next)} />;
+    return <PhoneField label={field.label} helperText={BULK_ENTRY_HELP[field.key]} field={field.key} required={field.required} error={error} value={value} onChange={(_field, next) => onChange(next)} />;
   }
   if (field.type === "position") {
     // A combobox, not a closed list: the studio's designations are what it hires for most of the
     // time and not all of it, and a position typed here is the one the candidate applied for.
-    return <ComboBoxField label={field.label} required={field.required} error={error} value={value} onChange={onChange} options={options.positions || []} placeholder="Select or type" />;
+    return <ComboBoxField label={field.label} helperText={BULK_ENTRY_HELP[field.key]} required={field.required} error={error} value={value} onChange={onChange} options={options.positions || []} placeholder="Select or type" />;
   }
   if (field.type === "source") {
-    return <ComboBoxField label={field.label} required={field.required} error={error} value={value} onChange={onChange} options={options.sources || []} placeholder="Select or type" />;
+    return <ComboBoxField label={field.label} helperText={BULK_ENTRY_HELP[field.key]} required={field.required} error={error} value={value} onChange={onChange} options={options.sources || []} placeholder="Select or type" />;
   }
   if (field.type === "date") {
-    return <DateField label={field.label} required={field.required} error={error} value={value} onChange={onChange} />;
+    return <DateField label={field.label} helperText={BULK_ENTRY_HELP[field.key]} required={field.required} error={error} value={value} onChange={onChange} />;
   }
   if (field.type === "textarea") {
     /*
@@ -290,7 +301,7 @@ function BulkEntryField({ field, value, options, invalid, clash = false, onChang
      * controls; `!min-h-9` is how the rest of this codebase overrides that floor. It stays a
      * textarea - a note is a sentence, it takes newlines and it drags open - but it starts level.
      */
-    return <TextAreaField label={field.label} required={field.required} error={error} rows={1} value={value} onChange={(event) => onChange(event.target.value)} inputClassName="!min-h-9 py-1.5" />;
+    return <TextAreaField label={field.label} helperText={BULK_ENTRY_HELP[field.key]} required={field.required} error={error} rows={1} value={value} onChange={(event) => onChange(event.target.value)} inputClassName="!min-h-9 py-1.5" />;
   }
-  return <TextField label={field.label} required={field.required} error={error} value={value} onChange={(event) => onChange(event.target.value)} />;
+  return <TextField label={field.label} helperText={BULK_ENTRY_HELP[field.key]} required={field.required} error={error} value={value} onChange={(event) => onChange(event.target.value)} />;
 }

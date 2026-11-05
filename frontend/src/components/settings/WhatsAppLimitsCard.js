@@ -1,5 +1,6 @@
 "use client";
 
+import HelpTip from "@/components/shared/HelpTip";
 import { useCallback, useState } from "react";
 import Button from "@/components/shared/Button";
 import TextField from "@/components/shared/TextField";
@@ -128,24 +129,15 @@ export default function WhatsAppLimitsCard({ limits, saved, defaults, bounds, ca
   if (!canEdit) {
     return (
       <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-        <p className="text-xs font-semibold text-slate-700 sm:text-sm">Usage limits</p>
-        <p className="mt-1 text-xs font-normal text-slate-500 sm:text-sm">
-          Each CRM is warned past {inForce.hourlyChats} different clients an hour,{" "}
-          {inForce.hourlyMessages} messages an hour, or {inForce.dailyMessages} messages a day.
-          Changing them needs User Settings access.
-        </p>
+        <p className="flex items-center text-xs font-semibold text-slate-700 sm:text-sm">Usage limits<HelpTip text={`Each CRM is warned past ${inForce.hourlyChats} different clients an hour, ${inForce.hourlyMessages} messages an hour, or ${inForce.dailyMessages} messages a day. Changing them needs User Settings access.`} /></p>
       </div>
     );
   }
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white px-4 py-4">
-      <p className="text-xs font-semibold text-slate-700 sm:text-sm">Usage limits</p>
-      <p className="mt-1 text-xs font-normal text-slate-500 sm:text-sm">
-        When a CRM is warned that they are messaging too hard. Nothing is blocked - the warning
-        asks them to stop, and their row above is where you can disconnect them. Leave a box empty
-        to use the app&apos;s own number.
-      </p>
+      {/* What the limits are and what is in force now, kept in the title's ⓘ; each box's own note is its ⓘ. */}
+      <p className="flex items-center text-xs font-semibold text-slate-700 sm:text-sm">Usage limits<HelpTip text={`When a CRM is warned that they are messaging too hard. Nothing is blocked - the warning asks them to stop, and their row above is where you can disconnect them. Leave a box empty to use the app's own number. In force now: ${inForce.hourlyChats} clients an hour, ${inForce.hourlyMessages} messages an hour, ${inForce.dailyMessages} a day. Messaging many different people in a short time is what WhatsApp reads as a broadcast and can get the number banned - so raise the message counts before the client count.`} /></p>
 
       {/* One column on a phone, three from `sm` - the boxes are short and the hints under them are
           not, so a narrow screen stacks rather than squeezing three of each side by side. */}
@@ -163,21 +155,11 @@ export default function WhatsAppLimitsCard({ limits, saved, defaults, bounds, ca
               value={form[field.key]}
               disabled={saving}
               onChange={(event) => update(field.key, event.target.value)}
+              helperText={field.hint}
             />
-            <p className="mt-1 text-[11px] font-normal text-slate-400">{field.hint}</p>
           </div>
         ))}
       </div>
-
-      {/* Said once, under the field it is about rather than in the paragraph above: the reach
-          limit is the one with a number's ban behind it, and an administrator raising it should
-          be told at the moment they are raising it. */}
-      <p className="mt-3 text-xs font-normal text-slate-500">
-        In force now: {inForce.hourlyChats} clients an hour, {inForce.hourlyMessages} messages an
-        hour, {inForce.dailyMessages} a day. Messaging many different people in a short time is what
-        WhatsApp reads as a broadcast, and the studio&apos;s number can be banned for it - so raise
-        the message counts before the client count.
-      </p>
 
       {error && <p role="alert" className="mt-2 text-xs text-red-600 sm:text-sm">{error}</p>}
       {notice && <p role="status" className="mt-2 text-xs text-emerald-700 sm:text-sm">{notice}</p>}

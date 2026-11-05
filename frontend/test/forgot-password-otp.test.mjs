@@ -59,8 +59,10 @@ test("the time left is shown, and Resend waits for it to run out", () => {
   assert.match(markup, /Expires in \$\{asClock\(secondsLeft\)\}/);
   assert.match(markup, /This code has expired\./);
   assert.match(markup, /disabled=\{busy \|\| !expired\}/, "Resend is offered while the code is still live");
-  // And an expired code cannot be submitted, so the only way on is a new one.
-  assert.match(markup, /disabled=\{busy \|\| \(step === "code" && \(expired \|\| otp\.length !== 6\)\)\}/);
+  // And an expired code cannot be submitted, so the only way on is a new one. A short code can be
+  // pressed, and is marked under its box rather than the button refusing in silence.
+  assert.match(markup, /disabled=\{busy \|\| \(step === "code" && expired\)\}/);
+  assert.match(markup, /fields\.check\(\{ otp: otp\.length !== 6 \? "Enter the six-digit code\." : "" \}\)/);
 });
 
 test("the countdown is one interval, and it is cleaned up", () => {

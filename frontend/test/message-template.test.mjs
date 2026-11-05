@@ -67,3 +67,40 @@ test("the two employee messages fill from the facts their dialogs hold", () => {
   });
   assert.equal(credentials, "Arun K: arun.k / Temp1234 at https://os.example/login (arun@example.com)");
 });
+
+/*
+ * **One switch per message.**
+ *
+ * The template panel carries its own "This message is sent" switch, which is right for a message
+ * whose only home is Settings → Templates. Three of them are not: the attendance report, Photo
+ * Selection Submitted and New Lead Welcome each have a notification panel above the wording with a
+ * switch of its own - the one that holds the schedule, the group and the senders, and the one the
+ * sender actually reads. Showing both put two switches on one screen for one message, and nothing
+ * told the reader which of them decided; for those three the template's own switch did nothing at
+ * all, because their senders never ask `isMessageEnabled`.
+ *
+ * So the panel above is the switch and the panel below is the wording, which is what the section's
+ * own layout already says.
+ */
+test("a message whose notification panel carries the switch does not show a second one over its wording", async () => {
+  const fs = await import("node:fs");
+  const read = (path) => fs.readFileSync(new URL(`../src/components/settings/${path}`, import.meta.url), "utf8");
+
+  const panel = read("MessageTemplatePanel.js");
+  assert.match(panel, /switchable = true/, "the switch is shown unless a caller says otherwise");
+  assert.match(panel, /\{switchable && <div[\s\S]{0,400}?This message is sent/, "the whole switch block is what `switchable` draws");
+
+  // The three sections that already have a switch of their own turn it off.
+  const overlay = read("SettingsOverlay.js");
+  for (const [section, marker] of [
+    ["Attendance WhatsApp Report", 'templateKey="ATTENDANCE_DAILY_REPORT"'],
+    ["Photo Selection Submitted", 'templateKey="PHOTO_SELECTION_SUBMITTED"'],
+  ]) {
+    const from = overlay.indexOf(marker);
+    assert.ok(from > -1, `${section} is no longer wired this way`);
+    assert.match(overlay.slice(from, from + 300), /switchable=\{false\}/, `${section} still shows two switches`);
+  }
+  // New Lead Welcome's wording is one template per vertical, so the set passes the answer down.
+  assert.match(overlay, /<LeadWelcomeVerticalTemplates[\s\S]{0,200}?switchable=\{false\}/);
+  assert.match(read("LeadWelcomeVerticalTemplates.js"), /switchable=\{switchable\}/);
+});

@@ -6,8 +6,8 @@ const prisma = require("../../../config/db");
 const SETTINGS_ID = "default";
 
 const settingsSelect = {
-  galleryValidityMonths: true, defaultSelectionLimit: true, originalStoragePath: true, selectedOutputPath: true, studioName: true, loginCredentialName: true, galleryLogoUrl: true, faviconUrl: true,
-  loginSlides: true, updatedByUserId: true, createdAt: true, updatedAt: true,
+  galleryValidityMonths: true, defaultSelectionLimit: true, originalStoragePath: true, selectedOutputPath: true, studioName: true, loginCredentialName: true, galleryLogoUrl: true, galleryLogoDarkUrl: true, faviconUrl: true, faviconDarkUrl: true,
+  loginSlides: true, clientLoginSlides: true, compression: true, updatedByUserId: true, createdAt: true, updatedAt: true,
 };
 
 function createRepository(client = prisma) {

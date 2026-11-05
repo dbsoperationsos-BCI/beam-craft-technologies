@@ -21,7 +21,8 @@ const UNAVAILABLE = "FACE_ENGINE_UNAVAILABLE";
 async function isReady() { return engine ? engine.isReady() : false; }
 function unavailableReason() { return engine ? engine.unavailableReason() : `The face engine module is not installed (${loadError}).`; }
 function unavailableError() { return Object.assign(new Error(`Face engine unavailable: ${unavailableReason()}`), { code: UNAVAILABLE }); }
-async function describe(buffer) { if (!engine) throw unavailableError(); return engine.describe(buffer); }
+// Faces only: People groups by box, embedding and quality, and never reads the culling signals.
+async function describe(buffer) { if (!engine) throw unavailableError(); return engine.describe(buffer, { signals: false }); }
 function checkFaceEngineReady() { if (engine) engine.checkFaceEngineReady(); }
 function getVectors() { if (!vectors) throw unavailableError(); return vectors; }
 

@@ -4,8 +4,9 @@ import ArrowBack from "@mui/icons-material/ArrowBack";
 import ContentCopy from "@mui/icons-material/ContentCopy";
 import { useEffect, useState } from "react";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
+import useWhatsappSender from "@/components/shared/useWhatsappSender";
 import { copyToClipboard } from "@/lib/clipboard";
-import { prepareWhatsAppTemplate, sendWhatsAppGroupInvite } from "@/services/image-selection/image-selection.service";
+import { notifyClientApp, prepareWhatsAppTemplate, sendWhatsAppGroupInvite } from "@/services/image-selection/image-selection.service";
 import WhatsAppGroupLinkDialog from "./WhatsAppGroupLinkDialog";
 
 function label(status) { return ({ SENDING: "Sending", SENT: "Sent", FAILED: "Failed", ALREADY_SENT: "Already Sent", MOCK_SENT: "Mock Sent" })[status] || "Not Sent"; }
@@ -50,6 +51,8 @@ export default function WhatsAppTemplatePanel({ project, canWrite = true, onBack
     if (!preview?.client?.whatsappShareUrl) { setMessage("The client's WhatsApp number is missing."); return; }
     window.open(`${preview.client.whatsappShareUrl}?text=${encodeURIComponent(text)}`, "_blank", "noopener,noreferrer");
     setStatus("SENT");
+    // The client's app hears of it too. Best-effort: WhatsApp has already opened either way.
+    if (canWrite) notifyClientApp(project.id).catch(() => {});
   }
   async function sendToGroup() {
     setSending(true); setStatus("SENDING"); setMessage("");
@@ -66,6 +69,9 @@ export default function WhatsAppTemplatePanel({ project, canWrite = true, onBack
     } finally { setSending(false); }
   }
   const groupName = project.whatsappGroupSubject || "";
+  // Send to Group goes from this person's own WhatsApp: absent until it is linked (Link a group /
+  // Change pairs it), asked again once the dialog links it.
+  const { canSend, refresh: refreshSender } = useWhatsappSender();
   return <>
     <aside className="flex min-h-0 flex-col border-l border-slate-200 bg-white md:h-full">
       <div className="flex shrink-0 items-center border-b border-slate-200 px-3 py-2"><button type="button" onClick={onBack} aria-label="Back to settings" className="rounded p-1 text-slate-600 hover:bg-slate-100"><ArrowBack style={{ fontSize: 15 }} /></button></div>
@@ -79,11 +85,12 @@ export default function WhatsAppTemplatePanel({ project, canWrite = true, onBack
         {preview ? <>
           <textarea value={text} readOnly className="mt-2 h-65 w-full resize-none rounded-md border border-slate-300 p-2 text-[10px] leading-4 text-slate-700 outline-none" />
           <div className="mt-2 flex flex-wrap justify-end gap-2">
-            {canWrite && <button type="button" onClick={sendToGroup} disabled={sending} className="inline-flex h-7 items-center rounded bg-green-600 px-3 text-[10px] font-medium text-white disabled:opacity-60">{sending ? "Sending..." : "Send to Group"}</button>}
+            {canWrite && canSend && <button type="button" onClick={sendToGroup} disabled={sending} className="inline-flex h-7 items-center rounded bg-green-600 px-3 text-[10px] font-medium text-white disabled:opacity-60">{sending ? "Sending..." : "Send to Group"}</button>}
             <button type="button" onClick={sendToClient} className="inline-flex h-7 items-center rounded bg-green-500 px-3 text-[10px] font-medium text-white">Send to Client</button>
             <button type="button" onClick={copy} className="inline-flex h-7 items-center gap-1 rounded bg-blue-50 px-3 text-[10px] text-blue-600"><ContentCopy style={{ fontSize: 12 }} />Copy</button>
           </div>
         </> : <p className="mt-6 text-xs text-slate-500">Preparing template...</p>}
+        {preview && canWrite && !canSend && <p className="mt-2 text-[10px] text-slate-500">Send to Group appears once your WhatsApp is linked - use {groupName ? "Change" : "Link a group"} above.</p>}
         {message && <p role="alert" className={`mt-3 text-xs ${status === "FAILED" ? "text-red-600" : "text-slate-600"}`}>{message}</p>}
       </div>
     </aside>
@@ -92,7 +99,7 @@ export default function WhatsAppTemplatePanel({ project, canWrite = true, onBack
         project={project}
         canWrite={canWrite}
         onClose={() => setLinkOpen(false)}
-        onLinked={(updated) => { onProjectUpdated?.(updated); setMessage(""); }}
+        onLinked={(updated) => { onProjectUpdated?.(updated); setMessage(""); refreshSender(); }}
       />
     )}
     <FloatingNotice notice={notice} onClose={clearNotice} />

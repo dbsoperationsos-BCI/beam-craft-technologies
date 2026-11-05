@@ -1,4 +1,5 @@
 const prisma = require("../../../config/db");
+const { LEAD_SOURCES } = require("./leadSources");
 const { CRM_LEAD_SQL_COLUMNS, flattenLeadColumns, ensureCrmLeadColumns, phoneMatchKey } = require("./crmLeadService");
 const { lookups: referenceLookups } = require("../../../services/referenceMatchers");
 const { resolveColumnMapping, mapRowToCrmCandidate, createLeadIdAllocator } = require("./googleSheetsService");
@@ -306,11 +307,9 @@ async function importCsvRows({ headers = [], rows = [], startRow = 2, systemTabl
       targetedTab: "",
       sourceRowNumber: rowNumber,
     };
-    // mapRowToCrmCandidate defaults source to "Google sheet integration"; a CSV row is
-    // not from a sheet, so only the file's own Source column should survive.
-    const sourceColumn = mapping?.fields?.source?.columnIndex;
-    const suppliedSource = sourceColumn === undefined ? "" : String(row[sourceColumn] ?? "").trim();
-    record.lead.source = suppliedSource || "CSV import";
+    // How it arrived, which is a CSV import - never the file's own Source cell (Instagram, a
+    // campaign name), the same rule the sheet sync follows. See `leadSources.js`.
+    record.lead.source = LEAD_SOURCES.CSV;
     prepared.push(record);
   }
 

@@ -78,13 +78,17 @@ test("it is offered where chasing is the work, and nowhere else", () => {
    */
   assert.match(PAGE, /const chasing = candidate\.status === FOLLOW_UP_STATUS;/);
   assert.match(PAGE, /label: chasing \? "Log Another Follow-up" : "Follow Up",/);
-  // Beside the screening form, because those two are the whole of what an untouched row offers.
-  assert.match(PAGE, /\{ label: "Send Screening Form"[\s\S]{0,400}?\.\.\.\(followable \? \[followUpItem\] : \[\]\),/);
+  // Beside Copy Link for a form already out - chase them, or open the popup to send one at all -
+  // which is what an untouched row still offers here now that sending is the popup's own pill. The
+  // plain menu's own Copy Link, not the waiting row's - hence the last, not the first, occurrence.
+  const plainCopyLink = PAGE.lastIndexOf("form.invite.applicationUrl");
+  assert.ok(plainCopyLink > 0, "Copy Link should still be on the plain menu");
+  assert.match(PAGE.slice(plainCopyLink, plainCopyLink + 700), /\.\.\.\(followable \? \[followUpItem\] : \[\]\),/);
 });
 
 test("it is the one stage that asks for a date, and the only one that sends it", () => {
   assert.match(DIALOG, /asksDate: true,/);
-  assert.match(DIALOG, /<DateField\s+label="Next Follow-up"/);
+  assert.match(DIALOG, /\{decision\.asksDate && <DateField\s+className="mb-4"\s+label="Next Follow-up"\s+helperText="[^"]*Left blank, nothing brings this candidate back to anybody's attention\."/);
   /*
    * `undefined` for the other three, so a rejection cannot blank a follow-up date nobody meant to
    * touch; `null` where Follow Up is saved with the box cleared, which means "there is no next one"

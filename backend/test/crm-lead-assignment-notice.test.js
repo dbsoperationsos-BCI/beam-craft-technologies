@@ -82,16 +82,21 @@ test("raising it can never be what breaks the assignment", () => {
 
 test("the name on a lead is matched the way every other reader of that column matches it", () => {
   /*
-   * `sales_crm_lead` records who is working a lead as a name rather than as a user id. The bell's own
-   * follow-up source makes the same match, and so does the Reports module wherever it groups by a
-   * person - so this makes it too rather than inventing a second rule. Trimmed and case-folded in the
-   * database, and against active logins only: a notice written to an account nobody signs into is a
-   * row that will never be read.
+   * `sales_crm_lead` records who is working a lead as text in `crm`, and every reader of that text
+   * resolves it through `referenceMatchers` - employee id, login username or full name, the one rule
+   * the board, the backfill and every write path share. The notice goes to the active login linked to
+   * the employee it names. Matching `user.name` directly, as this once did, was a second rule: it found
+   * nobody for a lead assigned by username or employee id, and the wrong somebody when a login had
+   * been renamed on one screen and not the other. The login's own name is only the fallback for a
+   * name the matcher cannot place, so a Super Admin with no employee record can still be told.
    */
-  assert.match(NOTICES, /LOWER\(TRIM\(`name`\)\) = LOWER\(TRIM\(\?\)\) AND `status` = 'ACTIVE'/);
-  assert.match(NOTICES, /LOWER\(TRIM\(\\`name\\`\)\) IN \(\$\{wanted\.map\(\(\) => "LOWER\(TRIM\(\?\)\)"\)/);
-  // One query for a bulk assign, not one per name.
-  assert.match(NOTICES, /\/\*\* The same lookup for several names at once, as a `name -> user id` map\. One query, not N\. \*\//);
+  assert.match(NOTICES, /const \{ lookups: referenceLookups \} = require\("\.\.\/\.\.\/\.\.\/services\/referenceMatchers"\);/);
+  assert.match(NOTICES, /const refs = await referenceLookups\(\);\s*\n\s*const employeeFor = new Map\(wanted\.map\(\(name\) => \[name, refs\.employeeId\(name\)\]\)\);/);
+  assert.match(NOTICES, /where: \{ linkedEmployeeId: \{ in: employeeIds \}, status: "ACTIVE" \}/);
+  // The fallback, for the names the matcher places nobody under - and only those.
+  assert.match(NOTICES, /if \(unplaced\.length\) \{\s*\n\s*const rows = await prisma\.\$queryRawUnsafe\(\s*\n\s*"SELECT `id`, `name` FROM `user` WHERE `status` = 'ACTIVE'"/);
+  // One resolution for a bulk assign, not one per name: the singular lookup is the plural one asked once.
+  assert.match(NOTICES, /return \(await userIdsForCrmNames\(\[wanted\]\)\)\.get\(wanted\) \?\? null;/);
 });
 
 test("the notice says which lead, and opens it", () => {

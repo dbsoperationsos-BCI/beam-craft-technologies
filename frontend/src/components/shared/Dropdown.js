@@ -1,12 +1,19 @@
 "use client";
 
+import HelpTip from "./HelpTip";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import ChevronIcon from "@/components/ui/ChevronIcon";
+
+/** How long the typing pauses before a remote search is asked for - as every search box here waits. */
+const SEARCH_PAUSE_MS = 250;
+import EmployeeAvatar from "@/components/shared/EmployeeAvatar";
 import { CLEAR_OPTION_VALUE, normalizeOptions, sortOptionsByLabel, typeaheadIndex, withClearOption } from "@/lib/dropdownOptions.mjs";
 import { placeDropdownMenu } from "@/lib/dropdownMenu.mjs";
 import useCloseWhenTriggerHidden from "./useCloseWhenTriggerHidden";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
+import { statusToneClass } from "@/lib/statusTones.mjs";
 
 /**
  * How long a typed letter waits for the next one before it counts as a fresh search. A shade under
@@ -17,6 +24,12 @@ const TYPEAHEAD_WINDOW_MS = 900;
 export default function Dropdown({
   ariaLabel,
   className = "",
+  // Open the moment it is drawn - for a picker put in place of a value only when somebody clicks it,
+  // so the click that asked for it is not a second click to open it. Never on an inert one.
+  defaultOpen = false,
+  // As in `MultiSelectField`: for a filter row where the placeholder or value names the control, the
+  // label stays for screen readers and is not drawn, and the box loses the gap that sat under it.
+  hideLabel = false,
   /*
    * Offer a way back to no answer at all.
    *
@@ -39,6 +52,8 @@ export default function Dropdown({
   // be pointing at nothing. It reads as a field, not as a control that refuses to work.
   readOnly = false,
   error = "",
+  // A grey line under the field saying what to choose and what it changes; the error replaces it.
+  helperText = "",
   label,
   // The menu is portalled to the body, so it needs to out-stack whatever it opens over. A value
   // from the layers scale is not enough on its own: the CRM's dialogs sit at z-150 to z-200, so a
@@ -47,11 +62,45 @@ export default function Dropdown({
   // Callers inside a known surface may still pass a lower, layer-scale value of their own.
   menuZIndexClassName = "z-[9999]",
   mode = "input",
+  // A smaller switch - a board column's period picker, where a full-height control crowds the lane.
+  compact = false,
   onChange,
   options = [],
   placeholder = "Select",
   required = false,
-  searchable = false,
+  /*
+   * Typing filters the list. **On by default in a field**, off for the section switch.
+   *
+   * It was opt-in, so whether a list could be searched depended on whether whoever wrote that form had
+   * thought to pass the prop: branches, designations, employees and master data lists that could only be
+   * scrolled sat beside identical ones that could be typed into. Decided here instead, which is also the
+   * only way the forms nobody has looked at get it.
+   *
+   * Safe as a default because of what the box does with what is typed: it is a `combobox` with
+   * `aria-autocomplete="list"`, so typing is the **search** and the value moves only when an option is
+   * chosen. A half-typed word in a branch field cannot be stored as a branch.
+   *
+   * `mode="switch"` is excluded by the trigger, not here - see `trigger` below. A picker that genuinely
+   * should not be typed into passes `searchable={false}` and says why.
+   */
+  searchable = mode === "input",
+  /*
+   * **Remote search.** By default a searchable dropdown filters the `options` it was handed, which is
+   * right for a list that fits - districts, expense types. It is wrong for a list that does not: the
+   * caller then has to send every row up front, and whatever cap it puts on that send becomes a
+   * silent limit on what can be chosen at all. Typing an id outside the cap finds nothing, and the
+   * menu says "No options available" as though the row did not exist.
+   *
+   * `onSearch` hands the typing to the caller instead, who asks the server and passes back a fresh
+   * `options`. The local filter then stands aside - the options already *are* the answer, and
+   * filtering them again would hide a row the server matched on something the label does not show,
+   * such as a project code. `searchLoading` draws the wait, and `searchTotal` lets the menu say how
+   * many matched when it is showing only a page of them, so a list that stops does not read as a
+   * list that has lost entries.
+   */
+  onSearch,
+  searchLoading = false,
+  searchTotal = 0,
   // The menu lists its options in alphabetical ascending order whatever order the caller holds
   // them in, so the same values read the same way in every picker. Pass `sorted={false}` for the
   // rare list whose order *is* its meaning — a duration scale, where "1 hour" belongs after
@@ -60,14 +109,29 @@ export default function Dropdown({
   // How wide the menu may open, whatever the trigger's own width. For a field that is
   // deliberately narrow - the country picker - a menu matching it wraps every row.
   menuMinWidth = 0,
+  // A taller ceiling than the usual 240px, for a short fixed list that should show whole rather
+  // than scroll inside its own menu. Still never taller than the window allows.
+  menuMaxHeight,
   // What the closed trigger reads, when that differs from the option's own row in the menu.
   // The country picker needs this: its rows say "🇮🇳 India +91" so they can be read and searched,
   // while the trigger sits in a 5rem box and may only show the flag and the code.
   triggerLabel,
+  /*
+   * A red dot on the closed trigger - something inside the menu wants attention. The count itself
+   * goes on the option, as its `badge`: a number drawn at the row's right end, apart from the
+   * label, so the label stays plain text that sorting and type-to-search still read.
+   */
+  triggerBadge = false,
+  /*
+   * An option may carry an `avatar` - `{ name, photoUrl, seed }` - when it is a person: the face is
+   * drawn before the label in its row and on the closed trigger once chosen, so a list of employees
+   * reads as people rather than as a column of names. The label stays the only text, so sorting and
+   * type-to-search are untouched.
+   */
   value,
 }) {
   const inert = disabled || readOnly;
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => Boolean(defaultOpen) && !inert);
   const [search, setSearch] = useState("");
   const [position, setPosition] = useState(null);
   // Which option the arrow keys are sitting on, as an index into what is currently listed.
@@ -92,10 +156,24 @@ export default function Dropdown({
   const answered = value !== CLEAR_OPTION_VALUE && value !== null && value !== undefined;
   const normalizedOptions = clearable && answered ? withClearOption(ordered, { label: clearLabel }) : ordered;
   const selected = normalizedOptions.find((option) => option.value === value);
-  const visibleOptions = searchable && search.trim()
-    ? normalizedOptions.filter((option) => String(option.label ?? "").toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))
+  const visibleOptions = searchable && search.trim() && !onSearch
+    ? normalizedOptions.filter((option) => matchesWordChunks(option.label, search))
     : normalizedOptions;
   const isInput = mode === "input";
+
+  /*
+   * The caller's search, once the typing pauses.
+   *
+   * `SEARCH_PAUSE_MS` is the same quarter-second every other search box in the app waits. The timer
+   * is cleared on unmount so a menu closed mid-type does not ask for something nobody is waiting
+   * for.
+   */
+  const searchTimer = useRef(null);
+  const askToSearch = useCallback((text) => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => { onSearch?.(text); }, SEARCH_PAUSE_MS);
+  }, [onSearch]);
+  useEffect(() => () => { if (searchTimer.current) clearTimeout(searchTimer.current); }, []);
 
   const updatePosition = useCallback(() => {
     const rect = triggerRef.current?.getBoundingClientRect();
@@ -110,9 +188,10 @@ export default function Dropdown({
       // The helper calls it `minWidth`. Passing it under this component's own prop name left it
       // undefined there, so the menu kept matching a 76px trigger and wrapped every row.
       minWidth: menuMinWidth,
+      ...(menuMaxHeight ? { maxHeight: menuMaxHeight } : {}),
     });
     setPosition(style);
-  }, [menuMinWidth]);
+  }, [menuMaxHeight, menuMinWidth]);
 
   const close = useCallback(() => {
     setOpen(false);
@@ -299,7 +378,7 @@ export default function Dropdown({
   // fill left open beside it, which reads as a field cut short. Centred, the box is the value's own.
   const readOnlyAlignment = readOnly ? "justify-center text-center" : "justify-between text-left";
   const triggerClassName = isInput
-    ? `mt-1.5 flex min-h-9 w-full items-center ${readOnlyAlignment} rounded-lg border bg-white px-3 text-xs font-normal text-slate-700 outline-none transition sm:text-sm focus:ring-2 disabled:cursor-default disabled:bg-slate-50 ${error ? "border-red-400 hover:border-red-500 focus:border-red-500 focus:ring-red-100" : "border-slate-300 hover:border-slate-400 focus:border-blue-500 focus:ring-blue-100"}`
+    ? `${hideLabel ? "" : "mt-1.5 "}flex min-h-9 w-full items-center ${readOnlyAlignment} rounded-lg border bg-white px-3 text-xs font-normal text-slate-700 outline-none transition sm:text-sm focus:ring-2 disabled:cursor-default disabled:bg-slate-50 ${error ? "border-red-400 hover:border-red-500 focus:border-red-500 focus:ring-red-100" : "border-slate-300 hover:border-slate-400 focus:border-blue-500 focus:ring-blue-100"}`
     /*
      * A switch is the width of its longest option — no more, and never less.
      *
@@ -320,7 +399,7 @@ export default function Dropdown({
      * the far edge and the pair stopped reading as one thing. No `gap`: the glyph carries its own
      * inset, so a gap on top of it is the space the arrow was being pushed away by.
      */
-    : `flex min-h-9 w-full items-center rounded-lg bg-white px-3 text-xs font-medium text-slate-700 hover:bg-slate-50 sm:text-sm disabled:cursor-default disabled:opacity-60 ${readOnly ? "justify-center" : "justify-start"}`;
+    : `flex w-full items-center rounded-lg bg-white font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-default disabled:opacity-60 ${compact ? "min-h-7 px-2 text-xs" : "min-h-9 px-3 text-xs sm:text-sm"} ${readOnly ? "justify-center" : "justify-start"}`;
 
   /*
    * What the closed trigger reads, and — in switch mode — what holds its width.
@@ -349,6 +428,7 @@ export default function Dropdown({
     <button
       ref={triggerRef}
       type="button"
+      data-invalid={error ? true : undefined}
       aria-label={ariaLabel || label}
       aria-expanded={open}
       aria-haspopup="listbox"
@@ -358,8 +438,14 @@ export default function Dropdown({
       onKeyDown={handleKeyDown}
       className={triggerClassName}
     >
-      {triggerText}
-      {!readOnly && <ChevronIcon size={isInput ? 20 : 24} className="-mr-1 shrink-0 text-slate-500" />}
+      {/* One span for the face and the name, so `justify-between` still holds the label left and the chevron right. */}
+      {selected?.avatar
+        ? <span className="flex min-w-0 items-center gap-2"><EmployeeAvatar {...selected.avatar} size="xs" decorative />{triggerText}</span>
+        : triggerText}
+      {triggerBadge && <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-red-500" />}
+      {/* The arrow turns with the list: down over a closed one, up over an open one, so the trigger
+          itself says which way a press will take it. */}
+      {!readOnly && <ChevronIcon direction={open ? "up" : "down"} size={isInput ? 20 : compact ? 18 : 24} className="-mr-1 shrink-0 text-slate-500" />}
     </button>
   );
 
@@ -378,12 +464,15 @@ export default function Dropdown({
        * `focus-within` rather than `focus`, unlike the standard trigger: the focus lands on the
        * input inside this wrapper, not on the wrapper itself.
        */
-      className={`mt-1.5 flex min-h-9 w-full items-center rounded-lg border bg-white text-slate-700 transition focus-within:ring-2 ${error ? "border-red-400 hover:border-red-500 focus-within:border-red-500 focus-within:ring-red-100" : "border-slate-300 hover:border-slate-400 focus-within:border-blue-500 focus-within:ring-blue-100"} ${inert ? "cursor-default bg-slate-50" : ""}`}
+      className={`${hideLabel ? "" : "mt-1.5 "}flex min-h-9 w-full items-center rounded-lg border bg-white text-slate-700 transition focus-within:ring-2 ${error ? "border-red-400 hover:border-red-500 focus-within:border-red-500 focus-within:ring-red-100" : "border-slate-300 hover:border-slate-400 focus-within:border-blue-500 focus-within:ring-blue-100"} ${inert ? "cursor-default bg-slate-50" : ""}`}
     >
+      {/* The face of the person chosen, while the box reads them back; typing replaces the name with a search, and the face goes with it. */}
+      {!open && selected?.avatar && <EmployeeAvatar {...selected.avatar} size="xs" decorative className="ml-2" />}
       <input
         ref={inputRef}
         type="text"
         role="combobox"
+        aria-invalid={error ? true : undefined}
         aria-label={ariaLabel || label}
         aria-controls={listboxId}
         aria-expanded={open}
@@ -395,15 +484,26 @@ export default function Dropdown({
         value={open ? search : ((selected && triggerLabel) || selected?.label || "")}
         placeholder={placeholder}
         onClick={openMenu}
-        onFocus={openMenu}
+        /*
+         * **No `onFocus`.** It opened the menu when the box was reached, which was reasonable while search
+         * was something a form opted into - and is not, now that every field dropdown is searchable: tabbing
+         * through a form would pop a menu at each of them.
+         *
+         * Nothing is lost. A click opens it, a keystroke opens it (see `onChange` below, which sets `open`),
+         * and ArrowUp / ArrowDown open it from `handleKeyDown`. What is gone is the one that fired without
+         * anybody having asked for anything.
+         */
         onKeyDown={handleKeyDown}
         onChange={(event) => {
           setSearch(event.target.value);
           // Every keystroke narrows the list, so the arrows start again from the top of what is left.
           setActiveIndex(0);
           setOpen(true);
+          // And where the caller owns the searching, it is asked - once the typing pauses, not once
+          // per keystroke, or a picker over a few thousand rows is a request per letter.
+          if (onSearch) askToSearch(event.target.value);
         }}
-        className={`min-h-9 min-w-0 flex-1 rounded-lg bg-transparent px-3 text-xs font-normal text-black placeholder:text-slate-500 outline-none sm:text-sm disabled:cursor-default ${readOnly ? "text-center" : ""}`}
+        className={`min-h-9 min-w-0 flex-1 rounded-lg bg-transparent ${!open && selected?.avatar ? "pl-2 pr-3" : "px-3"} text-xs font-normal text-black placeholder:text-slate-500 outline-none sm:text-sm disabled:cursor-default ${readOnly ? "text-center" : ""}`}
       />
       {!readOnly && <button
         type="button"
@@ -422,7 +522,7 @@ export default function Dropdown({
         }}
         className="flex min-h-9 shrink-0 items-center px-3 text-slate-500"
       >
-        <ChevronIcon size={20} />
+        <ChevronIcon direction={open ? "up" : "down"} size={20} />
       </button>}
     </div>
   );
@@ -442,8 +542,10 @@ export default function Dropdown({
             className={`fixed ${menuZIndexClassName} overflow-y-auto rounded-md border border-slate-200 bg-white py-1 text-xs shadow-lg sm:text-sm`}
             style={position}
           >
-            {visibleOptions.length === 0 ? (
-              <p className="px-3 py-2 text-slate-500">No options available.</p>
+            {searchLoading && onSearch ? (
+              <p className="px-3 py-2 text-slate-500">Searching...</p>
+            ) : visibleOptions.length === 0 ? (
+              <p className="px-3 py-2 text-slate-500">{onSearch && search.trim() ? "Nothing matches what you typed." : "No options available."}</p>
             ) : (
               visibleOptions.map((option, index) => option.separator ? (
                 // A rule between groups. Marked `disabled` upstream as well, so the arrow keys step
@@ -474,12 +576,33 @@ export default function Dropdown({
                   onClick={() => select(option)}
                   // The clear row is an option like any other to the keys and the mouse, and reads
                   // as the quieter answer it is - it withdraws one rather than giving one.
-                  className={`block w-full px-3 py-2 text-left disabled:cursor-not-allowed disabled:text-slate-400 ${option.value === value ? "bg-blue-50 font-medium text-blue-700" : index === activeIndex ? "bg-slate-100 text-slate-900" : option.clear ? "text-slate-500" : "text-slate-700"}`}
+                  className={`${option.badge || option.status ? "flex items-center justify-between gap-3" : option.avatar ? "flex items-center gap-2" : "block"} w-full px-3 py-2 text-left disabled:cursor-not-allowed disabled:text-slate-400 ${option.status ? "disabled:opacity-60" : ""} ${option.value === value ? "bg-blue-50 font-medium text-blue-700" : index === activeIndex && !option.disabled ? "bg-slate-100 text-slate-900" : option.clear ? "text-slate-500" : "text-slate-700"}`}
                 >
-                  {option.label}
+                  {/* A row may carry its state as a pill on the right (`status: { label, tone }`) -
+                      a version shown beside the ones that can be chosen, saying why it cannot. */}
+                  {option.status
+                    ? <><span className="min-w-0"><span className="block truncate">{option.label}</span>{option.description && <span className="block text-[11px] font-normal leading-4 text-slate-500">{option.description}</span>}</span><span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold leading-4 ${statusToneClass(option.status.tone)}`}>{option.status.label}</span></>
+                  : option.badge
+                    ? <><span className="min-w-0 truncate">{option.label}</span><span className="min-w-5 shrink-0 rounded-full bg-red-500 px-1.5 text-center text-[11px] font-semibold leading-5 text-white">{option.badge > 99 ? "99+" : option.badge}</span></>
+                    : option.avatar
+                      ? <><EmployeeAvatar {...option.avatar} size="xs" decorative /><span className="min-w-0 truncate">{option.label}</span></>
+                    // A row may explain itself in a second line: a choice whose label alone does not
+                    // say what it does (a weighting, a mode) is read once here, not looked up.
+                    : option.description
+                      ? <><span className="block">{option.label}</span><span className="block text-[11px] font-normal leading-4 text-slate-500">{option.description}</span></>
+                      : option.label}
                 </button>
               ))
             )}
+            {/*
+              * A page is said to be a page. A picker that silently stops at fifty reads as a list
+              * that has lost the row somebody is looking for, which is how the old cap was
+              * experienced - so where more matched than are shown, the menu says so and says what
+              * clears it.
+              */}
+            {onSearch && !searchLoading && searchTotal > visibleOptions.length && <p className="border-t border-slate-200 px-3 pb-1 pt-1.5 text-[11px] text-slate-500">
+              Showing {visibleOptions.length} of {searchTotal}. Type more to narrow it.
+            </p>}
           </div>,
           document.body,
         )
@@ -487,12 +610,15 @@ export default function Dropdown({
 
   if (isInput) {
     return (
-      <div className={`block text-[11px] font-semibold text-slate-600 sm:text-xs ${className}`}>
-        <span>
+      // `relative` holds a hidden label (`sr-only`, absolutely placed) inside the field: without it
+      // the label is placed against the app shell, and a field low in a scrolling table pushes the
+      // shell itself into scrolling.
+      <div className={`relative block text-[11px] font-semibold text-slate-600 sm:text-xs ${className}`}>
+        <span className={hideLabel ? "sr-only" : undefined}>
           {label}
           {/* The same mark TextField draws, so a required dropdown does not read as optional
               next to a required text field. */}
-          {required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}
+          {required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}<HelpTip text={helperText} />
         </span>
         {trigger}
         {menu}

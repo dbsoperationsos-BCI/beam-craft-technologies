@@ -1,13 +1,20 @@
+const { withUserNames } = require("../../../services/userNames");
 const { optionNames, nameWithFlag } = require("../../../services/optionLists");
 const { z } = require("zod");
-const { workingEmployeeStatuses } = require("../../../services/employeeOptionLists");
+const { workingEmployeeStatuses, listPhotoUrl } = require("../../../services/employeeOptionLists");
 const prisma = require("../../../config/db");
 const iamService = require("../../../services/iam.service");
 const dataScope = require("../../../services/dataScope.service");
+const { everyChunk } = require("../../../services/wordChunks");
+const { PICKER_PAGE, searchPicker } = require("../../../services/pickerSearch");
 const { lookups: referenceLookups } = require("../../../services/referenceMatchers");
 const { attachFiles, removeDroppedFiles, fileUrls, discardUploads } = require("../../../services/uploadMetadata");
 const { projectClientNames, clientNameOf } = require("../../../services/projectClientNames");
-const { recordCashEntry } = require("../../accounts/cash-entries/controller");
+const { recordCashEntry, attachProof } = require("../../accounts/cash-entries/controller");
+const { createAdvanceIn } = require("../payroll-advance/service");
+const { openPayrollMonth } = require("../payroll-register/settingsVersions");
+const { receivedIntoOptions } = require("../../../services/branchBankAccounts");
+const { VENDOR_LABEL_SELECT } = require("../../../services/vendorLabel");
 
 /**
  * Money an employee asks the studio for, and what an admin decided about it.
@@ -99,7 +106,6 @@ const LABEL_BY_TYPE = {
 // The employment statuses that count as working here, read off the status list the studio
 // maintains in Settings → Field Settings rather than written out again. See
 // `services/employeeOptionLists`.
-const LOOKUP_LIMIT = 200;
 const QR_FOLDER = "hrm/payment-requests/qr";
 const BILLS_FOLDER = "hrm/payment-requests/bills";
 const MAX_BILLS = 10;
@@ -107,12 +113,32 @@ const MAX_BILLS = 10;
 /**
  * Who may decide a request.
  *
- * READ_WRITE on ACCOUNTS / Payment Request Approval — the permission this module is named after.
+ * READ_WRITE on ACCOUNTS / Payment Request — the permission this module is named after.
  * It used to be `role === "SUPER_ADMIN"`, which meant the permission could be granted and the
  * decision still refused, and nobody but the super admin could ever approve a payment. Every route
  * asks this one question rather than testing for itself.
  */
-const canDecide = (user) => iamService.hasPermission(user?.id, "ACCOUNTS", "Payment Request Approval", "READ_WRITE");
+/**
+ * **Who may decide a request, and who may take their own back.**
+ *
+ * `canDecide` is `ACCOUNTS / Payment Request Approver` - approve, reject, correct anybody's request,
+ * and read the whole queue. It used to be Read / Write on `Payment Request`, the same
+ * permission that lets somebody **raise** a request, so a holder could ask the studio for money and
+ * allow it themselves in two clicks; the row then named one person as both who requested it and who
+ * decided it, and nothing marked that as unusual.
+ *
+ * `ownsIt` is the requester. Their own request is theirs to **withdraw** and nothing else: correcting
+ * it is the approver's, because an amount or a bill changed after the ask is what the approver is
+ * being asked about.
+ *
+ * And an approver does **not** withdraw. Withdrawing deletes the row; rejecting records who decided
+ * and why. An approver who disagrees with a request has the second of those and does not need the
+ * first, and a decision that leaves no trace is not one anybody can be asked about later.
+ */
+const canDecide = (user) => iamService.hasPermission(user?.id, "ACCOUNTS", "Payment Request Approver", "READ_WRITE");
+
+/** Whether this request is the caller's own - what they raised, by their employee record. */
+const ownedBy = (request, user) => Boolean(request?.requestedById) && request.requestedById === Number(user?.linkedEmployeeId);
 
 /**
  * An expense submission that came in under its advance is money coming back to the studio, not
@@ -125,6 +151,15 @@ const directionOf = async (request) => (request.type === "EXPENSE_SUBMISSION" &&
  * excess does not, because the money is coming back the other way and there is nobody to pay.
  */
 const takesQrCode = async (input) => !(input.type === "EXPENSE_SUBMISSION" && input.settlement === await excessSettlement());
+/**
+ * Whether a line is asked what the money was spent on.
+ *
+ * Everything that itemises, except an expense submission settling an **excess**: that is unspent
+ * advance money being handed back, so there is nothing it was spent on, and asking produced a
+ * category on a line that recorded a refund. An advance against expenses is still asked - what it
+ * *will* be spent on is the case for granting it.
+ */
+const asksExpenseType = async (input) => TYPES_WITH_EXPENSES.includes(input.type) && await takesQrCode(input);
 
 const optionalText = (max) => z.string().trim().max(max).nullable().optional();
 const requiredText = (max, message) => z.string().trim().min(1, message).max(max);
@@ -134,7 +169,9 @@ const expenseSchema = z.object({
   // belongs to and `resolveExpenseLinks` stores both, so nobody is asked the same thing twice.
   shootId: optionalText(191),
   expenseDate: z.coerce.date(),
-  expenseType: requiredText(60, "Choose what the expense was for"),
+  // Required of every itemising kind but an excess, and checked by the request rather than the line:
+  // only the request knows which settlement it is, and an excess has nothing it was spent on.
+  expenseType: optionalText(60),
   description: optionalText(2000),
   amount: z.coerce.number().positive("Enter an amount greater than zero").max(999_999_999),
 });
@@ -158,7 +195,6 @@ const requestSchema = z.object({
   qrCode: z.array(z.string().min(1)).max(1, "Attach one QR code").nullable().optional(),
   bills: z.array(z.string().min(1)).max(MAX_BILLS, `Attach at most ${MAX_BILLS} bills`).nullable().optional(),
   expenses: z.array(expenseSchema).max(50, "Add at most 50 expense lines").optional(),
-  acceptTerms: z.literal(true, { message: "Agree to the terms and conditions to raise this request" }),
 // Async: the settlement is checked against the studio's own list. Every parse of this schema is a
 // `safeParseAsync` accordingly.
 }).superRefine(async (value, context) => {
@@ -188,13 +224,31 @@ const requestSchema = z.object({
   if (value.type === "EXPENSE_SUBMISSION") {
     if (!(await settlementNames()).includes(value.settlement)) issue("settlement", "Choose whether this is an excess or a reimbursement");
   }
+  // Said against the line it is missing from, since a request may hold fifty of them.
+  if (await asksExpenseType(value)) {
+    (value.expenses || []).forEach((line, index) => {
+      if (!line.expenseType) issue("expenses", `Expense line ${index + 1}: choose what the expense was for`);
+    });
+  }
   if (value.type === "VENDOR_PAYMENT") {
     if (!value.vendorId) issue("vendorId", "Choose the vendor");
   }
 });
 
-/** What the admin has to add when approving: how the money actually moves, which the request cannot know. */
-const decisionSchema = z.object({
+/**
+ * Approving is a decision and nothing else: yes, with a note if there is one to leave.
+ *
+ * It used to carry the payment's own fields, because approving and paying were one step. They are
+ * two now - the person who authorises a spend is rarely the person who releases it - so the money
+ * details moved to `paymentSchema` below, and an approval knows nothing about how the money will
+ * eventually move.
+ */
+const approvalSchema = z.object({
+  remarks: optionalText(2000),
+});
+
+/** What Accounts adds when it releases the money: how it actually moved, which the request cannot know. */
+const paymentSchema = z.object({
   remarks: optionalText(2000),
   entryDate: z.coerce.date().optional(),
   paymentMode: optionalText(30),
@@ -223,7 +277,21 @@ const rejectSchema = z.object({
 const listQuerySchema = z.object({
   type: z.enum(TYPES).optional(),
   status: z.enum(STATUSES).optional(),
+  // Accounts Manager's queue: approved and not yet released. Asked as its own filter rather than as
+  // a fourth status, because paid is the cash book's answer and not a column on the request.
+  paid: z.enum(["yes", "no"]).optional(),
   search: z.string().trim().max(191).optional(),
+});
+
+/**
+ * Asset Management → Vendors → Vendor Payments: every vendor's bills, by where they have got to.
+ *
+ * No vendor and no search: the screen reads the whole ledger and narrows it in the table, whose
+ * column filters and search already answer "this vendor's bills" - a second picker above them would
+ * be a second answer to the same question.
+ */
+const vendorPaymentsQuerySchema = z.object({
+  status: z.enum(STATUSES).optional(),
 });
 
 function validationError(res, error) {
@@ -268,7 +336,7 @@ const include = {
     },
   },
   requestedBy: { select: { id: true, employeeId: true, employeeName: true, department: true, designation: true } },
-  cashEntry: { select: { id: true, entryId: true, entryType: true, entryDate: true } },
+  cashEntries: { where: { deletedAt: null }, orderBy: { entryId: "asc" }, select: { id: true, entryId: true, entryType: true, entryDate: true, shootId: true } },
 };
 
 /** Flattened for the table, which reads plain keys, with the lines and links kept for the panel. */
@@ -291,7 +359,27 @@ async function toRow(request) {
     direction: await directionOf(request),
     requestedByCode: request.requestedByCode || request.requestedBy?.employeeId || "",
     requestedByDepartment: request.requestedBy?.department || "",
-    cashEntryCode: request.cashEntry?.entryId || "",
+    // Every entry the approval wrote, in one cell: an approved request is as many rows in the books
+    // as it named shoots, and naming only the first of them hid the rest from the request they came
+    // from. One entry still reads as one number.
+    cashEntryCode: (request.cashEntries || []).map((entry) => entry.entryId).join(", "),
+    /*
+     * Paid is "the cash book has it", not a status of its own.
+     *
+     * An approved request waiting for Accounts and one Accounts has released differ by exactly the
+     * entries the release writes, so the entries are the fact and a fourth status would only be a
+     * second copy of it - one that every request approved before paying was split out would have
+     * needed a migration to backfill, and would have been wrong for any it missed.
+     */
+    paid: (request.cashEntries || []).length > 0,
+    /*
+     * Only ever said of an approved request. A pending one is not awaiting payment - it is awaiting
+     * a decision - and a rejected one never will be, so both read as nothing rather than as a queue
+     * they are not in.
+     */
+    paymentStatus: (request.cashEntries || []).length > 0
+      ? "Paid"
+      : (request.status === "APPROVED" ? "Awaiting Payment" : ""),
     qrCodeUrls: fileUrls(request.qrCode),
     billUrls: fileUrls(request.bills),
   };
@@ -300,8 +388,13 @@ async function toRow(request) {
 /** The lines' own total, which is what the two settlement kinds are worth however they were typed. */
 const totalOf = (expenses) => (expenses || []).reduce((sum, line) => sum + Number(line.amount || 0), 0);
 
-/** Only the lines that belong to the kind being raised, with the ones it does not ask for dropped. */
-function expenseRows(input) {
+/**
+ * Only the lines that belong to the kind being raised, with the ones it does not ask for dropped.
+ *
+ * `asksType` is false on an excess, where the line keeps no expense type however one got sent: a
+ * column the form does not ask for is not one a payload may fill in behind it.
+ */
+function expenseRows(input, asksType = true) {
   if (!TYPES_WITH_EXPENSES.includes(input.type)) return [];
   return (input.expenses || []).map((line) => ({
     // Written once. This object listed `projectId` twice and the second, always null, won — so a
@@ -311,7 +404,9 @@ function expenseRows(input) {
     projectId: line.projectId || null,
     shootId: line.shootId || null,
     expenseDate: line.expenseDate,
-    expenseType: line.expenseType,
+    // `|| null` as well as the check above: the per-line schema would let "" through on its own, and
+    // the column says "nothing it was spent on" with NULL rather than with an empty string.
+    expenseType: asksType ? (line.expenseType || null) : null,
     description: line.description ?? null,
     amount: Number(line.amount).toFixed(2),
   }));
@@ -387,15 +482,22 @@ async function resolveBranch(rows, requester, actorId = null) {
   throw badRequest("No branch could be worked out for this request. Name a shoot on an expense line, or ask an administrator to set a work base location on your employee record or a branch on your user account.");
 }
 
-/** The vendor being paid, read from the vendor record rather than typed, so neither can drift. */
+/**
+ * The vendor being paid, read from the vendor record rather than typed, so neither can drift.
+ *
+ * The **id** comes back beside the two names because that is what the request is filed under: Asset
+ * Management → Vendors reads a vendor's payments through `payment_request.vendor_id`, and the name
+ * columns are the copies the request was raised with - a vendor renamed afterwards, or removed from
+ * the register, still leaves a request that says who was paid.
+ */
 async function resolveVendor(vendorId) {
-  if (!vendorId) return { vendorName: null, vendorPhone: null };
+  if (!vendorId) return { vendorId: null, vendorName: null, vendorPhone: null };
   const vendor = await prisma.vendor.findFirst({
     where: { id: vendorId, isDeleted: false },
-    select: { vendorName: true, mobileNumber: true },
+    select: { id: true, vendorName: true, mobileNumber: true },
   });
   if (!vendor) throw badRequest("Select a valid vendor");
-  return { vendorName: vendor.vendorName, vendorPhone: vendor.mobileNumber || null };
+  return { vendorId: vendor.id, vendorName: vendor.vendorName, vendorPhone: vendor.mobileNumber || null };
 }
 
 function requestData(input, expenses, branch, vendor) {
@@ -411,6 +513,7 @@ function requestData(input, expenses, branch, vendor) {
     // The count belongs to the one choice that has it; the other stores none rather than a leftover.
     repaymentMonths: input.type === "SALARY_ADVANCE" && input.repaymentPlan === REPAYMENT_OVER_MONTHS ? input.repaymentMonths ?? null : null,
     settlement: settles ? input.settlement ?? null : null,
+    vendorId: isVendor ? vendor.vendorId : null,
     vendorName: isVendor ? vendor.vendorName : null,
     vendorPhone: isVendor ? vendor.vendorPhone : null,
   };
@@ -433,7 +536,9 @@ async function requesterOf(user) {
  * keeps exactly today's answer, and a requester still sees their own whatever the scope says.
  */
 const REQUEST_SCOPE_COLUMNS = { branch: "branchId", employee: "requestedById", user: "createdBy" };
-const requestScope = (user) => dataScope.resolve({ userId: Number(user?.id), module: "ACCOUNTS", feature: "Payment Request Approval", columns: REQUEST_SCOPE_COLUMNS });
+// Resolved on the **approver's** permission, because it only narrows the wide view that permission
+// grants: a requester sees their own rows by `requestedById` and nothing else narrows that further.
+const requestScope = (user) => dataScope.resolve({ userId: Number(user?.id), module: "ACCOUNTS", feature: "Payment Request Approver", columns: REQUEST_SCOPE_COLUMNS });
 
 async function visibilityWhere(user) {
   const employeeId = Number(user?.linkedEmployeeId) || null;
@@ -443,23 +548,143 @@ async function visibilityWhere(user) {
   return { AND: [(await requestScope(user)).where] };
 }
 
-async function listRequests(req, res) {
-  const parsed = listQuerySchema.safeParse(req.query);
+/*
+ * A request with an expense line on a project in Resource Management → Recycling Bin is kept - it is
+ * money asked for, and Restore brings the project back - but not listed, opened or acted on while it
+ * is there. Whole requests rather than single lines, so a request is never shown with part of its
+ * total missing.
+ */
+const NOT_ON_A_BINNED_PROJECT = { expenses: { none: { OR: [{ project: { deletedAt: { not: null } } }, { shoot: { project: { deletedAt: { not: null } } } }] } } };
+
+/*
+ * ── Asset Management → Vendors → Vendor Payments ───────────────────────────────────────────────
+ *
+ * The studio's bills to its vendors, read from the vendor's side: what was asked for, where it got
+ * to, and what has actually left the account against it. One row per Vendor Payment request, with
+ * the cash entries the approval wrote summed into `paid`.
+ *
+ * It lives here, in the module that owns payment requests, rather than in the assets module - and it
+ * answers for `ACCOUNTS / Payment Request` like every other route on this router, because
+ * that is the permission that decides who may read what the studio is paying. The Vendors screen
+ * offers the view only to somebody holding it; a reader with Vendor Management alone never sees it,
+ * and this guard is what makes that true rather than the screen hiding a tab.
+ *
+ * `visibilityWhere` is the same rule the Payment Requests screen reads by, so this cannot become a
+ * way around it: somebody who may not decide requests sees the ones they raised themselves, which
+ * from the vendor's side is "the bills I sent in for this vendor".
+ */
+const VENDOR_PAYMENT_INCLUDE = {
+  vendor: { select: { id: true, vendorId: true, vendorName: true, mobileNumber: true } },
+  requestedBy: { select: { employeeId: true, employeeName: true } },
+  cashEntries: {
+    where: { deletedAt: null, entryType: "Spent" },
+    orderBy: { entryDate: "asc" },
+    select: { id: true, entryId: true, entryDate: true, amount: true, paidTo: true },
+  },
+};
+
+/** One bill as the ledger reads it: asked, where it got to, and what has gone out against it. */
+function vendorPaymentRow(request) {
+  const entries = (request.cashEntries || []).map((entry) => ({ ...entry, amount: Number(entry.amount) }));
+  const paid = entries.reduce((sum, entry) => sum + entry.amount, 0);
+  const amount = Number(request.amount);
+  return {
+    id: request.id,
+    requestCode: request.requestCode,
+    status: request.status,
+    // The linked vendor's name as it reads **today**, falling back to the copy the request was
+    // raised with for a vendor since removed from the register - the one case the link is null and
+    // the text is all there is.
+    vendorId: request.vendor?.id ?? request.vendorId ?? null,
+    vendorCode: request.vendor?.vendorId || "",
+    vendorName: request.vendor?.vendorName || request.vendorName || "",
+    vendorPhone: request.vendor?.mobileNumber || request.vendorPhone || "",
+    // Null rather than 0 for a vendor the link never found: "we cannot tell" is not "nothing".
+    linked: Boolean(request.vendorId),
+    branch: request.branch,
+    billDate: request.expenseDate,
+    amount,
+    paid,
+    // Only ever what is still owed on an approved bill. A pending one is not owed until it is
+    // decided, and a rejected one never will be, so neither carries a balance.
+    balance: request.status === "APPROVED" ? Number((amount - paid).toFixed(2)) : 0,
+    paidOn: entries.length ? entries[entries.length - 1].entryDate : null,
+    cashEntryCode: entries.map((entry) => entry.entryId).join(", "),
+    cashEntries: entries,
+    requestedByName: request.requestedByName,
+    requestedByCode: request.requestedByCode || request.requestedBy?.employeeId || "",
+    comments: request.comments || "",
+    billUrls: fileUrls(request.bills),
+    createdAt: request.createdAt,
+    decidedAt: request.decidedAt,
+  };
+}
+
+async function vendorPayments(req, res) {
+  const parsed = vendorPaymentsQuerySchema.safeParse(req.query);
   if (!parsed.success) return validationError(res, parsed.error);
-  const { type, status, search } = parsed.data;
+  const { status } = parsed.data;
   try {
+    const visibility = await visibilityWhere(req.user);
     const data = await prisma.paymentRequest.findMany({
       where: {
         deletedAt: null,
-        ...(await visibilityWhere(req.user)),
+        type: "VENDOR_PAYMENT",
+        ...visibility,
+        ...NOT_ON_A_BINNED_PROJECT,
+      },
+      orderBy: [{ createdAt: "desc" }],
+      include: VENDOR_PAYMENT_INCLUDE,
+    });
+    const rows = data.map(vendorPaymentRow);
+    /*
+     * The status narrows the rows **here** rather than in the query, so the tabs' counts and the
+     * totals are of everything this reader can see rather than of the tab in front of them. A tab
+     * reading zero for what you are looking at is the one thing a count must never say.
+     */
+    const shown = status ? rows.filter((row) => row.status === status) : rows;
+    return res.json({
+      data: shown,
+      meta: {
+        // What the tabs count, over everything this reader can see rather than over the page shown.
+        counts: {
+          ALL: rows.length,
+          ...Object.fromEntries(STATUSES.map((entry) => [entry, rows.filter((row) => row.status === entry).length])),
+        },
+        totals: {
+          amount: Number(rows.reduce((sum, row) => sum + row.amount, 0).toFixed(2)),
+          paid: Number(rows.reduce((sum, row) => sum + row.paid, 0).toFixed(2)),
+          balance: Number(rows.reduce((sum, row) => sum + row.balance, 0).toFixed(2)),
+        },
+      },
+    });
+  } catch (error) { return handleError(res, error, "Unable to load vendor payments"); }
+}
+
+async function listRequests(req, res) {
+  const parsed = listQuerySchema.safeParse(req.query);
+  if (!parsed.success) return validationError(res, parsed.error);
+  const { type, status, paid, search } = parsed.data;
+  try {
+    const visibility = await visibilityWhere(req.user);
+    // Word Chunk Search: every word typed, any order - added beside the visibility rule's own AND.
+    const chunks = everyChunk(search, (chunk) => ({ OR: [
+      { requestCode: { contains: chunk } },
+      { requestedByName: { contains: chunk } },
+      { vendorName: { contains: chunk } },
+      { branch: { contains: chunk } },
+    ] }));
+    const data = await prisma.paymentRequest.findMany({
+      where: {
+        deletedAt: null,
+        ...visibility,
+        ...NOT_ON_A_BINNED_PROJECT,
+        ...(chunks.length ? { AND: [...(visibility.AND || []), ...chunks] } : {}),
         ...(type ? { type } : {}),
         ...(status ? { status } : {}),
-        ...(search ? { OR: [
-          { requestCode: { contains: search } },
-          { requestedByName: { contains: search } },
-          { vendorName: { contains: search } },
-          { branch: { contains: search } },
-        ] } : {}),
+        // `some`/`none` on the entries rather than a column: a soft-deleted entry is not a payment,
+        // and the relation is where that is already known.
+        ...(paid ? { cashEntries: paid === "yes" ? { some: { deletedAt: null } } : { none: { deletedAt: null } } } : {}),
       },
       orderBy: [{ createdAt: "desc" }],
       include,
@@ -476,8 +701,15 @@ async function listRequests(req, res) {
      * `(row) => toRow(row)` rather than `.map(toRow)`: map also passes the index and the array, and
      * a second parameter added to `toRow` later would silently start receiving them.
      */
-    const rows = await Promise.all(data.map((row) => toRow(row)));
-    return res.json({ data: rows, meta: { canDecide: await canDecide(req.user) } });
+    // Who raised and who decided each request, by name (`services/userNames`).
+    const rows = await withUserNames(await Promise.all(data.map((row) => toRow(row))));
+    /*
+     * `myEmployeeId` is how the screen knows which rows are the reader's own, which is what Withdraw
+     * is offered on. Sent rather than computed per row so one answer covers the list, and sent as an
+     * id rather than a `canWithdraw` flag per row because the screen also has to know it for a row
+     * that arrives later through a Kanban drag.
+     */
+    return res.json({ data: rows, meta: { canDecide: await canDecide(req.user), myEmployeeId: Number(req.user?.linkedEmployeeId) || null } });
   } catch (error) { return handleError(res, error, "Unable to load payment requests"); }
 }
 
@@ -485,20 +717,92 @@ async function getRequest(req, res) {
   const id = parseId(req, res);
   if (!id) return;
   try {
-    const request = await prisma.paymentRequest.findFirst({ where: { id, deletedAt: null, ...(await visibilityWhere(req.user)) }, include });
+    const request = await prisma.paymentRequest.findFirst({ where: { id, deletedAt: null, ...(await visibilityWhere(req.user)), ...NOT_ON_A_BINNED_PROJECT }, include });
     if (!request) return res.status(404).json({ message: "Payment request not found" });
     return res.json({ data: await toRow(request) });
   } catch (error) { return handleError(res, error, "Unable to load this payment request"); }
 }
 
 /** Everything the four forms and the approval draw their dropdowns from, in one request. */
+/*
+ * The pickers on a payment request, **searched on the server** rather than handed their whole list.
+ *
+ * `options` used to carry them: every live shoot and every live project, capped at 200.
+ * That cap reads like a page and is not one - nothing fetches the next - so it was the limit of what
+ * a line could ever name, and because the order is newest-first, what it dropped was the oldest. A
+ * studio that brought its past projects in through the Pre Production import could not file an
+ * expense against any of them, and the picker, filtering only what it had been given, said "No
+ * options available" as though the record did not exist. 200 of 986 shoots and 200 of 640 projects
+ * on the development database.
+ *
+ * Why this is shaped the way it is, and the shared `searchPicker`, are in
+ * `services/pickerSearch.js`.
+ *
+ * **The shoot search takes no project filter.** A line's project is derived from its shoot
+ * (`resolveExpenseLinks`), so the shoot is the one answer being given, and narrowing by a project
+ * chosen elsewhere would only hide shoots from somebody who knows which shoot they mean.
+ */
+const SHOOT_PAGE = PICKER_PAGE;
+
+async function searchShoots(req, res) {
+  try {
+    const { rows, total, capped } = await searchPicker(prisma.projectShoot, {
+      search: String(req.query.search || "").trim(),
+      where: { deletedAt: null, project: { deletedAt: null } },
+      chunkIn: (chunk) => [
+        { shootId: { contains: chunk } },
+        { shoot: { contains: chunk } },
+        { project: { eventId: { contains: chunk } } },
+        { project: { whatsappGroupName: { contains: chunk } } },
+      ],
+      orderBy: [{ dateCreated: "desc" }, { shootId: "desc" }],
+      select: {
+        id: true, shootId: true, shoot: true, dateCreated: true, projectId: true,
+        project: { select: { eventId: true } },
+      },
+    });
+    return res.json({
+      data: {
+        shoots: rows.map((shoot) => ({
+          id: shoot.id,
+          shootId: shoot.shootId,
+          shoot: shoot.shoot,
+          dateCreated: shoot.dateCreated,
+          projectId: shoot.projectId,
+          projectCode: shoot.project?.eventId || "",
+        })),
+        total,
+        capped,
+      },
+    });
+  } catch (error) { return handleError(res, error, "Unable to search shoots"); }
+}
+
+/** The vendors a request can be raised against: the active register, searched by name or code. */
+async function searchVendors(req, res) {
+  try {
+    const { rows, total, capped } = await searchPicker(prisma.vendor, {
+      search: String(req.query.search || "").trim(),
+      where: { isDeleted: false, status: "ACTIVE" },
+      chunkIn: (chunk) => [
+        { vendorName: { contains: chunk } },
+        { vendorId: { contains: chunk } },
+        { mobileNumber: { contains: chunk } },
+      ],
+      orderBy: [{ vendorName: "asc" }],
+      select: { id: true, vendorId: true, ...VENDOR_LABEL_SELECT, mobileNumber: true },
+    });
+    return res.json({ data: { vendors: rows, total, capped } });
+  } catch (error) { return handleError(res, error, "Unable to search vendors"); }
+}
+
 async function options(req, res) {
   try {
     const [employees, projects, shoots, vendors, accounts] = await Promise.all([
       prisma.employee.findMany({
         where: { archivedAt: null, employmentStatus: { in: await workingEmployeeStatuses() } },
         orderBy: { employeeName: "asc" },
-        select: { id: true, employeeId: true, employeeName: true, department: true },
+        select: { id: true, employeeId: true, employeeName: true, department: true, profilePhotoUrl: true },
       }),
       // Every project, whoever they belong to: a request is raised against whatever project the
       // money was for, which is often not one this person is on. The requests themselves are what
@@ -506,24 +810,33 @@ async function options(req, res) {
       prisma.salesProject.findMany({
         where: { deletedAt: null },
         orderBy: { createdAt: "desc" },
-        take: LOOKUP_LIMIT,
+        take: PICKER_PAGE,
         select: { id: true, eventId: true, whatsappGroupNameId: true, whatsappGroupName: true },
       }),
-      // Each shoot carries the project it belongs to, which is what the line's shoot picker filters
-      // on once a project is chosen beside it.
+      /*
+       * The shoots a line is most likely to name, for the picker to open on before anybody types:
+       * the nearest ones by shoot date. Everything else is reached by typing, which `searchShoots`
+       * answers over every shoot - this list is a starting point and never the limit of what can be
+       * chosen, which is what it used to be.
+       */
       prisma.projectShoot.findMany({
-        where: { deletedAt: null },
+        where: { deletedAt: null, project: { deletedAt: null } },
         orderBy: { dateCreated: "desc" },
-        take: LOOKUP_LIMIT,
+        take: SHOOT_PAGE,
         select: { id: true, shootId: true, shoot: true, dateCreated: true, projectId: true },
       }),
       prisma.vendor.findMany({
         where: { isDeleted: false, status: "ACTIVE" },
         orderBy: { vendorName: "asc" },
-        take: LOOKUP_LIMIT,
-        select: { id: true, vendorId: true, vendorName: true, mobileNumber: true },
+        take: PICKER_PAGE,
+        select: { id: true, vendorId: true, ...VENDOR_LABEL_SELECT, mobileNumber: true },
       }),
-      prisma.bankAccount.findMany({ where: { isActive: true }, orderBy: { name: "asc" }, select: { name: true } }),
+      /*
+       * The studio's accounts, from the branch register - the one place they are kept since the
+       * Accounts module's own bank-account list was retired. The label is the value stored on the
+       * record, so it is built in `services/branchBankAccounts.js` and nowhere else.
+       */
+      receivedIntoOptions(),
     ]);
     const names = await projectClientNames(projects);
     const projectCodes = new Map(projects.map((project) => [project.id, project.eventId]));
@@ -531,7 +844,7 @@ async function options(req, res) {
       data: {
         // No branches: nothing on these screens asks anybody to choose one. `resolveBranch` works
         // it out when the request is raised.
-        employees,
+        employees: employees.map((row) => ({ ...row, profilePhotoUrl: listPhotoUrl(row.profilePhotoUrl) })),
         projects: projects.map((project) => ({ id: project.id, eventId: project.eventId, clientName: clientNameOf(project, names) })),
         // Each shoot carries the project it belongs to, so one picker can name both.
         shoots: shoots.map((shoot) => ({
@@ -539,7 +852,8 @@ async function options(req, res) {
           projectCode: projectCodes.get(shoot.projectId) || "",
         })),
         vendors,
-        accounts: accounts.map((account) => account.name),
+        // Already labels, built where the stored value is - see `receivedIntoOptions`.
+        accounts,
         expenseTypes: EXPENSE_TYPES,
         settlements: await settlementNames(),
         // Which settlement means the money comes back, so the form can drop the QR code for it -
@@ -547,6 +861,7 @@ async function options(req, res) {
         excessSettlement: await excessSettlement(),
         repaymentPlans: REPAYMENT_PLANS,
         canDecide: await canDecide(req.user),
+        myEmployeeId: Number(req.user?.linkedEmployeeId) || null,
       },
     });
   } catch (error) { return handleError(res, error, "Unable to load payment request options"); }
@@ -560,7 +875,7 @@ async function createRequest(req, res) {
   try {
     const actorId = Number(req.user.id) || null;
     const requester = await requesterOf(req.user);
-    const expenses = expenseRows(input);
+    const expenses = expenseRows(input, await asksExpenseType(input));
     // All resolved before anything is uploaded, so a bad answer costs no bucket objects to roll back.
     await resolveExpenseLinks(expenses);
     const branch = await resolveBranch(expenses, requester, actorId);
@@ -604,95 +919,297 @@ async function createRequest(req, res) {
 }
 
 /**
- * The one shoot every line points at, so the spend lands on that shoot's books.
+ * The project every line that names one agrees on.
  *
- * Only when they all agree: a request mixing two shoots, or holding a single "General" line, has no
- * one shoot to be filed against and is left on the project-less side of the ledger rather than
- * being attributed to whichever shoot happened to be first.
+ * Null the moment two of them name different projects, because then there is no one project to be
+ * filed against. A "General" line names no shoot and so no project, and it does not take the
+ * project away from the lines that do: a courier among three shoot lines used to leave the whole
+ * request filed against nothing at all.
  */
-/** The one value every line agrees on, or null the moment any line differs or names nothing. */
-function commonLink(expenses, field) {
-  const lines = expenses || [];
-  if (!lines.length || lines.some((line) => !line[field])) return null;
-  const ids = [...new Set(lines.map((line) => line[field]))];
+function commonProject(expenses) {
+  const ids = [...new Set((expenses || []).map((line) => line.projectId).filter(Boolean))];
   return ids.length === 1 ? ids[0] : null;
 }
 
-/**
- * What an approved request's cash entry is filed against.
- *
- * The shoot only when every line is on the same one — an entry carries a single shoot, so lines
- * spread across shoots cannot honestly claim any of them. The project is the fallback and the
- * reason lines name it at all: a request itemising three shoots of one project still belongs to
- * that project, and before the project was recorded on the line that spend reached nothing.
- */
-const linksFor = (expenses) => ({ projectId: commonLink(expenses, "projectId"), shootId: commonLink(expenses, "shootId") });
+/** Paise, so a shoot's total is the sum of its lines rather than a float that drifts off them. */
+const paise = (amount) => Math.round(Number(amount || 0) * 100);
 
 /**
- * Approving a request pays it.
+ * The entries an approved request becomes: one per shoot it was spent on, or one per project the
+ * money came back for, each carrying that one's own lines.
  *
- * The request already says who is owed what and why; what it cannot know is how the money will
- * actually move, so that arrives with the decision. The entry and the decision are written in one
- * transaction: an approval that failed to produce its entry would leave a request marked paid that
- * nothing had paid.
+ * **Money out is per shoot** and **money in is per project** — the two rules Accounts already
+ * applies to its own cash book, since a spend happens on a shoot while money comes back for a
+ * project as a whole. Either way it is one row per thing, not one row for the total: a request
+ * itemising three shoots is three rows, each worth what was actually spent on that one, and an
+ * excess returning money across two projects is two rows, one per project.
+ *
+ * Nothing is divided. The lines already answer both questions — which shoot or project, and how
+ * much — and every itemising kind stores its `amount` as those lines' total (`requestData`), so the
+ * rows add back up to the request.
+ *
+ * Before this, an entry carried one shoot and a request could only be filed against a shoot, or a
+ * project, that every line agreed on. Two of either meant one entry naming neither, and that money
+ * reached nobody's books.
+ *
+ * A line naming neither — the "General" the form offers — is folded into the one project the rest of
+ * them name, and stands as its own row only when there is no single project to fold it into. Order
+ * is the order the lines were entered, so the books read down the way the request does.
+ */
+function entryGroups(expenses, { perShoot }) {
+  const lines = expenses || [];
+  if (!lines.length) return [];
+  const common = commonProject(lines);
+  const groups = new Map();
+  for (const line of lines) {
+    // A General line has no project of its own, so it takes the one the request as a whole names.
+    const projectId = line.projectId || common;
+    const shootId = perShoot ? line.shootId || null : null;
+    const key = perShoot ? line.shootId || "" : projectId || "";
+    const group = groups.get(key) || { projectId, shootId, total: 0 };
+    group.total += paise(line.amount);
+    groups.set(key, group);
+  }
+  return [...groups.values()].map(({ total, ...group }) => ({ ...group, amount: total / 100 }));
+}
+
+/**
+ * Every entry an approval writes, and what each is filed against.
+ *
+ * Money out is one entry per shoot; money coming **back** is one entry per project, since money
+ * comes back for a project as a whole — both through `entryGroups`. A request that itemises
+ * nothing, a salary advance, is the one entry it has always been, for the amount asked for.
+ *
+ * The rows have to come to the amount approved, and they do by construction: every itemising kind
+ * stores its `amount` as its lines' total (`requestData`). Checked rather than trusted, because the
+ * two are written at different times and a request whose figure had drifted from its lines would
+ * otherwise be paid as a set of rows that quietly did not add up to what was approved.
+ */
+function filingsFor(request, received) {
+  const groups = entryGroups(request.expenses, { perShoot: !received });
+  if (!groups.length) return [{ projectId: commonProject(request.expenses), shootId: null, amount: Number(request.amount) }];
+  const total = groups.reduce((sum, group) => sum + paise(group.amount), 0);
+  if (total !== paise(request.amount)) {
+    throw badRequest("This request's expense lines no longer add up to the amount being approved. Open it, check the lines, and save it again.");
+  }
+  return groups;
+}
+
+/**
+ * The payroll row an approved salary advance becomes, so the money comes back off a payslip.
+ *
+ * A salary advance was two records that did not know about each other: this request, which asked for
+ * the money and was approved, and HRM → Payroll → Advance Salary, which is what actually deducts it.
+ * Nothing joined them, so an approved advance reached payroll only if somebody remembered to retype
+ * it — and when nobody did, the studio paid it out and never took it back.
+ *
+ * **Which month.** `openPayrollMonth` — the payroll month still being paid, the first whose payable
+ * day has not passed. Approved before this month's payday it comes off this month; approved after
+ * it, off the next. Never a month already paid, which payroll refuses anyway and for good reason.
+ *
+ * The amount lands on that payslip through `syncPayroll` inside `createAdvanceIn`, which is the same
+ * path the Advance Salary screen's own form takes. Written in the approval's transaction: a request
+ * marked paid with no deduction behind it is the bug this exists to close.
+ */
+async function recordSalaryAdvance(tx, request, actorId, entryDate) {
+  const { year, month } = await openPayrollMonth(tx);
+  const day = (entryDate instanceof Date ? entryDate : new Date(entryDate)).toISOString().slice(0, 10);
+  return createAdvanceIn(tx, {
+    employeeId: request.requestedById,
+    advanceDate: day,
+    amount: Number(request.amount),
+    deductMonth: month,
+    deductYear: year,
+    // Says on the payroll screen where it came from, and what was agreed about paying it back.
+    reason: [request.requestCode, request.repaymentPlan, request.reason].filter(Boolean).join(" · "),
+    paymentRequestId: request.id,
+  }, actorId);
+}
+
+/**
+ * Approving a request authorises it. It does not pay it.
+ *
+ * These were one step, and the step did two jobs: it recorded a decision and it moved money. So the
+ * approver needed the cash book's fields in front of them, a request appeared in Accounts Manager
+ * only after it had already been paid, and nobody could authorise a spend without also releasing it.
+ *
+ * Now approving writes the decision and stops. The request then waits under Accounts Manager →
+ * Pending, where whoever holds the cash book releases it through `payRequest` below, which is what
+ * writes the cash entries and - for a salary advance - the payroll row that takes it back.
  */
 async function approveRequest(req, res) {
   const id = parseId(req, res);
   if (!id) return;
   if (!(await canDecide(req.user))) return res.status(403).json({ message: "Only an admin can decide a payment request" });
-  const parsed = decisionSchema.safeParse(req.body);
+  const parsed = approvalSchema.safeParse(req.body);
   if (!parsed.success) return validationError(res, parsed.error);
   try {
-    const request = await prisma.paymentRequest.findFirst({ where: { id, deletedAt: null, ...(await visibilityWhere(req.user)) }, include });
+    const request = await prisma.paymentRequest.findFirst({ where: { id, deletedAt: null, ...(await visibilityWhere(req.user)), ...NOT_ON_A_BINNED_PROJECT }, select: { id: true, status: true } });
     if (!request) return res.status(404).json({ message: "Payment request not found" });
     if (request.status !== "PENDING") throw badRequest(`This request has already been ${request.status.toLowerCase()}.`);
+
+    /*
+     * Claimed rather than updated: two approvers arriving together both read PENDING a moment ago,
+     * and only one of them may be the one who decided it. Harmless now that nothing is written
+     * alongside, kept because the decision's author and timestamp should still be whoever won.
+     */
+    const claimed = await prisma.paymentRequest.updateMany({
+      where: { id, status: "PENDING" },
+      data: {
+        status: "APPROVED",
+        decisionRemarks: parsed.data.remarks ?? null,
+        decidedById: Number(req.user.id) || null,
+        decidedAt: new Date(),
+      },
+    });
+    if (!claimed.count) throw badRequest("This request has already been decided.");
+
+    const decided = await prisma.paymentRequest.findUnique({ where: { id }, include });
+    return res.json({ data: await toRow(decided) });
+  } catch (error) { return handleError(res, error, "Unable to approve this payment request"); }
+}
+
+/**
+ * Releasing the money an approved request asked for — Accounts Manager → Pending → Record Payment.
+ *
+ * The request says who is owed what and why, and the approval says yes. What neither knows is how
+ * the money actually moved, so that arrives here and becomes the cash entries: one per shoot the
+ * money was spent on, one per project it came back for, through `filingsFor`.
+ *
+ * Everything is written in one transaction. A release that failed halfway would leave a request
+ * standing as paid with nothing behind it, or - now that a spend is one entry per shoot - a partial
+ * set of rows that did not add up to the amount approved.
+ *
+ * **Guarded by the cash book, not by the approval.** Authorising a spend and releasing it are
+ * different jobs held by different people, which is the whole point of the split: this route mounts
+ * `ACCOUNTS / Cash Management` READ / WRITE on top of the router's own permission, because what it
+ * writes is cash entries.
+ */
+async function payRequest(req, res) {
+  const id = parseId(req, res);
+  if (!id) return;
+  const parsed = paymentSchema.safeParse(req.body);
+  if (!parsed.success) return validationError(res, parsed.error);
+  try {
+    const request = await prisma.paymentRequest.findFirst({ where: { id, deletedAt: null, ...(await visibilityWhere(req.user)), ...NOT_ON_A_BINNED_PROJECT }, include });
+    if (!request) return res.status(404).json({ message: "Payment request not found" });
+    if (request.status === "PENDING") throw badRequest("This request has not been approved yet. It has to be approved on the Payment Requests screen before the money can be released.");
+    if (request.status !== "APPROVED") throw badRequest(`This request was ${request.status.toLowerCase()}, so there is nothing to pay.`);
+    if (request.cashEntries.length) throw badRequest(`This request has already been paid — ${request.cashEntries.map((entry) => entry.entryId).join(", ")}.`);
 
     const actorId = Number(req.user.id) || null;
     const direction = await directionOf(request);
     const received = direction === "Received";
     const counterparty = request.type === "VENDOR_PAYMENT" ? request.vendorName : request.requestedByName;
-    const links = linksFor(request.expenses);
+    const filings = filingsFor(request, received);
+    /*
+     * One payment, so one upload: the proof is stored once here and attached to every row this
+     * writes. Left to each entry, `storeImage` ran again for every shoot.
+     */
+    const { proof, uploads } = await attachProof(parsed.data.paymentProof, null, actorId);
 
-    const decided = await prisma.$transaction(async (tx) => {
-      const entry = await recordCashEntry({
-        entryType: direction,
-        // A receipt is filed against the project alone — money comes back for the project as a
-        // whole — which is the rule the Accounts module already applies to money in.
-        projectId: links.projectId,
-        shootId: received ? null : links.shootId,
-        clientName: counterparty,
-        category: received ? RECEIVED_CATEGORY : CATEGORY_BY_TYPE[request.type],
-        amount: Number(request.amount),
-        entryDate: parsed.data.entryDate || new Date(),
-        branch: request.branch,
-        paymentMode: parsed.data.paymentMode,
-        paymentModeOther: parsed.data.paymentModeOther,
-        transactionId: parsed.data.transactionId,
-        receivedAccount: parsed.data.receivedAccount,
-        paidFromAccount: parsed.data.paidFromAccount,
-        paidTo: received ? null : (parsed.data.paidTo || counterparty),
-        handlerEmployeeId: parsed.data.handlerEmployeeId,
-        handlerName: parsed.data.handlerName,
-        handlerIsOther: parsed.data.handlerIsOther,
-        paymentProof: parsed.data.paymentProof,
-        description: `${request.requestCode} · ${LABEL_BY_TYPE[request.type]}${request.reason || request.comments ? ` — ${request.reason || request.comments}` : ""}`,
-      }, actorId, tx);
+    try {
+      const paid = await prisma.$transaction(async (tx) => {
+        /*
+         * The request's row is locked before a rupee is written, and the entries are counted again
+         * behind the lock.
+         *
+         * The count outside the transaction was read a moment ago, so two people releasing at once
+         * both saw none. One entry each was one duplicate; a row per shoot would have been two full
+         * sets, both stamped with this request, and the spend double-counted in the books. The
+         * second waits on this lock until the first commits, then counts the entries it wrote and
+         * finds the payment already made. `FOR UPDATE` because there is no column saying "paid" to
+         * claim conditionally - the entries are the fact, and they are in another table.
+         *
+         * **This has to stay the first statement in the transaction.** Under REPEATABLE READ the
+         * snapshot is taken by the first *non-locking* read, and a locking read does not take one -
+         * so the count below is the first consistent read and sees what the winner committed. A
+         * plain read placed above this line would pin a snapshot from before the lock was granted,
+         * and the double payment would be back.
+         */
+        await tx.$queryRaw`SELECT id FROM payment_request WHERE id = ${id} FOR UPDATE`;
+        // Re-read behind the lock rather than trusting what was read before the transaction opened.
+        // APPROVED has no way back today - withdraw and reject both refuse anything but PENDING -
+        // but this costs one query and does not depend on that staying true.
+        const locked = await tx.paymentRequest.findUnique({ where: { id }, select: { status: true } });
+        if (locked?.status !== "APPROVED") throw badRequest("This request is no longer approved, so there is nothing to pay.");
+        const already = await tx.cashEntry.count({ where: { paymentRequestId: id, deletedAt: null } });
+        if (already) throw badRequest("This request has just been paid by somebody else.");
 
-      return tx.paymentRequest.update({
-        where: { id },
-        data: {
-          status: "APPROVED",
-          decisionRemarks: parsed.data.remarks ?? null,
-          decidedById: actorId,
-          decidedAt: new Date(),
-          cashEntryId: entry.id,
-        },
-        include,
+        const written = [];
+        for (const filing of filings) {
+          const entry = await recordCashEntry({
+            entryType: direction,
+            projectId: filing.projectId,
+            shootId: filing.shootId,
+            clientName: counterparty,
+            category: received ? RECEIVED_CATEGORY : CATEGORY_BY_TYPE[request.type],
+            amount: filing.amount,
+            entryDate: parsed.data.entryDate || new Date(),
+            branch: request.branch,
+            paymentMode: parsed.data.paymentMode,
+            paymentModeOther: parsed.data.paymentModeOther,
+            transactionId: parsed.data.transactionId,
+            receivedAccount: parsed.data.receivedAccount,
+            paidFromAccount: parsed.data.paidFromAccount,
+            paidTo: received ? null : (parsed.data.paidTo || counterparty),
+            handlerEmployeeId: parsed.data.handlerEmployeeId,
+            handlerName: parsed.data.handlerName,
+            handlerIsOther: parsed.data.handlerIsOther,
+            paymentProof: parsed.data.paymentProof,
+            // The payer's own note belongs to the entry, not to the request: `decisionRemarks` is
+            // the approver's word on whether to pay at all, and is not overwritten here.
+            description: [
+              `${request.requestCode} · ${LABEL_BY_TYPE[request.type]}${request.reason || request.comments ? ` — ${request.reason || request.comments}` : ""}`,
+              parsed.data.remarks,
+            ].filter(Boolean).join(" · "),
+          }, actorId, tx, { proof });
+          written.push(entry.id);
+        }
+        /*
+         * The entry names the request it came from, rather than the request naming the entry: one
+         * release writes as many entries as the request itemised shoots, and a single column on the
+         * request could hold only the first of them. Written after the entries because
+         * `recordCashEntry` takes only the fields a cash entry form sends, the same way a cleared
+         * scheduled payment stamps itself onto the entry it produced.
+         */
+        await tx.cashEntry.updateMany({ where: { id: { in: written } }, data: { paymentRequestId: id } });
+
+        /*
+         * A salary advance also becomes the payroll row that takes it back, and it becomes it when
+         * the money actually leaves — not when the advance was authorised, since nothing is owed
+         * back until it has been handed over. Refused rather than skipped when there is nobody to
+         * take it from: paying an advance that no payslip will ever recover is the thing this is
+         * here to prevent, so the release fails and says why.
+         */
+        if (request.type === "SALARY_ADVANCE") {
+          /*
+           * `PayrollAdvance.paymentRequestId` is unique, so a request whose cash entries were
+           * deleted and which is therefore payable again would hit that constraint and surface as a
+           * 500 with a Prisma message on it. Asked plainly instead: the deduction is still on a
+           * payslip, and that is the thing to undo first.
+           */
+          const recovery = await tx.payrollAdvance.findUnique({ where: { paymentRequestId: id }, select: { advanceId: true } });
+          if (recovery) {
+            throw badRequest(`This advance is already on the payroll as ${recovery.advanceId}. Remove that deduction in HRM → Payroll → Advance Salary before paying it again.`);
+          }
+          if (!request.requestedById) {
+            throw badRequest("This advance names no employee record, so there is no payslip to take it back from. Link the requester to an employee and raise it again.");
+          }
+          await recordSalaryAdvance(tx, request, actorId, parsed.data.entryDate || new Date());
+        }
+
+        // Read back rather than updated again: this is the row with its entries on it for the answer.
+        return tx.paymentRequest.findUnique({ where: { id }, include });
       });
-    });
 
-    return res.json({ data: await toRow(decided) });
-  } catch (error) { return handleError(res, error, "Unable to approve this payment request"); }
+      return res.json({ data: await toRow(paid) });
+    } catch (error) {
+      // Nothing was written, so the proof just uploaded belongs to nothing.
+      await discardUploads(uploads);
+      throw error;
+    }
+  } catch (error) { return handleError(res, error, "Unable to record this payment"); }
 }
 
 async function rejectRequest(req, res) {
@@ -702,7 +1219,7 @@ async function rejectRequest(req, res) {
   const parsed = rejectSchema.safeParse(req.body);
   if (!parsed.success) return validationError(res, parsed.error);
   try {
-    const request = await prisma.paymentRequest.findFirst({ where: { id, deletedAt: null, ...(await visibilityWhere(req.user)) }, select: { id: true, status: true } });
+    const request = await prisma.paymentRequest.findFirst({ where: { id, deletedAt: null, ...(await visibilityWhere(req.user)), ...NOT_ON_A_BINNED_PROJECT }, select: { id: true, status: true } });
     if (!request) return res.status(404).json({ message: "Payment request not found" });
     if (request.status !== "PENDING") throw badRequest(`This request has already been ${request.status.toLowerCase()}.`);
 
@@ -739,14 +1256,19 @@ async function updateRequest(req, res) {
   const input = parsed.data;
   try {
     const existing = await prisma.paymentRequest.findFirst({
-      where: { id, deletedAt: null, ...(await visibilityWhere(req.user)) },
+      where: { id, deletedAt: null, ...(await visibilityWhere(req.user)), ...NOT_ON_A_BINNED_PROJECT },
       select: { id: true, type: true, status: true, requestedById: true, qrCode: true, bills: true },
     });
     if (!existing) return res.status(404).json({ message: "Payment request not found" });
 
-    // The same answer withdrawing gives: your own request, or somebody who could have decided it.
-    const ownsIt = existing.requestedById && existing.requestedById === Number(req.user?.linkedEmployeeId);
-    if (!ownsIt && !(await canDecide(req.user))) throw forbidden("You can only edit a request you raised");
+    /*
+     * Correcting a request is the **approver's**, not the requester's.
+     *
+     * It used to be either, which meant the figure an approver was looking at could change under
+     * them between reading it and deciding it. A requester who got their own ask wrong withdraws it
+     * and raises the one they meant - which is one line of audit rather than a silent edit.
+     */
+    if (!(await canDecide(req.user))) throw forbidden("Only a payment request approver can correct a request. Withdraw yours and raise the one you meant.");
     if (existing.status !== "PENDING") throw badRequest(`This request has already been ${existing.status.toLowerCase()} and cannot be edited.`);
     if (input.type !== existing.type) throw badRequest("The kind of a request cannot be changed. Withdraw it and raise the one you meant.");
 
@@ -754,7 +1276,7 @@ async function updateRequest(req, res) {
     // Read from the row rather than from the signed-in user: an approver editing somebody else's
     // request must not quietly become the person who raised it.
     const requester = { requestedById: existing.requestedById };
-    const expenses = expenseRows(input);
+    const expenses = expenseRows(input, await asksExpenseType(input));
     await resolveExpenseLinks(expenses);
     // Three arguments, as `resolveBranch` takes them. A fourth used to be passed, with the caller's
     // id in it and `input.branch` - which the schema does not carry - in the caller's place, so the
@@ -806,11 +1328,15 @@ async function withdrawRequest(req, res) {
   const id = parseId(req, res);
   if (!id) return;
   try {
-    const request = await prisma.paymentRequest.findFirst({ where: { id, deletedAt: null, ...(await visibilityWhere(req.user)) }, select: { id: true, status: true, requestedById: true, qrCode: true, bills: true } });
+    const request = await prisma.paymentRequest.findFirst({ where: { id, deletedAt: null, ...(await visibilityWhere(req.user)), ...NOT_ON_A_BINNED_PROJECT }, select: { id: true, status: true, requestedById: true, qrCode: true, bills: true } });
     if (!request) return res.status(404).json({ message: "Payment request not found" });
 
-    const ownsIt = request.requestedById && request.requestedById === Number(req.user?.linkedEmployeeId);
-    if (!ownsIt && !(await canDecide(req.user))) throw forbidden("You can only withdraw a request you raised");
+    /*
+     * The requester's alone. An approver who disagrees **rejects**, which leaves who decided and why;
+     * withdrawing deletes the row, so an approver using it would erase the ask instead of answering
+     * it. A Super Admin is not excepted either - this is about what the action means, not about rank.
+     */
+    if (!ownedBy(request, req.user)) throw forbidden("Only the person who raised a request can withdraw it. An approver rejects it instead.");
     if (request.status !== "PENDING") throw badRequest(`This request has already been ${request.status.toLowerCase()} and cannot be withdrawn.`);
 
     await prisma.paymentRequest.update({ where: { id }, data: { deletedAt: new Date() } });
@@ -822,14 +1348,23 @@ async function withdrawRequest(req, res) {
 }
 
 module.exports = {
+  searchShoots,
+  searchVendors,
   listRequests,
+  vendorPayments,
   getRequest,
   options,
   createRequest,
   updateRequest,
   approveRequest,
+  payRequest,
   rejectRequest,
   withdrawRequest,
+  // Exported for the tests: what an approval files its money against, with no database behind it.
+  asksExpenseType,
+  filingsFor,
+  entryGroups,
+  commonProject,
   TYPES,
   STATUSES,
   EXPENSE_TYPES,

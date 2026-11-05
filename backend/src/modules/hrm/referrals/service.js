@@ -1,6 +1,7 @@
 const prisma = require("../../../config/db");
 const dataScope = require("../../../services/dataScope.service");
 const { nextIdentifier } = require("../../../services/identifiers");
+const { workingEmployeeStatuses } = require("../../../services/employeeOptionLists");
 
 /**
  * Employee referrals: who introduced a new hire, and the instalments the studio owes for it.
@@ -136,6 +137,56 @@ function readInstalmentCount(value) {
 }
 
 const PAYOUT_STATUSES = ["Pending", "Paid", "Cancelled"];
+
+/**
+ * **Stopped**: an instalment that will never be handed over, because one of the two people a
+ * referral is between had already left when its month came.
+ *
+ * Either of them ends it, and for different reasons. The bonus is a retention reward paid at the
+ * third month and the sixth *because the new hire stayed*, so the day **they** leave the instalments
+ * still to come stop. And it is money owed to **the referrer**, so once they have gone there is
+ * nobody to pay it to. Each on its own is enough; the payroll side asks the same question
+ * (`referralBonusDueIn`), so the register and the payslip cannot disagree about what is owed.
+ *
+ * Not one of `PAYOUT_STATUSES` - nothing writes it. It is worked out from the two employees' own
+ * statuses every time the register is read, so nothing has to be written when somebody is relieved,
+ * and somebody who rejoins is simply due again - the alternative was a stored Cancelled that would
+ * have had to be unwound by hand.
+ */
+const STOPPED = "Stopped";
+
+/** Why a referral stopped, for the screen to say which of the two it was. */
+const STOPPED_REASONS = { BOTH: "BOTH_LEFT", REFERRED: "REFERRED_LEFT", REFERRER: "REFERRER_LEFT" };
+
+/**
+ * Why this referral's unpaid instalments will never be paid, or null while they still can be.
+ *
+ * A referrer who is **gone from the repository altogether** - `referrerEmployeeId` cleared, only the
+ * name kept beside it - reads as left: there is no employee left to pay.
+ */
+function stoppedReasonFor(referral, working) {
+  const referredGone = !isWorking(referral.referred, working);
+  const referrerGone = !isWorking(referral.referrer, working);
+  if (referredGone && referrerGone) return STOPPED_REASONS.BOTH;
+  if (referredGone) return STOPPED_REASONS.REFERRED;
+  return referrerGone ? STOPPED_REASONS.REFERRER : null;
+}
+
+/**
+ * Whether an employee was working - the one question every rule here turns on.
+ *
+ * "Working" is the studio's own list (Settings → Fields → Employee Statuses, `countsAsWorking`), not
+ * a word hard-coded here: a studio that adds "Sabbatical" decides for itself whether it counts.
+ * Archived is never working, whatever the status says.
+ */
+const isWorking = (employee, working) => Boolean(employee) && !employee.archivedAt && working.includes(employee.employmentStatus);
+
+/** What a referral's instalments are selected with wherever one of these rules has to be applied. */
+const REFERRAL_READ_INCLUDE = {
+  payouts: { orderBy: { monthOffset: "asc" } },
+  referrer: { select: { id: true, employmentStatus: true, archivedAt: true } },
+  referred: { select: { employeeName: true, employeeId: true, employmentStatus: true, archivedAt: true } },
+};
 
 /**
  * The same day, `months` later.
@@ -298,12 +349,25 @@ async function syncEmployeeReferral(client, referredEmployeeId, { referrerEmploy
 async function referralForEmployee(referredEmployeeId) {
   const referral = await prisma.employeeReferral.findUnique({
     where: { referredEmployeeId },
-    include: { payouts: { orderBy: { monthOffset: "asc" } } },
+    include: REFERRAL_READ_INCLUDE,
   });
-  return referral ? serializeReferral(referral) : null;
+  if (!referral) return null;
+  // Shown on the employee's own record whatever their status - it is their referral, and HR opening
+  // a leaver's record is exactly who needs to see what stopped - but its instalments read Stopped.
+  return serializeReferral(referral, { reason: stoppedReasonFor(referral, await workingEmployeeStatuses()) });
 }
 
-function serializeReferral(referral) {
+/**
+ * One referral as every screen reads it, with the rules about who is still here already applied.
+ *
+ * `stopped` is whether the employee the referral was for has left. Its unpaid instalments are
+ * reported `Stopped`, which takes them out of what is outstanding and settles the referral by the
+ * rule the register already uses (nothing Pending, something Paid). What was paid stands: money that
+ * has left is a fact, not something a later resignation rewrites.
+ */
+function serializeReferral(referral, { reason = null } = {}) {
+  const stopped = Boolean(reason);
+  const statusOf = (payout) => (stopped && payout.status === "Pending" ? STOPPED : payout.status);
   return {
     id: referral.id,
     referralId: referral.referralId,
@@ -319,12 +383,125 @@ function serializeReferral(referral) {
       monthOffset: payout.monthOffset,
       dueOn: payout.dueOn,
       amount: Number(payout.amount || 0),
-      status: payout.status,
+      status: statusOf(payout),
       paidOn: payout.paidOn,
       remarks: payout.remarks,
     })),
-    total: (referral.payouts || []).reduce((sum, payout) => sum + (payout.status === "Cancelled" ? 0 : Number(payout.amount || 0)), 0),
+    // Which of the two has left, where one has, so a screen can say why an instalment stopped
+    // rather than leaving a reader to guess at it.
+    stoppedReason: reason,
+    total: (referral.payouts || []).reduce((sum, payout) => sum + (statusOf(payout) === "Paid" || statusOf(payout) === "Pending" ? Number(payout.amount || 0) : 0), 0),
   };
+}
+
+/**
+ * The register's rows, with the two rules about an employee who has left applied.
+ *
+ * A referral that stopped **before anything was paid** is left out altogether: nothing was earned,
+ * nothing is owed, and a row that can never do anything is a row somebody has to work out they can
+ * ignore. One with an instalment already paid stays, settled, because it is a record of money that
+ * left the studio. Either person leaving is enough for both rules - and while both are still here,
+ * a referral half paid stays **Outstanding**: it is not settled until the last instalment is.
+ */
+function applyLeavers(referrals, working) {
+  return referrals.reduce((rows, referral) => {
+    const reason = stoppedReasonFor(referral, working);
+    const paidAnything = (referral.payouts || []).some((payout) => payout.status === "Paid");
+    if (reason && !paidAnything) return rows;
+    rows.push(serializeReferral(referral, { reason }));
+    return rows;
+  }, []);
+}
+
+/**
+ * What Payroll owes this employee in referral bonuses for one month, and which referrals they are.
+ *
+ * The register's instalments are **paid through payroll** - `payroll-register/service.js` brings this
+ * in on generate and refresh as the row's Referral Bonus, and paying the month settles the
+ * instalments (`settleReferralBonus`). An instalment counts when its due date falls in the month and
+ * **both** people were working: the referrer, because the money is theirs and there is nobody to pay
+ * once they have gone, and the employee they referred, because the bonus is for that person staying.
+ *
+ * Takes referrals already loaded with `REFERRAL_BONUS_SELECT`, the way `policyBreachDueIn` takes the
+ * breaches off the employee - so the register reads every figure of a month in one query.
+ */
+function referralBonusDueIn(year, month, referrals = [], { referrer = null, working = [], entryId = null } = {}) {
+  if (!isWorking(referrer, working)) return { amount: 0, referralIds: [], payoutIds: [] };
+  const wanted = Number(year);
+  const wantedMonth = Number(month);
+  const carried = [];
+  for (const referral of referrals) {
+    // The bonus is for the new hire staying: one who has left stops the instalments still to come.
+    if (!isWorking(referral.referred, working)) continue;
+    for (const payout of referral.payouts || []) {
+      /*
+       * Still to pay, or already paid **by this row**.
+       *
+       * The second half is what makes a paid month read itself correctly. Without it, the figure and
+       * its Referral IDs were recomputed from what is still Pending - which, once this row had paid
+       * them, was nothing: a reopened month lost the figure it had paid, and a paid row showed no
+       * Referral ID at all. `entryId` is the row asking; left out (a month being generated, which
+       * has no row yet) only what is still Pending counts, which is the same answer.
+       */
+      const mine = Boolean(entryId) && payout.payrollEntryId === entryId;
+      if (!mine && payout.status !== "Pending") continue;
+      if (!payout.dueOn) continue;
+      // `dueOn` is written by `addMonths` from the joining date in UTC, so it is compared in UTC.
+      const dueOn = new Date(payout.dueOn);
+      if (dueOn.getUTCFullYear() !== wanted || dueOn.getUTCMonth() + 1 !== wantedMonth) continue;
+      carried.push({ referral, payout, settled: mine && payout.status === "Paid" });
+    }
+  }
+  const amount = carried.reduce((sum, { payout }) => sum + Number(payout.amount || 0), 0);
+  return {
+    amount: Math.round(amount * 100) / 100,
+    referralIds: [...new Set(carried.map(({ referral }) => referral.referralId).filter(Boolean))],
+    // Only the ones still to settle: paying a month again must not move a date already set.
+    payoutIds: carried.filter(({ settled }) => !settled).map(({ payout }) => payout.id),
+  };
+}
+
+/** How payroll selects what `referralBonusDueIn` reads, beside the referrer's own status. */
+const REFERRAL_BONUS_SELECT = {
+  select: {
+    referralId: true,
+    payouts: { select: { id: true, status: true, dueOn: true, amount: true, payrollEntryId: true } },
+    referred: { select: { employmentStatus: true, archivedAt: true } },
+  },
+};
+
+/**
+ * Settles the instalments a paid payroll month carried - called inside that month's own transaction.
+ *
+ * Payroll is what hands the money over, so payroll is what records it as handed over: the register's
+ * own Mark paid is gone, because an instalment that could be marked in two places is one that can be
+ * paid twice. Only an instalment still Pending is written, so paying a month twice (or paying it
+ * after a correction) cannot move a date that is already set.
+ */
+async function settleReferralBonus(tx, payoutIds, { paidOn, userId = null, payrollEntryId = null } = {}) {
+  if (!payoutIds?.length) return 0;
+  const { count } = await tx.employeeReferralPayout.updateMany({
+    where: { id: { in: payoutIds }, status: "Pending" },
+    data: { status: "Paid", paidOn: paidOn || new Date(), paidByUserId: userId || null, payrollEntryId },
+  });
+  return count;
+}
+
+/**
+ * Puts back the instalments a payroll row had paid - the row being set from Paid back to Pending.
+ *
+ * The other half of `settleReferralBonus`, and the reason the payout carries the row that paid it: a
+ * month reopened has not paid anything, so its instalments are owed again and the next Refresh reads
+ * them as due. Only the instalments **this row** settled, so a reopened month cannot put back one
+ * another month paid.
+ */
+async function unsettleReferralBonus(tx, payrollEntryId) {
+  if (!payrollEntryId) return 0;
+  const { count } = await tx.employeeReferralPayout.updateMany({
+    where: { payrollEntryId, status: "Paid" },
+    data: { status: "Pending", paidOn: null, paidByUserId: null, payrollEntryId: null },
+  });
+  return count;
 }
 
 /** Every referral, newest first, for the payout register. */
@@ -363,74 +540,89 @@ async function referralAccessWhere(userId) {
   return { OR: [scope.where, { referrer: { branchId: { in: scope.branchIds } } }] };
 }
 
-async function listReferrals({ status = "", userId } = {}) {
-  const access = await referralAccessWhere(userId);
-  const referrals = await prisma.employeeReferral.findMany({
-    // Under `AND` rather than spread beside the status: the rule's `where` is itself an `OR`, and
-    // spreading it next to another clause would replace the rule rather than narrow with it.
-    where: { AND: [access, ...(status ? [{ payouts: { some: { status } } }] : [])] },
-    include: {
-      payouts: { orderBy: { monthOffset: "asc" } },
-      referred: { select: { employeeName: true, employeeId: true } },
-    },
-    orderBy: { referredOn: "desc" },
+/**
+ * Settles one instalment by hand - the Employee Referral screen's **Mark 3rd month paid** - for money
+ * handed over outside payroll (cash, a transfer). It is recorded Paid with no payroll row, so payroll
+ * never carries it again: `referralBonusDueIn` reads only what is still Pending. A month already
+ * worked out with it in its Referral Bonus is refused at Pay until it is refreshed, which drops it.
+ *
+ * Only a Pending instalment of a referral this person may see, and not one that stopped because
+ * either of the two has left. The write is conditional on it still being Pending, so payroll paying
+ * the same instalment at the same moment cannot record it twice.
+ */
+async function updatePayout(payoutId, { paidOn = null, remarks = null } = {}, userId) {
+  const notFound = () => Object.assign(new Error("Referral instalment not found."), { status: 404 });
+  const payout = await prisma.employeeReferralPayout.findUnique({
+    where: { id: payoutId },
+    include: { referral: { select: { id: true, referrer: REFERRAL_READ_INCLUDE.referrer, referred: REFERRAL_READ_INCLUDE.referred } } },
   });
-  return referrals.map(serializeReferral);
+  if (!payout) throw notFound();
+  // Answered 404 rather than 403, as the list answers: a referral somebody may not read is one they
+  // must not learn exists by being refused it.
+  const readable = await prisma.employeeReferral.findFirst({ where: { AND: [await referralAccessWhere(userId), { id: payout.referralId }] }, select: { id: true } });
+  if (!readable) throw notFound();
+  if (payout.status !== "Pending") throw Object.assign(new Error(`This instalment is already ${payout.status === "Paid" ? "paid" : "cancelled"}.`), { status: 409 });
+  if (stoppedReasonFor(payout.referral, await workingEmployeeStatuses())) {
+    throw Object.assign(new Error("This instalment has stopped - the employee or the referrer has left - so there is nothing to pay."), { status: 409 });
+  }
+  const { count } = await prisma.employeeReferralPayout.updateMany({
+    where: { id: payoutId, status: "Pending" },
+    data: { status: "Paid", paidOn: paidOn ? new Date(paidOn) : new Date(), paidByUserId: userId || null, payrollEntryId: null, remarks: remarks ?? payout.remarks },
+  });
+  if (!count) throw Object.assign(new Error("This instalment was paid a moment ago. Refresh to see it."), { status: 409 });
+  return prisma.employeeReferralPayout.findUnique({ where: { id: payoutId } });
 }
 
 /**
- * Mark one instalment paid, or cancel it.
- *
- * Paid is not reversible here on purpose: it says money left the studio, and correcting that is an
- * Accounts entry rather than a dropdown on this screen.
+ * Deletes one referral and its instalments - the register's ⋮ → Delete, and each row of a bulk
+ * Delete. The same rule the employee form keeps when Referred By is cleared (`syncEmployeeReferral`):
+ * a referral with an instalment already **paid**, through payroll or by hand, is a record of money
+ * that left the studio and is not removed. Only a referral this person may see; 404 otherwise.
+ * The employee form reads Referred By from this row, so it reads empty afterwards.
  */
-async function updatePayout(payoutId, { status, paidOn, remarks }, userId) {
-  if (!PAYOUT_STATUSES.includes(status)) {
-    const error = new Error("A referral instalment is Pending, Paid or Cancelled.");
-    error.status = 400;
-    throw error;
+async function deleteReferral(id, userId) {
+  const referralId = Number(id);
+  const notFound = () => Object.assign(new Error("Referral not found."), { status: 404 });
+  if (!Number.isInteger(referralId) || referralId <= 0) throw notFound();
+  const referral = await prisma.employeeReferral.findFirst({
+    where: { AND: [await referralAccessWhere(userId), { id: referralId }] },
+    select: { id: true, payouts: { select: { status: true } } },
+  });
+  if (!referral) throw notFound();
+  if (referral.payouts.some((payout) => payout.status === "Paid")) {
+    throw Object.assign(new Error("This referral has already been paid, so it cannot be deleted."), { status: 409 });
   }
-  const payout = await prisma.employeeReferralPayout.findUnique({ where: { id: payoutId } });
-  if (!payout) {
-    const error = new Error("Referral instalment not found.");
-    error.status = 404;
-    throw error;
-  }
+  // Conditional on nothing having been paid since it was read: payroll paying an instalment of it at
+  // this moment leaves it in place. Its instalments go with it (`onDelete: Cascade`).
+  const { count } = await prisma.employeeReferral.deleteMany({ where: { id: referralId, payouts: { none: { status: "Paid" } } } });
+  if (!count) throw Object.assign(new Error("This referral was paid a moment ago, so it cannot be deleted."), { status: 409 });
+}
+
+async function listReferrals({ status = "", userId } = {}) {
   /*
-   * The instalment has to belong to a referral this person may see. Hiding a row from the register
-   * is not protection while its id can still be typed into this endpoint - and marking somebody
-   * else's referral Paid is the write that says money left the studio.
-   *
-   * Answered 404 rather than 403, exactly as the list answers: a referral somebody may not read is
-   * one they must not learn the existence of by being refused it.
+   * Only a status something is actually stored as. `Stopped` is worked out on the way out (an
+   * employee who has left), so asking the database for it would answer nothing at all - and the
+   * register's own tabs count what came back rather than asking per tab, so nothing sends one today.
    */
-  const readable = await prisma.employeeReferral.findFirst({
-    where: { AND: [await referralAccessWhere(userId), { id: payout.referralId }] },
-    select: { id: true },
-  });
-  if (!readable) {
-    const error = new Error("Referral instalment not found.");
-    error.status = 404;
-    throw error;
-  }
-  if (payout.status === "Paid" && status !== "Paid") {
-    const error = new Error("This instalment is already paid. Correct it through Accounts rather than here.");
-    error.status = 409;
-    throw error;
-  }
-  const updated = await prisma.employeeReferralPayout.update({
-    where: { id: payoutId },
-    data: {
-      status,
-      paidOn: status === "Paid" ? new Date(paidOn || Date.now()) : null,
-      paidByUserId: status === "Paid" ? userId || null : null,
-      remarks: remarks ?? payout.remarks,
-    },
-  });
-  return { id: updated.id, status: updated.status, paidOn: updated.paidOn, amount: Number(updated.amount || 0) };
+  const wanted = PAYOUT_STATUSES.includes(status) ? status : "";
+  const access = await referralAccessWhere(userId);
+  const [referrals, working] = await Promise.all([
+    prisma.employeeReferral.findMany({
+      // Under `AND` rather than spread beside the status: the rule's `where` is itself an `OR`, and
+      // spreading it next to another clause would replace the rule rather than narrow with it.
+      where: { AND: [access, ...(wanted ? [{ payouts: { some: { status: wanted } } }] : [])] },
+      include: REFERRAL_READ_INCLUDE,
+      orderBy: { referredOn: "desc" },
+    }),
+    workingEmployeeStatuses(),
+  ]);
+  return applyLeavers(referrals, working);
 }
 
 module.exports = {
+  // The pure halves of the rules `listReferrals` applies, for the tests: the query itself needs a
+  // database, and what is worth holding on to is the arithmetic about who is still here.
+  _internals: { applyLeavers, serializeReferral, stoppedReasonFor },
   INSTALMENT_INTERVAL_MONTHS,
   DEFAULT_INSTALMENT_COUNT,
   DEFAULT_INSTALMENT_MONTHS,
@@ -443,12 +635,20 @@ module.exports = {
   validateInstalmentMonths,
   splitReferralAmount,
   PAYOUT_STATUSES,
+  STOPPED,
+  STOPPED_REASONS,
+  isWorking,
+  referralBonusDueIn,
+  REFERRAL_BONUS_SELECT,
+  settleReferralBonus,
+  unsettleReferralBonus,
   addMonths,
   referralSettings,
   saveReferralSettings,
   syncEmployeeReferral,
   referralForEmployee,
   listReferrals,
-  referralAccessWhere,
   updatePayout,
+  deleteReferral,
+  referralAccessWhere,
 };

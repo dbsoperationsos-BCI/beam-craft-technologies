@@ -5,6 +5,8 @@ import DataTable from "@/components/data-table/DataTable";
 import useTableSelection from "@/components/data-table/useTableSelection";
 import { TableCellValue } from "@/components/data-table/tableCells";
 import DataTableShell from "@/components/data-table/DataTableShell";
+import KanbanBoard from "@/components/data-table/KanbanBoard";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import DataTableInfoPanel from "@/components/data-table/DataTableInfoPanel";
 import TableFooter from "@/components/data-table/TableFooter";
 import ModulePageHeader from "@/components/layout/ModulePageHeader";
@@ -16,6 +18,9 @@ import DropdownMenu from "@/components/ui/DropdownMenu";
 import useCompactView from "@/components/shared/useCompactView";
 import { verticalLabel } from "@/components/sales/whatsappGroupNameUtils";
 import { getClientGifts, updateClientGiftStatus } from "@/services/project-management/client-gifts.service";
+import { CLIENT_GIFT_STATUSES } from "@/constants/clientGifts";
+import { columnCount, daysSince } from "@/lib/kanbanSummary.mjs";
+
 
 /*
  * The two gifts the studio owes a client, each tracked the same way.
@@ -42,11 +47,10 @@ const gifts = [
  * It read "Yet To Receive", which named the wrong end: a gift in this state has not been *sent* yet,
  * and "yet to receive" reads as the studio waiting on something rather than owing something. The old
  * spelling is still in the database on rows written before the rename and is folded to this one when
- * the server reads them, so nothing here has to know about it. Keep this list in step with
- * `GIFT_STATUSES` in backend/src/modules/project-management/client-gifts/service.js - the server
- * refuses a status it does not list.
+ * the server reads them, so nothing here has to know about it. The list itself lives in
+ * `constants/clientGifts.js`, shared with Pre Production's General panel.
  */
-const statuses = ["Yet To Sent", "Sent", "Received by Client"];
+const statuses = CLIENT_GIFT_STATUSES;
 const clientGiftsTabs = ["All", ...statuses];
 
 const clientGiftsColumns = [
@@ -84,6 +88,29 @@ function displayValue(row, column) {
 
 // The same dot-and-label status cell every other table in the OS reads a status through.
 const statusStyles = { "Yet To Sent": "bg-amber-500", Sent: "bg-blue-500", "Received by Client": "bg-emerald-500" };
+
+/*
+ * The Board: a column per state, in the gift's order and colours. A card shows the gift in the panel
+ * beside it, as a click on its row does; dropping it on another column is that row's own "Mark as",
+ * which moves the gift straight away - for whoever may write, as the ⋮ is.
+ */
+const BOARD_COLUMNS = statuses.map((status) => ({ value: status, label: status, className: `${statusStyles[status] || "bg-slate-400"} text-white` }));
+const boardStatusOf = (row) => row.status;
+// One rule for the tag and the count: more than 7 days waiting - Sent from the send date, Yet To Sent
+// from the project's creation; Received is done.
+const WAITING_DAYS = 7;
+const giftFlag = (row, column) => {
+  if (column.value === "Received by Client") return "";
+  const days = daysSince(column.value === "Sent" ? row.sentAt : row.createdAt);
+  return days !== null && days > WAITING_DAYS ? `Waiting ${days} days` : "";
+};
+const giftColumnFigure = (rows, column) => (column.value === "Received by Client" ? null
+  : columnCount(rows, (row) => Boolean(giftFlag(row, column)), `Waiting ${WAITING_DAYS}+ days`, `Cards in this column waiting more than ${WAITING_DAYS} days`));
+const BOARD_CARD = {
+  title: (row) => row.clientName || row.eventId || "Gift",
+  subtitle: (row) => [row.eventId || row.enquiryId, row.assignee].filter(Boolean).join(" · "),
+  meta: (row) => (row.receivedAt ? `Received ${formatDate(row.receivedAt)}` : row.sentAt ? `Sent ${formatDate(row.sentAt)}` : ""),
+};
 
 export default function ClientGiftsPage() {
   // PROJECT / Client Gifts. Moving a gift along is a write; without it the row is read-only and
@@ -172,6 +199,12 @@ export default function ClientGiftsPage() {
     }
   }, [gift, giftLabel, loadRows, showError, showNotice]);
 
+  // A row's ⋮ - only the states this row is not already in: an action that would change nothing is
+  // left out rather than offered and ignored. Nothing at all without write, as the column is dropped.
+  const giftActions = useCallback((row) => (canWrite ? statuses
+    .filter((status) => status !== row.status)
+    .map((status) => ({ label: `Mark as ${status}`, onSelect: () => void moveTo(row, status) })) : undefined), [canWrite, moveTo]);
+
   const columns = useMemo(() => clientGiftsColumns.map((column) => ({
     ...column,
     header: column.label,
@@ -179,16 +212,12 @@ export default function ClientGiftsPage() {
     cell: column.id === "status"
       ? ({ row }) => <TableCellValue value={row.original.status} type="status" statusStyles={statusStyles} />
       : column.id === "actions"
-        ? ({ row }) => <OptionsMenu ariaLabel={`Actions for ${row.original.eventId || "gift"}`} items={statuses
-          // Only the states this row is not already in: an action that would change nothing is
-          // left out rather than offered and ignored.
-          .filter((status) => status !== row.original.status)
-          .map((status) => ({ label: `Mark as ${status}`, onSelect: () => void moveTo(row.original, status) }))} />
+        ? ({ row }) => <OptionsMenu ariaLabel={`Actions for ${row.original.eventId || "gift"}`} items={giftActions(row.original)} />
         : ({ row }) => displayValue(row.original, column),
     exportValue: (row) => displayValue(row, column),
     width: column.id === "actions" ? 56 : 180,
     minWidth: column.id === "actions" ? 56 : 150,
-  })).filter((column) => column.id !== "actions" || canWrite), [canWrite, moveTo]);
+  })).filter((column) => column.id !== "actions" || canWrite), [canWrite, giftActions]);
 
   const tabCounts = useMemo(() => Object.fromEntries(clientGiftsTabs.map((tab) => [
     tab,
@@ -198,6 +227,11 @@ export default function ClientGiftsPage() {
   const visibleRows = useMemo(() => activeTab === "All" ? rows : rows.filter((row) => row.status === activeTab), [activeTab, rows]);
 
   const updatedText = lastUpdated ? updatedFormat.format(lastUpdated) : "-";
+  const [layout, setLayout] = useTableBoardLayout("project-client-gifts");
+  const onBoard = layout === "board";
+  const canDropAt = useCallback(() => canWrite, [canWrite]);
+  const dropGift = useCallback((row, status) => void moveTo(row, status), [moveTo]);
+  const openGift = useCallback((row) => { setInfoRow(row); setInfoPanelState("expanded"); }, []);
 
   /*
    * The tick boxes, for a role holding `ADMIN / Table Select All`.
@@ -212,18 +246,36 @@ export default function ClientGiftsPage() {
     <ModulePageHeader
       title="Client Gifts"
       titleAddon={<div className="border-l border-slate-200 pl-3"><DropdownMenu ariaLabel="Gift" items={gifts} sorted={false} value={gift} onChange={(value) => { setGift(value); setInfoRow(null); }} /></div>}
-      tabs={clientGiftsTabs.map((tab) => ({ id: tab, label: tab, count: tabCounts[tab] || 0 }))}
+      // The Board stands every gift under its state, so the status tabs step aside while it shows.
+      tabs={onBoard ? undefined : clientGiftsTabs.map((tab) => ({ id: tab, label: tab, count: tabCounts[tab] || 0 }))}
       tabValue={activeTab}
       onTabChange={setActiveTab}
       tabsAriaLabel="Client gift status filters"
+      actions={<TableBoardSwitch value={layout} onChange={setLayout} />}
     />
     <FloatingNotice notice={notice} onClose={clearNotice} />
     <div className="min-h-0 flex-1">
-      <DataTableShell className="h-full min-h-0" footer={<TableFooter spread><span>Last updated: {updatedText}</span><span>Total rows: {tableStats.total}</span></TableFooter>}>
+      <DataTableShell className="h-full min-h-0" footer={<TableFooter spread><span>Last updated: {updatedText}</span><span>Total rows: {onBoard ? rows.length : tableStats.total}</span></TableFooter>}>
         {/* The shell stacks its children, so the table and the panel beside it need a row of their
             own — without it the info panel lands under the table instead of next to it. */}
         <div className="relative flex min-h-0 flex-1 overflow-hidden">
-          <div className="flex min-h-0 min-w-0 flex-1">
+          {onBoard ? <KanbanBoard
+            rows={rows}
+            columns={BOARD_COLUMNS}
+            statusOf={boardStatusOf}
+            // How many have sat 7+ days, and each of them tagged with how long.
+            columnAmount={giftColumnFigure}
+            cardFlag={giftFlag}
+            card={BOARD_CARD}
+            onOpen={openGift}
+            // The card's ⋮ is the row's ⋮.
+            cardActions={giftActions}
+            canDropAt={canDropAt}
+            onDrop={dropGift}
+            loading={loading}
+            noun="gifts"
+            ariaLabel="Client gifts board"
+          /> : <div className="flex min-h-0 min-w-0 flex-1">
             <DataTable
               columns={columns}
               data={visibleRows}
@@ -238,7 +290,7 @@ export default function ClientGiftsPage() {
               ariaLabel="Client gifts table"
               features={{ filtering: true, sorting: true, columnVisibility: true, infiniteScroll: { pageSize: 50 }, csvExport: { enabled: true, fileName: `client-gifts-${gift}`, onResult: (exported) => showNotice(exported ? "Client Gifts CSV export downloaded." : "No gifts available to export.") }, selection: bulk.selection }}
             />
-          </div>
+          </div>}
           <DataTableInfoPanel
             title={giftLabel}
             entity={infoRow}

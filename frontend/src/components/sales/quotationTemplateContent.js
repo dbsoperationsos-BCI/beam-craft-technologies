@@ -15,18 +15,39 @@
 
 import { brandNameInProse } from "../../lib/studioBranding.mjs";
 
-/** The rate used when a quotation was raised before the studio's settings existed. */
-export const DEFAULT_GST_PERCENT = 18;
-
 /**
  * Stated on top of the quoted total rather than folded into the figure. The rate comes from the
  * quotation itself, so a client reopening one from months ago reads the rate that applied then.
+ * Nothing is said where the quotation carries no rate above nought - an 18% is never assumed for
+ * a quotation that was not priced with one.
  */
-export function gstLabel(percent) {
-  const rate = Number(percent);
-  const shown = Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_GST_PERCENT;
-  // "18" not "18.00", but "18.5" kept: a rate is written the way it was entered.
-  return `+ ${Number(shown.toFixed(2))}% GST APPLICABLE`;
+export function gstLabel(percent, wording = "+ {gst}% GST APPLICABLE") {
+  const rate = percent === null || percent === undefined || percent === "" ? NaN : Number(percent);
+  if (!Number.isFinite(rate) || rate <= 0) return "";
+  // "18" not "18.00", but "18.5" kept: a rate is written the way it was entered. The wording is the
+  // studio's (Settings → Quotation Settings → General); the rate is always the quotation's own.
+  return String(wording || "").replace(/\{gst\}/g, String(Number(rate.toFixed(2)))).trim();
+}
+
+/** Whole months a quotation is valid for, from its words: 1 to 60, and three where it says nothing usable. */
+export function validityMonthsOf(value) {
+  const months = Number(String(value ?? "").trim());
+  return Number.isInteger(months) && months >= 1 && months <= 60 ? months : 3;
+}
+
+/**
+ * The validity line, with `{months}` and `{validUntil}` filled in: the months it was raised with,
+ * and the quotation's own date that many months on - "14 Jan 2027" - so a reopened quotation states
+ * the same date it was sent with, whatever Settings says since.
+ */
+export function validityLine(wording, monthsValue, quotationDate) {
+  const months = validityMonthsOf(monthsValue);
+  const from = new Date(quotationDate || Date.now());
+  // The same day that many months on, or that month's last day - 31 Jan plus one month is 28 Feb.
+  const lastDay = Number.isNaN(from.getTime()) ? 0 : new Date(from.getFullYear(), from.getMonth() + months + 1, 0).getDate();
+  const until = Number.isNaN(from.getTime()) ? null : new Date(from.getFullYear(), from.getMonth() + months, Math.min(from.getDate(), lastDay));
+  const untilText = until ? new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" }).format(until) : "";
+  return String(wording || "").replace(/\{months\}/g, String(months)).replace(/\{validUntil\}/g, untilText).trim();
 }
 
 export const termsAndConditions = [
@@ -62,7 +83,10 @@ export const defaultPdfContent = {
   deliverablesTitle: "Deliverables",
   deliverableFootnote: "Storage Note: Storage to be provided by client for raw data delivery",
   pricingLabel: "Pricing & Total of Services and Deliverables",
-  validityText: "This Quotation Valid up-to 3 Months from the Date Created",
+  gstText: "+ {gst}% GST APPLICABLE",
+  paymentLabel: "For Payment",
+  validityMonths: "3",
+  validityText: "This Quotation Valid up-to {months} Months from the Date Created",
   notesTitle: "Additional Notes",
   notesDefault: "",
   trademarkBadge: "Govt of India Registered",
@@ -173,7 +197,8 @@ export function templateContentFor(quotation, fallbackBranding = null) {
     socialHandle: text(words.socialHandle) || text(presentation.contact.socialHandle),
   };
   // Only an explicit `false` hides a section - see `emptyPresentation`.
-  const sections = Object.fromEntries(["notes", "trademark", "journey", "infrastructure"].map((key) => [key, presentation.sections?.[key] !== false]));
+  const sections = Object.fromEntries(["notes", "trademark", "journey", "infrastructure", "pricing", "gst", "payment", "validity"].map((key) => [key, presentation.sections?.[key] !== false]));
+  const gstPercent = snapshot?.gstPercent ?? quotation?.payload?.rates?.gstPercent;
   const year = new Date(quotation?.quotationDate || quotation?.createdAt || Date.now()).getFullYear();
   const copyright = text(content.copyrightText) || (brandName ? `Copyright © ${year} ${brandName}. All rights reserved.` : "");
   return {
@@ -189,7 +214,11 @@ export function templateContentFor(quotation, fallbackBranding = null) {
     contact,
     sections,
     copyright,
-    gstPercent: snapshot?.gstPercent ?? quotation?.payload?.rates?.gstPercent,
+    gstPercent,
+    // The Pricing & Total card's two filled lines: the GST rate stated in the studio's words, and
+    // the validity with its months and date - both "" where there is nothing to say.
+    gstLine: gstLabel(gstPercent, content.gstText),
+    validityText: validityLine(content.validityText, content.validityMonths, quotation?.quotationDate || quotation?.createdAt),
   };
 }
 

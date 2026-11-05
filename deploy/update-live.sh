@@ -59,7 +59,7 @@ say "Uploading"
 # --delete removes files deleted here; the excluded server-only files are never touched.
 rsync -az --delete \
   --exclude 'node_modules/' --exclude '.next/' --exclude '.git/' --exclude '.env' --exclude '.env.*' \
-  --exclude 'uploads/' --exclude '.whatsapp-sessions/' --exclude 'backups/' --exclude '.superpowers/' \
+  --exclude '/backend/uploads/' --exclude '.whatsapp-sessions/' --exclude 'backups/' --exclude '.superpowers/' \
   --exclude '.tmp-controller-merge/' --exclude '.vscode/' --exclude '.DS_Store' --exclude 'logs/' --exclude '*.log' \
   "$ROOT/" "$SERVER:$APP_DIR/"
 rsync -az --delete --exclude 'cache/' "$BUILD/frontend/.next/" "$SERVER:$APP_DIR/frontend/.next/"

@@ -184,7 +184,8 @@ test("the range is drawn ahead of Nebula and only where it applies", () => {
   );
   // The page's actions are conditional now - a table with rows ticked takes the row over - so what
   // is pinned here is the order of the three slots rather than the expression in the last of them.
-  assert.match(header, /\{leadingActions\}<NebulaHeaderButton \/>\{[^<]*actions\}/, "the leading slot no longer sits ahead of Nebula");
+  // The leading slot still opens the row; Nebula has moved to the end of it, before the ⋮.
+  assert.match(header, /\{leadingActions\}\{selection && !ownsSelectionActions \? null : actions\}<NebulaHeaderButton \/>/, "the leading slot no longer opens the row");
 
   const page = fs.readFileSync(
     path.join(import.meta.dirname, "..", "src", "components", "sales", "CRMPage.js"),

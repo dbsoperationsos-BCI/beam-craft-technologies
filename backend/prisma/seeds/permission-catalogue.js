@@ -65,6 +65,17 @@ const PERMISSIONS = [
     displayName: "Manage Client Storage",
     description: "Track client storage media and their movements"
   },
+  // Resource Management -> Project Vault (the feature key keeps its first name, Recycling Bin, which
+  // every grant and guard names): deleted projects wait there until restored or deleted permanently.
+  // Also in migration 20261029170000_project_recycling_bin, granted to SUPER_ADMIN only; renamed on
+  // screen by 20261031140000_project_vault_label.
+  {
+    module: "ASSET",
+    feature: "Recycling Bin",
+    level: "RECYCLING_BIN_MANAGE",
+    displayName: "Project Vault",
+    description: "Deleted projects: see them (Read), and restore them or delete them permanently with their photos (Read / Write)"
+  },
 
   // ============================================
   // HRM MODULE
@@ -93,6 +104,65 @@ const PERMISSIONS = [
     level: "ATTENDANCE_APPROVE",
     displayName: "Approve Attendance Requests",
     description: "Decide anyone's leave and permission requests, and set the shift, weekly offs and holiday calendar"
+  },
+  // HRM → Request: leave, permission and comp-off requests on a screen of their own. Its own row so
+  // the screen can be granted apart from Employee Attendance; the request endpoints accept either.
+  // Who may *decide* a request is still the approver slots on the requester's record, or the row above.
+  {
+    module: "HRM",
+    feature: "Requests",
+    level: "ATTENDANCE_REQUESTS",
+    displayName: "Requests",
+    description: "HRM → Request: raise and track your own leave, permission and comp-off requests, and answer the ones you are named an approver on"
+  },
+  // HRM → Events: the studio's events, a photo and a description each. Read is enough to see them
+  // and to post one; an event is removed only by whoever posted it, or an administrator. Migration
+  // 20260926100000 adds the same row and its first grants.
+  {
+    module: "HRM",
+    feature: "Events",
+    level: "EVENTS",
+    displayName: "Events",
+    description: "HRM → Events: see the studio's events and post your own photo and description; only the poster or an administrator can remove one"
+  },
+  // HRM → Events → Download: an event's photos saved as a file - the photo, or a ZIP of several.
+  // Its own row so the studio decides who may take the photos away apart from who may see them;
+  // Read is enough, a download changes nothing. Migration 20261026120000 adds the same row, granted
+  // to SUPER_ADMIN only.
+  {
+    module: "HRM",
+    feature: "Event Download",
+    level: "EVENT_DOWNLOAD",
+    displayName: "Download Events",
+    description: "HRM → Events: Download on each event, saving its photos - the photo itself, or a ZIP of several. Needs HRM → Events as well. Without it there is no Download and the photos can only be viewed"
+  },
+  // Four attendance permissions for what used to be "administrators only" in code, so each can be
+  // granted in Role Management. Migration 20260928120000 adds the same rows and grants them to the
+  // SUPER_ADMIN role and every administrator role - who held them in effect before. (Attendance
+  // Calculator and Attendance Logs were two more; 20260929110000 took them back off Role Management,
+  // and what they opened is administrators' alone again.)
+  {
+    module: "HRM",
+    feature: "Attendance Rules",
+    level: "ATTENDANCE_RULES",
+    displayName: "Attendance Rules",
+    description: "Read / Write changes the attendance rules: shift, weekly offs, half-day band and office locations"
+  },
+  {
+    module: "HRM",
+    feature: "All Requests",
+    level: "ATTENDANCE_ALL_REQUESTS",
+    displayName: "All Requests",
+    description: "See every leave, permission and other attendance request in the studio on HRM → Request (deciding stays with the named approvers)"
+  },
+  // Who links the WhatsApp group the Attendance Register's daily report goes into, and sends it from
+  // their own WhatsApp. Migration 20260929100000 adds the same row, granted to administrators.
+  {
+    module: "HRM",
+    feature: "Attendance WhatsApp Report",
+    level: "ATTENDANCE_WHATSAPP_REPORT",
+    displayName: "Attendance WhatsApp Report",
+    description: "Link the WhatsApp group the Attendance Register's daily report is sent to at 9:45 am, and send it from your own WhatsApp"
   },
   // Tasks are the one thing in the OS everybody does to everybody: anybody signed in may ask
   // anybody else to do something, so this is meant to be granted to every role rather than held by
@@ -167,6 +237,102 @@ const PERMISSIONS = [
     description: "Read / Write to tick candidates on the Interview register and act on the whole selection at once - moving every ticked candidate to a stage, and deleting them together. Without it the tick boxes are absent and candidates are worked one at a time"
   },
 
+  /*
+   * Speak-up: a confidential line to HR, not anonymous - HR sees who wrote it, so they can follow
+   * up, but nobody else in the studio can. Lives inside Employee Attendance's own section dropdown
+   * rather than a page of its own, the same way `Rules` does for its approval permission - see
+   * `HRM / Speak-up Review` below and `NO_MENU_ENTRY` in permission-catalogue-sidebar.test.js.
+   * READ alone only shows someone their own past submissions without letting them write a new one;
+   * READ_WRITE is what an ordinary employee role is meant to be granted.
+   */
+  {
+    module: "HRM",
+    feature: "Speak-up",
+    level: "SPEAK_UP",
+    displayName: "Speak-up",
+    description: "Write HR something personal, and see your own past Speak-ups"
+  },
+  // Reads every Speak-up submitted, studio-wide - deliberately not branch-scoped, since narrowing a
+  // confidential channel by branch would hide genuine complaints from an HR holder scoped to one
+  // branch. Nothing to write: a one-way inbox has no decision to record.
+  {
+    module: "HRM",
+    feature: "Speak-up Review",
+    level: "SPEAK_UP_REVIEW",
+    displayName: "Speak-up Review",
+    description: "Read every Speak-up submitted, across every branch"
+  },
+
+  // HRM → Payroll: an empty screen for now. Also in migrations - 20261008200000_hrm_payslip_permission
+  // created it as Payslip, granted to SUPER_ADMIN only, and 20261008210000_hrm_payslip_renamed_payroll
+  // renamed it.
+  {
+    module: "HRM",
+    feature: "Payroll",
+    level: "PAYROLL_VIEW",
+    displayName: "Payroll",
+    description: "The Payroll screen"
+  },
+
+  // HRM → Payslip: the signed-in employee's own payslips. Also in migration
+  // 20261012250000_hrm_my_payslip_permission, granted to SUPER_ADMIN only.
+  {
+    module: "HRM",
+    feature: "My Payslip",
+    level: "HRM_MY_PAYSLIP",
+    displayName: "My Payslip",
+    description: "HRM -> Payslip: the signed-in employee's own payslips"
+  },
+
+  // HRM → Payroll → Recovery: amounts taken back from salary over months. Also in migration
+  // 20261008230000_hrm_payroll_recovery, granted to SUPER_ADMIN only.
+  {
+    module: "HRM",
+    feature: "Payroll Recovery",
+    level: "PAYROLL_RECOVERY",
+    displayName: "Payroll Recovery",
+    description: "Payroll -> Recovery: amounts taken back from salary over months"
+  },
+
+  // HRM → Payroll → Policy Breach: fines for a policy breach taken from salary over months. Also in
+  // migration 20261024120000_hrm_payroll_policy_breach, granted to SUPER_ADMIN only.
+  {
+    module: "HRM",
+    feature: "Payroll Policy Breach",
+    level: "PAYROLL_POLICY_BREACH",
+    displayName: "Payroll Policy Breach",
+    description: "Payroll -> Policy Breach: fines for a policy breach taken from salary over months"
+  },
+
+  // HRM → Payroll → Advance Salary: amounts paid ahead of salary, taken back from one month's payroll.
+  // Also in migration 20261009120000_hrm_payroll_advance, granted to SUPER_ADMIN only.
+  {
+    module: "HRM",
+    feature: "Payroll Advance",
+    level: "PAYROLL_ADVANCE",
+    displayName: "Payroll Advance",
+    description: "Payroll -> Advance Salary: amounts paid ahead of salary, taken back from one month's payroll"
+  },
+
+  // HRM → Payroll → Main Page: the monthly payroll register, and Settings → Payroll rules. Also in
+  // migration 20261009100000_hrm_payroll_register, granted to SUPER_ADMIN only.
+  {
+    module: "HRM",
+    feature: "Payroll Register",
+    level: "PAYROLL_REGISTER",
+    displayName: "Payroll Register",
+    description: "Payroll -> Main Page: the monthly payroll register, and the Payroll rules"
+  },
+  // Payroll -> Main Page, once a month is past its payable date: changing it at all. Also in migration
+  // 20261015120000_payroll_after_payday, granted to SUPER_ADMIN only.
+  {
+    module: "HRM",
+    feature: "Payroll After Payday",
+    level: "PAYROLL_AFTER_PAYDAY",
+    displayName: "Payroll After Payday",
+    description: "Payroll -> Main Page: change a month after its payable date has passed (Read / Write)"
+  },
+
   // ============================================
   // SALES MODULE
   // ============================================
@@ -176,6 +342,30 @@ const PERMISSIONS = [
     level: "SALESPROJECT_MANAGE",
     displayName: "Manage Sales Projects",
     description: "The sale itself - enquiries, and creating, editing and deleting a sales project"
+  },
+  /*
+   * Editing a **booking** - the sale's own record on Bookings & Converted (and on Projects), which
+   * `SALES / Sales Manager` READ_WRITE deliberately does not carry.
+   *
+   * Creating a sale and changing one already made are different acts. Sales Manager READ_WRITE makes
+   * the booking, and changing it afterwards answered to the record itself: the people the project is
+   * staffed to, a branch administrator, or `PROJECT / Show All Projects` READ_WRITE. So the only
+   * grantable way to let a CRM edit bookings they are not staffed on was Show All Projects - which
+   * also hands them every project on Projects, Pre Production and Production. This is that one act
+   * on its own.
+   *
+   * It is an **additional** way in, never a narrowing: whoever may edit a booking today still may. It
+   * widens no *reading* either - the write looks its project up through the caller's own data scope,
+   * so it reaches the bookings they can already see and answers 404 for anything else.
+   * Read grants nothing - there is no reading an edit - so it is a Read / Write row or no row at all.
+   * Deleting a booking is still its Project Manager's, and the plan is still the plan's own rule.
+   */
+  {
+    module: "SALES",
+    feature: "Booking Edit",
+    level: "SALESPROJECT_BOOKING_EDIT",
+    displayName: "Edit Bookings",
+    description: "Read / Write to edit a booking on Bookings & Converted - the sale's own details, its payment schedule and its client login - without being staffed on the project. Only the bookings this person can already see; creating one is Manage Sales Projects, and deleting it stays with the Project Manager"
   },
   {
     module: "SALES",
@@ -265,6 +455,62 @@ const PERMISSIONS = [
     displayName: "Contacts",
     description: "The contact directory: every number the studio holds, each source shown only to somebody who may read that module"
   },
+  // Calendar → a day's ⋮ → Block Period: hold a branch's hours on a day. Also in migration
+  // 20261014180000_calendar_block, granted to SUPER_ADMIN only.
+  {
+    module: "SALES",
+    feature: "Block Period",
+    level: "SALES_BLOCK_PERIOD",
+    displayName: "Block Period",
+    description: "Calendar: see the branches' blocked hours (Read), and block or free them (Read / Write)"
+  },
+  // Client Management -> Client Chats: the chats clients start from their app. Also in migration
+  // 20261028150000_client_chat, granted to SUPER_ADMIN only; moved from SALES by
+  // 20261030100000_client_management_module.
+  {
+    module: "CLIENT",
+    feature: "Client Chats",
+    level: "CLIENT_CHAT_MANAGE",
+    displayName: "Client Chats",
+    description: "The chats clients start from their app: read them (Read), and answer them (Read / Write)"
+  },
+  // Client Management -> Client Offers: the offers on the Home page of the clients' app. Also in
+  // migration 20261028130000_client_offers_permission, granted to SUPER_ADMIN only; moved from SALES
+  // by 20261030100000_client_management_module.
+  {
+    module: "CLIENT",
+    feature: "Client Offers",
+    level: "CLIENT_OFFER_MANAGE",
+    displayName: "Client Offers",
+    description: "The offers shown on the Home page of the clients' app: see them (Read), and add, change or remove them (Read / Write)"
+  },
+  // Client Management -> Client Requests: what clients ask about their services and deliverables.
+  // Also in migration 20261031130000_client_service_requests, granted to SUPER_ADMIN only.
+  {
+    module: "CLIENT",
+    feature: "Client Requests",
+    level: "CLIENT_REQUEST_MANAGE",
+    displayName: "Client Requests",
+    description: "Requests clients raise from their app about their services and deliverables: see them (Read), and answer them (Read / Write)"
+  },
+  // Client Management -> Client Requests -> Raised Requests: pricing and deciding what the studio asks
+  // for on a project. Also in migration 20261104150000_project_change_requests, granted to SUPER_ADMIN only.
+  {
+    module: "CLIENT",
+    feature: "Request Approval",
+    level: "CLIENT_REQUEST_APPROVE",
+    displayName: "Request Approval",
+    description: "Requests the studio raises on a project (Client Requests -> Raised Requests): price each item and approve or reject it, and submit the decision that adds the approved items to the project (Read / Write)"
+  },
+  // Client Management -> Invitation Cards: the designs and songs clients make their invitations from.
+  // Also in migration 20261030120000_invitation_cards, granted to SUPER_ADMIN only.
+  {
+    module: "CLIENT",
+    feature: "Invitation Cards",
+    level: "INVITATION_CARD_MANAGE",
+    displayName: "Invitation Cards",
+    description: "The invitation designs and songs clients choose from in their app: see them (Read), and add, change or remove them (Read / Write)"
+  },
   {
     module: "SALES",
     feature: "Reports & Analytics",
@@ -346,6 +592,25 @@ const PERMISSIONS = [
     displayName: "Production",
     description: "The production board"
   },
+  /*
+   * Production Execution: whether a person runs a shoot's execution steps at all. Being named on
+   * the shoot still decides which shoots (`production/access.js` `accessFor`); without this, a named
+   * person reads the Execution tab and completes nothing. An action permission - no screen of its own.
+   */
+  {
+    module: "PROJECT",
+    feature: "Production Execution",
+    level: "PRODUCTION_EXECUTION",
+    displayName: "Production Execution",
+    description: "Read / Write to run the execution steps of the shoots you are named on in Production. Also needs PROJECT / Production Read / Write"
+  },
+  {
+    module: "PROJECT",
+    feature: "Shoot Board",
+    level: "SHOOTBOARD_VIEW",
+    displayName: "Shoot Board",
+    description: "A week of the shoots you and your team are named on, by day, coloured by project"
+  },
   {
     module: "PROJECT",
     feature: "Post Production",
@@ -359,6 +624,25 @@ const PERMISSIONS = [
     level: "CLIENTGIFTS_MANAGE",
     displayName: "Client Gifts",
     description: "The Welcome Gift and Shoot Completed Gift a project owes its client, and moving each one along"
+  },
+  {
+    module: "PROJECT",
+    feature: "Feedback",
+    level: "FEEDBACK_MANAGE",
+    displayName: "Feedback",
+    description: "Project Management feedback: reviews of each shoot, and Add Feedback"
+  },
+  /*
+   * View All Feedback: the Feedback list without the narrowing. Without it a person sees only the
+   * feedback they gave; with it, everybody's, as far as the branches of the roles granting it reach
+   * (`feedback/service.js` `feedbackScope`). An action permission - it opens no screen of its own.
+   */
+  {
+    module: "PROJECT",
+    feature: "View All Feedback",
+    level: "FEEDBACK_VIEW_ALL",
+    displayName: "View All Feedback",
+    description: "See everybody's feedback on the Feedback screen, not only your own"
   },
   // `PROJECT / All Projects` used to live here. It widened the project screens on its own, which
   // made two answers to one question - a person named on a single project was shown every project
@@ -426,6 +710,53 @@ const PERMISSIONS = [
     displayName: "AI Event Default Settings",
     description: "The studio-wide defaults every new AI event is created from, behind AI Feature → More → Event Default Settings"
   },
+  // The Signature Album tab inside an Image Selection project: a premium client album built from
+  // the project's existing photos. One row rather than view/edit/publish/share apart: Read opens the
+  // tab and the preview, Read / Write edits, publishes and shares - the same people do all of it,
+  // and three permissions nobody grants separately are worse than one (IAM.md). Its studio-wide
+  // defaults answer to SETTINGS / Organization, the permission of the panel they are edited in.
+  // Migration 20260924100000 writes the same row for production.
+  {
+    module: "IMAGE_SELECTION",
+    feature: "Signature Album",
+    level: "ISSIGNATURE_ALBUM",
+    displayName: "Signature Album",
+    description: "The Signature Album tab of an Image Selection project: its cover, chapters and photos, its design, and publishing and sharing the client album"
+  },
+  // The AI Editing tab inside an Image Selection project, between AI Culling and Photo Selection:
+  // the editing bay where photos are enhanced before they go on. One row, as the album: Read opens
+  // the tab and sees the edits, Read / Write uploads into it, edits, renders and sends on. Sending
+  // INTO Photo Selection or the album still answers to those destinations' own permissions.
+  // Migration 20261011090000 writes the same row for production.
+  {
+    module: "IMAGE_SELECTION",
+    feature: "AI Editing",
+    level: "ISAI_EDITING",
+    displayName: "AI Editing",
+    description: "The AI Editing tab of an Image Selection project: upload photos into it, edit them with the AI tools, and send the edited versions on to Photo Selection or the Signature Album"
+  },
+  // The AI Culling entry under Visual Curation and its dashboard. Only the dashboard answers to it:
+  // the AI Culling tab inside a project, and every culling endpoint it calls, stay on Project
+  // Management, as they always were. Its own row because the sidebar gives every entry a
+  // permission of its own. Migration 20261103120000 writes the same row for production, granted to
+  // SUPER_ADMIN alone.
+  {
+    module: "IMAGE_SELECTION",
+    feature: "AI Culling",
+    level: "ISAI_CULLING",
+    displayName: "AI Culling",
+    description: "The AI Culling dashboard under Visual Curation: every project's culling runs, where they stand and what they kept. Running and reviewing a cull inside a project stays with Manage Image Selection"
+  },
+  {
+    // Visual Curation → AI Feature → Photo Selling. Its own grant rather than a part of AI Feature:
+    // taking the studio's money and delivering what was bought is a different job from running an
+    // event. Also written by migration 20261023130000_photo_selling.
+    module: "IMAGE_SELECTION",
+    feature: "Photo Selling",
+    level: "ISPHOTO_SELLING",
+    displayName: "Photo Selling",
+    description: "Sell the studio's own photo galleries to guests: galleries and their photos, prices and packages, orders and payments, and delivering the photos bought"
+  },
 
   // ============================================
   // ACCOUNTS MODULE
@@ -440,12 +771,38 @@ const PERMISSIONS = [
   // Money the studio pays out belongs with the people who keep its books, not with the people who
   // keep its employee records. Both of these described HRM until the Employee Repository was left
   // holding permissions about payments it has nothing to do with.
+  /*
+   * **Two permissions, because raising money and allowing it are two jobs.**
+   *
+   * `Payment Request` is the screen and your **own** requests: Read to see it, Read / Write
+   * to raise one and to withdraw one you raised. Its name is older than the split and is kept so
+   * every grant the studio has already made still means what it meant.
+   *
+   * `Payment Request Approver` is the decision: approve, reject, edit anybody's request, and see the
+   * whole queue rather than your own rows. Whoever holds it cannot withdraw - withdrawing is the
+   * requester taking their own ask back, and an approver who disagrees with a request rejects it,
+   * which leaves a record of who decided and why. Deleting it instead would leave none.
+   *
+   * An approver needs **both**: this one to decide, and `Payment Request` at Read to open
+   * the screen, since a route names one permission and the screen is that one's.
+   *
+   * Before this, one permission did both, so anybody who could approve could approve **their own**
+   * request - raise money and allow it in two clicks - and nothing in the record said that was
+   * unusual.
+   */
   {
     module: "ACCOUNTS",
-    feature: "Payment Request Approval",
+    feature: "Payment Request",
+    level: "PAYMENT_APPROVE",
+    displayName: "Payment Requests",
+    description: "See the payment request screen and your own requests; Read / Write raises one and withdraws one you raised"
+  },
+  {
+    module: "ACCOUNTS",
+    feature: "Payment Request Approver",
     level: "PAYMENT_APPROVE",
     displayName: "Approve Payment Requests",
-    description: "Decide the payment requests employees raise, and read the whole queue"
+    description: "Decide anybody's payment request - approve, reject or correct it - and read the whole queue. Does not withdraw: an approver rejects, which leaves a record. Also needs ACCOUNTS / Payment Request Read to open the screen"
   },
 
   // ============================================
@@ -499,6 +856,21 @@ const PERMISSIONS = [
     level: "ROLE_MANAGE",
     displayName: "Manage Roles",
     description: "Create and manage roles"
+  },
+  /*
+   * Administration → User Activity Logs: the audit trail `src/middleware/activityLog.js` writes.
+   *
+   * Read is the whole of it - there is nothing to write on the screen - and the list narrows to the
+   * branches of the roles granting this permission (a Super Admin sees every line, including the
+   * failed sign-ins that belong to no branch). Written into migration 20261020100000 as well, and
+   * granted there to SUPER_ADMIN only.
+   */
+  {
+    module: "ADMIN",
+    feature: "User Activity Logs",
+    level: "USER_ACTIVITY_LOGS",
+    displayName: "User Activity Logs",
+    description: "Read the audit trail of what signed-in people did in the application: who, which screen, which action, from where, and the answer"
   },
   /*
    * The tick boxes on every table in the application, and the two acts a selection leads to.
@@ -627,6 +999,20 @@ const PERMISSIONS = [
   },
   {
     module: "SETTINGS",
+    feature: "Template Settings",
+    level: "SETTINGS_TEMPLATE_SETTINGS",
+    displayName: "Template Settings",
+    description: "Settings → Template Settings: a section of its own, empty for now"
+  },
+  {
+    module: "SETTINGS",
+    feature: "Wishes",
+    level: "SETTINGS_WISHES",
+    displayName: "Wishes",
+    description: "Settings → Wishes: the birthday and anniversary wishes the studio sends its people"
+  },
+  {
+    module: "SETTINGS",
     feature: "Organization",
     level: "SETTINGS_ORGANIZATION",
     displayName: "Organization",
@@ -648,10 +1034,52 @@ const PERMISSIONS = [
   },
   {
     module: "SETTINGS",
+    feature: "Client Page Images",
+    level: "SETTINGS_CLIENT_PAGE_IMAGES",
+    displayName: "Client Page Images",
+    description: "Settings → Project Management → Client page images: the pictures the client sign-in page shows"
+  },
+  {
+    module: "SETTINGS",
+    feature: "Payment Reminder",
+    level: "SETTINGS_PAYMENT_REMINDER",
+    displayName: "Payment Reminder",
+    description: "Settings → Project Management → Payment reminder: who sends the WhatsApp reminder two days before a payment is due, and when"
+  },
+  {
+    module: "SETTINGS",
+    feature: "Shoot Crew Notice",
+    level: "SETTINGS_SHOOT_CREW_NOTICE",
+    displayName: "Shoot Crew Notice",
+    description: "Settings → Project Management → Shoot crew notice: whether each shoot's crew is told about it on WhatsApp, and who sends it"
+  },
+  {
+    module: "SETTINGS",
     feature: "Application Monitoring",
     level: "SETTINGS_MONITORING",
     displayName: "Application Monitoring",
     description: "Settings → Application Monitoring: whether usage is recorded, and the email health check"
+  },
+  {
+    module: "SETTINGS",
+    feature: "WhatsApp Activity Log",
+    level: "SETTINGS_WHATSAPP_ACTIVITY",
+    displayName: "WhatsApp Activity Log",
+    description: "Settings → User Settings → WhatsApp Activity Log: every WhatsApp message the app sent or tried to send, and with Read / Write the Resend of a failed one"
+  },
+  {
+    module: "SETTINGS",
+    feature: "Automatic WhatsApp Message",
+    level: "SETTINGS_AUTOMATIC_WHATSAPP",
+    displayName: "Automatic WhatsApp Message",
+    description: "Settings → User Settings → Automatic WhatsApp Message → Photo Selection Submitted: whether a client's submitted selection is announced in a WhatsApp group, which group and who sends it. Editing the wording also needs SETTINGS / Message Template Read / Write"
+  },
+  {
+    module: "SETTINGS",
+    feature: "Activity Log Purge",
+    level: "SETTINGS_ACTIVITY_LOG_PURGE",
+    displayName: "Activity Log Purge",
+    description: "Settings → Activity Log Purge: delete User Activity Logs lines older than 1, 2, 3 or 6 months"
   }
 ];
 
@@ -692,7 +1120,9 @@ const SCOPES = [
     ["ONBOARD", "Send onboarding invites"],
     ["ISSUE_CREDENTIALS", "Issue login credentials"],
   ]],
-  ["ACCOUNTS", "Payment Request Approval", [
+  // Approving and rejecting moved with the decision, to `Payment Request Approver`. `Payment Request`
+  // is raising one and withdrawing your own, which are not actions anybody is granted separately.
+  ["ACCOUNTS", "Payment Request Approver", [
     ["APPROVE", "Approve requests"],
     ["REJECT", "Reject requests"],
   ]],

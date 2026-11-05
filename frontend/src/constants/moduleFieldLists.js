@@ -59,7 +59,7 @@ export const FIELD_LISTS = [
   { value: "blood-groups", label: "Blood Groups", singular: "Blood Group", screens: ["employee-repository"] },
   { value: "languages", label: "Languages", singular: "Language", screens: ["employee-repository"] },
   // The client contact's role on HRM → Client Details' Create Onboarding Invite.
-  { value: "client-designations", label: "Client Designations", singular: "Client Designation", screens: ["employee-repository"] },
+  { value: "client-designations", label: "Client Designations", singular: "Client Designation", screens: ["client-details"] },
 
   // ── Sales & CRM ──
   /*
@@ -80,11 +80,14 @@ export const FIELD_LISTS = [
    */
   { value: "religions", label: "Categories", singular: "Category", screens: ["quotations"], scopedBy: "vertical" },
   /*
-   * The shoots each brand quotes for. Not an HRM master-data resource at all - a brand's shoots
-   * live on the brand - so `editor` names the component that draws it, because the answer is per
-   * brand and Dum Dum's is not Qua Qua's.
+   * The shoots each brand does - one list per brand, Dum Dum's not being Qua Qua's - and the one
+   * vocabulary behind every Shoot Type in Sales & CRM: the Quotation Generator's Add Shoot, and
+   * each Event Details row on Add Lead and the lead popup, which read the lead's own vertical's
+   * list. Offered under both screens because editing it from either is the same edit. Not an HRM
+   * master-data resource at all - a brand's shoots live on the brand - so `editor` names the
+   * component that draws it, a tab per brand.
    */
-  { value: "shoot-types", label: "Shoot Types", singular: "Shoot Type", screens: ["quotations"], editor: "quotation-shoot-types" },
+  { value: "shoot-types", label: "Shoot Types", singular: "Shoot Type", screens: ["leads-followups", "quotations"], editor: "quotation-shoot-types" },
   // The Tier a Dum Dum group is booked at, minted into the W/A group name on Bookings & Converted.
   { value: "tiers", label: "Tiers", singular: "Tier", screens: ["bookings-converted"] },
   {

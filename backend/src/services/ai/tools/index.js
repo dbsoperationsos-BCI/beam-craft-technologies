@@ -5,6 +5,8 @@ const hrm = require("./hrm");
 const accounts = require("./accounts");
 const assetTools = require("./assets");
 const project = require("./project");
+const attendanceTools = require("./attendance");
+const requestTools = require("./requests");
 
 /**
  * Everything Nebula can do, registered once at boot.
@@ -38,7 +40,7 @@ let registered = false;
 function registerAllTools() {
   if (registered) return registry.allTools();
   registered = true;
-  for (const tool of [...sales.TOOLS, ...imageSelection.TOOLS, ...hrm.TOOLS, ...accounts.TOOLS, ...assetTools.TOOLS, ...project.TOOLS]) {
+  for (const tool of [...sales.TOOLS, ...imageSelection.TOOLS, ...hrm.TOOLS, ...accounts.TOOLS, ...assetTools.TOOLS, ...project.TOOLS, ...attendanceTools.TOOLS, ...requestTools.TOOLS]) {
     registry.registerTool(tool);
   }
   return registry.allTools();

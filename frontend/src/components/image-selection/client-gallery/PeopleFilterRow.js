@@ -3,9 +3,10 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import CheckRounded from "@mui/icons-material/CheckRounded";
 import GridViewRounded from "@mui/icons-material/GridViewRounded";
 import FaceAvatar from "./FaceAvatar";
+import { railSlotsForRest } from "@/lib/clientGalleryPeople.mjs";
 
 // How many people the rail leads with before the strip has been measured; once it has, as many as
-// fit its width lead, and the rest are reached through More.
+// fit its width lead, and only the rest are reached through More.
 const FEATURED = 5;
 // The least space between items, the most the rail will stretch it to when the items do not fill
 // the width exactly, and the strip's own left padding, in px, as the classes below draw them.
@@ -28,26 +29,31 @@ function currentSize() { const hit = SIZES.find(([query]) => window.matchMedia(q
 const useAvatarSize = () => useSyncExternalStore(subscribeToSize, currentSize, () => 64);
 
 /**
- * The People rail above the gallery's All Photos / Selected tabs, always one row: All anchored on
- * the left, and beside it a strip of face circles - name and photo count beneath each - that
- * scrolls sideways and never wraps, so the section is the same height whether three people were
- * found or thirty.
+ * The People rail at the top of the gallery home's People tab (`PeoplePanel`), always one row:
+ * All anchored on the left, and beside it a strip of face circles - name and photo count beneath
+ * each - that scrolls sideways and never wraps, so the section is the same height whether three
+ * people were found or thirty. Drawn nowhere else: All Photos and the folders know nothing of it.
  *
  * A filter and nothing more, and one that takes several people at once: pressing a person adds
  * them (blue ring, soft blue background, a tick on the circle), pressing them again takes them
- * out, and the grid shows the photos ANY chosen person is in through the handler the gallery
+ * out, and the gallery shows the photos EVERY chosen person is in together through the handler it
  * already owns. All - or Clear, beside the heading with two or more chosen - empties the set. People
  * chosen here are not photos chosen: the tick on a photo card is the photo's own and is untouched.
  *
- * The strip leads with as many people as fit its width - measured, so a wide desktop shows nine
- * and a phone three - and a More item made of the next faces stacked with "+N"; pressing it puts
- * the rest into the same strip and scrolls towards them - no menu, no dialog, no second row -
- * after which the strip simply scrolls, natively: a finger, a trackpad, a shift-wheel, with a Less
- * item at its end that folds the rail back to the featured few. There are no arrow buttons; fades
- * at the edges say there is more. Absent when nobody has been found.
+ * The strip leads with as many people as fit its width - measured, and measured again as the window
+ * is resized - and only when some do not fit, a More item made of the next faces stacked with "+N",
+ * its slot taken from the people rather than added to them. **Everybody
+ * chosen leads it**, whether or not they were among the few it would have led with: a person
+ * picked out of the hundreds in the picker would otherwise be filtering the gallery from behind
+ * More, where the client cannot see them to take them out again.
+ *
+ * More opens the picker (`onOpenMore`) rather than tipping the rest into this strip, which is what
+ * it used to do: a gallery holding hundreds of faces then meant scrolling sideways through all of
+ * them to reach one, and the rail is a filter rather than a place to browse. What is left here
+ * scrolls natively - a finger, a trackpad, a shift-wheel - with fades at the edges saying there is
+ * more and no arrow buttons. Absent when nobody has been found.
  */
-export default function PeopleFilterRow({ people = [], activePersonIds = [], onSelect, sessionToken, totalCount = 0 }) {
-  const [expanded, setExpanded] = useState(false);
+export default function PeopleFilterRow({ people = [], activePersonIds = [], onSelect, onOpenMore, sessionToken, totalCount = 0, totalPeople = 0 }) {
   const stripRef = useRef(null);
   const [edges, setEdges] = useState({ left: false, right: false });
   // How many items the strip has room for, counted from its measured width, and that width; null
@@ -82,27 +88,30 @@ export default function PeopleFilterRow({ people = [], activePersonIds = [], onS
   }, [measure, people.length, size]);
 
   if (!people.length) return null;
-  // Everyone fits: no More. Otherwise the last slot is More and the ones before it are people.
-  const featured = slots === null ? FEATURED : people.length <= slots ? people.length : slots - 1;
-  const hidden = expanded ? [] : people.slice(featured);
-  const shown = expanded ? people : people.slice(0, featured);
   const chosen = activePersonIds.length;
   const allActive = chosen === 0;
-  function showMore() {
-    setExpanded(true);
-    // Once the rest are in the strip, move towards them so the press visibly opens something.
-    requestAnimationFrame(() => { const strip = stripRef.current; if (strip) strip.scrollBy({ left: strip.clientWidth * 0.75, behavior: "smooth" }); });
-  }
-  function showLess() {
-    setExpanded(false);
-    requestAnimationFrame(() => { const strip = stripRef.current; if (strip) strip.scrollTo({ left: 0, behavior: "smooth" }); });
-  }
+  /*
+   * Who the rail leads with: everybody chosen, in the order the gallery numbers them, and then as
+   * many of the rest as the width still has room for. Chosen people are never cut - ten of them
+   * simply make the strip scroll - because a filter the client cannot see is one they cannot undo.
+   */
+  const isActive = (person) => activePersonIds.includes(person.id);
+  const active = people.filter(isActive);
+  const rest = people.filter((person) => !isActive(person));
+  const total = Math.max(totalPeople, people.length);
+  // Everybody when everybody fits, and More only for the people who do not (`railSlotsForRest`).
+  const slotsForRest = railSlotsForRest({ slots, total, held: people.length, chosen: active.length, fallback: FEATURED });
+  const shown = [...active, ...rest.slice(0, slotsForRest)];
+  // The faces behind More, and how many there are: the count is the whole gallery's, since the
+  // rail is only ever handed the first page of people.
+  const hiddenCount = Math.max(0, total - shown.length);
+  const hiddenFaces = rest.slice(slotsForRest, slotsForRest + 3);
 
   const width = size + 24;
   // Whole items never fill the width exactly; the remainder is shared out between them so the
   // last item sits at the edge rather than a stray gap - capped, and back to the compact gap the
   // moment the rail holds more than fits and scrolls.
-  const itemCount = shown.length + (hidden.length ? 1 : 0) + (expanded && people.length > featured ? 1 : 0);
+  const itemCount = shown.length + (hiddenCount ? 1 : 0);
   const spare = stripWidth - STRIP_PADDING - itemCount * width;
   const gap = itemCount > 1 && spare > 0 ? Math.min(MAX_GAP, Math.max(GAP, spare / (itemCount - 1))) : GAP;
   const item = (active) => `group flex shrink-0 snap-start flex-col items-center gap-1.5 rounded-2xl px-1 pb-1.5 pt-2 text-center transition-colors ${active ? "bg-blue-50" : "hover:bg-slate-50"}`;
@@ -115,7 +124,7 @@ export default function PeopleFilterRow({ people = [], activePersonIds = [], onS
   return (
     <section aria-label="Filter by person" className="shrink-0 border-b border-slate-200 bg-white px-3 pb-1 pt-2.5 sm:px-5">
       <div className="mb-1 flex min-h-6 items-center gap-2">
-        <h2 className="flex items-baseline gap-1.5 text-xs font-semibold text-slate-500">People <span className="font-normal text-slate-400">{people.length}</span></h2>
+        <h2 className="flex items-baseline gap-1.5 text-xs font-semibold text-slate-500">People <span className="font-normal text-slate-400">{formatCount(total)}</span></h2>
         {/* Two or more chosen: how many, and the way to none, beside the heading. */}
         {chosen >= 2 && (
           <span className="flex items-center gap-1">
@@ -123,7 +132,7 @@ export default function PeopleFilterRow({ people = [], activePersonIds = [], onS
             {clearButton()}
           </span>
         )}
-        <p className="ml-auto hidden truncate text-[11px] text-slate-400 sm:block">Select multiple people to view all their photos</p>
+        <p className="ml-auto hidden truncate text-[11px] text-slate-400 sm:block">Select multiple people to see the photos they are in together</p>
       </div>
       <div className="flex items-start">
         {/* All is the anchor: it stays put, so the way back to the whole folder is never scrolled out of reach. */}
@@ -156,31 +165,23 @@ export default function PeopleFilterRow({ people = [], activePersonIds = [], onS
                   </button>
                 );
               })}
-              {hidden.length > 0 && (
+              {hiddenCount > 0 && (
                 // The next faces themselves, stacked, with how many are behind them: the cue that
-                // there is more is the people there are more of.
-                <button type="button" aria-label={`Show ${hidden.length} more ${hidden.length === 1 ? "person" : "people"}`} onClick={showMore} style={{ width }} className={item(false)}>
+                // there is more is the people there are more of. It opens the picker - everybody,
+                // scrolled inside itself - rather than pouring the rest into this row.
+                <button type="button" aria-label={`Show all ${formatCount(total)} people`} onClick={onOpenMore} style={{ width }} className={item(false)}>
                   <span aria-hidden="true" style={{ width: size, height: size }} className="relative grid place-items-center rounded-full bg-slate-50 ring-1 ring-dashed ring-slate-300 group-hover:ring-slate-400">
                     <span className="flex items-center" style={{ marginLeft: Math.round(size * 0.12) }}>
-                      {hidden.slice(0, 3).map((person, index) => (
+                      {hiddenFaces.map((person, index) => (
                         <span key={person.id} className="rounded-full ring-2 ring-white" style={{ marginLeft: index ? -Math.round(size * 0.14) : 0, zIndex: 3 - index }}>
                           <FaceAvatar cover={person.cover} label={person.label} sessionToken={sessionToken} size={Math.round(size * 0.36)} />
                         </span>
                       ))}
                     </span>
-                    <span className="absolute -bottom-0.5 -right-0.5 rounded-full bg-slate-800 px-1.5 py-px text-[10px] font-semibold leading-4 text-white ring-2 ring-white">+{hidden.length}</span>
+                    <span className="absolute -bottom-0.5 -right-0.5 rounded-full bg-slate-800 px-1.5 py-px text-[10px] font-semibold leading-4 text-white ring-2 ring-white">+{formatCount(hiddenCount)}</span>
                   </span>
                   <span className={name(false)}>More</span>
-                  <span className={count(false)}>{hidden.length} {hidden.length === 1 ? "person" : "people"}</span>
-                  {dot(false)}
-                </button>
-              )}
-              {expanded && people.length > featured && (
-                // The way back: folds the rail to the featured few and returns to its start.
-                <button type="button" aria-label="Show fewer people" onClick={showLess} style={{ width }} className={item(false)}>
-                  <span aria-hidden="true" style={{ width: size, height: size }} className="grid place-items-center rounded-full bg-slate-50 text-lg font-semibold text-slate-500 ring-1 ring-dashed ring-slate-300 group-hover:ring-slate-400">–</span>
-                  <span className={name(false)}>Less</span>
-                  <span className={count(false)}>{formatCount(people.length)} people</span>
+                  <span className={count(false)}>{formatCount(hiddenCount)} {hiddenCount === 1 ? "person" : "people"}</span>
                   {dot(false)}
                 </button>
               )}

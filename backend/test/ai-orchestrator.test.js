@@ -126,8 +126,10 @@ test("a module's standing summary is fetched before the model can invent one", a
   iamService.hasPermission = async () => true;
 
   let systemSeen = "";
+  let questionSeen = "";
   provider.completeWithTools = async ({ messages }) => {
     systemSeen = messages.find((m) => m.role === "system")?.content || "";
+    questionSeen = messages[messages.length - 1]?.content || "";
     return { content: "There are 17 overdue follow-ups." };
   };
 
@@ -141,11 +143,14 @@ test("a module's standing summary is fetched before the model can invent one", a
     assert.strictEqual(summaryRan, 1, "the summary should run once, before the model");
     assert.ok(result.trace.some((t) => t.name === "sales.getPipeline" && t.prefetched));
 
-    // The real figures are in front of the model before it writes a word.
-    assert.match(systemSeen, /Leads: 31071/);
-    assert.match(systemSeen, /Overdue: 17/);
+    // The real figures are in front of the model before it writes a word - beside the question.
+    assert.match(questionSeen, /Leads: 31071/);
+    assert.match(questionSeen, /Overdue: 17/);
+    assert.match(questionSeen, /How many leads are overdue\?$/);
+    // Not in the system message: that stays the same from question to question, so Ollama reuses it.
+    assert.ok(!/Leads:/.test(systemSeen), "the figures went into the system message");
     // Prose, not JSON - handed raw JSON it read a money object back as a count.
-    assert.ok(!systemSeen.includes('{"leads"'), "the summary went in as JSON");
+    assert.ok(!questionSeen.includes('{"leads"'), "the summary went in as JSON");
   } finally {
     iamService.hasPermission = realPermission;
     provider.completeWithTools = realComplete;
@@ -211,7 +216,8 @@ test("a question that needs no records fetches no summary and no knowledge", asy
 
   let systemSeen = "";
   provider.streamConversation = async ({ messages }, onToken) => {
-    systemSeen = messages.find((m) => m.role === "system")?.content || "";
+    // Everything the model is handed, wherever in the conversation it sits.
+    systemSeen = messages.map((m) => m.content).join(" ");
     onToken?.("Focus on the album.");
     return "Focus on the album.";
   };
@@ -266,4 +272,18 @@ test("a question about a written process with no document is answered, never imp
   } finally {
     provider.streamConversation = realStream;
   }
+});
+
+test("the figures sit beside the question, so the system prompt and the history are the same as last time", () => {
+  const { withFigures } = require("../src/services/ai/orchestrator");
+  const history = [{ role: "user", content: "Any leave requests?" }, { role: "assistant", content: "Six." }];
+  const first = withFigures("You are Nebula.", [...history, { role: "user", content: "Which is oldest?" }], "Requests found: 6");
+  const second = withFigures("You are Nebula.", [...history, { role: "user", content: "And the newest?" }], "Requests found: 7");
+  // Everything before the new question is identical - what Ollama can reuse instead of re-reading.
+  assert.deepStrictEqual(first.slice(0, -1), second.slice(0, -1));
+  assert.deepStrictEqual(first[0], { role: "system", content: "You are Nebula." });
+  assert.strictEqual(first.at(-1).role, "user");
+  assert.match(first.at(-1).content, /^Requests found: 6\n\nThe question: Which is oldest\?$/);
+  // Nothing to add: the conversation goes as it came.
+  assert.deepStrictEqual(withFigures("You are Nebula.", history.slice(0, 1), ""), [{ role: "system", content: "You are Nebula." }, history[0]]);
 });

@@ -229,11 +229,9 @@ function SubscriptionClientsScreen({ product = null }) {
       onTabChange={setActiveTab}
       tabsAriaLabel={`${productLabel} clients`}
       // Invites are sent from HRM -> Client Details only; a product page just lists that product's clients.
-      actions={product ? (rows.length ? <Button type="button" disabled={checking} onClick={() => void checkAll()}>{checking ? "Checking..." : "Check now"}</Button> : null) : canWrite ? <>
-        <Button type="button" variant="primary" onClick={() => setInviting(true)}>Create Onboarding Invite</Button>
-        {/* Every invite sent, with what became of each - as the Employee Repository's own ⋮. */}
-        <OptionsMenu ariaLabel="Client invite options" items={[{ label: "View All Invites", onSelect: () => setOpenParam("invites") }]} />
-      </> : null}
+      actions={product ? (rows.length ? <Button type="button" disabled={checking} onClick={() => void checkAll()}>{checking ? "Checking..." : "Check now"}</Button> : null) : canWrite ? <Button type="button" variant="primary" onClick={() => setInviting(true)}>Create Onboarding Invite</Button> : null}
+      // Every invite sent, with what became of each - as the Employee Repository's own ⋮, after Nebula.
+      menu={!product && canWrite ? <OptionsMenu ariaLabel="Client invite options" items={[{ label: "View All Invites", onSelect: () => setOpenParam("invites") }]} /> : null}
     />
     <FloatingNotice notice={notice} onClose={clearNotice} />
     <DataTableShell className="min-h-0 flex-1" footer={<TableFooter spread className="z-30"><span>Last updated: {updatedText}</span><span>Total rows: {stats.total}</span></TableFooter>}>

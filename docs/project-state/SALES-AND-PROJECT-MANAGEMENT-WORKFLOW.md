@@ -413,7 +413,7 @@ The vertical decides which form the public link renders. Only the Dum Dum form -
 
 ### Shoot Creation
 
-- Add Shoot dialog asks **Shoot Date Known** — the same Yes/No toggle the W/A Group-Name Generator uses for Main Event Date Known, opening on Yes — and then Date Created where the answer is Yes (today by default, editable), plus Shoot, Shoot Place, District, State, Event Start Time, and Event End Time. On No the Date is not shown and the shoot saves without one — a wedding is regularly sold before the family fixes the reception date. An undated shoot reads as "—" wherever a shoot date is listed, does not set the project's Main Event Date even when it is the main event, and is treated by Image Selection as a shoot that has not happened, so its folders and selection items stay closed until a date is put on it.
+- Add Shoot dialog asks **Shoot Date Known** — the same Yes/No toggle the W/A Group-Name Generator uses for Main Event Date Known, opening on Yes — and then Date Created where the answer is Yes (today by default, editable), plus Shoot, Shoot Type, Shoot Place, District, State, Session Timing and its duration, and who takes care of Food, Accommodation and Travel. Event Start Time and Event End Time are **not** asked for here — they are the Pre Production board's, which is the stage that knows them. On No the Date is not shown and the shoot saves without one — a wedding is regularly sold before the family fixes the reception date. An undated shoot reads as "—" wherever a shoot date is listed, does not set the project's Main Event Date even when it is the main event, and is treated by Image Selection as a shoot that has not happened, so its folders and selection items stay closed until a date is put on it.
 - District is searchable/text-entry capable; State auto-populates for known mappings but remains editable.
 - Shoot ID is generated server-side as `DBS-SID-DD-ERD-000001` — the project's vertical and branch,
   counted per vertical; internal Prisma IDs never display.
@@ -469,26 +469,134 @@ Work agreed on top of what the project was sold for — an extra shoot, an album
   work and writes nothing to the books. The client pays for it later as an ordinary receipt.
 - It sits at **Approval pending** until decided. Only the manager named on that project — or a super
   admin — may decide it: approving spend and agreeing to sell more work are different authorities,
-  so holding `ACCOUNTS / Payment Request Approval` is not enough. Rejecting asks why.
+  so holding `ACCOUNTS / Payment Request` is not enough. Rejecting asks why.
 - Only **approved** extras count. They appear in the Extras column and are what the Project Summary's
   **Extra** figure totals. A pending one shows beside them, drawn back and uncounted; a rejected one
   shows nowhere.
 - Raising and reading answer to `PROJECT / Projects`.
-- Two places read them. The project's **Extras** column shows that project's own, waiting ones drawn
-  back above the approved. The **Extra Quotations** tab on Payment Requests is the working list:
-  what you raised and what waits on your decision, in one table with the same columns, filters and
-  export as every other table. Note that tab sits on a screen guarded by
-  `ACCOUNTS / Payment Request Approval` — a project manager holding only `PROJECT / Projects` cannot
-  open it, and reaches their decisions through the project instead.
+- One place reads them: the project's **Extras** column (its Payments tab), that project's own, waiting
+  ones drawn back above the approved, each naming who added it. Payment Requests no longer has an
+  Extra Quotations tab - it was removed on 4 Nov 2026 - so a pending extra is decided on its project.
 
 ## Project Management Submodules
 
 ### Pre Production
 
-- `/project-management/pre-production` shows projects with a saved Pre Production Coordinator.
-- `/project-management/pre-production/dum-dum` filters Dum Dum/WED.
-- `/project-management/pre-production/qua-qua` filters Qua Qua/QQ.
-- `/project-management/pre-production/corp` filters Corp/CORP.
+The board lists one row per **project**; the data underneath is one record per **shoot** — a
+location, a reporting time and a studio start belong to one shoot. A row carries the project's own
+columns plus a shoot summary (count, names, dates, "2/3 Completed", **Shoots Pending** — the names
+of the shoots not yet completed, so the column filter answers "which projects still owe a
+Reception?" — the follow-up), and everything per-shoot is reached by opening the row: double-click or
+⋮ → View Shoots opens the project's shoot cards. A project sits on every status tab one of its
+shoots is on.
+
+- `/project-management/pre-production` is the whole board;
+  `/dum-dum`, `/qua-qua` and `/corp` cut it by Product (the project's vertical).
+- A row is raised automatically when a **started** project has a Pre Production Coordinator, and for
+  each shoot added to one afterwards. Nobody creates a row by hand. A project still Yet to Start
+  raises none, and an existing row is never reset — reassigning the coordinator or adding a shoot
+  months later leaves what was already filled in alone.
+- **My Shoots / All Shoots** decides whose rows are listed. "Mine" matches the signed-in account's
+  linked employee record against the project's Pre Production Coordinator. An account with no linked
+  employee — most administrator logins — falls back to All Shoots and is told why.
+- Status tabs are pre production's own progress: Not Started, In Progress, Completed. This
+  is deliberately **not** `projectStatus`, which the Production and Post Production boards filter on.
+- Each **shoot's** status is worked out from its details, never set by hand
+  (`frontend/src/lib/preProductionProgress.js`): nothing filled is Not Started, every counted detail
+  filled is Completed, anything between is In Progress. The details counted are the ones the shoot
+  card's "details pending" counts — the shared times and location, the accommodation
+  address and a concept reference when they apply, and the vertical's checklist (a chased question
+  once Completed, an action toggle once on, the meeting and invitation fields only when their switch
+  is on, remarks never). The **project's** status is derived from its shoots, so it appears on
+  exactly one tab, by this precedence: **Completed** only when every shoot is; **In Progress** when anything has been started or finished
+  but the project is not done — which covers "some pending, some completed"; **Not Started** when
+  nothing has been touched. It is computed on every read rather than stored, which is why adding a
+  shoot to a finished project drops it back to In Progress on its own, with no recalculation
+  anywhere.
+- Read the row from the ⋮ menu or a double-click. **Edit Pre Production** needs
+  `PROJECT / Pre Production` at READ_WRITE and opens the project's shoots as cards — one card per
+  shoot, carrying **every** pre production answer for that shoot (times, studio start, location,
+  accommodation, follow-ups, statuses), so an unanswered "—" reads as the
+  to-do list. Accommodation lines appear only when Travel & Accommodation is needed, as in the form.
+  Clicking a card opens that shoot's own form over the cards; saving returns to them with the card
+  updated, which is the loop the coordinator works in: pick a shoot, fill it in, pick the next.
+  A card shows only what is needed to choose a shoot to work on — its status, date, place, event and
+  reporting times, plus a bar saying how much is still blank — a
+  percentage and a "3 details pending" count, rather than a fraction: seven answers are asked of
+  every shoot and two more only when accommodation or concepts apply, so denominators legitimately
+  differ between shoots and a fraction would read as a fault — not every answer it holds;
+  the rest is one click away in the form the card opens. A **General** tile leads the grid, ahead of
+  every shoot, stating what holds for the whole project — Welcome Kit, Storage Needed, Storage ID
+  and the CRD document's state — read-only, since all four are decided elsewhere.
+
+Inherited and shown read-only: Event ID, Client Name, Client Number, Source Branch, Product, CRD
+Document status, Sales Pre Production Remarks, CRM, the three coordinators, Main Event Date, and the
+shoot's own Shoot ID, Shoot, Shoot Place, District, State and Sub Event Date. Changing any of them is
+still the Projects screen's job.
+
+Filled in by the coordinator, in this order: Location Address and Link; Event Start Time, Event End
+Time, Reporting Time, Studio Start Date and Time, Schedule Remarks; Concepts (a list with no yes/no in
+front of it, added one by one with **+ Add Concept** the way an employee's qualifications are, each
+with the Reference the crew shoots against and its Remarks; it scrolls within a fixed height once it
+grows long, and `concepts_needed` follows from whether any are left — stored in
+`project_pre_production_concept`); Travel & Accommodation Needed (and when it is, the accommodation
+Address, Link and Remarks). The Production Coordinator and the Travel Mode are no longer asked
+here — both are on the production plan instead (`docs/project-state/PROJECT-STATE.md` §
+Production), and a shoot's existing answers are carried over once, as the plan's starting
+coordinator and travel, when its production record is raised. The old `project_pre_production`
+coordinator and `travel_*` columns stay, deprecated, until one follow-up migration drops them.
+
+**Chasing the client is the project's, not the shoot's.** A project's follow-ups are a list in
+`project_pre_production_followup_entry`, shown in a **Follow-ups** column *beside* the shoot cards
+(under them on a phone) — a coordinator rings the couple about the wedding, not about the Haldi and
+then again about the Reception. **Add Follow-up** asks only for the Next Followup Date (today or
+later) and Remarks; the follow-up joins the **Pending** list, and **Mark done** moves it to the **Completed** list below it (each list is shown
+only when it has something in it). Nothing
+asks for a last date: the earliest pending date is the project's Next Followup Date, the latest
+marked-done time its Last Followup Date, and the Followup Remarks are the next one's (or the last
+one's when nothing is pending). Every shoot row on the board reports the same values, and a project
+whose next follow-up has gone by while any shoot is still open has that date coloured in the table. The single-row `project_pre_production_followup` it replaced was carried into
+the list by migration and is no longer read.
+
+**The CRD document reads itself.** Pre Production shows the sale's hand-set `crdDocumentStatus`
+alongside what the CRD Documents page actually knows, derived from the document row: **CRD Document
+State** (Not Issued / Sent / In Progress / Submitted), **CRD Sides Received** — worked out from the
+answers, so a side counts as received once none of its required fields are missing — and **CRD
+Completion %**. The sale's own field is kept because it is the only one that can say "Not
+Applicable": no document is raised for a project that needs none. See
+[crd-documents/summary.js](../../backend/src/modules/sales/crd-documents/summary.js).
+
+**Create Project starts from a CRM lead.** Select Enquiry ID searches `sales_crm_lead` by enquiry
+id, name or number — it used to search existing projects, which was circular: only an enquiry that
+already had a project could be found. A lead that already has a live project is left out, since one
+project per enquiry is the rule. Picking one fills in the client, the number they are messaged on,
+the branch it is worked from, and its **vertical**.
+
+**Where the vertical comes from:** the CRM lead's `branch` column — "Dum Dum" / "Qua Qua" / "Corp",
+which is the vertical and not `assignedBranch`, the physical branch. A reserved WhatsApp group name carries it (its Group Type maps
+Dum Dum → WED, Qua Qua → QQ, Corp → CORP); a *manual* group name has none, so Create Project and
+Edit Sale Details ask for a required Product (Group Type) whenever no reserved name is attached and
+derive the vertical with the same mapping. Quotations carry no vertical.
+
+**Each vertical adds its own checklist on top**, described once in
+`frontend/src/constants/preProductionVerticalFields.js` and read by the board columns, the shoot
+cards, the info panel and the edit form alike. A checklist question is a Pending/Completed status
+(null = not taken up), a yes/no toggle, or text:
+
+- **Dum Dum** — Groom/Bride Address, Intro Call per side + Remarks, Event Schedule Meeting (with
+  Date, Time and Link once it is on), Get Invitation Soft Copy (+ Link), Getting Dresses/Decor
+  Images, Site Visit, Team Reached Message, Shoot Completion Message, Post Wedding Gift.
+- **Qua Qua** — Intro Call + Remarks, Getting Dresses Images, Shoot Completion Message, Google
+  Review.
+- **Received The Storage / Storage ID** appear on every vertical but are stored nowhere here: they
+  are read from the project's Client Storage record (received = its status has moved past
+  "Yet to Receive"), so the disc's whereabouts keeps one source of truth.
+
+The columns are the superset on one `project_pre_production` row per shoot — a Dum Dum shoot simply
+leaves the Qua Qua-only answers empty — so recoding a project's vertical loses nothing.
+
+Event Start and End Time are columns on the shoot itself, so Production reads them too; pre
+production is simply the only screen that asks for them.
 
 ### Production
 

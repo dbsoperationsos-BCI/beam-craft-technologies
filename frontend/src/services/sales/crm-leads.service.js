@@ -28,3 +28,12 @@ export function getCrmBranches() {
 export function getCrmLead(enquiryId) {
   return apiRequest(`/api/sales/crm-leads/${encodeURIComponent(enquiryId)}`);
 }
+
+/**
+ * One lead moved to another vertical, from its popup. The server clears what only the old vertical
+ * asks and refuses a number the target vertical already holds (409, naming that enquiry). Behind
+ * `SALES / CRM Leads` (Read / Write), as editing the lead is.
+ */
+export function moveCrmLeadVertical(enquiryId, vertical) {
+  return apiRequest(`/api/sales/crm-leads/${encodeURIComponent(enquiryId)}/vertical`, { method: "POST", body: JSON.stringify({ vertical }) });
+}

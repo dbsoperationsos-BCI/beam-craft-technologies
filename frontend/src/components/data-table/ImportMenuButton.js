@@ -24,28 +24,35 @@ import { importTableRows } from "@/services/api/tableImport.service";
  *
  * Rendered only where the viewer may write: an Import that opens and is then refused by the API is
  * worse than one that was never offered.
+ *
+ * A table with more than one template - Pre Production has one per vertical - passes `importConfigs`
+ * instead, and each becomes its own entry named by its `menuLabel`.
  */
-export default function ImportMenuButton({ importConfig, ariaLabel = "More actions" }) {
-  const [open, setOpen] = useState(false);
-  if (!importConfig) return null;
+export default function ImportMenuButton({ importConfig, importConfigs, ariaLabel = "More actions" }) {
+  const [open, setOpen] = useState(null);
+  const configs = importConfigs?.length ? importConfigs : importConfig ? [importConfig] : [];
+  if (!configs.length) return null;
 
   return <>
     <OptionsMenu
       ariaLabel={ariaLabel}
       // The quiet trigger, so the icon reads as an icon rather than as a second button competing
       // with the primary one beside it.
-      menuClassName="w-40"
-      items={[{ label: "Import", onSelect: () => setOpen(true) }]}
+      menuClassName={configs.length > 1 ? "w-48" : "w-40"}
+      items={configs.map((config) => ({ label: config.menuLabel || "Import", onSelect: () => setOpen(config) }))}
     />
     {/* Rendered only while open, so a reopened dialog is a fresh mount and the last file's verdict
         does not greet the next import. */}
     {open && <ImportDialog
-      onClose={() => setOpen(false)}
-      title={importConfig.title || "Import"}
-      columns={importConfig.columns || []}
-      templateName={importConfig.templateName || "import-template"}
-      onImportChunk={(chunk) => importTableRows(importConfig.prefix, chunk).then((answer) => answer?.data || answer)}
-      onImported={importConfig.onImported}
+      onClose={() => setOpen(null)}
+      title={open.title || "Import"}
+      columns={open.columns || []}
+      templateName={open.templateName || "import-template"}
+      hints={open.hints || []}
+      replaceOption={open.replaceOption}
+      restoreOption={open.restoreOption}
+      onImportChunk={(chunk, options) => importTableRows(open.prefix, chunk, options).then((answer) => answer?.data || answer)}
+      onImported={open.onImported}
     />}
   </>;
 }

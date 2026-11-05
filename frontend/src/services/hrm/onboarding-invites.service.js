@@ -34,3 +34,17 @@ export function sendOnboardingInviteEmail(id, payload) {
 export function cancelOnboardingInvite(id) {
   return apiRequest(`/api/hrm/onboarding-invites/${id}/cancel`, { method: "PATCH" });
 }
+
+/**
+ * The same invite, handed over on WhatsApp from the sender's own paired account.
+ *
+ * The wording travels because the dialog's box is editable and what is on screen is what should
+ * go. The candidate's **number** does not: the server reads it off the invite, so this cannot be
+ * pointed at anybody else.
+ */
+export function sendOnboardingInviteWhatsApp(id, message) {
+  return apiRequest(`/api/hrm/onboarding-invites/${encodeURIComponent(id)}/send-whatsapp`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  });
+}

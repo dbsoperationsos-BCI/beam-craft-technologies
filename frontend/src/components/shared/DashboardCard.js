@@ -1,3 +1,4 @@
+import HelpTip from "./HelpTip";
 import Button from "@/components/shared/Button";
 
 /**
@@ -8,16 +9,36 @@ import Button from "@/components/shared/Button";
  * Shared rather than module-local because Image Selection and Employee Attendance both draw
  * dashboards, and two copies of a card shell drift apart the first time one of them is adjusted.
  */
-export default function DashboardCard({ title, note, action, children, className = "", bodyClassName = "p-3" }) {
-  return <section className={`flex min-w-0 flex-col rounded-lg border border-slate-200 bg-white shadow-sm ${className}`}>
+/**
+ * `note` is a line under the title; `noteAsTip` moves it into the ⓘ instead, for an explanation
+ * rather than a fact about the card.
+ *
+ * `tip` is for a card that needs **both**: a short line everybody reads, and the long form behind the
+ * ⓘ for whoever wants it. A consequence - what a switch will send, what it will not - belongs in the
+ * visible line, because a warning only a hover reveals is one a touch or keyboard reader never meets.
+ */
+export default function DashboardCard({ id, title, note, noteAsTip = false, tip = "", action, children, className = "", bodyClassName = "p-3", titleClassName = "" }) {
+  return <section id={id} className={`flex min-w-0 flex-col rounded-lg border border-slate-200 bg-white shadow-sm ${className}`}>
     <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-slate-100 px-3 py-2">
       <div className="min-w-0">
-        <h2 className="text-sm font-medium text-slate-700">{title}</h2>
-        {note && <p className="text-[11px] text-slate-400">{note}</p>}
+        {/* `noteAsTip`: an explanation rather than a fact about the card (Settings), kept in the ⓘ. */}
+        <h2 className={`flex items-center text-sm font-medium text-slate-700 ${titleClassName}`}>{title}{noteAsTip && <HelpTip text={note} />}{tip && !noteAsTip && <HelpTip text={tip} />}</h2>
+        {note && !noteAsTip && <p className="text-[11px] text-slate-400">{note}</p>}
       </div>
       {action}
     </header>
     <div className={`min-w-0 flex-1 ${bodyClassName}`}>{children}</div>
+  </section>;
+}
+
+/** A studio with nothing yet: the one message and, for a writer, the one thing to do next. */
+export function EmptyDashboard({ title, message, action }) {
+  return <section className="flex min-h-72 items-center justify-center rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <div className="max-w-md text-center">
+      <h2 className="text-base font-semibold text-slate-800">{title}</h2>
+      <p className="mt-1 text-xs text-slate-500">{message}</p>
+      {action}
+    </div>
   </section>;
 }
 

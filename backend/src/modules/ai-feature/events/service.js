@@ -1,3 +1,4 @@
+const { withUserNames } = require("../../../services/userNames");
 const prisma = require("../../../config/db");
 const { compressImage } = require("../../../services/imageCompression");
 const { httpError } = require("../shared/http");
@@ -9,8 +10,15 @@ const defaults = require("../default-settings/service");
 const { loadEvent } = require("../shared/eventAccess");
 const { serializeEvent } = require("../shared/serializers");
 const processingSummary = require("../processing/summary");
+const { LISTED_MEDIA } = require("../shared/mediaScope");
+const watermarks = require("../watermarks/service");
+const queue = require("../processing/queue");
+const { assertCanRequireCodes } = require("../notifications/otp");
+const { everyChunk } = require("../../../services/wordChunks");
 
-const COUNTS = { _count: { select: { guests: true, media: true, faces: true } } };
+// `media` is the All Photos count: exactly what the Media tab lists (`LISTED_MEDIA`) - live rows
+// in a folder, plus a guest's uploads - never a deleted row or a staff row left in no folder.
+const COUNTS = { _count: { select: { guests: true, media: { where: LISTED_MEDIA }, faces: true } } };
 
 /**
  * The status an event reads as, from its dates: UPCOMING before the start, ACTIVE between the
@@ -41,7 +49,9 @@ const sanitizeSubEvents = (rows) => rows.map((row, index) => ({ name: row.name, 
 
 async function list(query, userId) {
   const where = { deletedAt: null };
-  if (query.search) where.OR = [{ name: { contains: query.search } }, { location: { contains: query.search } }, { eventType: { contains: query.search } }];
+  // Word Chunk Search: every word typed, any order.
+  const chunks = everyChunk(query.search, (chunk) => ({ OR: [{ name: { contains: chunk } }, { location: { contains: chunk } }, { eventType: { contains: chunk } }] }));
+  if (chunks.length) where.AND = chunks;
   if (query.status === "archived") where.archivedAt = { not: null };
   else where.archivedAt = null;
   const orderBy = { newest: { createdAt: "desc" }, oldest: { createdAt: "asc" }, eventDate: { startDate: "desc" }, name: { name: "asc" } }[query.sort];
@@ -52,7 +62,8 @@ async function list(query, userId) {
   const total = filtered.length;
   const page = filtered.slice((query.page - 1) * query.pageSize, query.page * query.pageSize);
   const processing = await processingSummary.forEvents(page.map((row) => row.id));
-  return { items: page.map((row) => serializeEvent({ ...row, processing: processing[row.id] })), total, page: query.page, pageSize: query.pageSize };
+  // Who created each event, by name (`services/userNames`).
+  return { items: await withUserNames(page.map((row) => serializeEvent({ ...row, processing: processing[row.id] }))), total, page: query.page, pageSize: query.pageSize };
 }
 
 async function get(eventId) {
@@ -64,6 +75,11 @@ async function get(eventId) {
 async function create(body, user) {
   const defaultsRow = await defaults.rawRow();
   const settings = snapshotForEvent(defaultsRow, body.settings);
+  assertCanRequireCodes(body.settings?.guestAccess);
+  // The preset is checked before anything is written; its copy needs the event's id, so it is
+  // taken just after, and an event whose copy cannot be taken is not left behind half made.
+  settings.gallery = { ...settings.gallery, watermarkSnapshot: null };
+  await watermarks.assertPreset(settings.gallery.watermarkPresetId);
   const created = await prisma.$transaction(async (tx) => {
     const event = await tx.aiEvent.create({ data: {
       name: body.name, eventType: body.eventType, startDate: new Date(body.startDate), endDate: body.endDate ? new Date(body.endDate) : null,
@@ -74,6 +90,16 @@ async function create(body, user) {
     } });
     return event;
   });
+  if (settings.gallery.watermarkPresetId) {
+    try {
+      const watermarkSnapshot = await watermarks.snapshotFor(created.id, settings.gallery.watermarkPresetId);
+      await prisma.aiEventSetting.update({ where: { eventId: created.id }, data: { gallery: { ...settings.gallery, watermarkSnapshot } } });
+    } catch (error) {
+      await storage.deleteEventObjects(created.id).catch(() => {});
+      await prisma.aiEvent.delete({ where: { id: created.id } }).catch(() => {});
+      throw error;
+    }
+  }
   if (body.coverImage) {
     const coverKey = await storeCover(created.id, body.coverImage, null);
     if (coverKey) await prisma.aiEvent.update({ where: { id: created.id }, data: { coverKey } });
@@ -104,6 +130,7 @@ async function readSettings(eventId) {
   const event = await loadEvent(eventId, { include: { setting: true } });
   const out = {};
   for (const group of EVENT_GROUPS) out[group] = mergeGroup(group, event.setting?.[group]);
+  out.gallery = { ...out.gallery, watermarkSnapshot: watermarks.serializeSnapshot(out.gallery.watermarkSnapshot) };
   return out;
 }
 
@@ -111,7 +138,29 @@ async function saveSettings(eventId, patch, user) {
   const event = await loadEvent(eventId, { include: { setting: true } });
   const data = { updatedByUserId: user?.id ?? null };
   for (const group of EVENT_GROUPS) data[group] = mergeGroup(group, { ...mergeGroup(group, event.setting?.[group]), ...(patch[group] || {}) });
-  await prisma.aiEventSetting.upsert({ where: { eventId: event.id }, create: { eventId: event.id, ...data }, update: data });
+  // Only a save that turns it on is refused; one that leaves it on, or turns it off, is not.
+  if (!mergeGroup("guestAccess", event.setting?.guestAccess).verifyPhone) assertCanRequireCodes(patch.guestAccess);
+  // The watermark copy is the server's: retaken when another preset is chosen (or the same one is
+  // asked for again with `watermarkRefresh`), dropped when none is, and otherwise left as it was.
+  const before = mergeGroup("gallery", event.setting?.gallery);
+  const presetChanged = (data.gallery.watermarkPresetId || null) !== (before.watermarkPresetId || null);
+  let staleLogo = null;
+  if (presetChanged || (patch.gallery?.watermarkRefresh && data.gallery.watermarkPresetId)) {
+    staleLogo = before.watermarkSnapshot?.logoKey || null;
+    data.gallery.watermarkSnapshot = data.gallery.watermarkPresetId ? await watermarks.snapshotFor(event.id, data.gallery.watermarkPresetId) : null;
+  }
+  try {
+    await prisma.aiEventSetting.upsert({ where: { eventId: event.id }, create: { eventId: event.id, ...data }, update: data });
+  } catch (error) {
+    // A logo copied for a save that did not land is nobody's.
+    const copied = data.gallery.watermarkSnapshot?.logoKey;
+    if (copied && copied !== before.watermarkSnapshot?.logoKey) await storage.deletePublicKeys([copied]);
+    throw error;
+  }
+  if (staleLogo && staleLogo !== data.gallery.watermarkSnapshot?.logoKey) await storage.deletePublicKeys([staleLogo]);
+  // Guests are handed copies drawn with the new look as soon as the worker gets to them; the old
+  // look's copies are discarded there.
+  if (watermarks.watermarkRequired(data.gallery) !== watermarks.watermarkRequired(before) || presetChanged || patch.gallery?.watermarkRefresh) queue.enqueueWatermarks(event.id).catch((error) => console.error("[ai-feature] watermark enqueue failed:", error.message));
   await activity.record(event.id, activity.EVENTS.SETTINGS_UPDATED, activity.staffActor(user), Object.keys(patch).join(", "));
   return readSettings(event.id);
 }
@@ -126,6 +175,14 @@ async function duplicate(eventId, body, user) {
     subEvents: { create: source.subEvents.map((row) => ({ name: row.name, date: row.date, startTime: row.startTime, endTime: row.endTime, location: row.location, description: row.description, sortOrder: row.sortOrder })) },
     guestGroups: { create: source.guestGroups.map((row) => ({ name: row.name, subEventIds: [], sortOrder: row.sortOrder })) },
   } });
+  // The copy gets its own copy of the watermark logo, so deleting either event leaves the other whole.
+  const sourceGallery = mergeGroup("gallery", source.setting?.gallery);
+  if (sourceGallery.watermarkSnapshot) {
+    const watermarkSnapshot = await watermarks.copySnapshot(sourceGallery.watermarkSnapshot, created.id).catch(() => null);
+    // A copy whose logo could not be taken does not claim a watermark it cannot draw: it is switched
+    // off, where the event's Settings shows it, rather than left on with nothing behind it.
+    await prisma.aiEventSetting.update({ where: { eventId: created.id }, data: { gallery: { ...sourceGallery, watermarkSnapshot, ...(watermarkSnapshot ? {} : { watermark: false }) } } });
+  }
   await activity.record(created.id, activity.EVENTS.EVENT_DUPLICATED, activity.staffActor(user), `from ${source.name}`);
   return get(created.id);
 }

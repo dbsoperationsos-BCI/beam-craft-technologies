@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const prisma = require("../src/config/db");
 const { invalidate } = require("../src/services/referenceMatchers");
 const { clientStorageAccessWhere } = require("../src/modules/assets/client-storage.service");
+const { retrying } = require("./helpers/retrying");
 
 /*
  * Client Storage on the studio's one rule.
@@ -19,14 +20,16 @@ const STAMP = String(Date.now()).slice(-6);
 const tag = (name) => `TCS-${STAMP}-${name}`;
 const PERMISSION = { module: "ASSET", feature: "Client Storage" };
 const F = {};
+// A project is keyed to its lead (20260924150000), so every enquiry a fixture names gets one.
+const leadFor = (enquiryId) => prisma.salesCrmLead.upsert({ where: { enquiryId }, create: { enquiryId, name: enquiryId }, update: {} });
 
 async function grant(user, module, feature, reachBranchIds = []) {
   const permission = await prisma.permission.findFirst({ where: { module, feature }, select: { id: true } });
   assert.ok(permission, `the seed no longer has ${module} / ${feature}`);
-  const roleRow = await prisma.role.create({ data: { name: tag(`r-${Math.random().toString(36).slice(2, 7)}`) } });
-  await prisma.rolePermission.create({ data: { roleId: roleRow.id, permissionId: permission.id, accessLevel: "READ_WRITE" } });
-  await prisma.userRole.create({ data: { userId: user.id, roleId: roleRow.id } });
-  if (reachBranchIds.length) await prisma.roleBranch.createMany({ data: reachBranchIds.map((id) => ({ roleId: roleRow.id, branchId: id })) });
+  const roleRow = await retrying(() => prisma.role.create({ data: { name: tag(`r-${Math.random().toString(36).slice(2, 7)}`) } }));
+  await retrying(() => prisma.rolePermission.create({ data: { roleId: roleRow.id, permissionId: permission.id, accessLevel: "READ_WRITE" } }));
+  await retrying(() => prisma.userRole.create({ data: { userId: user.id, roleId: roleRow.id } }));
+  if (reachBranchIds.length) await retrying(() => prisma.roleBranch.createMany({ data: reachBranchIds.map((id) => ({ roleId: roleRow.id, branchId: id })) }));
   return async () => {
     await prisma.userRole.deleteMany({ where: { roleId: roleRow.id } });
     await prisma.roleBranch.deleteMany({ where: { roleId: roleRow.id } });
@@ -45,28 +48,28 @@ const listed = async (userId) => {
 };
 
 before(async () => {
-  F.br = await prisma.branch.create({ data: { code: tag("BR"), name: `Storage Scope Branch ${STAMP}` } });
+  F.br = await retrying(() => prisma.branch.create({ data: { code: tag("BR"), name: `Storage Scope Branch ${STAMP}` } }));
   F.dumDum = await prisma.vertical.findFirst({ where: { code: "DUM_DUM" }, select: { id: true } });
-  const person = (name, extra = {}) => prisma.employee.create({ data: { employeeId: tag(name), employeeName: `Storage Scope ${name} ${STAMP}`, branchId: F.br.id, workBaseLocation: F.br.name, ...extra } });
+  const person = (name, extra = {}) => retrying(() => prisma.employee.create({ data: { employeeId: tag(name), employeeName: `Storage Scope ${name} ${STAMP}`, branchId: F.br.id, workBaseLocation: F.br.name, ...extra } }));
   F.manager = await person("mgr");
   F.report = await person("rep", { reportsToEmployeeId: F.manager.id });
   F.stranger = await person("str");
-  const login = (name, employee) => prisma.user.create({ data: { name: `Storage scope ${name}`, email: `${tag(name)}@test.local`.toLowerCase(), username: tag(name).toLowerCase(), password: "x", role: "ADMIN", branchId: F.br.id, linkedEmployeeId: employee.id } });
+  const login = (name, employee) => retrying(() => prisma.user.create({ data: { name: `Storage scope ${name}`, email: `${tag(name)}@test.local`.toLowerCase(), username: tag(name).toLowerCase(), password: "x", role: "ADMIN", branchId: F.br.id, linkedEmployeeId: employee.id } }));
   F.me = await login("me", F.manager);
   F.other = await login("other", F.stranger);
   invalidate();
 
-  const project = (name, owner) => prisma.salesProject.create({ data: {
+  const project = async (name, owner) => { await leadFor(tag(`enq-${name}`)); return retrying(() => prisma.salesProject.create({ data: {
     enquiryId: tag(`enq-${name}`), eventId: tag(name), whatsappGroupName: `WED ${name}`, clientMainNumber: "+919876543210",
     sourceBranch: F.br.name, branchId: F.br.id, vertical: "WED", verticalId: F.dumDum.id,
     deliverables: "[]", initialConvertedValue: 0, crmName: "Test", projectManagerEmployeeId: owner.id,
-  } });
+  } })); };
   F.myProject = await project("p-mine", F.manager);
   F.theirProject = await project("p-theirs", F.stranger);
-  F.theirShoot = await prisma.projectShoot.create({ data: { projectId: F.theirProject.id, shootId: tag("sh-theirs"), shoot: "Their shoot", shootPlace: "Studio", district: "Erode", state: "Tamil Nadu" } });
-  F.myShoot = await prisma.projectShoot.create({ data: { projectId: F.myProject.id, shootId: tag("sh-mine"), shoot: "My shoot", shootPlace: "Studio", district: "Erode", state: "Tamil Nadu" } });
+  F.theirShoot = await retrying(() => prisma.projectShoot.create({ data: { projectId: F.theirProject.id, shootId: tag("sh-theirs"), shoot: "Their shoot", shootPlace: "Studio", district: "Erode", state: "Tamil Nadu" } }));
+  F.myShoot = await retrying(() => prisma.projectShoot.create({ data: { projectId: F.myProject.id, shootId: tag("sh-mine"), shoot: "My shoot", shootPlace: "Studio", district: "Erode", state: "Tamil Nadu" } }));
 
-  const disc = (name, data) => prisma.clientStorage.create({ data: { storageId: tag(name), ...data } });
+  const disc = (name, data) => retrying(() => prisma.clientStorage.create({ data: { storageId: tag(name), ...data } }));
   await disc("held-by-me", { assignedToId: F.manager.id });
   await disc("held-by-my-report", { assignedToId: F.report.id });
   await disc("handed-out-by-me", { assignedToId: F.stranger.id, assignedById: F.me.id });
@@ -81,6 +84,7 @@ after(async () => {
   await prisma.clientStorage.deleteMany({ where: { storageId: { startsWith: `TCS-${STAMP}` } } });
   await prisma.projectShoot.deleteMany({ where: { shootId: { startsWith: `TCS-${STAMP}` } } });
   await prisma.salesProject.deleteMany({ where: { eventId: { startsWith: `TCS-${STAMP}` } } });
+  await prisma.salesCrmLead.deleteMany({ where: { enquiryId: { startsWith: `TCS-${STAMP}` } } });
   await prisma.userRole.deleteMany({ where: { userId: { in: [F.me.id, F.other.id] } } });
   await prisma.user.deleteMany({ where: { id: { in: [F.me.id, F.other.id] } } });
   await prisma.employee.deleteMany({ where: { employeeId: { startsWith: `TCS-${STAMP}` } } });

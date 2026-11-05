@@ -134,6 +134,34 @@ export function setCandidateStatus(id, status, note, nextFollowUpDate) {
 }
 
 /**
+ * A remark on the candidate, without moving their stage.
+ *
+ * Appended to the same log the decisions write to, so one list holds both why a stage moved and what
+ * was said. Until now a note could only reach a record by taking a decision, which meant pretending
+ * to change something in order to write down a phone call.
+ */
+export function addCandidateRemark(id, note) {
+  return apiRequest(`/api/hrm/interview/candidates/${encodeURIComponent(id)}/remarks`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
+/**
+ * A WhatsApp message to the candidate.
+ *
+ * The **number is not sent** - the server reads it off the record. There is no "send to this number"
+ * route in this application and there must not be, because the studio's paired number can be banned
+ * for being used that way. One-way: their replies do not come back into the application.
+ */
+export function sendCandidateWhatsApp(id, body) {
+  return apiRequest(`/api/hrm/interview/candidates/${encodeURIComponent(id)}/whatsapp`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
+/**
  * Resend: reopen the application this candidate already submitted and email them their own link.
  *
  * Not `sendApplicationInvite` again. That raises a *new* form on a new link, which asks somebody who
@@ -256,6 +284,17 @@ export function sendApplicationInviteEmail(id, payload) {
 }
 
 /**
+ * The same screening form, handed over on WhatsApp from the sender's own paired account.
+ *
+ * The wording travels because the dialog's box is editable and what is on screen is what should
+ * go. The candidate's **number** does not: the server reads it off the invite, so this cannot be
+ * pointed at anybody else.
+ */
+export function sendApplicationInviteWhatsApp(id, message) {
+  return apiRequest(`/api/hrm/interview/invites/${encodeURIComponent(id)}/send-whatsapp`, { method: "POST", body: JSON.stringify({ message }) });
+}
+
+/**
  * The candidates the register already holds on this number or this address.
  *
  * The question the form asks **as a number is typed**, so that "already on the register" appears
@@ -276,4 +315,34 @@ export function getDuplicateCandidates({ phone = "", email = "", excludeId = "" 
   if (!query.toString()) return Promise.resolve({ data: { count: 0, candidates: [] } });
   if (excludeId) query.set("excludeId", String(excludeId));
   return apiRequest(`/api/hrm/interview/candidates/duplicates?${query.toString()}`);
+}
+
+/**
+ * The calls on one candidate's number, for the popup's Call Logs tab.
+ *
+ * The number is the **server's** to read off the record the id names - this asks about a candidate, not
+ * about a number, which is the only shape that cannot be turned into a way to read the call history of
+ * anybody the studio has ever rung.
+ *
+ * Each row is the fact of the call and nothing about the CRM's own client: when, which way, how long,
+ * and which of the studio's people was on it.
+ */
+export function getCandidateCallLogs(id) {
+  return apiRequest(`/api/hrm/interview/candidates/${encodeURIComponent(id)}/call-logs`);
+}
+
+/**
+ * The transcripts of this candidate's calls.
+ *
+ * A transcript hangs off a call, and a candidate is known by their number rather than an enquiry
+ * id - so the server finds the calls first and their transcripts from those. Guarded by
+ * `HRM / Interview`, as the register's own routes are.
+ */
+export function getCandidateTranscripts(id) {
+  return apiRequest(`/api/hrm/interview/candidates/${encodeURIComponent(id)}/transcripts`);
+}
+
+/** One of them in full, with its spoken segments - what "View Full Transcript" opens. */
+export function getCandidateTranscriptDetail(id, transcriptId) {
+  return apiRequest(`/api/hrm/interview/candidates/${encodeURIComponent(id)}/transcripts/${encodeURIComponent(transcriptId)}`);
 }

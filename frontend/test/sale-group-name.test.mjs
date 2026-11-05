@@ -184,3 +184,12 @@ test("with no enquiry chosen the switch stays open", () => {
   assert.equal(savedGroupNameModeAvailable({ groupNames: names, enquiryId: "", mode: "manual" }), true);
   assert.equal(savedGroupNameModeAvailable({ groupNames: names, enquiryId: "   ", mode: "manual" }), true);
 });
+
+test("a saved group name hands the project its vertical as a code, whatever it stored", async () => {
+  const { projectVerticalFor } = await import("../src/lib/saleGroupName.mjs");
+  assert.equal(projectVerticalFor({ vertical: "QQ", groupType: "Qua Qua" }), "QQ");
+  // Older rows spelled the vertical out; the project accepts only the code.
+  assert.equal(projectVerticalFor({ vertical: "Dum Dum", groupType: "Dum Dum" }), "WED");
+  assert.equal(projectVerticalFor({ vertical: "", groupType: "Corp" }), "CORP");
+  assert.equal(projectVerticalFor({}), "");
+});

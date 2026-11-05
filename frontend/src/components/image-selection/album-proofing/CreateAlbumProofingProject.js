@@ -3,11 +3,15 @@
 import ExpandMore from "@mui/icons-material/ExpandMore";
 import { useEffect, useMemo, useRef, useState } from "react";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import useFormErrors from "@/components/shared/useFormErrors";
 import { availableGroupNames, filterGroupNames } from "@/lib/albumProofingGroupNames.mjs";
 import { DEFAULT_COUNTRY_CODE, formatClientPhone, validateClientPhone } from "@/lib/imageSelectionSettings.mjs";
 import { getSalesProjects } from "@/services/sales/projects.service";
 
-const inputClass = "h-8 w-full rounded-md border border-slate-300 px-3 text-xs text-slate-700 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100";
+// The box border, red while that box is the one to fix.
+const boxBorder = (invalid) => (invalid ? "border-red-400" : "border-slate-300");
+const inputClass = (invalid) => `h-8 w-full rounded-md border ${boxBorder(invalid)} px-3 text-xs text-slate-700 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100`;
+const FieldError = ({ children }) => (children ? <p role="alert" className="mt-1 text-[10px] font-normal text-red-600">{children}</p> : null);
 
 /**
  * The Album Proofing page's own New Project form. Unlike the Projects page, an Album Proofing
@@ -31,11 +35,12 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
   const [salesProjects, setSalesProjects] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
+  const fields = useFormErrors();
   const pickerRef = useRef(null);
 
   useEffect(() => {
     let active = true;
-    getSalesProjects()
+    getSalesProjects({ summary: true })
       .then((response) => { if (active) setSalesProjects(response.data || []); })
       .catch((loadError) => { if (active) setError(loadError.message || "Unable to load Sales Manager group names."); })
       .finally(() => { if (active) setIsLoading(false); });
@@ -60,6 +65,7 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
 
   function resetForm() {
     setError("");
+    fields.clearAll();
     setSavedProjectId("");
     setGroupNameSearch("");
     setIsPickerOpen(false);
@@ -71,11 +77,9 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
 
   function submitProject(event) {
     event.preventDefault();
+    setError("");
     if (nameMode === "saved") {
-      if (!selectedSalesProject) {
-        setError("Please select a saved group name.");
-        return;
-      }
+      if (!fields.check({ savedProjectId: selectedSalesProject ? "" : "Select a saved group name." })) return;
       Promise.resolve(onCreate(selectedSalesProject.whatsappGroupName.trim(), { salesProjectId: selectedSalesProject.id }))
         .then(resetForm)
         .catch((createError) => setError(createError.message || "Unable to create project."));
@@ -83,24 +87,15 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
     }
 
     const projectName = manualName.trim();
-    if (!projectName) {
-      setError("Please enter a project name.");
-      return;
-    }
     // A manual project has no Sales Manager project behind it, so the client the proof link is
-    // sent to is recorded here — and only here. Checked in the order they are read.
-    if (!clientName.trim()) {
-      setError("Please enter the client's name.");
-      return;
-    }
-    if (!clientNumber.trim()) {
-      setError("Please enter the client's WhatsApp number.");
-      return;
-    }
-    if (!validateClientPhone(clientCountryCode, clientNumber)) {
-      setError("Enter a country code and exactly 10 digits.");
-      return;
-    }
+    // sent to is recorded here — and only here. Each gap is said under its own box.
+    const ok = fields.check({
+      manualName: projectName ? "" : "Enter a project name.",
+      clientName: clientName.trim() ? "" : "Enter the client's name.",
+      clientNumber: !clientNumber.trim() ? "Enter the client's WhatsApp number."
+        : validateClientPhone(clientCountryCode, clientNumber) ? "" : "Enter a country code and exactly 10 digits.",
+    });
+    if (!ok) return;
     Promise.resolve(onCreate(projectName, {
       salesProjectId: null,
       clientName: clientName.trim(),
@@ -113,6 +108,7 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
   function switchMode(mode) {
     setNameMode(mode);
     setError("");
+    fields.clearAll();
     setIsPickerOpen(false);
   }
 
@@ -147,6 +143,7 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
                 aria-expanded={isPickerOpen}
                 aria-controls="album-proofing-group-name-options"
                 aria-autocomplete="list"
+                aria-invalid={fields.errors.savedProjectId ? true : undefined}
                 disabled={isLoading}
                 value={groupNameSearch}
                 onFocus={() => setIsPickerOpen(true)}
@@ -156,9 +153,10 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
                   if (value !== selectedSalesProject?.whatsappGroupName) setSavedProjectId("");
                   setIsPickerOpen(true);
                   setError("");
+                  fields.clear("savedProjectId");
                 }}
                 placeholder={isLoading ? "Loading Sales Manager group names..." : "Search Group Name..."}
-                className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 pr-9 text-xs text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-400"
+                className={`h-10 w-full rounded-md border ${boxBorder(fields.errors.savedProjectId)} bg-white px-3 pr-9 text-xs text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-400`}
               />
             </label>
             <button type="button" aria-label="Show saved group names" disabled={isLoading} onClick={() => setIsPickerOpen(true)} className="absolute inset-y-0 right-0 flex w-9 items-center justify-center text-slate-500 disabled:text-slate-300">
@@ -179,6 +177,7 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
                       setGroupNameSearch(project.whatsappGroupName);
                       setIsPickerOpen(false);
                       setError("");
+                      fields.clear("savedProjectId");
                     }}
                     className={`block w-full px-3 py-2 text-left text-xs hover:bg-blue-50 ${savedProjectId === project.id ? "bg-blue-50 text-blue-700" : "text-slate-700"}`}
                   >
@@ -188,6 +187,7 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
               </div>
             </div>
           )}
+          <FieldError>{fields.errors.savedProjectId}</FieldError>
         </div>
       ) : (
         <div className="mt-1 space-y-3">
@@ -197,10 +197,12 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
               autoFocus
               value={manualName}
               aria-required="true"
-              onChange={(event) => { setManualName(event.target.value); setError(""); }}
+              aria-invalid={fields.errors.manualName ? true : undefined}
+              onChange={(event) => { setManualName(event.target.value); setError(""); fields.clear("manualName"); }}
               placeholder="Enter Project Name..."
-              className={inputClass}
+              className={inputClass(fields.errors.manualName)}
             />
+            <FieldError>{fields.errors.manualName}</FieldError>
           </label>
 
           <label className="block" htmlFor="create-ap-client-name">
@@ -210,17 +212,19 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
               value={clientName}
               maxLength={191}
               aria-required="true"
-              onChange={(event) => { setClientName(event.target.value); setError(""); }}
+              aria-invalid={fields.errors.clientName ? true : undefined}
+              onChange={(event) => { setClientName(event.target.value); setError(""); fields.clear("clientName"); }}
               placeholder="Client name for the proof link"
-              className={inputClass}
+              className={inputClass(fields.errors.clientName)}
             />
+            <FieldError>{fields.errors.clientName}</FieldError>
           </label>
 
           <div>
             <label className="mb-1 block text-[10px] font-semibold text-slate-700" htmlFor="create-ap-client-number">
               Client WhatsApp Number<span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>
             </label>
-            <div className="flex h-8 rounded-md border border-slate-300 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100">
+            <div className={`flex h-8 rounded-md border ${boxBorder(fields.errors.clientNumber)} focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100`}>
               <input
                 value={clientCountryCode}
                 maxLength={5}
@@ -229,6 +233,7 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
                 onChange={(event) => {
                   setClientCountryCode(event.target.value.replace(/[^+\d]/g, "").replace(/(\+.*)\+/g, "$1").slice(0, 5));
                   setError("");
+                  fields.clear("clientNumber");
                 }}
                 className="w-14 rounded-l-md border-r border-slate-200 bg-slate-50 px-2 text-center text-xs text-slate-700 outline-none"
               />
@@ -237,17 +242,19 @@ export default function CreateAlbumProofingProject({ onCreate, usedSalesProjectI
                 value={clientNumber}
                 inputMode="numeric"
                 aria-required="true"
-                onChange={(event) => { setClientNumber(event.target.value.replace(/\D/g, "").slice(0, 10)); setError(""); }}
+                aria-invalid={fields.errors.clientNumber ? true : undefined}
+                onChange={(event) => { setClientNumber(event.target.value.replace(/\D/g, "").slice(0, 10)); setError(""); fields.clear("clientNumber"); }}
                 placeholder="10-digit number"
                 className="min-w-0 flex-1 rounded-r-md px-3 text-xs text-slate-700 outline-none placeholder:text-slate-400"
               />
             </div>
+            <FieldError>{fields.errors.clientNumber}</FieldError>
           </div>
         </div>
       )}
 
-      <p role={error ? "alert" : undefined} className={`mt-2 min-h-4 text-[10px] ${error ? "text-red-600" : "text-slate-500"}`}>
-        {error || (nameMode === "saved"
+      <p role={error || fields.summary ? "alert" : undefined} className={`mt-2 min-h-4 text-[10px] ${error || fields.summary ? "text-red-600" : "text-slate-500"}`}>
+        {error || fields.summary || (nameMode === "saved"
           ? (!isLoading && groupNames.length === 0
             ? "No unused WhatsApp group names from in-progress projects are available."
             : "The client's name and number come from the selected Sales Manager project.")

@@ -1,4 +1,5 @@
 const prisma = require("../../config/db");
+const { everyChunk } = require("../../services/wordChunks");
 const dataScope = require("../../services/dataScope.service");
 const iamService = require("../../services/iam.service");
 
@@ -106,10 +107,8 @@ function summarise(row) {
 async function searchAssets({ search, status, limit, scope } = {}) {
   const where = { isDeleted: false, ...scopeWhere(scope) };
 
-  const term = String(search || "").trim();
-  if (term) {
-    where.OR = [{ assetCode: { contains: term } }, { assetName: { contains: term } }, { company: { contains: term } }];
-  }
+  // Word Chunk Search: every word typed, any order - beside the scope, never replacing it.
+  where.AND.push(...everyChunk(search, (chunk) => ({ OR: [{ assetCode: { contains: chunk } }, { assetName: { contains: chunk } }, { company: { contains: chunk } }] })));
   const inStatus = String(status || "").trim();
   if (inStatus) where.status = inStatus;
 

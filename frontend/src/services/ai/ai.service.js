@@ -30,18 +30,6 @@ export function askAi({ module, message, history = [], conversationId, vertical 
 }
 
 /**
- * Carries out a change the assistant proposed.
- *
- * The token is the consent, and it is single-use - pressing twice cannot apply it twice.
- */
-export function confirmAiAction({ module, token }) {
-  return apiRequest("/api/ai/confirm", {
-    method: "POST",
-    body: JSON.stringify({ module, token }),
-  });
-}
-
-/**
  * One turn, streamed.
  *
  * `apiRequest` is not used here: it reads a JSON body, and the whole point is to show the answer as
@@ -69,7 +57,11 @@ export async function streamAi({ module, message, history, conversationId, verti
     body: JSON.stringify({ module, message, history, conversationId, vertical }),
     signal,
   });
-  if (!response.ok || !response.body) throw new Error(`The assistant responded ${response.status}.`);
+  // A refusal before the stream opens carries its reason in a JSON body; that is what is shown.
+  if (!response.ok || !response.body) {
+    const refusal = await response.json().catch(() => null);
+    throw new Error(refusal?.message || `The assistant responded ${response.status}.`);
+  }
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();

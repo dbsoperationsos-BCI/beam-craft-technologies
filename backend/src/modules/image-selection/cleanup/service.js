@@ -32,9 +32,14 @@ function createCleanupService(dependencies = {}) {
   const log = dependencies.log || ((message) => console.error(message));
 
   // Every R2 object a set of upload rows owns: the stored keys, never keys rebuilt from names —
-  // renaming a project or folder does not rewrite keys, so rebuilt ones would miss objects.
+  // renaming a project or folder does not rewrite keys, so rebuilt ones would miss objects. A row
+  // that carries its `edit` relation owns that edit's objects too - the edit master, its display
+  // pair and the reference photo - which otherwise stayed in the bucket after the project went.
   function collectR2Keys(uploads) {
-    return (uploads || []).flatMap((upload) => [upload.thumbnailKey, upload.previewKey]).filter(Boolean);
+    return (uploads || []).flatMap((upload) => [
+      upload.thumbnailKey, upload.previewKey,
+      upload.edit?.outputKey, upload.edit?.outputPreviewKey, upload.edit?.outputThumbnailKey, upload.edit?.referenceKey,
+    ]).filter(Boolean);
   }
 
   async function deleteRemoteDerivatives(uploads) {

@@ -36,6 +36,8 @@ const source = [
   declaration('const UNASSIGNED_STATUS =', ';'),
   declaration('function normalizeLeadStatus(', '\n}'),
   declaration('const STATUSES_WITHOUT_FOLLOW_UP = [', '];'),
+  declaration('const NEXT_FOLLOW_UP_REQUIRED_STATUSES = [', '];'),
+  declaration('const NEXT_FOLLOW_UP_FIELD =', ';'),
   declaration('const REQUIRED_LEAD_FIELDS = [', '\n];'),
   declaration('const POPUP_REQUIRED_FIELDS = {', '\n};'),
   declaration('const REJECTED_LEAD_FIELDS =', ';'),
@@ -55,7 +57,7 @@ const { requiredLeadFields, isRequiredLeadField, missingRequiredLeadFields } = n
 const keys = (...args) => requiredLeadFields(...args).map((field) => field.key);
 
 test("a lead is asked for the same four, whatever vertical it is on", () => {
-  assert.deepEqual(keys("Interested", "Anitha"), ["name", "phone", "assignedBranch", "estimatedValue"]);
+  assert.deepEqual(keys("Interested", "Anitha"), ["name", "phone", "assignedBranch", "estimatedValue", "nextFollowUpDate"]);
 });
 
 /*
@@ -80,7 +82,7 @@ test("the lead popup asks for it, and only on Qua Qua", () => {
   assert.equal(isRequiredLeadField("dateOfBirthOrEdod", "Interested", "Anitha", { vertical: "Qua Qua", popup: true }), true);
   assert.deepEqual(
     keys("Interested", "Anitha", { vertical: "Qua Qua", popup: true }),
-    ["name", "phone", "assignedBranch", "estimatedValue", "dateOfBirthOrEdod"],
+    ["name", "phone", "assignedBranch", "estimatedValue", "dateOfBirthOrEdod", "nextFollowUpDate"],
   );
   // The other two verticals do not show the field at all, so they cannot be asked for it.
   for (const vertical of ["Dum Dum", "Corp", "", "Calls"]) {
@@ -94,7 +96,7 @@ test("a lead named CNA is excused the date, exactly as it is excused the value",
    * knowable than what the job is worth. Both fall away together, and everything that makes the
    * call findable stays.
    */
-  assert.deepEqual(keys("Interested", "CNA", { vertical: "Qua Qua", popup: true }), ["name", "phone", "assignedBranch"]);
+  assert.deepEqual(keys("Interested", "CNA", { vertical: "Qua Qua", popup: true }), ["name", "phone", "assignedBranch", "nextFollowUpDate"]);
   assert.equal(isRequiredLeadField("dateOfBirthOrEdod", "Interested", "CNA", { vertical: "Qua Qua", popup: true }), false);
   assert.equal(isRequiredLeadField("estimatedValue", "Interested", "CNA", { vertical: "Qua Qua", popup: true }), false);
 });
@@ -113,7 +115,7 @@ test("a Qua Qua lead being turned down is asked for neither", () => {
  * number - or for the call to go unrecorded.
  */
 test("a lead named CNA is not asked what the job is worth", () => {
-  assert.deepEqual(keys("Interested", "CNA"), ["name", "phone", "assignedBranch"]);
+  assert.deepEqual(keys("Interested", "CNA"), ["name", "phone", "assignedBranch", "nextFollowUpDate"]);
   // Everything that makes the call findable is still required - the number is the whole point of it.
   assert.equal(isRequiredLeadField("phone", "Interested", "CNA"), true);
   assert.equal(isRequiredLeadField("assignedBranch", "Interested", "CNA"), true);
@@ -122,7 +124,7 @@ test("a lead named CNA is not asked what the job is worth", () => {
 
 test("it is the name as typed, however it is typed", () => {
   for (const typed of ["CNA", "cna", " Cna ", "cNa"]) {
-    assert.deepEqual(keys("Interested", typed), ["name", "phone", "assignedBranch"], typed);
+    assert.deepEqual(keys("Interested", typed), ["name", "phone", "assignedBranch", "nextFollowUpDate"], typed);
   }
 });
 
@@ -135,7 +137,7 @@ test("any other name leaves the field exactly as required as it was", () => {
   for (const typed of ["", "Anitha", "CNA Traders", "Mr CNA", "cna kumar", "C N A"]) {
     assert.deepEqual(
       keys("Interested", typed),
-      ["name", "phone", "assignedBranch", "estimatedValue"],
+      ["name", "phone", "assignedBranch", "estimatedValue", "nextFollowUpDate"],
       typed,
     );
   }
@@ -150,7 +152,7 @@ test("any other name leaves the field exactly as required as it was", () => {
  * two, so the client and the branch a CNA lead does have are still asked for.
  */
 test("the CNA status excuses the same two fields the CNA name does", () => {
-  assert.deepEqual(keys("CNA", "Anitha"), ["name", "phone", "assignedBranch"]);
+  assert.deepEqual(keys("CNA", "Anitha"), ["name", "phone", "assignedBranch", "nextFollowUpDate"]);
 });
 
 test("a lead being turned down is still asked for who the person is, and nothing else", () => {
@@ -163,7 +165,7 @@ test("a lead being turned down is still asked for who the person is, and nothing
 });
 
 test("the save refuses on exactly what the asterisks ask for", () => {
-  const form = { vertical: "Qua Qua", leadStatus: "Interested", name: "CNA", phone: "9876543210", assignedBranch: "Erode TN" };
+  const form = { vertical: "Qua Qua", leadStatus: "Interested", name: "CNA", phone: "9876543210", assignedBranch: "Erode TN", nextFollowUpDate: "2026-10-10" };
   assert.deepEqual(missingRequiredLeadFields(form), [], "a CNA call with a number and a branch is saveable");
   // The same form under a real name is refused until the value is answered - and says which field.
   assert.deepEqual(
@@ -191,7 +193,7 @@ test("the save refuses on exactly what the asterisks ask for", () => {
  */
 test("a CNA status excuses Estimated Value and the date, on a lead with a real name", () => {
   // The name is a real client's - this is the status doing the work, which is the whole change.
-  assert.deepEqual(keys("CNA", "Priya", { vertical: "Qua Qua", popup: true }), ["name", "phone", "assignedBranch"]);
+  assert.deepEqual(keys("CNA", "Priya", { vertical: "Qua Qua", popup: true }), ["name", "phone", "assignedBranch", "nextFollowUpDate"]);
   assert.equal(isRequiredLeadField("estimatedValue", "CNA", "Priya", { vertical: "Qua Qua", popup: true }), false);
   assert.equal(isRequiredLeadField("dateOfBirthOrEdod", "CNA", "Priya", { vertical: "Qua Qua", popup: true }), false);
 });
@@ -234,13 +236,13 @@ test("a status that is not one of the three still demands both", () => {
 test("a CNA status leaves Add Lead and Bulk Entry as they were, bar Estimated Value", () => {
   // The date is never asked outside the popup, so there is nothing there for this to excuse; the
   // value is, and an unanswered call cannot answer it on the way in either.
-  assert.deepEqual(keys("CNA", "Priya"), ["name", "phone", "assignedBranch"]);
-  assert.deepEqual(keys("Interested", "Priya"), ["name", "phone", "assignedBranch", "estimatedValue"]);
+  assert.deepEqual(keys("CNA", "Priya"), ["name", "phone", "assignedBranch", "nextFollowUpDate"]);
+  assert.deepEqual(keys("Interested", "Priya"), ["name", "phone", "assignedBranch", "estimatedValue", "nextFollowUpDate"]);
 });
 
 test("the save refusal agrees with the asterisks", () => {
   // Both read `requiredLeadFields`, so a lead saved on CNA with neither answer is not refused.
-  const lead = { name: "Priya", phone: "9876543210", assignedBranch: "Erode", leadStatus: "CNA", estimatedValue: "", dateOfBirthOrEdod: "" };
+  const lead = { name: "Priya", phone: "9876543210", assignedBranch: "Erode", leadStatus: "CNA", estimatedValue: "", dateOfBirthOrEdod: "", nextFollowUpDate: "2026-10-10" };
   assert.deepEqual(missingRequiredLeadFields(lead, { vertical: "Qua Qua", popup: true }), []);
   // The same lead on Followup is refused for exactly the two.
   const worked = { ...lead, leadStatus: "Followup" };
@@ -248,4 +250,23 @@ test("the save refusal agrees with the asterisks", () => {
     missingRequiredLeadFields(worked, { vertical: "Qua Qua", popup: true }).map((field) => field.key),
     ["estimatedValue", "dateOfBirthOrEdod"],
   );
+});
+
+test("a lead still being chased cannot be saved without its next follow-up date", () => {
+  /*
+   * CNA, Interested, Followup and Converted & Followup are still being chased, so when the next
+   * call is due has to be written down. Converted, Invalid and Rejected end the chase and keep
+   * only the Last Follow-up Date; a lead with no status yet is not asked.
+   */
+  for (const status of ["CNA", "Interested", "Followup", "Converted & Followup"]) {
+    assert.equal(isRequiredLeadField("nextFollowUpDate", status, "Priya"), true, status);
+    assert.equal(isRequiredLeadField("nextFollowUpDate", status, "Priya", { vertical: "Qua Qua", popup: true }), true, status);
+    assert.equal(isRequiredLeadField("nextFollowUpDate", status, "CNA"), true, `${status} / CNA name`);
+  }
+  for (const status of ["Converted", "Invalid", "Rejected", ""]) {
+    assert.equal(isRequiredLeadField("nextFollowUpDate", status, "Priya"), false, status || "(blank)");
+  }
+  const lead = { name: "Priya", phone: "9876543210", assignedBranch: "Erode", estimatedValue: "50000", leadStatus: "Followup" };
+  assert.deepEqual(missingRequiredLeadFields(lead).map((field) => field.key), ["nextFollowUpDate"]);
+  assert.deepEqual(missingRequiredLeadFields({ ...lead, nextFollowUpDate: "2026-10-10" }), []);
 });

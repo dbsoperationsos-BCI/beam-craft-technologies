@@ -9,7 +9,7 @@
  * would filter to an empty table with nothing on screen to say why.
  */
 
-export const TASK_STATUSES = ["PENDING", "IN_PROGRESS", "COMPLETED", "REASSIGNED", "CANCELLED"];
+export const TASK_STATUSES = ["PENDING", "IN_PROGRESS", "COMPLETED", "REASSIGNED", "CANCELLED", "SUBMITTED"];
 /**
  * The two a task is over in. Mirrors `CLOSED_STATUSES` in the module, which is what the server
  * refuses every further verb with — so a task in one of these has nothing left anybody can do to it.
@@ -47,6 +47,8 @@ export const STATUS_LABELS = {
   COMPLETED: "Completed",
   REASSIGNED: "Reassigned",
   CANCELLED: "Cancelled",
+  // Finished by its holder and sent back, waiting for whoever assigned it. Its tab sits after Cancelled.
+  SUBMITTED: "Finish & Send Back",
 };
 
 export const PRIORITY_LABELS = { LOW: "Low", MEDIUM: "Medium", HIGH: "High", CRITICAL: "Critical" };
@@ -60,7 +62,10 @@ export const statusLabel = (status) => STATUS_LABELS[status] || status || "—";
  * the screen's own permission is the whole answer for them. The page drops a view whose permission
  * the viewer does not hold, rather than listing one that would answer with a refusal.
  */
+// In this order on screen (the dropdown is not sorted): Dashboard, All Tasks, My Tasks, Tasks Given.
 export const TASK_VIEWS = [
+  // Everybody's: their own tasks as figures - and the studio's too for whoever holds All Tasks.
+  { id: "dashboard", label: "Dashboard", dashboard: true },
   {
     id: "all",
     label: "All Tasks",
@@ -72,13 +77,11 @@ export const TASK_VIEWS = [
 ];
 
 /**
- * The view the screen opens on, which is deliberately not the first one listed.
- *
- * All Tasks leads the dropdown because it is the widest reading and most readers who have it want it
- * within reach — but it is also the one most roles do not hold at all, and the screen has to open
- * on something everybody has. My Tasks is what the person came for.
+ * The view the screen opens on: the Dashboard, which every reader of Tasks has - their own figures
+ * first, the way Image Selection opens. All Tasks is listed above My Tasks but most roles do not
+ * hold it, so it is never the default.
  */
-export const DEFAULT_TASK_VIEW = "mine";
+export const DEFAULT_TASK_VIEW = "dashboard";
 
 /**
  * The tab row's "no filter" entry — the whole of whichever view is open.
@@ -100,10 +103,33 @@ export const ALL_STATUSES = "ALL";
  */
 export const FILTERABLE_STATUSES = [...TASK_STATUSES];
 
+/*
+ * Not a status - an overlay, like the repository's Review Pending: a task whose due day has passed
+ * while it is still owed (Pending, In Progress, or Finished & Sent Back and waiting for its setter's
+ * approval). It shows under Overdue and under its own status tab too. The same rule as the Task
+ * Dashboard's Overdue card (`hrm/tasks/dashboard.js`), so the two always count the same.
+ */
+export const OVERDUE = "OVERDUE";
+const OWED_TABS = ["PENDING", "IN_PROGRESS", "SUBMITTED"];
+
+/** Today in the browser's own calendar, "YYYY-MM-DD" - what a due day is compared with. */
+export function todayKey(now = new Date()) {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+/** How many whole days past its due day an owed task is, for this reader; 0 when it is not overdue. */
+export function daysOverdue(task, viewId, today = todayKey()) {
+  const due = String(task?.dueOn || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(due) || due >= today || !OWED_TABS.includes(taskTab(task, viewId))) return 0;
+  return Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${due}T00:00:00Z`)) / 86_400_000);
+}
+export const taskIsOverdue = (task, viewId, today) => daysOverdue(task, viewId, today) > 0;
+
 export const TASK_STATUS_FILTERS = [
   // A named id rather than an empty string: it is a tab's React key and its `aria-selected` test,
   // and "" is a poor value for both. The page sends "" to the server for it.
   { id: ALL_STATUSES, label: "All" },
+  { id: OVERDUE, label: "Overdue" },
   ...FILTERABLE_STATUSES.map((status) => ({ id: status, label: STATUS_LABELS[status] })),
 ];
 
@@ -116,9 +142,32 @@ export const TASK_STATUS_FILTERS = [
  * All tab was already fetching the whole view — filtering it here costs nothing and saves a round
  * trip on every tab change.
  */
-export const tasksForStatus = (tasks, statusFilter) => (statusFilter === ALL_STATUSES
+/*
+ * Finish & Send Back is the assigner's tab: it lives in Tasks Given (and All Tasks), where the
+ * person who gave the work follows it. My Tasks is the work given *to* you, so a task you finished
+ * and sent back is simply Completed there - your part of it is done.
+ */
+export const taskStatusFiltersFor = (viewId) => (viewId === "mine"
+  ? TASK_STATUS_FILTERS.filter((filter) => filter.id !== "SUBMITTED")
+  : TASK_STATUS_FILTERS);
+
+export const tasksForStatus = (tasks, statusFilter, viewId) => (statusFilter === ALL_STATUSES
   ? [...(tasks || [])]
-  : (tasks || []).filter((task) => task?.status === statusFilter));
+  : statusFilter === OVERDUE
+    ? (tasks || []).filter((task) => taskIsOverdue(task, viewId))
+    : (tasks || []).filter((task) => taskTab(task, viewId) === statusFilter));
+
+/**
+ * The status tab a task sits under for this reader. A task they passed on to somebody else is under
+ * Reassigned, and only there - it is no longer theirs to do, so it is not Pending for them. Its new
+ * holder gets it as Pending, which is what the server sends it as. One reassigned before that rule
+ * may still say `REASSIGNED`; it is somebody's pending work all the same.
+ */
+export const taskTab = (task, viewId) => {
+  if (task?.passedOn) return "REASSIGNED";
+  if (viewId === "mine" && task?.status === "SUBMITTED") return "COMPLETED";
+  return task?.status === "REASSIGNED" ? "PENDING" : task?.status;
+};
 
 /**
  * How many tasks sit behind each tab, keyed by the tab's own id.
@@ -131,10 +180,23 @@ export const tasksForStatus = (tasks, statusFilter) => (statusFilter === ALL_STA
  * owes nobody anything — but its tasks are still in the list, so a total that left them out would
  * disagree with the rows underneath it.
  */
-export function taskStatusCounts(tasks) {
+/**
+ * A row as the open view reads it, so its Status always says the tab it sits under: a task you
+ * passed on reads Reassigned, and in My Tasks work you sent back reads Completed.
+ */
+export const rowForView = (task, viewId) => {
+  const tab = taskTab(task, viewId);
+  return tab === task?.status ? task : { ...task, statusLabel: STATUS_LABELS[tab] || task?.statusLabel };
+};
+
+export function taskStatusCounts(tasks, viewId) {
   const rows = Array.isArray(tasks) ? tasks : [];
-  const counts = { [ALL_STATUSES]: rows.length };
-  for (const task of rows) counts[task?.status] = (counts[task?.status] || 0) + 1;
+  const counts = { [ALL_STATUSES]: rows.length, [OVERDUE]: 0 };
+  const today = todayKey();
+  for (const task of rows) {
+    counts[taskTab(task, viewId)] = (counts[taskTab(task, viewId)] || 0) + 1;
+    if (taskIsOverdue(task, viewId, today)) counts[OVERDUE] += 1;
+  }
   return counts;
 }
 
@@ -152,6 +214,7 @@ export const taskStatusStyles = {
   Completed: "bg-emerald-500",
   Reassigned: "bg-violet-500",
   Cancelled: "bg-slate-400",
+  "Finish & Send Back": "bg-teal-500",
 };
 
 /** `[key, header, type, size, minSize]`, the same shape every other module table uses. */
@@ -207,14 +270,14 @@ export const taskFormSections = [
        * offered this box would be a second, quieter way of doing it, and the server's update schema
        * would refuse the field anyway. On a duplicate it is a fresh choice like any other.
        */
-      { name: "assignedToUserId", label: "Assigned To", type: "select", required: true, when: (values, context) => !context?.editing, options: "users", placeholder: "Select a person", props: { searchable: true }, colSpan: 2 },
+      { name: "assignedToUserId", label: "Assigned To", helperText: "The person who will do this task; they are notified once it is given.", type: "select", required: true, when: (values, context) => !context?.editing, options: "users", placeholder: "Select a person", props: { searchable: true }, colSpan: 2 },
       // `clears` empties the box below on every change of type, so a detail typed under "Other" and
       // then switched away cannot be submitted against a type that never showed it.
-      { name: "taskType", label: "Task Type", type: "select", required: true, options: "taskTypes", placeholder: "Select a type", clears: ["taskTypeOther"] },
-      { name: "taskTypeOther", label: "What Kind of Task", required: true, when: taskTypeIsOther, props: { placeholder: "e.g. Vendor coordination", maxLength: 120 } },
+      { name: "taskType", label: "Task Type", helperText: "The kind of work this is; choose Other to describe it yourself.", type: "select", required: true, options: "taskTypes", placeholder: "Select a type", clears: ["taskTypeOther"] },
+      { name: "taskTypeOther", label: "What Kind of Task", helperText: "A few words naming the kind of task, since it is not on the list.", required: true, when: taskTypeIsOther, props: { placeholder: "e.g. Vendor coordination", maxLength: 120 } },
       // `sorted: false` because the order of a priority scale *is* its meaning — alphabetically it
       // would read Critical, High, Low, Medium, which says nothing about which is which.
-      { name: "priority", label: "Priority", type: "select", required: true, options: "priorities", props: { sorted: false } },
+      { name: "priority", label: "Priority", helperText: "How urgent the task is, so the assignee knows what to do first.", type: "select", required: true, options: "priorities", props: { sorted: false } },
       /*
        * Required, which it was not. A task with no due date is in nobody's "due this week" and
        * nothing chases it: it sits in the list being neither done nor overdue. The server asks for
@@ -228,23 +291,23 @@ export const taskFormSections = [
        * calendar offered every past day, and the comment above claimed a bound that neither side
        * enforced.
        */
-      { name: "dueOn", label: "Due Date", type: "date", required: true, props: { minDate: new Date().toISOString().slice(0, 10) } },
+      { name: "dueOn", label: "Due Date", helperText: "The day it must be done by; past dates cannot be chosen.", type: "date", required: true, props: { minDate: new Date().toISOString().slice(0, 10) } },
       /*
        * Where the work sits, asked rather than read off the assignee: a task crosses those lines
        * often enough that reading them off the person would file it under the wrong one. Both are
        * closed lists from the studio's own master data, and both are required - a task nobody said
        * a department for is a row that every reading by department has to leave out.
        */
-      { name: "department", label: "Department", type: "select", required: true, options: "departments", placeholder: "Select a department", props: { searchable: true } },
-      { name: "branch", label: "Branch", type: "select", required: true, options: "branches", placeholder: "Select a branch", props: { searchable: true } },
+      { name: "department", label: "Department", helperText: "The department this work belongs to, used to sort and report tasks.", type: "select", required: true, options: "departments", placeholder: "Select a department", props: { searchable: true } },
+      { name: "branch", label: "Branch", helperText: "The branch this work belongs to, used to sort and report tasks.", type: "select", required: true, options: "branches", placeholder: "Select a branch", props: { searchable: true } },
     ],
   },
   {
     id: "the-task",
     title: "The Task",
     fields: [
-      { name: "title", label: "Task Title", type: "text", required: true, placeholder: "e.g. Send the Sharma wedding album for review", colSpan: 2 },
-      { name: "description", label: "Detailed Description", type: "textarea", required: true, placeholder: "What needs doing, anything needed to do it, and what finished looks like.", props: { rows: 8 }, colSpan: 2 },
+      { name: "title", label: "Task Title", helperText: "One short line naming the task, shown in lists and notifications.", type: "text", required: true, placeholder: "e.g. Send the Sharma wedding album for review", colSpan: 2 },
+      { name: "description", label: "Detailed Description", helperText: "What needs doing, what is needed for it and what finished looks like.", type: "textarea", required: true, placeholder: "What needs doing, anything needed to do it, and what finished looks like.", props: { rows: 8 }, colSpan: 2 },
     ],
   },
 ];
@@ -293,6 +356,8 @@ export const ACTIVITY_LABELS = {
   ASSIGNED: "Task assigned",
   STATUS_CHANGED: "Status changed",
   COMPLETED: "Task completed",
+  SUBMITTED: "Finished & sent back",
+  REVOKED: "Task revoked",
   REASSIGNED: "Task reassigned",
   // Kept for the tasks rolled back before reassigning replaced it: the history says what happened
   // at the time, in the words it happened in, and rewriting it would be a lie about the record.
@@ -314,6 +379,8 @@ export const activityStyles = {
   ASSIGNED: "bg-blue-500",
   STATUS_CHANGED: "bg-blue-500",
   COMPLETED: "bg-emerald-500",
+  SUBMITTED: "bg-teal-500",
+  REVOKED: "bg-rose-500",
   REASSIGNED: "bg-violet-500",
   REVERTED: "bg-rose-500",
   CANCELLED: "bg-slate-400",

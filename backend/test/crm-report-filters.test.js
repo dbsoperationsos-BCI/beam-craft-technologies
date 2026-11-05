@@ -22,7 +22,9 @@ test("no filters still produces a usable clause", () => {
 
 test("a date range covers both of its end days whole", () => {
   // "to 31 Aug" has to include the 31st. Up to its midnight would silently drop a day's calls.
-  assert.deepEqual(params({ from: "2026-08-01", to: "2026-08-31" }), ["2026-08-01 00:00:00", "2026-08-31 23:59:59"]);
+  // And the day is the studio's - Asia/Kolkata - so each bound is the UTC instant that moment is;
+  // see studio-day.test.js.
+  assert.deepEqual(params({ from: "2026-08-01", to: "2026-08-31" }), ["2026-07-31 18:30:00.000", "2026-08-31 18:29:59.999"]);
 });
 
 test("every range in these reports is bounded by the one day rule", () => {
@@ -33,15 +35,15 @@ test("every range in these reports is bounded by the one day rule", () => {
    * Usage columns read 0m however long the application had been in use. One rule, in one place, is
    * what stops that being written a fourth time.
    */
-  assert.equal(dayStart("2026-09-02"), "2026-09-02 00:00:00");
-  assert.equal(dayEnd("2026-09-02"), "2026-09-02 23:59:59", "the day named is included, not cut at its midnight");
+  assert.equal(dayStart("2026-09-02"), "2026-09-01 18:30:00.000");
+  assert.equal(dayEnd("2026-09-02"), "2026-09-02 18:29:59.999", "the day named is included, not cut at its midnight");
   // No day is no bound at all, rather than a clause matching the empty string.
   assert.equal(dayStart(""), "");
   assert.equal(dayEnd(""), "");
   // The usage reports bound their range the same way the call reports do.
   assert.deepEqual(
     buildUsageWhere({ from: "2026-08-04", to: "2026-09-02" }, { dateColumn: "`a`.`created_at`", nameExpr: "`n`" }).params,
-    ["2026-08-04 00:00:00", "2026-09-02 23:59:59"],
+    ["2026-08-03 18:30:00.000", "2026-09-02 18:29:59.999"],
   );
 });
 
@@ -110,6 +112,12 @@ test("a search is bound, wildcards and all, never concatenated", () => {
   assert.deepEqual(built.params, ["%O'Brien%", "%O'Brien%", "%O'Brien%"]);
   assert.ok(!built.sql.includes("O'Brien"), "the value must not appear in the statement");
   assert.equal(built.sql.match(/\?/g).length, 3, "one placeholder per column searched");
+});
+
+test("a search of several words needs every word, in any order (Word Chunk Search)", () => {
+  const built = buildWhere({ search: "naidu lokesh" });
+  assert.deepEqual(built.params, ["%naidu%", "%naidu%", "%naidu%", "%lokesh%", "%lokesh%", "%lokesh%"]);
+  assert.equal(built.sql.match(/\?/g).length, 6, "three columns for each word");
 });
 
 test("a value that reads as SQL is still only a value", () => {

@@ -3,7 +3,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const prisma = require("../config/db");
 const { sendPasswordResetEmail } = require("../services/emailService");
-const { sendSms } = require("../services/smsSender");
+const { sendSms, smsAvailable } = require("../services/smsSender");
+const { CLIENT_ROLE } = require("../services/loginCredentials");
 const { normalizePhoneNumber } = require("../services/phoneNumber");
 const { passwordProblem } = require("../services/passwordPolicy");
 const { passwordReuseProblem, nextPasswordHistory } = require("../services/passwordHistory");
@@ -125,7 +126,9 @@ async function accountForMobile(mobile) {
   const unique = [...new Map(candidates.map((row) => [row.id, row])).values()];
   if (unique.length !== 1) return null;
 
-  return unique[0].status === "ACTIVE" ? unique[0] : null;
+  // A client's login keeps the password the studio gave it (Create Project → Client Credentials):
+  // it is not one somebody may reset by phone, even if a number is later put on the account.
+  return unique[0].status === "ACTIVE" && unique[0].role !== "CLIENT" ? unique[0] : null;
 }
 
 /** Only the hash is stored, so a copy of the table is not a set of working links. */
@@ -133,6 +136,9 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 const authSessions = require("../services/authSessionService");
+// Sign-ins, failed sign-ins and sign-outs for Administration → User Activity Logs. Queued, never
+// awaited: the answer to the person signing in does not wait on the audit trail.
+const { recordAuthEvent } = require("../services/activityLog");
 
 // The short-lived access token, exactly as login has always minted it — refresh issues the same
 // shape so a refreshed session is indistinguishable from a fresh sign-in to every guard.
@@ -449,7 +455,15 @@ const resetPassword = async (req, res) => {
      * A password changed without the token being spent would leave the link working; a token spent
      * without the password changing would lose somebody their only way in.
      */
+    /*
+     * A reset signs the account out of every device too (`signOutEverywhere`), and for the sharper
+     * reason: a reset is what somebody does when the old password is in the wrong hands, so leaving
+     * that person's open sessions alive is leaving them in.
+     */
+    const changedAt = new Date();
     await prisma.$transaction([
+      prisma.user.update({ where: { id: record.userId }, data: { passwordChangedAt: changedAt } }),
+      prisma.authSession.updateMany({ where: { userId: record.userId, revokedAt: null }, data: { revokedAt: changedAt } }),
       prisma.user.update({
         where: { id: record.userId },
         // They have just chosen it themselves, so there is nothing left to force on next sign-in.
@@ -481,12 +495,14 @@ const login = async (req, res) => {
     });
 
     if (!user) {
+      recordAuthEvent(req, { action: "Login failed", statusCode: 401, succeeded: false });
       return res.status(401).json({
         message: "Invalid email or password",
       });
     }
 
     if (user.status !== "ACTIVE") {
+      recordAuthEvent(req, { action: "Login failed", statusCode: 403, user, succeeded: false });
       return res.status(403).json({
         message: "User account is inactive",
       });
@@ -495,35 +511,158 @@ const login = async (req, res) => {
     const isPasswordCorrect = await bcrypt.compare(password, user.password);
 
     if (!isPasswordCorrect) {
+      recordAuthEvent(req, { action: "Login failed", statusCode: 401, user, succeeded: false });
       return res.status(401).json({
         message: "Invalid email or password",
       });
     }
 
-    const token = signAccessToken(user);
-
-    const updatedUser = await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
-
-    // A persistent session is minted only when the client asks for one — the desktop app sends
-    // `client: "desktop"` — so the web app's login request and response are exactly what they
-    // always were. The raw refresh token goes out once, here; only its hash is stored.
-    let refreshSession = null;
-    if (req.body.client === "desktop") {
-      const created = await authSessions.createSession(user.id, "desktop");
-      refreshSession = { refreshToken: created.token, refreshTokenExpiresAt: created.expiresAt };
+    // A client (the Beam Craft app) proves the number too, when the studio has turned that on: a
+    // code by SMS, and the token only for it.
+    if (user.role === CLIENT_ROLE && clientLoginOtpOn()) {
+      if (smsAvailable()) return startClientLoginOtp(req, res, user);
+      // Turned on, but no gateway on this server: signing in stays as it was rather than shutting
+      // every client out.
+      console.warn("[auth] Client signed in without a code: SMS is not configured on this server.");
     }
 
-    return res.json({
-      message: "Login successful",
-      token,
-      ...(refreshSession || {}),
-      user: publicUser(updatedUser),
-    });
+    return completeLogin(req, res, user);
   } catch (error) {
     if (process.env.NODE_ENV !== "production") console.error("Login failed:", error);
     return res.status(500).json({
       message: "Unable to sign in. Please try again later.",
     });
+  }
+};
+
+/** The signed-in answer: the token (and the desktop's refresh session), recorded and returned. */
+async function completeLogin(req, res, user) {
+  const token = signAccessToken(user);
+
+  const updatedUser = await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+
+  // A persistent session is minted only when the client asks for one — the desktop app sends
+  // `client: "desktop"` — so the web app's login request and response are exactly what they
+  // always were. The raw refresh token goes out once, here; only its hash is stored.
+  let refreshSession = null;
+  if (req.body?.client === "desktop") {
+    const created = await authSessions.createSession(user.id, "desktop");
+    refreshSession = { refreshToken: created.token, refreshTokenExpiresAt: created.expiresAt };
+  }
+
+  recordAuthEvent(req, { action: "Login", statusCode: 200, user: updatedUser });
+  return res.json({
+    message: "Login successful",
+    token,
+    ...(refreshSession || {}),
+    user: publicUser(updatedUser),
+  });
+}
+
+/*
+ * ── A client's sign-in code ──────────────────────────────────────────────────────────────────
+ *
+ * The Beam Craft app signs a client in with their mobile number and password, then a six-digit code
+ * sent by SMS to that number: the password alone gives no token. `login` answers a right password
+ * with `{ otpRequired, challenge, mobile, expiresInSeconds }` instead - while `CLIENT_LOGIN_OTP` is
+ * "on"; off (the default), a client signs in with the password alone, as before; `POST /client-otp/verify`
+ * takes the challenge and the code and answers as `login` always has. The app asks again only after
+ * signing out (or when its token runs out).
+ *
+ * The same rules as the reset code above, with a longer life - a text can take a minute to land and
+ * this one is typed straight away: single use, five wrong guesses spend it, only its hash is kept.
+ */
+const CLIENT_OTP_TTL_MS = 5 * 60 * 1000;
+// Off until the studio sets CLIENT_LOGIN_OTP="on" - once its SMS sender (DLT) is approved.
+const clientLoginOtpOn = (env = process.env) => String(env.CLIENT_LOGIN_OTP || "").trim().toLowerCase() === "on";
+// A challenge can be sent again (a new code, a new challenge) for this long after it was made.
+const CLIENT_OTP_RESEND_WINDOW_MS = 15 * 60 * 1000;
+const CLIENT_OTP_REFUSED_MESSAGE = "That code is not right, or it has expired. Ask for a new one.";
+
+// "9876543210" -> "******3210": enough for the client to know which phone, nothing for anybody else.
+const maskedMobile = (value) => {
+  const digits = String(value || "").replace(/\D/g, "").slice(-10);
+  return digits ? `${"*".repeat(Math.max(0, digits.length - 4))}${digits.slice(-4)}` : null;
+};
+
+async function startClientLoginOtp(req, res, user) {
+  // The number the studio saved for the client's own project; the login's username is those digits.
+  const project = user.clientProjectId
+    ? await prisma.salesProject.findUnique({ where: { id: user.clientProjectId }, select: { clientMainNumber: true } })
+    : null;
+  const mobile = project?.clientMainNumber || user.username;
+
+  // A new code spends whatever was outstanding: the one typed is the one that arrived last.
+  await prisma.clientLoginOtp.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: new Date() } });
+  const code = newOtpCode();
+  const record = await prisma.clientLoginOtp.create({
+    data: { userId: user.id, codeHash: hashToken(code), expiresAt: new Date(Date.now() + CLIENT_OTP_TTL_MS) },
+  });
+
+  const result = await sendSms({
+    to: mobile,
+    code,
+    message: `${code} is your Don't Blink Studioz login code. It expires in 5 minutes. Do not share it with anyone.`,
+  });
+  if (!result?.sent) {
+    await prisma.clientLoginOtp.update({ where: { id: record.id }, data: { usedAt: new Date() } });
+    console.warn(`[auth] Client login code not sent for account ${user.id}: ${result?.reason || "unknown reason"}.`);
+    return res.status(503).json({ message: "We could not send the code to your phone just now. Please try again in a minute." });
+  }
+  console.log(`[auth] Client login code sent for account ${user.id}${result.channel ? ` (${result.channel})` : ""}.`);
+  return res.json({ otpRequired: true, challenge: record.id, mobile: maskedMobile(mobile), expiresInSeconds: CLIENT_OTP_TTL_MS / 1000 });
+}
+
+// The challenge's login, while it may still sign in: an active client.
+async function clientForChallenge(record) {
+  if (!record) return null;
+  const user = await prisma.user.findUnique({ where: { id: record.userId } });
+  return user && user.status === "ACTIVE" && user.role === CLIENT_ROLE ? user : null;
+}
+
+const verifyClientLoginOtp = async (req, res) => {
+  const challenge = String(req.body?.challenge || "").trim();
+  const code = String(req.body?.otp || "").trim();
+  if (!challenge || !code) return res.status(400).json({ message: "Enter the code that was sent to your phone." });
+
+  try {
+    const record = await prisma.clientLoginOtp.findUnique({ where: { id: challenge } });
+    const user = await clientForChallenge(record);
+    if (!user || record.usedAt || record.expiresAt < new Date()) return res.status(400).json({ message: CLIENT_OTP_REFUSED_MESSAGE });
+
+    // Counted before it is compared, and the fifth wrong guess spends the code - as the reset code.
+    if (record.codeHash !== hashToken(code)) {
+      const spent = record.attempts + 1 >= OTP_MAX_ATTEMPTS;
+      await prisma.clientLoginOtp.update({ where: { id: record.id }, data: { attempts: { increment: 1 }, ...(spent ? { usedAt: new Date() } : {}) } });
+      recordAuthEvent(req, { action: "Login failed", statusCode: 400, user, succeeded: false });
+      return res.status(400).json({ message: CLIENT_OTP_REFUSED_MESSAGE });
+    }
+
+    // Spent only if still unspent, so two requests with the same code cannot both sign in.
+    const spent = await prisma.clientLoginOtp.updateMany({ where: { id: record.id, usedAt: null }, data: { usedAt: new Date() } });
+    if (spent.count !== 1) return res.status(400).json({ message: CLIENT_OTP_REFUSED_MESSAGE });
+    return completeLogin(req, res, user);
+  } catch (error) {
+    console.error("Unable to verify a client login code:", error);
+    return res.status(500).json({ message: "Unable to check that code. Please try again." });
+  }
+};
+
+// "Resend code": a new code (and challenge) for the sign-in the challenge began - never for anybody
+// the caller names, so this cannot be used to send texts to numbers of their choosing.
+const resendClientLoginOtp = async (req, res) => {
+  const challenge = String(req.body?.challenge || "").trim();
+  if (!challenge) return res.status(400).json({ message: "Please sign in again." });
+  try {
+    const record = await prisma.clientLoginOtp.findUnique({ where: { id: challenge } });
+    const user = await clientForChallenge(record);
+    if (!user || Date.now() - record.createdAt.getTime() > CLIENT_OTP_RESEND_WINDOW_MS) {
+      return res.status(400).json({ message: "This sign-in has expired. Please sign in again." });
+    }
+    return startClientLoginOtp(req, res, user);
+  } catch (error) {
+    console.error("Unable to resend a client login code:", error);
+    return res.status(500).json({ message: "Unable to send a new code. Please try again." });
   }
 };
 
@@ -552,6 +691,13 @@ const refreshSession = async (req, res) => {
 const logout = async (req, res) => {
   try {
     await authSessions.revokeSession(req.body?.refreshToken);
+    // The audit line comes after, and on its own: nothing about it may decide whether a session ends.
+    try {
+      const owner = await authSessions.sessionOwner(req.body?.refreshToken);
+      if (owner) recordAuthEvent(req, { action: "Logout", statusCode: 200, user: owner });
+    } catch {
+      // A sign-out that could not be logged is still a sign-out.
+    }
     return res.json({ message: "Signed out." });
   } catch (error) {
     if (process.env.NODE_ENV !== "production") console.error("Logout failed:", error);
@@ -560,6 +706,8 @@ const logout = async (req, res) => {
 };
 
 module.exports = {
+  verifyClientLoginOtp,
+  resendClientLoginOtp,
   requestPasswordResetOtp,
   verifyPasswordResetOtp,
   login,

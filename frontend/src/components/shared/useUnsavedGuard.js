@@ -43,7 +43,9 @@ export default function useUnsavedGuard(holdsUnsavedEdits, options = {}) {
     guard,
     /*
      * Spread onto a `ConfirmDialog`. Cancel keeps the work and stays where it is, so the answer
-     * that loses nothing is the one that needs no decision - closing the dialog is Cancel.
+     * that loses nothing is the one that needs no decision - closing the dialog is Cancel, and
+     * `primaryAction: "cancel"` is what makes it the button that draws the eye too, rather than
+     * the one that throws the work away.
      */
     confirmProps: {
       open: Boolean(pendingMove),
@@ -51,6 +53,7 @@ export default function useUnsavedGuard(holdsUnsavedEdits, options = {}) {
       message: options.message || "Go back if you want to save your settings.",
       cancelLabel: options.cancelLabel || "Go Back",
       confirmLabel: options.confirmLabel || "Discard & Continue",
+      primaryAction: "cancel",
       onCancel: () => setPendingMove(null),
       onConfirm: () => {
         const move = pendingMove;

@@ -1,196 +1,113 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
-import RefreshRounded from "@mui/icons-material/RefreshRounded";
+import { useCallback, useEffect, useRef, useState } from "react";
 import AiFeatureNavigation from "@/components/ai-feature/AiFeatureNavigation";
-import EventCover from "@/components/ai-feature/shared/EventCover";
-import ProgressBar from "@/components/ai-feature/shared/ProgressBar";
-import StatTile from "@/components/ai-feature/shared/StatTile";
-import StatusChip from "@/components/ai-feature/shared/StatusChip";
+import { useRouteAccess } from "@/components/auth/PermissionsProvider";
 import Button from "@/components/shared/Button";
-import DashboardCard, { CardState } from "@/components/shared/DashboardCard";
+import { CardState, EmptyDashboard } from "@/components/shared/DashboardCard";
+import DashboardRangeBar from "@/components/shared/DashboardRangeBar";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
-import IconButton from "@/components/shared/IconButton";
-import { describeActivity, formatBytes, formatCount, formatEventRange } from "@/lib/aiFeature.mjs";
+import useAutoRefresh from "@/components/shared/useAutoRefresh";
+import { DEFAULT_RANGE, number, periodPhrase, previousPhrase } from "@/lib/dashboardRange.mjs";
+import { REFRESH_INTERVALS } from "@/lib/refreshPolicy.mjs";
+import { createEventHref, eventHref } from "@/lib/aiDashboard.mjs";
 import { getAiOverview } from "@/services/ai-feature/ai-feature.service";
+import AiDashboardRecentEvents from "./AiDashboardRecentEvents";
+import { AiSummaryCards, DetectionStorageCard, ProcessingProgressCard } from "./AiDashboardCards";
 
 /**
- * AI Feature → Overview: the studio's event galleries as they stand.
+ * AI Feature → Overview: the studio's event galleries as they stand, on the Image Selection
+ * dashboard's pattern — the ten figures, the Recent Events table they filter, and the two panels
+ * beneath — so the two read as one product.
  *
- * One request paints the page - `/api/ai-feature/overview` - so no tile can show one moment's
- * figure beside another's. It is re-read every half minute while the tab is in front, because the
- * numbers it shows are the ones a worker is changing in the background: photos processed, faces
- * found. Nothing here navigates except an event; Create Event goes to the Events list, which owns
- * the wizard.
+ * One request paints the page - `/api/ai-feature/overview?range=` - so no card can show one
+ * moment's figure beside another's. There is no Refresh button: the page keeps itself current
+ * (`useAutoRefresh`) — every half minute while the tab is in front, because the numbers it shows
+ * are the ones a worker is changing in the background, and when the tab or the network comes
+ * back. A quiet re-read keeps the figures on screen and swaps them in; one that fails says so.
+ *
+ * Two clocks, labelled rather than assumed: the figures are a **position** — every live event and
+ * photo as it stands — and the line under each card is a **period**, the range picked above them.
+ * Nothing on the page navigates except an event: a double click on a row of the table, a press on
+ * a row of the progress list. Create Event goes to the Events list, which owns the wizard.
  *
  * IMAGE_SELECTION / AI Feature governs the route: READ sees the overview, and only READ_WRITE is
  * offered Create Event (the header decides that).
  */
-const POLL_MS = 30_000;
-const EVENT_HREF = (id) => `/visual-curation/ai/events/${encodeURIComponent(id)}`;
-
-/** A row of tiles. Two to a row on a phone, four from a tablet up, so each group fills one line. */
-function TileRow({ title, tiles }) {
-  return <section aria-label={title}>
-    <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h2>
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-      {tiles.map((tile) => <StatTile key={tile.label} {...tile} />)}
-    </div>
-  </section>;
-}
-
-/** Grey tiles standing in for figures still on their way. */
-function TileSkeleton({ title }) {
-  return <section aria-hidden="true">
-    <div className="mb-2 h-3 w-24 animate-pulse rounded bg-slate-100" />
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-      {Array.from({ length: 4 }, (_, index) => <div key={`${title}-${index}`} className="h-[4.5rem] animate-pulse rounded-lg border border-slate-200 bg-white" />)}
-    </div>
-  </section>;
-}
-
-function RecentEventRow({ event, onOpen }) {
-  const percent = event.processing?.percent ?? 0;
-  return <li className="flex gap-3 py-3 first:pt-0 last:pb-0">
-    <EventCover src={event.coverUrl} name={event.name} className="h-16 w-16 shrink-0 rounded-md sm:h-20 sm:w-20" />
-    <div className="min-w-0 flex-1">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <p className="min-w-0 truncate text-sm font-medium text-slate-800">{event.name}</p>
-        <StatusChip status={event.status} />
-      </div>
-      <p className="mt-0.5 text-xs text-slate-500">{formatEventRange(event.startDate, event.endDate)}{event.eventType ? ` · ${event.eventType}` : ""}</p>
-      <p className="mt-1 text-[11px] text-slate-500">{formatCount(event.guestCount)} guests · {formatCount(event.mediaCount)} photos · {formatCount(event.faceCount)} faces</p>
-      <div className="mt-2 flex items-center gap-2">
-        <ProgressBar percent={percent} label={`AI processing for ${event.name}`} className="min-w-0 flex-1" />
-        <span className="w-9 shrink-0 text-right text-[11px] tabular-nums text-slate-600">{percent}%</span>
-      </div>
-      <div className="mt-2 sm:hidden">
-        <Button type="button" size="sm" onClick={() => onOpen(event)}>Open Event</Button>
-      </div>
-    </div>
-    <div className="hidden shrink-0 self-center sm:block">
-      <Button type="button" size="sm" onClick={() => onOpen(event)}>Open Event</Button>
-    </div>
-  </li>;
-}
-
-function ActivityRow({ row }) {
-  const at = row.createdAt ? new Date(row.createdAt) : null;
-  const time = at && !Number.isNaN(at.getTime()) ? at.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" }) : "";
-  const day = at && !Number.isNaN(at.getTime()) ? at.toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "";
-  return <li className="flex gap-3 py-2 first:pt-0 last:pb-0">
-    <div className="w-14 shrink-0 text-right">
-      <p className="text-[11px] tabular-nums text-slate-600">{time}</p>
-      <p className="text-[10px] text-slate-400">{day}</p>
-    </div>
-    <div className="min-w-0 flex-1">
-      <p className="text-xs text-slate-700">{describeActivity(row)}</p>
-      <p className="mt-0.5 truncate text-[11px] text-slate-400">{[row.eventName, row.actorLabel].filter(Boolean).join(" · ")}</p>
-    </div>
-  </li>;
-}
-
 export default function AiOverviewPage() {
   const router = useRouter();
+  const { canWrite } = useRouteAccess();
   const { notice, showError, clearNotice } = useNotice();
+  const [range, setRange] = useState(DEFAULT_RANGE);
+  // Which card is pressed — what the Recent Events table is narrowed to. Null is every event.
+  const [view, setView] = useState(null);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  // "12 mins ago" is measured from when the numbers were read, not from when the tab was last looked at.
+  const [now, setNow] = useState(() => new Date());
+  // Read by the loader without being a dependency, so a response never re-creates it and reload.
+  const hasData = useRef(false);
 
   const load = useCallback(async ({ quiet = false } = {}) => {
-    if (!quiet) setLoading(true);
+    const silent = quiet && hasData.current;
+    if (!silent) { setLoading(true); setError(""); }
     try {
-      const response = await getAiOverview();
+      const response = await getAiOverview({ range });
       setData(response?.data || null);
+      hasData.current = true;
+      setNow(new Date());
       setError("");
     } catch (caught) {
       const message = caught?.message || "Unable to load the AI Feature overview.";
-      setError(message);
-      // With figures already up, the failure is a toast rather than a page replaced by an error.
-      if (quiet) showError(message);
+      // A refresh that fails keeps the numbers already on screen and says so; a first load has
+      // nothing to keep, so the page itself carries the message.
+      if (hasData.current) showError(message); else setError(message);
     } finally {
-      if (!quiet) setLoading(false);
+      if (!silent) setLoading(false);
     }
-  }, [showError]);
+  }, [range, showError]);
 
+  // Deferred a tick, this codebase's convention for a first load; every later read is quiet.
   useEffect(() => {
-    const timer = window.setTimeout(() => void load(), 0);
-    return () => window.clearTimeout(timer);
+    const timer = setTimeout(() => void load({ quiet: true }), 0);
+    return () => clearTimeout(timer);
   }, [load]);
+  useAutoRefresh(load, { intervalMs: REFRESH_INTERVALS.aiFeature });
 
-  // Re-read while the tab is in front, and straight away when it comes back to the front - a tab
-  // left open overnight should not show last night's figures for half a minute.
-  useEffect(() => {
-    const tick = () => { if (document.visibilityState === "visible") void load({ quiet: true }); };
-    const interval = window.setInterval(tick, POLL_MS);
-    document.addEventListener("visibilitychange", tick);
-    return () => { window.clearInterval(interval); document.removeEventListener("visibilitychange", tick); };
-  }, [load]);
-
-  const openEvent = (event) => router.push(EVENT_HREF(event.id));
-  const events = data?.events; const media = data?.media; const faces = data?.faces; const storage = data?.storage;
-  const showSkeleton = loading && !data;
+  const openEvent = (row) => router.push(eventHref(row.id));
+  const createEvent = () => router.push(createEventHref());
+  const period = data?.period;
+  const caption = [
+    "Every AI event as it stands",
+    data?.trend ? `each arrow is the change ${previousPhrase(data.period?.key)}` : null,
+    period ? `${periodPhrase(period.key)}: +${number(period.eventsCreated)} events, ${number(period.photosUploaded)} photos uploaded, ${number(period.photosProcessed)} processed` : null,
+  ].filter(Boolean).join(" · ");
+  const isEmpty = !loading && !error && data && data.totalEventsAllTime === 0;
+  const rangeKey = data?.range?.key || range;
 
   return <section className="flex min-h-0 flex-1 flex-col bg-white">
-    <AiFeatureNavigation
-      onCreateEvent={() => router.push("/visual-curation/ai/events?create=1")}
-      actions={<IconButton label="Refresh overview" size="sm" onClick={() => load()} disabled={loading} className="text-slate-600 hover:bg-slate-100"><RefreshRounded fontSize="small" aria-hidden="true" className={loading ? "animate-spin" : ""} /></IconButton>}
-    />
+    <AiFeatureNavigation onCreateEvent={createEvent} />
+
     <FloatingNotice notice={notice} onClose={clearNotice} />
 
-    {/* Fills what is left of the shell's flex column and scrolls inside it, so the shell never
-        scrolls as a page. `dashboard-canvas` is the tinted ground the cards sit on. */}
     <div className="dashboard-canvas min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4">
       {error && !data
         ? <CardState error={error} onRetry={() => load()} />
-        : <div className="space-y-4">
-          {showSkeleton
-            ? <><TileSkeleton title="events" /><TileSkeleton title="photos" /><TileSkeleton title="faces" /></>
-            : <>
-              <TileRow title="Events" tiles={[
-                { label: "Total events", value: events?.total },
-                { label: "Active", value: events?.active, tone: "text-green-700" },
-                { label: "Upcoming", value: events?.upcoming, tone: "text-amber-700" },
-                { label: "Completed", value: events?.completed },
-              ]} />
-              <TileRow title="Photos" tiles={[
-                { label: "Total photos", value: media?.total, note: media?.videos ? `+ ${formatCount(media.videos)} videos` : undefined },
-                { label: "Processed", value: media?.processed, tone: "text-green-700", note: media?.total ? `${media.percent ?? 0}% of all media` : undefined },
-                { label: "Processing", value: media?.processing, tone: "text-blue-700" },
-                { label: "Failed", value: media?.failed, tone: media?.failed ? "text-red-700" : "text-slate-900" },
-              ]} />
-              <TileRow title="Faces" tiles={[
-                { label: "Faces detected", value: faces?.detected },
-                { label: "People", value: faces?.people },
-                { label: "Face matches", value: faces?.matches },
-                { label: "Unmatched faces", value: faces?.unmatched },
-              ]} />
-              <TileRow title="Storage" tiles={[
-                { label: "Storage used", value: formatBytes(storage?.bytes), raw: true },
-                { label: "Recent uploads (24h)", value: storage?.recentUploads },
-                { label: "Guests", value: data?.guests?.total },
-                { label: "Archived events", value: events?.archived },
-              ]} />
-            </>}
-
-          <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-            <DashboardCard title="Recent Events" note="The six most recently worked on">
-              <CardState loading={showSkeleton} error={!data ? error : ""} onRetry={() => load()} empty={!data?.recentEvents?.length} emptyMessage="No events yet. Create one to start a gallery." rows={5}>
-                <ul className="divide-y divide-slate-100">
-                  {(data?.recentEvents || []).map((event) => <RecentEventRow key={event.id} event={event} onOpen={openEvent} />)}
-                </ul>
-              </CardState>
-            </DashboardCard>
-            <DashboardCard title="Recent Activity" note="What just happened across every event">
-              <CardState loading={showSkeleton} error={!data ? error : ""} onRetry={() => load()} empty={!data?.recentActivity?.length} emptyMessage="Nothing has happened yet." rows={6}>
-                <ul className="divide-y divide-slate-100">
-                  {(data?.recentActivity || []).map((row) => <ActivityRow key={row.id} row={row} />)}
-                </ul>
-              </CardState>
-            </DashboardCard>
-          </div>
-        </div>}
+        : isEmpty
+          ? <EmptyDashboard title="No events yet" message={canWrite ? "Create an event, add its photos and the engine finds the faces — the dashboard fills in from there." : "The dashboard fills in once an event is created."} action={canWrite && <Button type="button" variant="primary" size="sm" className="mt-4" onClick={createEvent}>+ Create Event</Button>} />
+          : <>
+            <DashboardRangeBar caption={caption} range={range} onRangeChange={setRange} />
+            <AiSummaryCards summary={data?.summary} trend={data?.trend} rangeKey={rangeKey} loading={loading} view={view} onViewChange={setView} />
+            <div className="mt-3">
+              <AiDashboardRecentEvents rows={data?.eventRows || []} view={view} onClearView={() => setView(null)} loading={loading} error={!data ? error : ""} onRetry={() => load()} onOpen={openEvent} now={now} />
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+              <ProcessingProgressCard rows={data?.processingProgress || []} loading={loading} error={!data ? error : ""} onRetry={() => load()} onOpen={openEvent} now={now} />
+              <DetectionStorageCard data={data} rangeKey={rangeKey} loading={loading} error={!data ? error : ""} onRetry={() => load()} />
+            </div>
+          </>}
     </div>
   </section>;
 }

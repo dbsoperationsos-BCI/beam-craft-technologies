@@ -15,6 +15,10 @@ const formatDate = (value) => value ? new Intl.DateTimeFormat("en-GB", { dateSty
  * Every line names the shoot it belongs to, or "General" for one that belongs to none, and the
  * project each shoot sits under is shown beside it, since that is what an approved request is
  * ultimately filed against.
+ *
+ * `compact` is the narrow side panel: the shoot, what it was for and the amount, stacked. It is the
+ * same lines as the table, never a shorter list of them - a reader who sees four lines in one place
+ * and three in another trusts neither.
  */
 export default function PaymentRequestExpenseSummary({ expenses, compact = false, heading = true }) {
   const lines = Array.isArray(expenses) ? expenses : [];
@@ -27,7 +31,18 @@ export default function PaymentRequestExpenseSummary({ expenses, compact = false
       {lines.map((line, index) => <li key={line.id ?? index} className="flex items-baseline justify-between gap-2 text-xs">
         <span className="min-w-0 text-slate-700">
           <span className="font-medium">{line.shootCode || "General"}</span>
-          <span className="text-slate-500"> · {line.expenseType}</span>
+          {/* An excess names no expense type - there is nothing it was spent on - so the separator
+              goes with it rather than trailing a bare dot. */}
+          {line.expenseType ? <span className="text-slate-500"> · {line.expenseType}</span> : null}
+          {/*
+            * What the line **says**, which this list used to leave out.
+            *
+            * It showed the shoot, the expense type and the amount, so a line whose description was
+            * the whole point of it - which hall, whose transport, what the vendor actually did - read
+            * as a bare figure against a shoot code, and the only way to the words was to open the
+            * record separately. It is the narrow side panel, so it goes under rather than beside.
+            */}
+          {line.description ? <span className="block break-words text-[11px] text-slate-500">{line.description}</span> : null}
         </span>
         <span className="shrink-0 font-medium text-slate-900">{formatAmount(line.amount)}</span>
       </li>)}
@@ -54,7 +69,8 @@ export default function PaymentRequestExpenseSummary({ expenses, compact = false
         { key: "shoot", label: "Shoot", cellClassName: "font-medium text-slate-900", render: (line) => <>{line.shootCode || "General"}{line.shootName ? <span className="block text-[11px] font-normal text-slate-500">{line.shootName}</span> : null}</> },
         { key: "project", label: "Project", render: (line) => line.projectCode || "—" },
         { key: "date", label: "Date", render: (line) => formatDate(line.expenseDate) },
-        { key: "expense", label: "Expense", render: (line) => <>{line.expenseType}{line.description ? <span className="block text-[11px] text-slate-500">{line.description}</span> : null}</> },
+        // An excess has no expense type: a dash rather than an empty cell, which reads as missing data.
+        { key: "expense", label: "Expense", render: (line) => <>{line.expenseType || "—"}{line.description ? <span className="block text-[11px] text-slate-500">{line.description}</span> : null}</> },
         { key: "amount", label: "Amount", headerClassName: "text-right", cellClassName: "text-right font-medium text-slate-900", render: (line) => formatAmount(line.amount) },
       ]}
       rows={lines}

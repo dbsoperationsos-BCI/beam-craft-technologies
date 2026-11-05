@@ -19,7 +19,9 @@ const ESTIMATED_ROW_HEIGHT = 36;
  *
  * An item is `{ label, onSelect }` plus optional `disabled`, `title`, `tone: "danger"`, a
  * `detail` for a quiet second line inside the row itself, `description` for a line of explanatory
- * text standing on its own, a `submenu` of its own choices, or `separator: true`
+ * text standing on its own, a `submenu` of its own choices, an `action` - `{ label, onSelect }`, a
+ * small button at the end of the row that acts on it and leaves the menu open, `switchOn` - true or
+ * false - for a setting drawn as an on/off switch rather than a tick, or `separator: true`
  * for a rule between groups. `title` on the menu itself draws a heading above the first group, the
  * way a desktop context menu names what it is acting on.
  *
@@ -56,12 +58,17 @@ const TRIGGER_TONES_OPEN = {
 };
 
 /**
+ * `compact` is the small menu a Board card's ⋮ opens: as wide as its longest option (never a fixed
+ * width that cuts "Mark 3rd month paid" short), tighter rows in smaller type, and a
+ * short grow-and-fade from the ⋮ (`.animate-options-menu-pop`, still under reduced motion). On a
+ * phone the rows keep a finger's height; from `sm` up they tighten.
+ *
  * `zIndex` is the numeric escape hatch for a trigger that lives inside its own portal - the menu is
  * a sibling of that portal under document.body, not a child of it, so a caller stacked above the
  * default would otherwise paint straight over its own open menu. When given it wins over
  * `menuZIndexClassName`, which stays the usual, layer-scale way to say the same thing.
  */
-export default function OptionsMenu({ ariaLabel = "Options", title, items, menuClassName = "w-44", menuBodyClassName = "", menuZIndexClassName = "z-[60]", triggerClassName = "", triggerVariant = "plain", zIndex, triggerContent = "⋮", triggerSize, preferAbove = false, onOpen }) {
+export default function OptionsMenu({ ariaLabel = "Options", title, items, menuClassName = "w-44", menuBodyClassName = "", menuZIndexClassName = "z-[60]", triggerClassName = "", triggerVariant = "plain", zIndex, triggerContent = "⋮", triggerSize, preferAbove = false, onOpen, compact = false }) {
   const zIndexClass = zIndex === undefined ? menuZIndexClassName : "";
   const zIndexStyle = zIndex === undefined ? null : { zIndex };
   const [open, setOpen] = useState(false);
@@ -210,9 +217,10 @@ export default function OptionsMenu({ ariaLabel = "Options", title, items, menuC
           aria-label={item.label}
           onMouseEnter={() => showSubmenu(item.label)}
           onMouseLeave={() => hideSubmenu(item.label)}
-          /* `w-40` unless the row asks for more: a flyout only has to be as wide as its own
-             choices, and a name that wraps onto a second line reads as two options. */
-          className={`fixed ${zIndexClass} ${item.submenuClassName || "w-40"} rounded-md border border-slate-200 bg-white py-1 shadow-lg`}
+          /* As wide as its longest choice, never narrower than `w-40` nor wider than the screen,
+             unless the row asks for a width of its own: the choices never wrap (a name on two lines
+             reads as two options), so a fixed width let "Employment Certificate" run into the edge. */
+          className={`fixed ${zIndexClass} ${item.submenuClassName || "w-max min-w-40 max-w-[calc(100vw-1rem)]"} rounded-md border border-slate-200 bg-white py-1 shadow-lg`}
           style={{ ...(placed ? { top: placed.top, left: placed.left } : { top: 0, left: 0, visibility: "hidden" }), ...zIndexStyle }}
         >
           {/* The flyout repeats what it is choosing, so it still reads on its own once it has
@@ -244,17 +252,19 @@ export default function OptionsMenu({ ariaLabel = "Options", title, items, menuC
       </div>;
     }
 
-    // An item that can be on or off says so with a tick, the way the submenu choices already do.
-    const checkable = item.selected !== undefined;
-    return <button
+    // An item that can be on or off says so with a tick, the way the submenu choices already do - or,
+    // with `switchOn`, with a switch: a setting the row turns on and off rather than a choice made.
+    const switchable = item.switchOn !== undefined;
+    const checkable = item.selected !== undefined || switchable;
+    const row = <button
       key={key}
       type="button"
       role={checkable ? "menuitemcheckbox" : "menuitem"}
-      aria-checked={checkable ? Boolean(item.selected) : undefined}
+      aria-checked={checkable ? Boolean(switchable ? item.switchOn : item.selected) : undefined}
       disabled={item.disabled}
       onClick={() => choose(item)}
       title={item.title}
-      className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-transparent disabled:text-slate-400 ${item.tone === "danger" ? "text-red-600 hover:bg-red-50" : item.selected ? "bg-blue-50 font-medium text-blue-700" : "text-slate-700"}`}
+      className={`flex w-full items-center justify-between gap-2 text-left hover:bg-slate-50 disabled:cursor-not-allowed ${compact ? "px-2.5 py-1.5 text-[13px] sm:py-1 sm:text-xs" : "px-3 py-2 text-sm"} disabled:bg-transparent disabled:text-slate-400 ${item.tone === "danger" ? "text-red-600 hover:bg-red-50" : item.selected ? "bg-blue-50 font-medium text-blue-700" : "text-slate-700"}`}
     >
       {/* `detail` is a second line of the same row, not a row of its own: a description item
           beneath carries its own padding, so one entry read as two and the menu grew twice as tall
@@ -265,7 +275,24 @@ export default function OptionsMenu({ ariaLabel = "Options", title, items, menuC
         {item.detail && <span className="mt-0.5 block truncate text-xs font-normal text-slate-400">{item.detail}</span>}
       </span>
       {item.selected && <span aria-hidden="true">✓</span>}
+      {switchable && <span aria-hidden="true" className={`relative h-4 w-8 shrink-0 rounded-full transition-colors ${item.switchOn ? "bg-blue-600" : "bg-slate-300"}`}><span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${item.switchOn ? "translate-x-4" : ""}`} /></span>}
     </button>;
+    if (!item.action) return row;
+    // Beside the row rather than inside it - a button cannot hold a button - and it does not close
+    // the menu, so several rows can be acted on in one visit.
+    return <div key={key} className="flex items-center gap-1 pr-2 hover:bg-slate-50">
+      <span className="min-w-0 flex-1">{row}</span>
+      <button
+        type="button"
+        onClick={() => item.action.onSelect?.()}
+        aria-label={`${item.action.label}: ${item.label}`}
+        // 40px tall, like every other thing a finger has to hit: on a phone this sits beside a
+        // row that opens something else, and a miss is the wrong action rather than no action.
+        className="min-h-10 shrink-0 whitespace-nowrap rounded px-2 text-[11px] font-medium text-blue-600 hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200 sm:text-xs"
+      >
+        {item.action.label}
+      </button>
+    </div>;
   }
 
   return <div className="flex justify-center">
@@ -276,7 +303,7 @@ export default function OptionsMenu({ ariaLabel = "Options", title, items, menuC
         role="menu"
         aria-label={title || ariaLabel}
         onClick={(event) => event.stopPropagation()}
-        className={`fixed ${zIndexClass} rounded-md border border-slate-200 bg-white py-1 text-left shadow-lg ${menuClassName}`}
+        className={`fixed ${zIndexClass} rounded-md border border-slate-200 bg-white py-1 text-left shadow-lg ${compact ? `animate-options-menu-pop ${menuClassName === "w-44" ? "w-max min-w-28 max-w-56" : menuClassName}` : menuClassName}`}
         style={{ ...position, ...zIndexStyle }}
       >
         {title && <div className={`${headingClass} mb-1 border-b border-slate-200 pb-2`}>{title}</div>}

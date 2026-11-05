@@ -1,4 +1,5 @@
 import { PROGRESS_COLORS } from "./progressStatus.mjs";
+import { RANGE_OPTIONS, DEFAULT_RANGE, PERIOD_PHRASES, periodPhrase, PREVIOUS_PHRASES, previousPhrase, PREVIOUS_LABELS, previousLabel, trendOf, unitLabel, formatCompact, formatBytes, relativeTime } from "./dashboardRange.mjs";
 
 /**
  * The Image Selection dashboard's vocabulary, in one place: the ranges it offers, the stages it
@@ -10,67 +11,12 @@ import { PROGRESS_COLORS } from "./progressStatus.mjs";
 export const DASHBOARD_ROUTE = "/image-selection/dashboard";
 export const PROJECTS_ROUTE = "/image-selection/projects";
 
-/**
- * The range picker above the cards: the keys the API accepts, in the order the menu lists them.
- * It scopes the period figures only — the line under each card — never the counts themselves,
- * which are always every Image Selection project as it stands.
+/*
+ * The range picker, the phrases under the arrows and the formatters are the vocabulary every
+ * module dashboard shares (`dashboardRange.mjs`); they are re-exported here so this module's
+ * callers and tests keep one import.
  */
-export const RANGE_OPTIONS = [
-  { value: "lifetime", label: "Lifetime" },
-  { value: "month", label: "This Month" },
-  { value: "week", label: "This Week" },
-  { value: "3m", label: "3 Months" },
-  { value: "6m", label: "6 Months" },
-];
-export const DEFAULT_RANGE = "month";
-
-/**
- * How each range reads at the end of a sentence: "+2 created **this month**", "624 photos picked
- * **in total**". The label alone would not do it — "created Lifetime" is not a sentence — so the
- * picker's name and the words under a card are kept apart on purpose.
- */
-export const PERIOD_PHRASES = {
-  lifetime: "in total",
-  month: "this month",
-  week: "this week",
-  "3m": "in the last 3 months",
-  "6m": "in the last 6 months",
-};
-export const periodPhrase = (key) => PERIOD_PHRASES[key] || "in this range";
-
-/**
- * What each card's arrow is measured against: where the number stood at the start of the range.
- * Lifetime has no start, so it has no phrase and the card shows no arrow.
- */
-export const PREVIOUS_PHRASES = {
-  month: "vs last month",
-  week: "vs last week",
-  "3m": "vs 3 months ago",
-  "6m": "vs 6 months ago",
-};
-export const previousPhrase = (key) => PREVIOUS_PHRASES[key] || null;
-
-/**
- * The same comparison as a name rather than as a phrase: what a card prints under its own "vs".
- *
- * Title case and no "vs" of its own, because the card supplies that word on the line above it.
- * Lifetime has nothing behind it to compare with and so has no name here, exactly as it has no
- * phrase above.
- */
-export const PREVIOUS_LABELS = {
-  month: "Last Month",
-  week: "Last Week",
-  "3m": "3 Months Ago",
-  "6m": "6 Months Ago",
-};
-export const previousLabel = (key) => PREVIOUS_LABELS[key] || null;
-
-/** The arrow for a change: which way it points, and the signed number beside it. */
-export function trendOf(delta) {
-  const change = Number(delta || 0);
-  const direction = change > 0 ? "up" : change < 0 ? "down" : "flat";
-  return { direction, text: change > 0 ? `+${change.toLocaleString("en-IN")}` : change.toLocaleString("en-IN") };
-}
+export { RANGE_OPTIONS, DEFAULT_RANGE, PERIOD_PHRASES, periodPhrase, PREVIOUS_PHRASES, previousPhrase, PREVIOUS_LABELS, previousLabel, trendOf, unitLabel, formatCompact, formatBytes, relativeTime };
 
 // Archived is the studio closing a project, not a rung of the progress ladder, so it takes a
 // neutral grey rather than borrowing a rung's colour.
@@ -112,37 +58,62 @@ export const SUMMARY_CARDS = [
   { key: "notPublished", label: "Client Sending Not Done", unit: "Project", view: { attention: "notPublished" } },
   { key: "clientNotStarted", label: "Client Not Started", unit: "Project", view: { stage: "linkSent" } },
   { key: "clientInProgress", label: "Client In Progress", unit: "Project", view: { stage: "selecting" } },
-  { key: "clientSubmitted", label: "Client Submitted", unit: "Project", view: { stage: "submitted" } },
+  // Any item submitted, not every item: Retouches sent while Frames is still being picked counts.
+  { key: "clientSubmitted", label: "Client Submitted", unit: "Project", view: { attention: "clientSubmitted" } },
   { key: "notYetDownloaded", label: "Yet to Download", unit: "Project", view: { attention: "readyToDownload" } },
   { key: "linkExpiringSoon", label: "Link Expiring Soon", unit: "Project", view: { attention: "expiringSoon" } },
   { key: "linkExpired", label: "Expired Projects", unit: "Project", view: { attention: "expired" } },
   { key: "downloaded", label: "Downloaded", unit: "Project", view: { attention: "downloaded" } },
 ];
 
-/**
- * The noun that follows a headline figure, matched to it: "1 Project", "4 Projects".
- *
- * `unit` is written singular in the table above and pluralised here by appending an "s", which is
- * all the nouns this dashboard counts need. A word that does not pluralise that way has to be
- * given as a pair rather than run through this.
- */
-export function unitLabel(value, unit) {
-  if (!unit) return "";
-  return Math.abs(Number(value) || 0) === 1 ? unit : `${unit}s`;
-}
-
 /*
  * A view is what the Recent Projects table is narrowed to: `null` for everything, `{ stage }` for
- * a rung of the ladder (or the archive), `{ attention }` for one of the classifier's flags. The
+ * a rung of the ladder (or the archive), `{ attention }` for one of the classifier's flags, and -
+ * in Expand - `{ expand: "enabled" | "disabled" }` for the projects switched on or off there. The
  * cards, the workflow strip and the Needs Attention rows all press one; the table reads it.
  */
+
+/**
+ * Expand's two cards: how many projects are enabled and how many disabled, each a filter on its
+ * table. Counted from the rows themselves (`expandCounts`), every project as it stands now - the
+ * summary cards beside them count only the enabled ones, so these are what says how many are off.
+ */
+export const EXPAND_CARDS = [
+  { key: "enabled", label: "Enabled", unit: "Project", view: { expand: "enabled" } },
+  { key: "disabled", label: "Disabled", unit: "Project", view: { expand: "disabled" } },
+];
+
+/** `{ enabled, disabled }` over Expand's rows - a row is enabled unless it says otherwise. */
+export function expandCounts(rows = []) {
+  const disabled = (rows || []).filter((row) => row?.expandEnabled === false).length;
+  return { enabled: (rows || []).length - disabled, disabled };
+}
+
+/**
+ * Where Enabled and Disabled stood at the start of the range, and how far each has moved since - the
+ * same `{ before, delta }` every other card carries, so they get the same arrow and "vs ...". Null
+ * for Lifetime (no `comparedAt`), as for every card. A project counts at the start if it had been
+ * created by then, and as disabled then if its switch was already off by then (`disabledAt`). Only
+ * the last switch-off is stamped, so a project switched off and on again inside the range leaves no
+ * trace, and counts as enabled at both ends.
+ */
+export function expandTrend(rows = [], comparedAt) {
+  if (!comparedAt) return null;
+  const from = new Date(comparedAt).getTime();
+  const before = (stamp) => stamp != null && new Date(stamp).getTime() < from;
+  const existed = (rows || []).filter((row) => before(row?.createdAt));
+  const disabled = existed.filter((row) => row?.expandEnabled === false && before(row?.disabledAt)).length;
+  const now = expandCounts(rows);
+  const enabled = existed.length - disabled;
+  return { enabled: { before: enabled, delta: now.enabled - enabled }, disabled: { before: disabled, delta: now.disabled - disabled } };
+}
 
 /** Two views the same, `null` and `undefined` both meaning everything. */
 export function sameView(first, second) {
   const a = first || null; const b = second || null;
   if (a === b) return true;
   if (!a || !b) return false;
-  return a.stage === b.stage && a.attention === b.attention;
+  return a.stage === b.stage && a.attention === b.attention && a.expand === b.expand;
 }
 
 /** The words for a view: the card that carries it, else the stage or the flag, else "All projects". */
@@ -150,6 +121,7 @@ export function viewLabel(view) {
   if (!view) return "All projects";
   const card = SUMMARY_CARDS.find((candidate) => sameView(candidate.view, view));
   if (card) return card.label;
+  if (view.expand) return view.expand === "disabled" ? "Disabled projects" : "Enabled projects";
   if (view.stage) return STAGE_BY_KEY[view.stage]?.label || view.stage;
   return ATTENTION_BY_KEY[view.attention]?.label || view.attention || "All projects";
 }
@@ -159,6 +131,7 @@ export function rowMatchesView(row, view) {
   if (!view) return true;
   if (view.stage) return row?.stage === view.stage;
   if (view.attention) return Boolean(row?.views?.[view.attention]);
+  if (view.expand) return (row?.expandEnabled !== false) === (view.expand === "enabled");
   return true;
 }
 
@@ -175,6 +148,7 @@ export const ATTENTION_ROWS = [
   { key: "notOpened", label: "Haven't opened", description: "Gallery link never opened" },
   { key: "inactive", label: "No activity", description: "Quiet for 7+ days" },
   { key: "newSubmissions", label: "New submissions", description: "Sent in the last 7 days" },
+  { key: "clientSubmitted", label: "Client submitted", description: "At least one selection item sent" },
   { key: "readyToDownload", label: "Yet to download", description: "Submitted selections still to copy out" },
   { key: "yetToUpload", label: "Yet to upload", description: "No photos added yet" },
   { key: "notPublished", label: "Client sending not done", description: "Photos in, gallery not sent" },
@@ -188,10 +162,10 @@ export const ATTENTION_BY_KEY = Object.fromEntries(ATTENTION_ROWS.map((row) => [
 /**
  * Where a dashboard control sends the reader. A stage is the sidebar's progress filter (or its
  * Archived toggle); an attention row is the list's `attention` filter; a project id opens that
- * project, with `at` making each click a distinct URL so a repeat click still jumps; `create`
- * opens the New Project form.
+ * project, with `at` making each click a distinct URL so a repeat click still jumps, and `folderId`
+ * opening it on one folder - the same pair the upload dock sends; `create` opens the New Project form.
  */
-export function projectsHref({ stage, attention, projectId, at, create } = {}) {
+export function projectsHref({ stage, attention, projectId, folderId, at, create } = {}) {
   const params = new URLSearchParams();
   if (stage && STAGE_BY_KEY[stage]) {
     const { progress } = STAGE_BY_KEY[stage];
@@ -199,10 +173,25 @@ export function projectsHref({ stage, attention, projectId, at, create } = {}) {
     else params.set("status", progress);
   }
   if (attention && ATTENTION_BY_KEY[attention]) params.set("attention", attention);
-  if (projectId) { params.set("projectId", projectId); params.set("at", String(at ?? Date.now())); }
+  if (projectId) {
+    params.set("projectId", projectId);
+    if (folderId) params.set("folderId", folderId);
+    params.set("at", String(at ?? Date.now()));
+  }
   if (create) params.set("new", "1");
   const query = params.toString();
   return query ? `${PROJECTS_ROUTE}?${query}` : PROJECTS_ROUTE;
+}
+
+/**
+ * Where a Recent Projects row opens. Under Yet to Download it opens on the shoot folder that put
+ * the project there - `readyToDownloadFolderId`, worked out by the server from the same rule the
+ * card counts with - so Download Selected is on screen; under every other view, and where the
+ * server found no folder for that shoot, it opens the project exactly as a click on it always has.
+ */
+export function openProjectHref(row, view, at) {
+  const folderId = sameView(view, { attention: "readyToDownload" }) ? row?.readyToDownloadFolderId : null;
+  return projectsHref({ projectId: row?.id, folderId, at });
 }
 
 /**
@@ -218,43 +207,6 @@ export function projectListFiltersFromParams(get) {
     attention: ATTENTION_KEYS.includes(attention) ? attention : null,
     create: get("new") === "1",
   };
-}
-
-/** "184", "12.5K", "248K", "1.2M" — a headline number that fits a card. */
-export function formatCompact(value) {
-  const number = Number(value || 0);
-  if (!Number.isFinite(number)) return "0";
-  const abs = Math.abs(number);
-  if (abs < 1000) return number.toLocaleString("en-IN");
-  if (abs < 10000) return `${(number / 1000).toFixed(1).replace(/\.0$/, "")}K`;
-  if (abs < 1000000) return `${Math.round(number / 1000)}K`;
-  return `${(number / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
-}
-
-/** A byte count as the unit a person reads it in. */
-export function formatBytes(bytes) {
-  const number = Number(bytes || 0);
-  if (!Number.isFinite(number) || number <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const power = Math.min(units.length - 1, Math.floor(Math.log(number) / Math.log(1024)));
-  const scaled = number / 1024 ** power;
-  const text = scaled >= 100 || power === 0 ? String(Math.round(scaled)) : scaled.toFixed(1).replace(/\.0$/, "");
-  return `${text} ${units[power]}`;
-}
-
-/** "just now", "12 mins ago", "3 days ago" — or a dash for a time nobody recorded. */
-export function relativeTime(value, now = new Date()) {
-  if (!value) return "—";
-  const stamp = new Date(value);
-  if (Number.isNaN(stamp.getTime())) return "—";
-  const seconds = Math.max(0, Math.round((now.getTime() - stamp.getTime()) / 1000));
-  if (seconds < 60) return "just now";
-  const units = [["min", 60], ["hour", 3600], ["day", 86400], ["week", 604800], ["month", 2629800], ["year", 31557600]];
-  for (let index = units.length - 1; index >= 0; index -= 1) {
-    const [unit, size] = units[index];
-    if (seconds >= size) { const count = Math.floor(seconds / size); return `${count} ${unit}${count === 1 ? "" : "s"} ago`; }
-  }
-  return "just now";
 }
 
 /**

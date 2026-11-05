@@ -87,3 +87,11 @@ test("waiting is still said out loud rather than refused in silence", () => {
   assert.match(GATE, /`Refresh code in \$\{waiting\}s`/, "the countdown is gone, so a long cooldown now reads as a dead button");
   assert.match(GATE, /disabled=\{starting \|\| waiting > 0\}/, "the button no longer disables while it is waiting");
 });
+
+test("the session is read fast only while the gate is holding somebody, and once a minute otherwise", () => {
+  const gate = fs.readFileSync(new URL("../src/components/sales/WhatsappRequiredGate.js", import.meta.url), "utf8");
+  assert.match(gate, /const IDLE_REFRESH_MS = 60 \* 1000;/);
+  assert.match(gate, /const holding = Boolean\(session && session\.linkRequired === true && whatsappLinkNeeded\(session\)\);/);
+  assert.match(gate, /window\.setInterval\(read, holding \? QR_REFRESH_MS : IDLE_REFRESH_MS\);/);
+  assert.match(gate, /\}, \[holding\]\);/);
+});

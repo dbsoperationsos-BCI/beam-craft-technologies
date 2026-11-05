@@ -1,0 +1,22 @@
+-- User Activity Logs can say **what** a write changed, where its handler says so.
+--
+-- The log recorded that somebody saved a project and nothing about what they saved, so "he says he
+-- updated it and it is not reflecting" could not be answered either way: the line proved a request
+-- happened and stopped there.
+--
+-- `changes` holds it in words - "Main Event Date: 20 Nov 2026 → 22 Nov 2026 · Production Manager: — →
+-- Karthik". **Opt-in per handler**: null unless a handler hands the list over, which is how the
+-- module's own rule survives - it never records a body, a query string, a token or a password, and an
+-- endpoint carrying a password or a bank account therefore says nothing by default rather than by
+-- being remembered to be excluded.
+--
+-- TEXT rather than VARCHAR: a save touching a dozen fields, one of them a remark, is longer than any
+-- length worth arguing about, and the writer clips it anyway.
+--
+-- Space: about 400 bytes on a line that carries one, against ~655 bytes for the line itself - roughly
+-- +146 MB a year at a thousand writes a day, which Settings → Activity Log Purge then reclaims for
+-- the table to reuse. Nullable, so every line already written stays as it is and nothing is rewritten.
+--
+-- Cost: one nullable column on a 2,400-row table here. Instant.
+
+ALTER TABLE `user_activity_log` ADD COLUMN `changes` TEXT NULL;

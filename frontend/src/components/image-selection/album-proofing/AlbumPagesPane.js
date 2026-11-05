@@ -120,6 +120,8 @@ export default function AlbumPagesPane({ album, canWrite, onAlbumChanged, revise
         projectId={album.projectId}
         // Under Album Proofing's own routes and permission, not Image Selection's.
         uploadsBase={albumProofingUploadsBase(album.projectId)}
+        // And to Album Proofing's own preset pair: a spread's text and layout want the detail.
+        compressionModule="albumProofing"
         projectName={album.projectName || album.name}
         folderId={album.rootFolderId}
         folderName={album.name}

@@ -5,6 +5,7 @@ const { derivedLimitOf } = require("../deliverables/service");
 const { expiryOf } = require("../publication/service");
 const { clientNameOf } = require("../../../services/projectClientNames");
 const { closeAbandonedBatches } = require("../uploads/batchRepository");
+const { projectsWithAShootReached } = require("../shoot-visibility");
 
 /**
  * The Image Selection dashboard, answered in one request.
@@ -25,44 +26,10 @@ const { closeAbandonedBatches } = require("../uploads/batchRepository");
  * as one of fifty.
  */
 
-// The studio's day. Asia/Kolkata keeps one offset all year, so a fixed shift is the whole rule.
-const STUDIO_OFFSET_MS = 330 * 60 * 1000;
-const RANGE_KEYS = ["lifetime", "month", "week", "3m", "6m"];
-// The labels the picker itself shows, so the page never has two names for one range.
-const RANGE_LABELS = { lifetime: "Lifetime", month: "This Month", week: "This Week", "3m": "3 Months", "6m": "6 Months" };
-// Lifetime has no floor. The epoch stands in for one so every range is a pair of instants and the
-// queries stay identical — nothing in this application predates 1970.
-const LIFETIME_START = new Date(0);
-// Monday, the way a working week is read here (the meetings calendar starts its columns there).
-const mondayOffset = (weekday) => (weekday + 6) % 7;
-const DEFAULT_RANGE = "month";
+// The range vocabulary is shared with every module dashboard (`src/services/dashboardRange.js`);
+// it is re-exported below so this module's callers and tests keep one import.
+const { RANGE_KEYS, RANGE_LABELS, DEFAULT_RANGE, rangeBounds } = require("../../../services/dashboardRange");
 const PROGRESS_LIMIT = 5;
-
-function studioParts(now) {
-  const shifted = new Date(now.getTime() + STUDIO_OFFSET_MS);
-  return { y: shifted.getUTCFullYear(), m: shifted.getUTCMonth(), d: shifted.getUTCDate(), weekday: shifted.getUTCDay() };
-}
-/** Midnight of one studio day, as the instant the database compares against. */
-const studioDayStart = (y, m, d) => new Date(Date.UTC(y, m, d) - STUDIO_OFFSET_MS);
-
-/**
- * The instants one range key means, ending after today. `to` is exclusive — the first moment of
- * tomorrow — so a project created at any time today is inside "Today".
- */
-function rangeBounds(key = DEFAULT_RANGE, now = new Date()) {
-  const resolved = RANGE_KEYS.includes(key) ? key : DEFAULT_RANGE;
-  const { y, m, d, weekday } = studioParts(now);
-  const starts = {
-    // Two calendar ranges — the week and the month so far, which is what somebody means by
-    // "this week" — and two rolling ones, which is what "3 months" means.
-    lifetime: LIFETIME_START,
-    month: studioDayStart(y, m, 1),
-    week: studioDayStart(y, m, d - mondayOffset(weekday)),
-    "3m": studioDayStart(y, m - 3, d + 1),
-    "6m": studioDayStart(y, m - 6, d + 1),
-  };
-  return { key: resolved, label: RANGE_LABELS[resolved], from: starts[resolved], to: studioDayStart(y, m, d + 1) };
-}
 
 /**
  * How many photos the client may pick for one live selection item, by the deliverable service's
@@ -79,6 +46,17 @@ function limitOf(config, defaultSelectionLimit) {
 
 const time = (value) => (value ? new Date(value).getTime() : 0);
 const byLastActivity = (first, second) => time(second.lastActivityAt) - time(first.lastActivityAt);
+
+/**
+ * The shoot a selection item belongs to, by id where it has one and by name always: a Project
+ * Management shoot's id, or the root folder a manual item is filed under (its live name).
+ */
+function shootOf(config) {
+  const source = config.shootDeliverable || config.postProductionAllocation;
+  if (source?.shootId) return { shootId: source.shootId, name: source.shoot?.shoot || null };
+  if (config.manualShootFolder) return { shootId: null, folderId: config.manualShootFolder.id, name: config.manualShootFolder.name };
+  return config.manualShootName ? { shootId: null, name: config.manualShootName } : null;
+}
 
 function createDashboardService(repo = repository, dependencies = {}) {
   const settings = dependencies.settings || createSettingsService();
@@ -110,7 +88,7 @@ function createDashboardService(repo = repository, dependencies = {}) {
       // A selection item that did not exist yet was not a selection item then.
       if (asOf && config.createdAt && new Date(config.createdAt) >= asOf) continue;
       if (!configsByProject.has(config.imageSelectionProjectId)) configsByProject.set(config.imageSelectionProjectId, []);
-      configsByProject.get(config.imageSelectionProjectId).push({ id: config.id, selectionSubmittedAt: before(config.selectionSubmittedAt), selectionLimit: limitOf(config, defaultSelectionLimit), selectedCount: countByConfig.get(config.id) || 0 });
+      configsByProject.get(config.imageSelectionProjectId).push({ id: config.id, name: config.name || config.shootDeliverable?.deliverableName || config.postProductionAllocation?.serviceName || "Selection item", selectionSubmittedAt: before(config.selectionSubmittedAt), selectedDownloadedAt: before(config.selectedDownloadedAt), selectionLimit: limitOf(config, defaultSelectionLimit), selectedCount: countByConfig.get(config.id) || 0, shoot: shootOf(config) });
     }
     return new Map(projects.map((project) => {
       const stored = publicationByProject.get(project.id) || null;
@@ -157,7 +135,8 @@ function createDashboardService(repo = repository, dependencies = {}) {
       notPublished: attention.notPublished,
       clientNotStarted: stageCounts.linkSent,
       clientInProgress: stageCounts.selecting,
-      clientSubmitted: stageCounts.submitted,
+      // Any item submitted - not every item: Retouches sent while Frames is still being picked counts.
+      clientSubmitted: attention.clientSubmitted,
       notYetDownloaded: attention.readyToDownload,
       linkExpiringSoon: attention.expiringSoon,
       linkExpired: attention.expired,
@@ -186,6 +165,11 @@ function createDashboardService(repo = repository, dependencies = {}) {
       selectedDownloadedAt: snapshot.selectedDownloadedAt || null,
       lastActivityAt: classify.latestOf(project.updatedAt, publication?.publishedAt, publication?.lastClientActivityAt, publication?.galleryLastOpenedAt, publication?.selectionSubmittedAt, latestSubmission),
       attention: classify.attentionFlagsOf(snapshot, at),
+      // The items the client has submitted, each with whether its picks have been copied out - what
+      // Client Submitted and Yet to Download count by, shown on the row.
+      submittedItems: classify.submittedItemsOf(snapshot),
+      // Internal: the items behind Yet to Download, resolved to a folder once per build and dropped.
+      downloadConfigs: classify.readyToDownloadConfigs(snapshot),
     };
   }
 
@@ -225,13 +209,51 @@ function createDashboardService(repo = repository, dependencies = {}) {
     }
   }
 
+  /*
+   * Each Yet to Download row carries the shoot folder to open it on - `readyToDownloadFolderId`,
+   * null on every other row and where no folder stands for the shoot. One read of root folders for
+   * the rows that need it; the dashboard's other rows ask for nothing.
+   */
+  async function withDownloadFolders(rows) {
+    const ready = rows.filter((row) => row.attention.readyToDownload && row.downloadConfigs.length);
+    const folders = await repo.rootFolders(ready.map((row) => row.id));
+    const byProject = new Map();
+    for (const folder of folders) {
+      if (!byProject.has(folder.projectId)) byProject.set(folder.projectId, []);
+      byProject.get(folder.projectId).push(folder);
+    }
+    return rows.map(({ downloadConfigs, ...row }) => ({
+      ...row,
+      readyToDownloadFolderId: row.attention.readyToDownload ? classify.downloadFolderOf(downloadConfigs, byProject.get(row.id)) : null,
+    }));
+  }
+
+  /*
+   * Every row says whether its project is enabled (`expandEnabled`: no `disabledAt`). With `expand`,
+   * the cards and period figures count only the enabled projects, by exactly the rules of the full
+   * dashboard, while the table still lists every project - a disabled one marked so - so it can be
+   * enabled again from there. Storage belongs to the whole store rather than to a set of projects,
+   * so it is not read there.
+   */
   async function build(input = {}) {
     const at = now();
     const range = rangeBounds(input.range, at);
-    const [projects, totalProjectsAllTime, period] = await Promise.all([repo.listProjects(), repo.countAllProjects(), repo.periodCounts(range)]);
+    const expand = input.expand === true;
+    const [allProjects, allProjectsCount] = await Promise.all([repo.listProjects(), repo.countAllProjects()]);
+    const off = new Set(allProjects.filter((project) => project.disabledAt).map((project) => project.id));
+    const disabledAtOf = new Map(allProjects.filter((project) => project.disabledAt).map((project) => [project.id, project.disabledAt]));
+    const counts = (id) => !expand || !off.has(id);
+    const period = await repo.periodCounts(range, { excludeIds: expand ? [...off] : [] });
+    // Only what the Projects sidebar lists: a linked project none of whose shoots has passed yet
+    // is held back there, so it is no card, stage or row here either.
+    const projects = await projectsWithAShootReached(allProjects, repo.listShootDatesForSalesProjects, at);
+    const counted = projects.filter((project) => counts(project.id));
+    const totalProjectsAllTime = allProjectsCount - (allProjects.length - projects.length);
     const names = await repo.clientNames(projects.map((project) => project.salesProject).filter(Boolean));
-    const [rows, storage] = await Promise.all([rowsFor(projects, at, { names }), readStorage(range)]);
-    const { summary } = summarize(rows);
+    const [allRows, storage] = await Promise.all([rowsFor(projects, at, { names }), expand ? null : readStorage(range)]);
+    const rows = await withDownloadFolders(allRows);
+    const countedRows = rows.filter((row) => counts(row.id));
+    const { summary } = summarize(countedRows);
 
     /*
      * Where the same nine numbers stood at the start of the range — the end of last week, last
@@ -241,9 +263,9 @@ function createDashboardService(repo = repository, dependencies = {}) {
      */
     const previous = range.key === "lifetime"
       ? null
-      : summarize(await rowsFor(projects.filter((project) => new Date(project.createdAt) < range.from), range.from, { asOf: range.from, names })).summary;
+      : summarize(await rowsFor(counted.filter((project) => new Date(project.createdAt) < range.from), range.from, { asOf: range.from, names })).summary;
     const trend = previous && Object.fromEntries(Object.keys(summary).map((key) => [key, { before: previous[key], delta: summary[key] - previous[key] }]));
-    const active = rows.filter((row) => !row.archivedAt);
+    const active = countedRows.filter((row) => !row.archivedAt);
     const strip = ({ attention: _attention, ...row }) => row;
 
     return {
@@ -272,7 +294,10 @@ function createDashboardService(repo = repository, dependencies = {}) {
       // press is instant and asks the server for nothing — and every row was already read to
       // count the cards, so this costs no query. Rows are small; a studio's whole register is a
       // few hundred kilobytes, and the table draws them a page at a time.
-      recentProjects: [...rows].sort(byLastActivity).map(({ attention: views, ...row }) => ({ ...row, views })),
+      // `disabledAt` beside the switch: when a disabled project was switched off, so Expand's Enabled
+      // and Disabled cards can say where each stood at the start of the range, as every card does.
+      recentProjects: [...rows].sort(byLastActivity).map(({ attention: views, ...row }) => ({ ...row, views, expandEnabled: !off.has(row.id), disabledAt: disabledAtOf.get(row.id) || null })),
+      expand,
       generatedAt: at,
     };
   }

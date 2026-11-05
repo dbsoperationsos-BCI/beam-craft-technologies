@@ -37,13 +37,22 @@ const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 const SESSION_SCOPE = "album-proof-session";
 function sessionSecret() { const secret = process.env.JWT_SECRET; if (!secret) throw httpError(500, "Proof session signing is not configured."); return secret; }
-function signSession(token, publicationId, albumId) { return jwt.sign({ scope: SESSION_SCOPE, proofToken: token, publicationId, albumId }, sessionSecret(), { expiresIn: "30d" }); }
+// A short fingerprint of the PIN the session was opened with, so a Reset PIN ends the sessions the
+// old PIN opened. Sessions issued before the marker existed carry none and stay accepted.
+const pinVersion = (pinHash) => (pinHash ? hashValue(pinHash).slice(0, 16) : null);
+function signSession(token, publicationId, albumId, pinHash) { return jwt.sign({ scope: SESSION_SCOPE, proofToken: token, publicationId, albumId, ...(pinHash ? { pv: pinVersion(pinHash) } : {}) }, sessionSecret(), { expiresIn: "30d" }); }
 function verifySession(token, authHeader) {
   if (!authHeader || !authHeader.startsWith("Bearer ")) throw httpError(401, "PIN verification required.");
   let payload;
   try { payload = jwt.verify(authHeader.slice(7), sessionSecret()); } catch { throw httpError(401, "Your session has expired. Please enter the PIN again."); }
   if (payload.scope !== SESSION_SCOPE || payload.proofToken !== token) throw httpError(401, "Invalid proof session.");
   return payload;
+}
+// The session against the publication its link resolves to now: another publication, or a PIN
+// changed since the session was opened, is the client asked for the PIN again.
+function assertSessionCurrent(payload, publication) {
+  const stale = (payload.publicationId && payload.publicationId !== publication.id) || (payload.pv && payload.pv !== pinVersion(publication.pinHash));
+  if (stale) throw httpError(401, "Your session has expired. Please enter the PIN again.");
 }
 
 /*
@@ -76,6 +85,6 @@ const _resetPinAttempts = () => attempts.clear();
 
 module.exports = {
   hashValue, encryptValue, decryptValue, generateToken, generatePin, hashPin, comparePin, PIN_LENGTH,
-  TOKEN_PATTERN, signSession, verifySession, registerPinAttempt, clearPinAttempts,
+  TOKEN_PATTERN, signSession, verifySession, assertSessionCurrent, registerPinAttempt, clearPinAttempts,
   _resetPinAttempts, PIN_MAX_PER_LINK, PIN_MAX_PER_ADDRESS,
 };

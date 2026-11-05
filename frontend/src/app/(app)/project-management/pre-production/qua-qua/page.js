@@ -1,5 +1,5 @@
-import ProjectWorkflowModulePage from "@/components/project-management/ProjectWorkflowModulePage";
+import PreProductionPage from "@/components/project-management/PreProductionPage";
 
 export default function QuaQuaPreProductionPage() {
-  return <ProjectWorkflowModulePage moduleKey="pre-production-qua-qua" />;
+  return <PreProductionPage moduleKey="pre-production-qua-qua" />;
 }

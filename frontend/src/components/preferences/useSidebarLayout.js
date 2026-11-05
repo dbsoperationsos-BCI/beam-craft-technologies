@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo } from "react";
 import { usePermissions } from "@/components/auth/PermissionsProvider";
-import { usePreference, usePreferencesReady } from "@/components/preferences/PreferencesProvider";
+import { usePreference, usePreferenceValues, usePreferencesReady } from "@/components/preferences/PreferencesProvider";
 import { permissionForRoute } from "@/constants/modulePermissions";
 import { FAMILY_SIDEBAR_ITEM_ID, familyEntryFor } from "@/constants/rbacSections";
 import { SIDEBAR_LAYOUT_KEY, resolveSidebarLayout } from "@/lib/sidebarLayout.mjs";
+import { LAST_PAGE_KEYS, PAGE_FAMILIES, lastPageKey, rememberedPage } from "@/lib/lastPage.mjs";
 
 /**
  * This login's sidebar: the registry, filtered to what they may open, in the order they arranged.
@@ -25,6 +26,8 @@ export default function useSidebarLayout() {
   const { hasPermission, loading } = usePermissions();
   const ready = usePreferencesReady();
   const [stored, setStored, resetStored] = usePreference(SIDEBAR_LAYOUT_KEY, null);
+  // The screen each page family was last left on (`useRememberLastPage`), for its row's link.
+  const { values: lastPages } = usePreferenceValues(LAST_PAGE_KEYS);
 
   /*
    * Whether this person may open one screen.
@@ -36,9 +39,10 @@ export default function useSidebarLayout() {
   const canSee = useCallback((item) => {
     if (!item?.href) return true;
     /*
-     * One row, four screens. Employee Repository is the only entry in the menu for the family it
-     * belongs to - the repository itself, the referral register, Users and Roles - so asking only
-     * what `/employees` needs would shut the door on a role granted one of the other three and not
+     * One row, five screens. Employee Repository is the only entry in the menu for the family it
+     * belongs to - the repository itself, the referral register, User Activity Logs, Users and
+     * Roles - so asking only what `/employees` needs would shut the door on a role granted one of
+     * the other four and not
      * that one: the screens stay readable by URL and unreachable by navigation. The row is offered
      * if any of them is, and leads to the first the reader may open (see `entry` below).
      */
@@ -61,20 +65,35 @@ export default function useSidebarLayout() {
    * Where the family's one row actually leads, for this reader.
    *
    * `/employees` for anybody holding Employee Management, which is nearly everybody who has the
-   * row at all; the referral register, or Users, or Roles, for a role granted one of those and not
-   * the repository. The label stays **Employee Repository**: it is the name of the group of screens
-   * as the application talks about them - the heading on all four reads it - and the switch beside
+   * row at all; the referral register, the activity log, Users or Roles, for a role granted one of
+   * those and not the repository. The label stays **Employee Repository**: it is the name of the
+   * group of screens as the application talks about them - the heading on all five reads it - and the switch beside
    * that heading says which one is open.
    */
+  /*
+   * And a family row opens the screen it was last left on, where the reader may still open it -
+   * Employee Referral rather than Administration, Corp rather than All, Schedule rather than Table -
+   * instead of the first.
+   */
   const groups = useMemo(() => {
-    const entry = loading ? null : familyEntryFor(hasPermission);
-    if (!entry || entry === "/employees") return resolved;
+    if (loading) return resolved;
+    const mayOpen = (href) => {
+      const permission = permissionForRoute(href);
+      return permission ? hasPermission(permission.module, permission.feature, "READ") : true;
+    };
+    const remembered = (id) => rememberedPage(id, lastPages[lastPageKey(id)], mayOpen);
+    const entry = remembered(FAMILY_SIDEBAR_ITEM_ID) || familyEntryFor(hasPermission);
     return resolved.map((group) => ({
       ...group,
-      items: (group.items || []).map((item) =>
-        item.id === FAMILY_SIDEBAR_ITEM_ID ? { ...item, href: entry, activePath: entry } : item),
+      items: (group.items || []).map((item) => {
+        // The family's activePath follows its link: the five screens share no prefix.
+        if (item.id === FAMILY_SIDEBAR_ITEM_ID) return entry && entry !== item.href ? { ...item, href: entry, activePath: entry } : item;
+        // Only the link changes: each of the others' `activePath` already claims all its screens.
+        const href = PAGE_FAMILIES[item.id] ? remembered(item.id) : null;
+        return href && href !== item.href ? { ...item, href } : item;
+      }),
     }));
-  }, [resolved, hasPermission, loading]);
+  }, [resolved, hasPermission, loading, lastPages]);
 
   /*
    * The merged layout, written back so the stored record keeps up with the application.

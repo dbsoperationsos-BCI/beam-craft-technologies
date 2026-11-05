@@ -1,6 +1,8 @@
+const { withUserNames } = require("../../../services/userNames");
 const prisma = require("../../../config/db");
+const { everyChunk } = require("../../../services/wordChunks");
 const { lookups: referenceLookups } = require("../../../services/referenceMatchers");
-const { workingEmployeeStatuses, genderNames } = require("../../../services/employeeOptionLists");
+const { workingEmployeeStatuses, genderNames, listPhotoUrl } = require("../../../services/employeeOptionLists");
 const { optionNames } = require("../../../services/optionLists");
 const { normalizeDateText, toClockTime } = require("../../sales/crm-leads/leadDates");
 // The same number key the sheet importer matches on, so "the same person" means one thing across
@@ -352,7 +354,8 @@ const COLUMN_VALUES_LIMIT = 500;
  *
  * Two shapes, and the shape is the question. A **list** is what somebody ticked in a menu built
  * from the column's own values, so it is an exact `in`. A **string** is what they typed into the
- * box above a column, so it narrows by matching text.
+ * box above a column, so it narrows by matching text - Word Chunk Search: every word typed, in any
+ * order, one `contains` per word, which `candidateWhere` adds under `AND`.
  *
  * The register is read a page at a time, which is why this has to exist at all: filtering in the
  * browser filters the hundred rows scrolled into view, so picking a value the column holds but the
@@ -365,8 +368,8 @@ function columnFilterFor(field, raw) {
     // An empty list is no filter, not a filter matching nothing - the same reading the menu gives.
     return values.length ? { in: values } : null;
   }
-  const value = String(raw ?? "").trim();
-  return value ? { contains: value } : null;
+  const chunks = everyChunk(raw, (chunk) => ({ [field]: { contains: chunk } }));
+  return chunks.length ? { AND: chunks } : null;
 }
 
 /** The `where` one stage and its column filters come to. */
@@ -383,7 +386,8 @@ function candidateWhere({ status = "", filters = {}, exceptColumn = "" } = {}) {
      */
     if (exceptColumn && field === exceptColumn) continue;
     const clause = columnFilterFor(field, raw);
-    if (clause) where[field] = clause;
+    if (clause?.AND) where.AND = [...(where.AND || []), ...clause.AND];
+    else if (clause) where[field] = clause;
   }
   return where;
 }
@@ -439,7 +443,8 @@ async function listCandidates({ status = "", offset = 0, limit = CANDIDATE_PAGE_
     ? grouped.reduce((all, row) => ({ ...all, [String(row.status || "")]: row._count._all }), {})
     : null;
 
-  return { rows: rows.map(toRow), total, counts };
+  // Who added each candidate, by name (`services/userNames`).
+  return { rows: await withUserNames(rows.map(toRow)), total, counts };
 }
 
 async function getCandidate(id) {
@@ -689,17 +694,79 @@ async function deleteCandidate(id) {
   return { id: existing.id, candidateCode: existing.candidateCode, deleted: true };
 }
 
+/*
+ * How many ids go into one statement. The CRM lead board's own number, and chosen for the same
+ * reason: well inside MySQL's placeholder and packet limits, while turning a selection of tens of
+ * thousands into a couple of round trips rather than one per row.
+ */
+const BULK_DELETE_SLICE = 20000;
+
+/**
+ * A whole selection deleted together.
+ *
+ * `deleteCandidate` in a loop is what this replaces, and the loop was the reason the request was
+ * capped at 2,000: each candidate cost its own two statements and its own transaction, so a large
+ * selection was thousands of round trips and long enough to risk a gateway timeout - which would
+ * leave somebody with no idea how much of it had happened.
+ *
+ * Batched, the work is a handful of statements whatever the size, so the cap can be the CRM's
+ * rather than a number that exists to keep the loop short.
+ *
+ * Answers which ids actually went, because the screen reports it: an id that names no live
+ * candidate - already deleted, or never here - is left out of `deletedIds` rather than counted.
+ */
+async function deleteCandidates(ids = []) {
+  const wanted = [...new Set((Array.isArray(ids) ? ids : []).map((id) => String(id || "").trim()).filter(Boolean))];
+  if (!wanted.length) return { deletedIds: [], missedIds: [] };
+
+  const deletedIds = [];
+  for (let offset = 0; offset < wanted.length; offset += BULK_DELETE_SLICE) {
+    const slice = wanted.slice(offset, offset + BULK_DELETE_SLICE);
+    /*
+     * A slice that fails is reported and the rest still run.
+     *
+     * The loop this replaced caught per candidate and carried on, so one bad row cost one row. Let
+     * a slice throw instead and the whole call becomes a 500 - which the screen reads as "nothing
+     * happened" while the slices before it have already committed, leaving somebody to guess how
+     * much of their selection went. Its ids stay out of `deletedIds`, so they are reported as not
+     * found, which is the honest answer for a row this pass did not remove.
+     */
+    try {
+      // Read first: after the delete there is no way to tell which of the ids asked for were real.
+      const live = await prisma.hrmInterviewCandidate.findMany({
+        where: { id: { in: slice }, deletedAt: null },
+        select: { id: true },
+      });
+      if (!live.length) continue;
+      const liveIds = live.map((row) => row.id);
+      // The invites first, in the same transaction: an invite names a `candidate_id` and nothing
+      // enforces that it exists, so a failure between the two would leave forms pointing at nobody.
+      await prisma.$transaction([
+        prisma.hrmInterviewApplicationInvite.deleteMany({ where: { candidateId: { in: liveIds } } }),
+        prisma.hrmInterviewCandidate.deleteMany({ where: { id: { in: liveIds } } }),
+      ]);
+      deletedIds.push(...liveIds);
+    } catch (error) {
+      console.error(`Unable to delete a slice of ${slice.length} interview candidate(s):`, error?.message || error);
+    }
+  }
+
+  const gone = new Set(deletedIds);
+  return { deletedIds, missedIds: wanted.filter((id) => !gone.has(id)) };
+}
+
 /**
  * Who may interview: every working employee, not one department's. Names and ids only, served
  * here rather than from the HR roster endpoint, which answers to a permission an interviewer's
  * screen need not hold.
  */
 async function interviewers() {
-  return prisma.employee.findMany({
+  const rows = await prisma.employee.findMany({
     where: { archivedAt: null, employmentStatus: { in: await workingEmployeeStatuses() } },
-    select: { id: true, employeeId: true, employeeName: true, designation: true },
+    select: { id: true, employeeId: true, employeeName: true, designation: true, profilePhotoUrl: true },
     orderBy: { employeeName: "asc" },
   });
+  return rows.map((row) => ({ ...row, profilePhotoUrl: listPhotoUrl(row.profilePhotoUrl) }));
 }
 
 /**
@@ -717,7 +784,7 @@ async function interviewers() {
 async function meetGuests() {
   const rows = await prisma.employee.findMany({
     where: { archivedAt: null, employmentStatus: { in: await workingEmployeeStatuses() } },
-    select: { id: true, employeeId: true, employeeName: true, designation: true, workEmailId: true, emailId: true },
+    select: { id: true, employeeId: true, employeeName: true, designation: true, workEmailId: true, emailId: true, profilePhotoUrl: true },
     orderBy: { employeeName: "asc" },
   });
   return rows
@@ -727,6 +794,7 @@ async function meetGuests() {
       name: row.employeeName || row.employeeId || "Employee",
       designation: row.designation || "",
       email: String(row.workEmailId || row.emailId || "").trim(),
+      profilePhotoUrl: listPhotoUrl(row.profilePhotoUrl),
     }))
     .filter((row) => row.email);
 }
@@ -814,6 +882,7 @@ module.exports = {
   createCandidatesBulk,
   updateCandidate,
   deleteCandidate,
+  deleteCandidates,
   interviewOptions,
   interviewers,
   meetGuests,

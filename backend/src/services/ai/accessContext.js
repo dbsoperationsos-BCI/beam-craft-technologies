@@ -1,5 +1,5 @@
 const iamService = require("../iam.service");
-const { findModule, permissionModuleFor, isGlobal, isKnownScope, moduleIds } = require("./modules");
+const { findModule, permissionModuleFor, isGlobal, isKnownScope, moduleIds, companionModules } = require("./modules");
 const { verticalFor } = require("./verticals");
 
 /**
@@ -113,8 +113,12 @@ async function buildAccessContext({ userId, requestedModule, requestedVertical }
     userName: user.name || "",
     isSuperAdmin,
     scope: registered.id,
-    // One module, and only one. A normal user's session cannot widen past this.
-    modules: [registered.id],
+    /*
+     * One panel module, and only one: a normal user's session cannot widen past it. Beside it, each
+     * companion (attendance) this person holds the permission for - asked of the database, one by
+     * one, exactly like the module itself.
+     */
+    modules: [registered.id, ...await companionsHeld(id)],
     feature: registered.feature,
     /*
      * Which of the studio's three businesses this session is looking at.
@@ -131,6 +135,26 @@ async function buildAccessContext({ userId, requestedModule, requestedVertical }
     vertical: verticalFor(requestedVertical)?.name || null,
     branchIds: await reachableBranches(id),
   };
+}
+
+/** The companion modules (`modules.js`) this person holds the permission for, at READ. */
+async function companionsHeld(userId) {
+  const held = [];
+  for (const companion of companionModules()) {
+    try {
+      // Either of a companion's permissions (`anyOf`) where its routes admit more than one.
+      const grants = companion.anyOf || [{ module: permissionModuleFor(companion), feature: companion.feature }];
+      for (const grant of grants) {
+        if (await iamService.hasPermission(userId, grant.module, grant.feature, "READ")) {
+          held.push(companion.id);
+          break;
+        }
+      }
+    } catch {
+      // A companion that cannot be checked is simply not offered.
+    }
+  }
+  return held;
 }
 
 /**

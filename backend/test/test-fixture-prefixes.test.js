@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { PREFIXES, TARGETS } = require("../scripts/clear-test-fixtures");
+const { PREFIXES, TARGETS, literalPrefix } = require("../scripts/clear-test-fixtures");
 
 /*
  * The suites write real rows, and something has to clear the ones they do not.
@@ -71,18 +71,39 @@ test("the sweep clears something in every table the suites write to", () => {
    * The join rows are `onDelete: Cascade` from the row above them, so the sweep takes them with the
    * role, user, branch or project rather than listing them.
    *
-   * The two AI tables are a different case and worth stating: `ai-actions.test.js` writes its plans
-   * against whichever user already exists rather than one of its own, so there is no prefix to
-   * sweep on - and it clears them in its `before` as well as its `after`, so the next run cleans up
-   * after a killed one. Nothing of theirs is ever shown in a list of branches or employees.
+   * The AI conversation table is a different case and worth stating: its suite writes against
+   * whichever user already exists rather than one of its own, so there is no prefix to sweep on -
+   * and it clears its rows in its `before` as well as its `after`, so the next run cleans up after a
+   * killed one. Nothing of it is ever shown in a list of branches or employees.
    */
   const cascaded = new Set([
     "userRole", "rolePermission", "roleBranch", "projectAttachment",
     "hrmTaskHolder", "hrmTaskActivity", "salesProjectCrdDocument",
-    "aiConversation", "aiActionPlan",
+    "aiConversation",
+    // `onDelete: Cascade` from the project a client's chat is about, and its messages from the chat.
+    "clientChatThread", "clientChatMessage",
+    // `onDelete: Cascade` from the client's project, which the sweep takes.
+    "clientCoinEntry",
+    // `onDelete: Cascade` from the client's project, which the sweep takes before the designs.
+    "clientInvitation",
+    // `onDelete: Cascade` from the client's project, which the sweep takes.
+    "clientServiceRequest",
     // Both `onDelete: Cascade` from the user: an account that goes takes its outstanding reset
     // codes and links with it, so sweeping the user sweeps these.
     "passwordResetOtp", "passwordResetToken",
+    // `onDelete: Cascade` from the project it reviews, so sweeping the project sweeps its feedback.
+    "projectFeedback",
+    // `onDelete: Cascade` from the project whose plan changed, so sweeping the project sweeps its Sale Extras.
+    "projectSaleExtra",
+    // `onDelete: Cascade` from the employee it is shared with, so sweeping the employee sweeps it.
+    "salesQuotationShare",
+    // `onDelete: Cascade` from the lead it belongs to: sweeping the lead sweeps its occasions.
+    "salesCrmLeadOccasion",
+    // `onDelete: Cascade` from the login they belong to: sweeping the user sweeps a client's
+    // notifications, a staff notification and a client's push tokens.
+    "clientNotification", "notification", "clientPushToken",
+    // `onDelete: Cascade` from its project and its shoot, both of which the sweep takes.
+    "projectPreProduction",
   ]);
 
   const written = new Set();
@@ -143,4 +164,14 @@ test("the sweep deletes children before their parents", () => {
   before("salesCrmMeeting", "salesCrmLead");
   before("employee", "branch");
   before("user", "branch");
+});
+
+test("a prefix is swept as written: its _ and % are not LIKE wildcards", () => {
+  // Unescaped, TEST_ reached every row starting TEST and one more character - TEST-EV-001 included.
+  assert.equal(literalPrefix("TEST_"), "TEST\\_");
+  assert.equal(literalPrefix("50%"), "50\\%");
+  assert.equal(literalPrefix("a\\b"), "a\\\\b");
+  assert.equal(literalPrefix("TFB-"), "TFB-");
+  const source = fs.readFileSync(path.join(__dirname, "..", "scripts", "clear-test-fixtures.js"), "utf8");
+  assert.match(source, /\{ startsWith: literalPrefix\(prefix\) \}/);
 });

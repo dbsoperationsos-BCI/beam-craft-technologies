@@ -4,6 +4,12 @@ const repository = require("./repository");
 const r2 = require("../storage/r2");
 const { assertReadable } = require("../originals/paths");
 const { createSettingsService } = require("../settings/service");
+// The client gallery's Scene filter: the culling run's scene profile names the scenes, and the
+// filter module counts the readings (ai-culling/scene/).
+const sceneProfile = require("../ai-culling/scene/profile");
+const { sceneCounts } = require("../ai-culling/scene/filter");
+// Photos no culling run has read are read in the background the first time a gallery asks (scene/backfill.js).
+const sceneBackfill = require("../ai-culling/scene/backfill");
 
 const settings = createSettingsService();
 
@@ -28,11 +34,19 @@ function serializeImage(projectId, item, base) {
 async function list(projectId, options) {
   const { items, total } = await repository.listReadyImages(projectId, options);
   const base = `/api/image-selection/projects/${projectId}/gallery`;
-  return { items: items.map((item) => serializeImage(projectId, item, base)), pagination: { page: options.page, pageSize: options.pageSize, total, totalPages: Math.max(1, Math.ceil(total / options.pageSize)) } };
+  return {
+    items: items.map((item) => serializeImage(projectId, item, base)),
+    pagination: { page: options.page, pageSize: options.pageSize, total, totalPages: Math.max(1, Math.ceil(total / options.pageSize)) },
+    // Added through AI Culling and waiting there: they join this gallery once culled.
+    heldForCulling: await repository.countHeldForCulling(projectId, options.folderId || null),
+  };
 }
 
-async function media(projectId, imageId, type) {
-  const image = await repository.findReadyImage(projectId, imageId);
+// `eligibleOnly` is the client gallery's view: a photo a finalized cull hid does not resolve
+// there even by id. The staff route stays unfiltered because the Photo Culling workspace shows
+// culled photos through it.
+async function media(projectId, imageId, type, { eligibleOnly = false } = {}) {
+  const image = eligibleOnly ? await repository.findPublishedImage(projectId, imageId) : await repository.findReadyImage(projectId, imageId);
   if (!image) throw httpError(404, "Image not found.");
   // These routes stay alive for images stored in R2 so that any URL already cached by a
   // browser or pasted into a message keeps resolving; they just redirect to the bucket.
@@ -91,6 +105,14 @@ async function selectedManifest(projectId, folderId = null) {
     // for that folder can turn it back into a file, which is how Download Selected reaches a master
     // this server has never had a copy of.
     originalPath: item.originalPath || null,
+    // The original's recorded size: the workstation copies exactly that file, never a same-named one.
+    // A stored 0 means "never known", not a zero-byte file, so it goes out as null and the size
+    // check is skipped rather than failed.
+    sizeBytes: Number(item.sizeBytes) > 0 ? Number(item.sizeBytes) : null,
+    // The BLAKE3 the desktop recorded when it added the photo (null for the browser flows and for
+    // older desktops): a workstation that finds a file of the right size but another checksum has
+    // the wrong file, and says so instead of copying it.
+    sourceChecksum: item.sourceChecksum || null,
     // Set for a desktop-registered photo: the named root `originalPath` is relative to. A
     // workstation resolves the pair through its own mapping; the browser flow ignores it.
     storageRootId: item.storageRootId || null,
@@ -109,17 +131,55 @@ async function setSelection(projectId, imageId, selected) {
   return { imageId, selected };
 }
 
-async function selectionSummary(projectId) {
-  return repository.folderSelectionSummary(projectId);
+async function selectionSummary(projectId, options = {}) {
+  return repository.folderSelectionSummary(projectId, options);
 }
 
-// Download Selected finished in the browser. Recorded from the browser rather than inferred from
-// the manifest request, because a manifest is asked for at the *start* of a run that may still be
-// refused a folder or interrupted; only the end of the run is a download.
-async function markSelectedDownloaded(projectId) {
-  const result = await repository.markSelectedDownloaded(projectId);
-  if (!result.count) throw httpError(404, "Image Selection project not found.");
-  return { projectId, downloaded: true };
+/**
+ * The client gallery's Scene filter: which scenes the culling run read in the photos the People
+ * tab lists - the shoot in view (`folderGroupId`) and, with anyone chosen, the photos those
+ * people are in (`personId`) - and how many photos each holds, in the profile's own order with
+ * the studio's words (`scenesOf`). A scene nobody's photo was read as is not listed, the
+ * accidental scenes never are. Stored readings only on this request: a photo no culling run has
+ * read is handed to the scene engine in the background (`scene/backfill.pending`), and
+ * `processing` says so, so the gallery can say scenes are still being organised and ask again
+ * - the People filter's own lifecycle. A gallery with nothing to read and nothing read answers
+ * an empty list, so the dropdown simply does not appear.
+ */
+async function listScenes(projectId, { folderGroupId, folderId, personId } = {}) {
+  const [rows, processing] = await Promise.all([
+    repository.listSceneReadings(projectId, { folderGroupId, folderId, personId, accidentalScenes: sceneProfile.accidentalSceneIds() }),
+    sceneBackfill.pending(projectId).catch((error) => { console.warn(`[image-selection scenes] could not check project ${projectId}: ${error.message}`); return false; }),
+  ]);
+  return { scenes: sceneProfile.scenesOf(sceneCounts(rows)), processing };
 }
 
-module.exports = { list, media, original, selectedManifest, setSelection, selectionSummary, markSelectedDownloaded, serializeImage, uploadRoot };
+/*
+ * Download Selected finished in the browser. Recorded from the browser rather than inferred from
+ * the manifest request, because a manifest is asked for at the *start* of a run that may still be
+ * refused a folder or interrupted; only the end of the run is a download.
+ *
+ * What it records is the selection state the run saved - the `asOf` its manifest was read at - not
+ * the moment it finished, so a client submission landing while the photos were being saved is newer
+ * than the stamp and keeps the project on Yet to Download. A time from the future is held to now,
+ * and one older than the stamp already there changes nothing, so a second download of the same
+ * state, or a report arriving late, never puts the project back on the list.
+ */
+async function markSelectedDownloaded(projectId, asOf = null, folderId = null) {
+  const now = new Date();
+  const reported = asOf ? new Date(asOf) : null;
+  const at = reported && !Number.isNaN(reported.getTime()) && reported < now ? reported : now;
+  // A run of one folder covered only the items whose every pick sits in it; a run of the whole
+  // project covered every submitted item (null).
+  let covered = null;
+  if (folderId) {
+    const folderIds = await repository.folderSubtreeIds(projectId, folderId);
+    if (!folderIds) throw httpError(404, "Folder not found.");
+    covered = await repository.coveredDeliverableConfigIds(projectId, folderIds);
+  }
+  const result = await repository.markSelectedDownloaded(projectId, at, covered);
+  if (!result.found) throw httpError(404, "Image Selection project not found.");
+  return { projectId, downloaded: true, selectedDownloadedAt: result.selectedDownloadedAt, deliverableConfigIds: covered };
+}
+
+module.exports = { list, media, original, selectedManifest, setSelection, selectionSummary, listScenes, markSelectedDownloaded, serializeImage, uploadRoot };

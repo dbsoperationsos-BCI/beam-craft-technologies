@@ -7,10 +7,12 @@ import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import Dropdown from "@/components/shared/Dropdown";
 import MultiSelectField from "@/components/shared/MultiSelectField";
 import TextField from "@/components/shared/TextField";
+import useFormErrors from "@/components/shared/useFormErrors";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import { getMasterData, saveMasterData, deleteMasterData } from "@/services/hrm/master-data.service";
 import { layers } from "@/constants/layers";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 /**
  * One of the HRM lists - Designations, Departments, Verticals, Skills - as Table Settings edits it.
@@ -91,6 +93,7 @@ const masterDataApi = {
  */
 export default function HrmOptionListEditor({ resource, label, singular, onError, api = masterDataApi, behaviours = [], staged = false, unsavedRef, controlsRef, onStagedChange }) {
   const { notice, showSuccess, showError, clearNotice } = useNotice();
+  const fields = useFormErrors();
   const [records, setRecords] = useState([]);
   /*
    * The staged copy, and the whole of what `staged` means: every edit is made here and nothing is
@@ -193,7 +196,7 @@ export default function HrmOptionListEditor({ resource, label, singular, onError
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return rows;
-    return rows.filter((record) => String(record.name || "").toLowerCase().includes(needle));
+    return rows.filter((record) => matchesWordChunks(record.name, needle));
   }, [query, rows]);
   const searching = Boolean(query.trim());
 
@@ -209,16 +212,21 @@ export default function HrmOptionListEditor({ resource, label, singular, onError
   /** A row that only exists on screen yet. The prefix is what `save` sorts the new from the kept by. */
   const isNew = (record) => String(record.id ?? "").startsWith(NEW_ROW_PREFIX);
 
+  /**
+   * What is wrong with `value` as an entry, said under its box: blank, or already in the list
+   * (`except` the row being renamed). Refused here rather than at Save, where on a staged list it
+   * would be one failure among several and would name a row typed several edits ago.
+   */
+  const nameProblem = (value, except = null) => {
+    if (!value) return `Enter the ${singular.toLowerCase()}.`;
+    const taken = rows.some((record) => record.id !== except && String(record.name || "").trim().toLowerCase() === value.toLowerCase());
+    return taken ? `${value} is already in ${label}.` : "";
+  };
+
   async function add() {
     const value = name.trim();
-    if (!value || busy) return;
+    if (busy || !fields.check({ add: nameProblem(value) })) return;
     if (staged) {
-      // Refused here rather than at Save, where it would be one failure among several and would
-      // name a row the person typed several edits ago.
-      if (rows.some((record) => String(record.name || "").trim().toLowerCase() === value.toLowerCase())) {
-        showError(`${value} is already in ${label}.`);
-        return;
-      }
       setWorking((current) => [...current, { id: `${NEW_ROW_PREFIX}${nextNewId.current += 1}`, name: value }]);
       setName("");
       setQuery("");
@@ -255,12 +263,8 @@ export default function HrmOptionListEditor({ resource, label, singular, onError
    */
   async function rename() {
     const value = String(editing?.name ?? "").trim();
-    if (!value || busy) return;
+    if (busy || !fields.check({ rename: nameProblem(value, editing.id) })) return;
     if (staged) {
-      if (rows.some((record) => record.id !== editing.id && String(record.name || "").trim().toLowerCase() === value.toLowerCase())) {
-        showError(`${value} is already in ${label}.`);
-        return;
-      }
       setWorking((current) => current.map((record) => (record.id === editing.id ? { ...record, name: value } : record)));
       setEditing(null);
       return;
@@ -403,6 +407,7 @@ export default function HrmOptionListEditor({ resource, label, singular, onError
     setWorking(records.map((row) => ({ ...row })));
     setEditing(null);
     setName("");
+    fields.clearAll();
   }
 
   /*
@@ -457,16 +462,17 @@ export default function HrmOptionListEditor({ resource, label, singular, onError
       <TextField
         label={`Add ${singular}`}
         value={name}
-        onChange={(event) => setName(event.target.value)}
+        onChange={(event) => { fields.clear("add"); setName(event.target.value); }}
         onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void add(); } }}
         placeholder={`New ${singular.toLowerCase()}`}
         disabled={busy}
+        error={fields.errors.add}
         className="w-[16rem]"
       />
       {/* Add is the only action on this row again, now the pair has gone up to the pickers, so it
           keeps the primary weight it has always had. It never reads "Saving..." on a staged list:
           nothing is being written when it is pressed, and the word belongs to that list's own Save. */}
-      <Button type="button" variant="primary" disabled={busy || !name.trim()} onClick={() => void add()}>
+      <Button type="button" variant="primary" disabled={busy} onClick={() => void add()}>
         {!staged && busy ? "Saving..." : "Add"}
       </Button>
       {/* No Cancel or Save here. A staged list hands both to whoever drew the pickers above it, so
@@ -486,6 +492,7 @@ export default function HrmOptionListEditor({ resource, label, singular, onError
           {behaviour.mode === "one"
             ? <Dropdown
               label={behaviour.question}
+              helperText={behaviour.hint}
               value={answerTo(behaviour)}
               onChange={(value) => void answerQuestion(behaviour, value)}
               // The list's own order, not alphabetical: these read as the order a schedule runs in.
@@ -499,13 +506,13 @@ export default function HrmOptionListEditor({ resource, label, singular, onError
             />
             : <MultiSelectField
               label={behaviour.question}
+              helperText={behaviour.hint}
               values={answerTo(behaviour)}
               onChange={(values) => void answerQuestion(behaviour, values)}
               options={entryNames}
               disabled={busy || loading}
               placeholder="None"
             />}
-          <p className="mt-1 text-xs text-slate-500">{behaviour.hint}</p>
         </div>)}
       </div>
     </div>}
@@ -552,17 +559,18 @@ export default function HrmOptionListEditor({ resource, label, singular, onError
                   // onto the input, so the camel-cased one reaches the DOM as an unknown attribute.
                   aria-label={`Rename ${record.name}`}
                   value={editing.name}
-                  onChange={(event) => setEditing((current) => ({ ...current, name: event.target.value }))}
+                  onChange={(event) => { fields.clear("rename"); setEditing((current) => ({ ...current, name: event.target.value })); }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") { event.preventDefault(); void rename(); }
                     if (event.key === "Escape") { event.preventDefault(); setEditing(null); }
                   }}
                   disabled={busy}
+                  error={fields.errors.rename}
                   className="min-w-0 flex-1"
                 />
                 <span className="flex shrink-0 gap-2">
                   <Button type="button" size="sm" disabled={busy} onClick={() => setEditing(null)}>Cancel</Button>
-                  <Button type="button" size="sm" variant="primary" disabled={busy || !editing.name.trim()} onClick={() => void rename()}>
+                  <Button type="button" size="sm" variant="primary" disabled={busy} onClick={() => void rename()}>
                     {busy ? "Saving..." : "Save"}
                   </Button>
                 </span>
@@ -576,7 +584,7 @@ export default function HrmOptionListEditor({ resource, label, singular, onError
                   ariaLabel={`Actions for ${record.name}`}
                   menuZIndexClassName={layers.menuOverPanel}
                   items={[
-                    { label: "Edit", onSelect: () => setEditing({ id: record.id, name: record.name }) },
+                    { label: "Edit", onSelect: () => { fields.clear("rename"); setEditing({ id: record.id, name: record.name }); } },
                     { label: "Delete", tone: "danger", onSelect: () => setDeleting(record) },
                   ]}
                 />

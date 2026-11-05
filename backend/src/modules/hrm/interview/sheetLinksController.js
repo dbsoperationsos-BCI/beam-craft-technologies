@@ -1,7 +1,7 @@
 const { z } = require("zod");
 const prisma = require("../../../config/db");
 const { getConnectionForUser } = require("../../sales/google-oauth/service");
-const { prepareInterviewSheetImport, syncInterviewSheetLink, deleteCandidatesFromSheet } = require("./sheetSyncService");
+const { prepareInterviewSheetImport, syncInterviewSheetLink } = require("./sheetSyncService");
 const { listRulesForLink, replaceRulesForLink, deleteRulesForLink, validateRules } = require("./sheetRulesStore");
 const { interviewers } = require("./service");
 
@@ -283,19 +283,24 @@ async function remove(req, res) {
   try {
     const existing = await readLink(id);
     if (!existing) return res.status(404).json({ message: "Google Sheet link not found." });
+    // Held to the owner like update and sync: removing a link also deletes the candidates it brought in.
+    if (notOwner(existing, req)) return res.status(403).json({ message: "You do not have access to this Google Sheet link." });
     await prisma.hrmInterviewGoogleSheetLink.update({ where: { id }, data: { deletedAt: new Date() } });
-    // Deleting a source deletes what it produced; the spreadsheet itself is never touched.
-    let deletedCandidates = 0;
-    try {
-      deletedCandidates = await deleteCandidatesFromSheet({
-        spreadsheetId: existing.spreadsheetId || extractSpreadsheetId(existing.sheetUrl) || "",
-        gid: extractGidFromUrl(existing.sheetUrl) ?? "",
-        targetTab: existing.targetedTab || "",
-      });
-    } catch (error) {
-      console.error("Interview sheet link deleted, but its candidates could not be removed:", error.message);
-    }
-    return res.json({ data: await readLink(id, { deleted: true }), deletedCandidates });
+    /*
+     * ── The candidates stay ───────────────────────────────────────────────────────────────────
+     *
+     * This used to delete every candidate the sheet had imported, on the argument that deleting a
+     * source deletes what it produced. That is defensible right up until the records have been
+     * worked: a candidate with three rounds booked, a remark history and a screening form out with
+     * them, gone because somebody tidied up an integration.
+     *
+     * A link is a **sync**, and stopping a sync is not a reason to destroy what it brought in. Once
+     * a row is in the register it is the studio's record, and the only thing that removes it is
+     * somebody pressing Delete on it. The link is still soft-deleted below, so the poller stops
+     * reading that sheet and `restore` can bring it back - and the ledger still remembers which rows
+     * it imported, so re-linking does not import them all a second time.
+     */
+    return res.json({ data: await readLink(id, { deleted: true }) });
   } catch (error) {
     console.error("Unable to remove the Interview Google Sheet link:", error);
     return res.status(500).json({ message: "Unable to remove Google Sheet link." });
@@ -309,6 +314,7 @@ async function restore(req, res) {
   try {
     const deleted = await readLink(id, { deleted: true });
     if (!deleted) return res.status(404).json({ message: "That Google Sheet link is not available to restore." });
+    if (notOwner(deleted, req)) return res.status(403).json({ message: "You do not have access to this Google Sheet link." });
     await prisma.hrmInterviewGoogleSheetLink.update({ where: { id }, data: { deletedAt: null } });
     return res.json({ message: "Google Sheet link restored.", data: await readLink(id) });
   } catch (error) {

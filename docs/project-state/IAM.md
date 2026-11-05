@@ -61,51 +61,53 @@ permission whose whole job is the question. Reading the second off the screen's 
 role that merely grants a screen in six branches hand somebody every colleague's records in all six.
 
 
-## Admin Permission — the set every Branch Admin carries
+## Branch Admin — the tick that fills a role and widens it
 
-A second tick beside Administrator marks a role as a **Branch Admin**, and every role carrying that
-tick also carries one shared permission matrix: the **Admin Permission** set, edited once from the
-button of that name on the Roles page.
+A second tick beside Administrator marks a role as a **Branch Admin**. It does two things, and they
+are worth keeping apart: it **fills the matrix** once, and it **widens whose records the holder
+sees** for as long as it is ticked.
 
-**One set for the studio, not one per role.** A branch administrator in Erode and one in Bangalore
-do the same job in two places; what differs between them is the branch list on their own role, which
-this does not touch. So the studio decides once what the job may reach, and changing it changes what
-every branch administrator may do — at once, without a single role being re-saved. The editor says
-so, with the number of roles affected, before it saves.
+**Ticking it fills every module at Read / Write.** An administrator starts from "all of it" and the
+studio takes away what this particular one has no business in — which is how the studio describes
+the job, and the opposite of building it up permission by permission. Every grant lands on screen,
+so the role editor still answers the one question it exists for: what does this role do.
 
-It is read in `IAMService.getUserPermissions` and merged through the same
-`_mergeMostPermissive` every other grant goes through, which means **it can only ever widen**. A role
-already granting `SALES / CRM Leads` at `READ_WRITE` keeps `READ_WRITE` when the set names it at
-`READ`; the set adds what the role does not hold and never lowers what it does. A deactivated role
-grants nothing, the shared set included.
+**The ticks are then yours to cut back, and the role stays a Branch Admin.** The tick used to clear
+the moment any module was touched, because a role differing from the shared set was no longer
+carrying that set. There is no set any more, so there is nothing to differ from: cutting Accounts
+out of an administrator's matrix does not stop them administering their branch. Only unticking does,
+and unticking leaves the permissions where they are — taking the title away is not taking the work
+away, and whoever unticked it can clear what they mean to clear.
 
-**Ticking it fills the matrix below rather than hiding behind a flag.** A tick that silently granted
-eleven permissions with nothing on screen would leave the role editor unable to answer the one
-question it exists for. So the set is merged into the modules on screen, exactly as the server
-merges it — and because those grants are really there, **editing any module detaches the role from
-the set**: the tick clears and what is on screen stays as that role's own permissions. The moment
-somebody's access differs from the shared set they are not carrying the shared set any more; they
-are a person with their own list.
+**What a branch admin may do is their own role's matrix and nothing else.** There used to be one
+studio-wide **Admin Permission** set merged in at sign-in on top of every ticked role. It meant a
+permission unticked on the role came straight back at the next sign-in, with no screen saying why —
+a grant nobody could see was a grant nobody could remove. The set, its button, its dialog and its
+two routes are gone; `20261024090000_branch_admin_own_matrix` copies whatever it was granting into
+each ticked role's own matrix first, most-permissively, so nobody's access changes on deploy.
+`branch_admin_permission` is left in place and unread.
 
-**The tick carries `ADMIN / Branch Administration` itself**, on top of the set. That permission is
-what *makes* a branch administrator one — it is the widening from the work your own name is on to
-every record in the branches your roles reach — so being marked Branch Admin and not holding it was
-a contradiction the Roles page had no way to show. It used to be an ordinary row in the matrix,
-under a name ("Administer Branches") that reads like the right to edit the branch register, which is
+**The tick carries `ADMIN / Branch Administration` itself.** That permission is what *makes* a
+branch administrator one — it is the widening from the work your own name is on to every record in
+the branches your roles reach — so being marked Branch Admin and not holding it was a contradiction
+the Roles page had no way to show. It used to be an ordinary row in the matrix, under a name
+("Administer Branches") that reads like the right to edit the branch register, which is
 `SETTINGS / Organization` and something else entirely; studios ticked the box, watched nothing
 change, and could not see why.
 
-So it is granted by the tick and by nothing else. `GET /api/admin/permissions` leaves it out, which
-closes the role editor **and** the Admin Permission dialog at once, since one response feeds both,
-and `writeRoleMatrix` drops it from anything a payload sends by hand. It is merged most-permissively
-like every other grant, at `READ_WRITE`, so it can only widen. A role granted it before the tick
-carried it keeps it: the matrix is replaced whole on every save, so `writeRoleMatrix` carries across
-the permissions the editor was never offered rather than revoking them silently. See
-[Whose records](#whose-records).
+So it is granted by the tick and by nothing else. `GET /api/admin/permissions` leaves it out, so the
+role editor cannot draw it, and `writeRoleMatrix` drops it from anything a payload sends by hand. It
+is merged most-permissively like every other grant, at `READ_WRITE`, so it can only widen. A role
+granted it before the tick carried it keeps it: the matrix is replaced whole on every save, so
+`writeRoleMatrix` carries across the permissions the editor was never offered rather than revoking
+them silently.
 
-Stored in `branch_admin_permission`, one row per permission granted
-(`20260919150000_branch_admin_permissions`). Empty on arrival: a new installation grants nobody
-anything through it until somebody saves a set, which is the direction it has to fail in.
+**And the branches it widens to are the ticked role's own.** `reachableBranchIds` reads the tick
+beside the grants when it is asked about `ADMIN / Branch Administration`: a role carrying the
+permission through the tick has no row in `role_permission`, so asking "which roles grant it" by
+reading that table alone answered *none* — and the one permission whose whole job is "see every
+record in these branches" found no branches to apply itself to and widened nobody. See
+[Whose records](#whose-records).
 
 ## Administrator
 
@@ -114,8 +116,9 @@ anything through it until somebody saves a set, which is the direction it has to
 **There is no longer a tick for it.** Role Management used to offer one at the top of Action
 permissions that settled every module in one move; it was removed once Branch Admin arrived, because
 two one-click ways to hand out sweeping access is one more than the screen can explain. A role that
-needs everything is now built from the module dropdowns like any other, or given the shared
-[Admin Permission](#admin-permission--the-set-every-branch-admin-carries) set.
+needs everything is now built from the module dropdowns like any other, or ticked
+[Branch Admin](#branch-admin--the-tick-that-fills-a-role-and-widens-it), which fills them all in one
+move.
 
 The flag itself stays, and is still **derived rather than stored beside the permissions**:
 `toPayload` computes it from the matrix on every save, so it and the rows cannot disagree. Lower one
@@ -177,6 +180,19 @@ narrower, and it is worth being clear about why it is not the same mistake:
 
 A Super Admin is narrowed by nothing.
 
+**`SALES / Booking Edit`** is the narrower grant beside it, for the one act people kept needing
+`Show All Projects` for. Changing a **booking** - a project's own sale record, and its client login -
+answered to the record: the four seats it is staffed to, a branch administrator, or Show All Projects.
+So letting a CRM correct a booking they are not staffed on meant handing them every project on
+Projects, Pre Production and Production as well. At **Read / Write** this grants that act alone - on the bookings their own data
+scope already shows them, since the write looks its project up through `projectAccessWhere` - its
+**payment schedule** with it, which is agreed when the sale is (`PUT …/payment-schedule` takes this
+grant or the plan's pair), and it **adds**: whoever may edit a booking today still may. Read grants nothing. Creating a
+booking stays `SALES / Sales Manager` Read / Write - which is still needed to be on the screen at all -
+**deleting** one stays its Project Manager's (or a branch administrator's, or Show All Projects'), and
+the plan stays its own rule. Both the row's Edit and `PATCH /api/sales/projects/:id` read it, through
+`mayEditProject`, so the menu cannot offer an edit the endpoint refuses.
+
 **What reads it:** Asset Management, CRM Leads and its reports and dashboard, the project register
 (Sales Manager, Quotations, CRD Documents, the four project boards), Cash Management, Payment
 Requests, All Tasks, saved WhatsApp group names — the screens and the assistant's tools alike, on
@@ -233,6 +249,14 @@ requester could have chosen them.
 
 Managing the branch list itself — adding, renaming, deactivating a location — is unnarrowed and
 stays with `HRM / Employee Management` `READ_WRITE`.
+
+**Offboarding reaches past HRM, deliberately.** Recording a separation (`HRM / Employee Management`
+`READ_WRITE`) hands the leaver's pending work to the person HR names - open tasks, open CRM leads,
+roles on unfinished projects, unfinished production, interview candidates, sheet assignment rules
+and approver slots - without the CRM, Projects or Interview permissions those screens ask for. It is
+the consequence of somebody leaving, the receiver must be a working employee, and only pending work
+moves (`backend/src/modules/hrm/separations/handover.js`). `GET /api/hrm/separations/pending-work`
+lists it under the same write permission, since it names leads and projects across the studio.
 
 ### What the branch list actually narrows in the *data*
 
@@ -316,9 +340,9 @@ a role granted nothing extra still sees its own work.
 | Screen | You see | Widened to everything by |
 | --- | --- | --- |
 | Asset Requests | Requests you raised (`requestedBy = you`) | `ASSET / Asset Request Approval` READ, which also carries Accept and Reject |
-| Payment Requests | Requests you raised, matched through `User.linkedEmployeeId` | `ACCOUNTS / Payment Request Approval` READ_WRITE — then narrowed by [the rule](#whose-records) |
+| Payment Requests | Requests you raised, matched through `User.linkedEmployeeId` | `ACCOUNTS / Payment Request` — Read to see your own, Read / Write to raise one and withdraw one you raised. The whole queue, and approving, rejecting or correcting anybody's, is `ACCOUNTS / Payment Request Approver` Read / Write — then narrowed by [the rule](#whose-records). An approver cannot withdraw: that deletes the row, while rejecting records who decided and why. An approver needs the older permission at Read too, to open the screen |
 | Tasks | Tasks given to you, and tasks you gave — always | `HRM / All Tasks` READ, on its own endpoint, narrowed by [the rule](#whose-records) |
-| Extra Quotations (`?mine=true`) | What you raised **or** what you are the project manager for | Being Super Admin, or simply not asking for `mine` |
+| Extra Quotations API (`GET /api/sales/extra-quotations?mine=true` - no screen asks for it since Payment Requests lost its Extra Quotations tab) | What you raised **or** what you are the project manager for | Being Super Admin, or simply not asking for `mine` |
 | Employee Referral | Referrals **you made**, and those made by anybody reporting to you — plus whoever entered one on your behalf (`createdByUserId`) | `ADMIN / Branch Administration`, which adds every referral whose **referrer** works in a branch the role reaches |
 | Employee Repository | **You** and everybody reporting to you, at any depth — an employee *is* the person, so the name on the record is the row itself (`employee: "id"`) | `ADMIN / Branch Administration`, which adds every employee in a branch the role reaches, matched on `branchId` **or** Work Base Location **or** Current Work Location |
 
@@ -365,7 +389,7 @@ silently missing. Opening one of these is never a way around another module's gu
 | `PROJECT` | Client Gifts (the project register and its boards read [the rule](#whose-records) composed with the older "named on" rule — DATA-SCOPE.md D15) |
 | `IMAGE_SELECTION` | Every screen — projects, folders, uploads, galleries |
 | `ACCOUNTS` | — (Cash Management and Payment Requests read [the rule](#whose-records) now) |
-| `ASSET` | Vendors, Client Storage |
+| `ASSET` | Vendors, Client Storage, Recycling Bin (by the project's branch) |
 | `ADMIN` | Roles |
 
 This is a deliberate consequence of the branch columns being free text, not an oversight to be fixed
@@ -386,7 +410,24 @@ in Nebula and unnarrowed on the screen for the same records. **That inconsistenc
 Every module's read service — assets, employees, cash, projects, and the CRM's own context — resolves
 the same [scope](#scope), on the same columns, as its screen's controller. Nebula and the screen
 answer with the same rows for the same person, and the assistant says when its figures are narrowed
-rather than presenting a partial count as the studio's.
+rather than presenting a partial count as the studio's. The single-lead lookups hold the same line:
+lead search carries the scope into its SQL, and reading one lead - its details, activity, call logs,
+transcripts, or the lead assistant's whole conversation about it - first checks the board's own
+`scope.allows`, so a lead the screen would hide is "not found". Nebula only reads: it asks READ of
+its module, and has no write tool to ask more. Attendance, asked of Nebula from any panel, holds the
+attendance screens' rules: HRM / Employee Attendance to ask at all, your own day always, anybody
+else's only with HRM / Attendance Approval - and narrower than the register screen there, within
+that grant's data scope on the employee record's columns (`modules/hrm/employees/scopeColumns.js`,
+shared with the employees screen), so its counts can be lower than the register's. It is the one
+place a panel carries another module's data: attendance is a *companion* offered beside any panel,
+and only to somebody holding its permission, re-checked on every lookup. A Super Admin is not on the
+register, so their own day is not there to show.
+
+HRM requests are the second companion (`services/ai/tools/requests.js`), held at HRM / Employee
+Attendance **or** HRM / Requests - the requests router's own pair, so a companion may name either
+of several permissions (`anyOf`), checked the same way when the session is built and on every
+lookup. Which requests is the Requests screen's own `visibilityFilter`: your own, the ones you are
+named as an approver on, or every colleague's with HRM / All Requests. No new permission.
 
 ## Who the Users screen lists
 
@@ -396,7 +437,9 @@ whatever their employment status. It opens on the **All** tab.
 **Users** (`/admin/users`) lists the accounts: `status` `ACTIVE`, whether or not any role has been
 given yet. An account is closed by setting `status` to anything else — `INACTIVE` is the value the
 app writes — which both drops it off this screen and refuses its sign-in, since login checks for
-`ACTIVE` and nothing else.
+`ACTIVE` and nothing else. A client's sign-in (`role` CLIENT, from Create Project → Client
+Credentials) is never listed here or in a role's Manage Users, and cannot be given a role: these
+screens are for the studio's own people.
 
 A user and an employee are **separate records**, joined only by the optional `User.linkedEmployeeId`.
 That link is not a nicety: **Employee Attendance**, **Payment Requests**, **Tasks** and the **org
@@ -411,6 +454,19 @@ Clearing the link is allowed, for one made to the wrong person. The rules live i
 the picker is served by `GET /api/admin/linkable-employees` under `ADMIN / User Management` rather
 than from the Employee Repository's own endpoint, so administering users does not also require
 `HRM / Employee Management`.
+
+**Client logins** (Create Project → Client Credentials) answer to the **booking's** permission, not
+to this one: `SALES / Sales Manager` on Create Project, and the project's own editor on
+`POST /api/sales/projects/:id/client-login`, reading it, and sending it to the client
+(`.../client-login/whatsapp`). They asked for `ADMIN / User Management` at Read & Write until
+24 Oct 2026, on the reading that making an account is User Management's act wherever it happens.
+That is true of a *staff* account; a client login reaches one project's portal and nothing of the
+studio's, and making it is the last step of booking that project - so the person booking filled the
+section in, pressed save, and had the **whole project** refused with a 403 naming a permission the
+Sales screen never mentions. A client account has `role` CLIENT and no IAM role, and `protect`
+refuses it every route but `GET /api/user/profile` - it is not a studio login with nothing ticked,
+it cannot be given a role's screens, and it cannot change or reset the password the studio gave it,
+which is what makes the booking's own permission enough for it.
 
 Removing somebody from the Employee Repository therefore has to close their account as well, and
 does: archiving an employee sets any account linked to them to `INACTIVE` in the same transaction.
@@ -435,6 +491,8 @@ in it are guarded a second time in the controller rather than by the router:
 | `PATCH /api/hrm/attendance/:sessionId` — HR changing a record directly | `HRM / Attendance Approval`. Appends an `ADMIN_EDIT` audit row; never overwrites a capture |
 | `GET /api/hrm/attendance` — the studio-wide register | `HRM / Attendance Approval`. It is also what the **HRM → Attendance Register** menu entry opens |
 | `GET /api/hrm/attendance/selfie/:eventId` | The employee the photograph is **of**, or `HRM / Attendance Approval` |
+| Payroll → Advance Salary / Recovery: Convert to Recovery, its undo, and the Main Page's Skip | The other module's `READ_WRITE` beside the router's, per route (`checkPermission`): converting and undoing need both `HRM / Payroll Advance` and `HRM / Payroll Recovery`; Skip needs `HRM / Payroll Register` with Advance (an advance), Recovery (a recovery) or Policy Breach (a policy breach). Each employee must be in reach through both. `GET …/:id/history` under each register's own Read returns, from the payroll, only each month's payment status, date and mode for that record's own months - never salary or net pay; anything more there needs a stricter guard |
+| `/api/hrm/attendance/requests*` and `GET …/settings` | Router-level: `HRM / Employee Attendance` **or** `HRM / Requests`, because two screens read them — Employee Attendance's request tabs and **HRM → Request**. Deciding is then the row above. `HRM / Requests` was created with every Employee Attendance grant copied across at the same level (20260925130000) |
 
 The selfie one is the sharper example. An attendance selfie is a photograph of a named person at a
 place at a time, and the router guard alone would have made every one of them readable by every
@@ -469,6 +527,20 @@ branch, and the copy is never locked.
 Deleting a **role somebody still carries** is refused: it would silently strip access from people
 who did not ask for it. Remove it from them first. A Super Admin also cannot delete their own account,
 and the last Super Admin cannot be deleted at all.
+
+The role form itself carries a **Manage Users** section, the last one in its rail — giving a new
+role to the ten or fifteen accounts it is meant for while creating it, instead of visiting each one
+through **User Management → Manage Roles**. It lists every active account carrying the role
+(`GET /api/admin/roles/:roleId/users`, narrowed by the caller's User Management branches) and adds
+or removes them with the same `RolePicker`. What is ticked is held on the form and handed over on
+**Save / Update**, after the role itself is saved — a new role has no id to assign anybody to until
+then — as `assignRoleToUser`/`removeRoleFromUser` for only the accounts that changed.
+
+The section answers to **`ADMIN / User Management`**, not Role Management, because those are the
+endpoints that change it: absent without it, a list with no controls at `READ`, editable at
+`READ_WRITE`. A locked role's **View** from the row menu still opens it for changing, and can be
+saved for its users alone — assigning who carries Super Admin is a different decision from editing
+what it grants. A double-click only looks.
 
 ## Starter roles
 
@@ -596,14 +668,34 @@ of change therefore need a migration beside the catalogue edit:
 
 | Module | Features |
 | --- | --- |
-| `ASSET` | Asset Management, Asset Administration, Asset Request Approval, Vendor Management, Client Storage |
-| `HRM` | Employee Management, Employee Attendance, Attendance Approval, Employee Referral, Task Management, All Tasks, Interview, Interview Select All |
+| `ASSET` | Asset Management, Asset Administration, Asset Request Approval, Vendor Management, Client Storage, Recycling Bin |
+| `HRM` | Employee Management, Employee Attendance, Attendance Approval, Requests, Employee Referral, Task Management, All Tasks, Interview, Interview Select All, Payroll, My Payslip |
 | `SALES` | Sales Manager, CRM Leads, CRM Lead Deletion, CRM Lead Select All, CRM Lead Import, Reports & Analytics, Contacts, Quotation Management |
-| `PROJECT` | Projects, CRD Documents, Pre Production, Production, Post Production, Client Gifts |
-| `IMAGE_SELECTION` | Project Management, Album Proofing, Album Proofing QC |
-| `ACCOUNTS` | Cash Management, Payment Request Approval |
-| `ADMIN` | User Management, Role Management, Branch Administration, Table Select All |
-| `SETTINGS` | User Settings, Table Settings, Field Settings, Project Settings, Exclude Phone Numbers, Integrations, Quotation Settings, Employee Referral, Message Template, Organization, Holidays, Login Slide, Application Monitoring |
+| `PROJECT` | Projects, CRD Documents, Pre Production, Production, Production Execution, Shoot Board, Post Production, Client Gifts, Feedback, View All Feedback |
+| `IMAGE_SELECTION` | Project Management, AI Editing, Signature Album, Album Proofing, Album Proofing QC |
+| `ACCOUNTS` | Cash Management, Payment Request, Payment Request Approver |
+| `ADMIN` | User Management, Role Management, Branch Administration, Table Select All, User Activity Logs |
+| `SETTINGS` | User Settings, Table Settings, Field Settings, Project Settings, Exclude Phone Numbers, Integrations, Quotation Settings, Employee Referral, Message Template, Template Settings, Wishes, Organization, Holidays, Login Slide, Client Page Images, Application Monitoring, WhatsApp Activity Log, Automatic WhatsApp Message, Activity Log Purge |
+
+`ADMIN / User Activity Logs` opens Administration → User Activity Logs and guards
+`/api/admin/activity-logs` (`requireModule`; only reads exist, so `READ` is the whole of it). The
+list narrows to the branches of the roles granting **this** permission, on the branch the person was
+homed in when the line was written (people homed there, not work filed there), and a branch-limited
+reader never sees a line a Super Admin made; a Super Admin sees every line, including those that belong to no
+branch (a failed sign-in naming no account). Added by migration `20261020100000_user_activity_log`,
+granted to `SUPER_ADMIN` only — every other role starts at `DISABLED`.
+
+`ASSET / Recycling Bin` (shown as **Project Vault**; the key keeps its first name) opens Resource Management → Project Vault and guards `/api/recycling-bin`
+(`requireModule`: `READ` lists deleted projects, `READ_WRITE` restores them and deletes them
+permanently). **It is a power over every deleted project in its holder's branch reach, on its own**:
+the per-project delete rule (`mayDeleteProject` - Project Manager, branch administrator, whoever
+works every project) decides who may *delete* a project, not who may restore or erase one from the
+bin, so a holder with READ_WRITE may restore or permanently delete a project they could never have
+deleted. The list and both actions narrow to the branches of the roles granting **this** permission,
+on the project's own branch (`dataScope`, `{ branch: "branchId" }`). Added by migration
+`20261029170000_project_recycling_bin`, granted to `SUPER_ADMIN` only — every other role starts at
+`DISABLED`; Branch Admin, or whoever the studio trusts to erase bookings for good, are the roles it
+might consider granting it to in Role Management.
 
 Everything about money the studio pays out is `ACCOUNTS`, including the payment requests whose code
 lives under `backend/src/modules/hrm/` for historical reasons. `HRM` is the Employee Repository,
@@ -867,9 +959,11 @@ the application currently writes is about a task; a role without it keeps the pl
 one that opens on an empty panel.
 
 `IMAGE_SELECTION / Project Management` is Image Selection itself: the dashboard, projects, folders,
-settings, uploads, the gallery and publishing to the client. `READ` browses — the dashboard and its
-filtered Projects links included — and reads a published link; `READ_WRITE` changes any of it, and
-is the only level offered New Project on the dashboard.
+settings, uploads, the gallery, publishing to the client, and the Photo Culling tab
+(`/api/image-selection/projects/:projectId/ai-culling`). `READ` browses — the dashboard and its
+filtered Projects links included — reads a published link and sees a culling run's results, the roles given to the people in the photos and their own learned culling preferences;
+`READ_WRITE` changes any of it, starts, decides, finalizes and reopens a cull, switches off or resets their own learned culling preferences (never another photographer's), and is the only
+level offered New Project on the dashboard.
 
 `IMAGE_SELECTION / Album Proofing` is a separate job with its own routes under
 `/api/image-selection/album-proofs` and its own screen at `/image-selection/album-proofing`: its
@@ -877,6 +971,100 @@ projects, albums, page uploads, corrections and client publication, none of whic
 Management. `Album Proofing QC` is the QC lead's grant — `READ` opens the albums, `READ_WRITE` rules
 on them — and grants nothing else. It opens no sidebar entry of its own, because the QC panel lives
 inside the Album Proofing screen; `permission-catalogue-sidebar.test.js` records that as a decision.
+
+`IMAGE_SELECTION / AI Editing` is the AI Editing tab inside the same project workspace - a tab
+inside a screen, asked for by name, with its own API behind it
+(`/api/image-selection/projects/:projectId/ai-editing`). `READ` opens the tab and sees the edits;
+`READ_WRITE` edits, renders and sends photos on (the web takes no upload into it: the desktop app
+imports for AI Culling and AI Editing); without it the tab is absent. The desktop's two routes on
+this router - `GET …/ai-editing/pending` (READ) and `POST …/ai-editing/photos/:uploadId/local-source`
+(READ_WRITE) - sit under the same guard, behind the `DESKTOP_AI_ENABLED` gate like `…/output`; they
+add no permission row.
+Sending INTO Photo Selection still answers to `Project Management` READ_WRITE and into the album to
+`Signature Album` READ_WRITE - the destination keeps its own guard, stacked on the router's. The bay's
+fallback media routes sit under this guard too, so the permission opens the tab on its own.
+Download Edited (`POST …/ai-editing/downloads/plan`) needs only AI Editing `READ`, and is mounted
+ahead of the project router so that is all it needs; the file route takes its ticket instead.
+**Automatic album sync is checked at enrolment, not at each write:** sending Keeps as "AI Editing +
+Signature Album" (`photos/add` with `albumSync`) and the sync's Retry need `Signature Album`
+READ_WRITE besides AI Editing; once a photo is enrolled, each edit that saves - by whoever has AI
+Editing READ_WRITE - updates its album copy through the worker without asking again.
+Migration `20261011090000_ai_editing` writes the row and grants it to `SUPER_ADMIN` only; the
+studio ticks the roles that edit (the same people who cull, usually) in Role Management.
+Since 3 Nov 2026 AI Editing is a Visual Curation module of its own and this permission opens it:
+the **AI Editing** sidebar entry, its Dashboard (`/image-selection/ai-editing/dashboard`, read from
+`GET /api/image-selection/stage-dashboards/ai-editing`) and its Projects page
+(`/image-selection/ai-editing/projects`), where its own projects open on the editing bay - no longer
+a tab of Photo Selection. It has left `NO_MENU_ENTRY`, and needs no other permission: see
+**Visual Curation modules** below.
+
+**Visual Curation modules (since 3 Nov 2026).** Photo Selection, AI Culling, AI Editing and
+Signature Album each answer to their own permission alone - `Project Management`, `AI Culling`, `AI
+Editing`, `Signature Album` - and none opens another: the sidebar, the dashboard and projects routes,
+and every API all ask the same one.
+
+- **Projects.** AI Culling's, AI Editing's and Signature Album's own projects
+  (`visual_curation_module_project`) are listed, edited and deleted through
+  `/api/image-selection/module-projects`: a list needs Read on the module named, an edit or delete
+  Read / Write on the record's own module (an id from another module is answered by that module's
+  permission). Photo Selection's projects keep `/api/image-selection/projects` and Project Management,
+  its guard now on each of its own routes rather than on the whole `/api/image-selection` prefix,
+  where it stood in front of every module's routes.
+- **Create Project.** `POST /api/image-selection/module-projects` (and the older `POST /projects`)
+  needs Read / Write on every module the project is created in - the form's own and each Linked
+  Module - checked on the server (`requireCreatePermissions` in `projects/moduleProjects.js`); the
+  form offers only those modules. "Create" is Read / Write: there are no separate Create, Edit or
+  Delete permissions, and none were added.
+- **The photo workspace** a module works in - folders, uploads, original registration, previews, a
+  linked project's allocated services, the storage roots list, the desktop's face hand-off - opens on
+  the permission of any module the project is in that the viewer holds (`requireWorkspaceAccess` in
+  `projects/modules.js`; Read for a GET, Read / Write otherwise). The AI Culling routes take AI
+  Culling's alone; the AI Editing routes AI Editing's, for a project in AI Editing. Photo Selection's
+  client gallery list and selections, its publication, sharing, WhatsApp, selection items and copying
+  selected originals keep Project Management alone.
+- **Sends** go only into a project linked by creation (`requireProjectModule`, `409
+  MODULE_NOT_LINKED`) and need the destination's own Read / Write: culling → Photo Selection
+  (Project Management), culling → AI Editing (AI Editing, and Signature Album with the album sync),
+  editing → album and its retry (Signature Album), and culling → album import and plan (Signature
+  Album, with AI Culling Read to read the run).
+
+`IMAGE_SELECTION / AI Culling` (`ISAI_CULLING`, since 3 Nov 2026) opens the **AI Culling** module:
+its sidebar entry, its Dashboard (`/image-selection/ai-culling/dashboard`, read from
+`GET /api/image-selection/stage-dashboards/ai-culling`), its Projects page
+(`/image-selection/ai-culling/projects`) and every culling endpoint - Project Management no longer
+opens culling. Migration `20261103120000_ai_culling_dashboard_permission` writes the row and grants
+it to `SUPER_ADMIN`; `20261103130000_ai_culling_grants_follow_project_management` then hands it to
+every role holding `Project Management` at that role's own level (the studio asked for this on
+3 Nov 2026), so nobody who culled from the old tab loses culling when it moved.
+
+`IMAGE_SELECTION / Signature Album` is the Signature Album tab inside a project the `Project
+Management` row already opens - a tab inside a screen, asked for by name there, with the album's
+own API behind it (`/api/image-selection/signature-albums`). `READ` opens the tab and its preview;
+`READ_WRITE` builds, publishes and shares the album; without it the tab is absent. One row rather
+than view / edit / publish / share apart, because the same people do all of it. The studio-wide
+defaults on the Settings rail answer to `SETTINGS / Organization`, the permission of the panel they
+are edited in. Migration `20260924100000_signature_album` writes the row and grants it to
+SUPER_ADMIN; `20260924110000_signature_album_grants_follow_project_management` then hands it to
+every role holding `Project Management` at that role's own level, so the tab reaches the people
+who already run the project rather than vanishing for all but a Super Admin. Since 3 Nov 2026
+Signature Album is a Visual Curation module of its own and this permission opens it: the sidebar
+entry, its Dashboard (`/image-selection/signature-album/dashboard`, read from
+`GET /api/image-selection/stage-dashboards/signature-album`) and its Projects page, where a project
+opens on its album - no longer a tab of Photo Selection. It has left `NO_MENU_ENTRY`, and needs no
+other permission (**Visual Curation modules** above).
+
+`IMAGE_SELECTION / Photo Selling` (`ISPHOTO_SELLING`) is the second option under the AI Feature
+heading: the studio's own galleries of photos sold to guests, independent of AI Feature events, at `/visual-curation/ai/photo-selling` and
+`/api/photo-selling`. It is its own grant, not part of `AI Feature`, because taking the studio's
+money and delivering what was bought is a different job from running an event; somebody may hold
+either alone, and the sidebar offers each option by its own permission. `READ` opens the
+overview, the galleries, their photos, prices and links, and the orders; `READ_WRITE` creates,
+uploads to, edits, publishes, archives and deletes galleries, changes prices, packages and photos, checks a payment,
+re-issues a buyer's link and records an original as delivered. The watermark presets a store
+chooses from are listed by Photo Selling's own endpoint, so no AI Feature settings grant is
+needed. Galleries are studio-wide, so it must not go to a branch-scoped role until they are narrowed. Migration 20261023130000 writes it and grants it to SUPER_ADMIN only.
+The guest store (`/api/public/photo-selling`) authenticates by link code, PIN, store session,
+order key and download ticket - see [PHOTO-SELLING.md](PHOTO-SELLING.md).
 
 `IMAGE_SELECTION / AI Feature` is the third Visual Curation screen, and a product of its own: event
 galleries with face recognition, at `/visual-curation/ai` and `/api/ai-feature`, sharing nothing
@@ -888,8 +1076,18 @@ generates the guest link. Two grants sit beside it and open no menu entry of the
 `AI Face Management` is the People and Face Recognition tabs inside an event - `READ` looks,
 `READ_WRITE` renames, merges, splits and hides people, links them to guests, confirms or rejects a
 match and retries failed processing - and `AI Event Default Settings` is More → Event Default
-Settings, the template every new event is copied from. Migration 20260922100000 writes all three
+Settings, the template every new event is copied from, and the Watermark Presets managed inside
+it - `READ` lists them, `READ_WRITE` adds, edits and deletes; the
+list alone is also open to `AI Feature` `READ`, since Create Event picks from it. Migration 20260922100000 writes all three
 and grants them to SUPER_ADMIN; nobody else holds them until their roles are re-saved.
+The guest WhatsApp photo summary adds no permission: its switch is one more event setting, so
+`AI Feature` `READ_WRITE` turns it on for an event and `AI Event Default Settings` `READ_WRITE` for
+new events, and the guest's own routes (`/api/public/ai-feature/:code/whatsapp/*`) are reached by
+the guest session alone and only ever touch that guest. A guest session is not a login: joining
+finds the guest by phone, so a guest with something to protect (a selfie, a photo shown as theirs, a
+confirmed number) is opened on a new device only after an SMS code to the number stored on them, and
+the code ends every other session for that guest (`session_version`). See backend/README.md, "AI
+Feature guest login verification".
 
 `ASSET / Asset Management` is one screen and one job: the register, the inspections recorded against
 it, the custody history, and raising a request for an asset. It is meant to be held widely — `READ`
@@ -1104,9 +1302,15 @@ the same shape: a screen somebody can open onto refusals, or a guard that refuse
 8. **Do not fire the call either.** A request the viewer cannot make should not be made: gate the
    fetch as well as the button, or the page reports its own refusal as an error.
 
-9. **Say who reaches it.** One `docs/CHANGELOG.md` entry naming the permission, and **re-save the
-   roles that should now hold it** — the seed creates roles but never writes grants, so nothing is
-   granted automatically, including to the seeded roles.
+9. **Say who might reach it — but do not grant it yourself.** A new permission defaults to nobody
+   but `SUPER_ADMIN` (step 10 grants that one role and no other); every other role — Branch Admin,
+   an Administrator-tick role, a role that already holds something adjacent — starts at `DISABLED`
+   and stays there until the studio decides otherwise. One `docs/CHANGELOG.md` entry naming the
+   permission and which roles the studio might want to consider for it is the whole of this step.
+   **Re-saving a role to grant it yourself is a defect**, not a convenience, even when it "seemed
+   like the same people who already hold the related permission" — that reasoning is exactly how a
+   permission has reached further than the studio knew before. Only re-save a role when the user has
+   explicitly named that role, in this change, as one that should get it.
 
 10. **Write the row into a migration too, or it will never exist on production.** The seed **cannot
     be run on the VPS**, so a permission added to `seeds/permission-catalogue.js` alone reaches a

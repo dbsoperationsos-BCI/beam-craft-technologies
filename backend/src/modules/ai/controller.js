@@ -6,8 +6,8 @@ const toolRegistry = require("../../services/ai/tools/registry");
 const memory = require("../../services/ai/memory/conversations");
 const { answerWithTools } = require("../../services/ai/orchestrator");
 const limits = require("../../services/ai/limits");
+const { cancelOnDisconnect } = require("../../services/ai/disconnect");
 const audit = require("../../services/ai/audit");
-const actions = require("../../services/ai/actions");
 const { isOutOfScope, outOfScopeReply, greetingReply, isUnreadableScript, unreadableScriptReply } = require("../../services/ai/scope");
 const { classify, INTENT } = require("../../services/ai/intent");
 const { candidateNames } = require("../../services/ai/mentions");
@@ -40,10 +40,8 @@ require("../../services/ai/tools").registerAllTools();
  * it cannot look anything up.
  */
 
-/** Whether the whole subsystem is switched on. Off means the CRM runs exactly as before, minus AI. */
-function aiEnabled() {
-  return String(process.env.AI_ENABLED ?? "true").trim().toLowerCase() !== "false";
-}
+/** Whether the whole subsystem is switched on - `provider.enabled`, which the lead assistant reads too. */
+const aiEnabled = () => provider.enabled();
 
 /*
  * One place to turn a failure into something a person can act on.
@@ -287,7 +285,7 @@ function systemPromptFor(context) {
  * costs one bounded indexed lookup, and only on the questions that were about to be refused - which
  * are rare, and were about to cost nothing anyway.
  */
-async function refusalForOutOfScope(message, history, context, language) {
+async function refusalForOutOfScope(message, history, context) {
   // A script this assistant does not read is settled before anything else looks at the question.
   if (isUnreadableScript(message)) return unreadableScriptReply();
 
@@ -308,7 +306,7 @@ async function refusalForOutOfScope(message, history, context, language) {
     }
   }
 
-  return outOfScopeReply(language, context.scope);
+  return outOfScopeReply(context.scope);
 }
 
 async function threadFor({ body, context, message }) {
@@ -392,7 +390,7 @@ async function chatStream(req, res) {
     if (greeting) {
       send("token", { t: greeting });
       if (thread.conversation) await memory.recordTurn({ conversationId: thread.conversation.id, question: message, answer: greeting });
-      send("done", { proposals: [] });
+      send("done", {});
       return;
     }
 
@@ -400,11 +398,11 @@ async function chatStream(req, res) {
      * Outside the application entirely - answered without a model, like the vertical guard below.
      * There is nothing for a generation to add to a refusal, and it would take a second to say it.
      */
-    const offTopic = await refusalForOutOfScope(message, thread.messages, context, "english");
+    const offTopic = await refusalForOutOfScope(message, thread.messages, context);
     if (offTopic) {
       send("token", { t: offTopic });
       if (thread.conversation) await memory.recordTurn({ conversationId: thread.conversation.id, question: message, answer: offTopic });
-      send("done", { proposals: [] });
+      send("done", {});
       return;
     }
 
@@ -414,14 +412,16 @@ async function chatStream(req, res) {
       const answer = otherVerticalReply(context.vertical, otherVertical);
       send("token", { t: answer });
       if (thread.conversation) await memory.recordTurn({ conversationId: thread.conversation.id, question: message, answer });
-      send("done", { proposals: [] });
+      send("done", {});
       return;
     }
 
-    const { answer, proposals } = await limits.withLimits(context.userId, () => answerWithTools({
+    const { answer, trace } = await limits.withLimits(context.userId, () => answerWithTools({
       system: systemPromptFor(context),
       messages: [...thread.messages, { role: "user", content: message }],
       context,
+      // The reader closing the panel stops the generation, and frees its slot for somebody else.
+      signal: cancelOnDisconnect(res),
       // Each fragment reaches the reader as it is produced.
       onToken: (piece) => send("token", { t: piece }),
     }));
@@ -435,11 +435,18 @@ async function chatStream(req, res) {
 
     // Only when the server is the one keeping the thread. See `threadFor`.
     if (thread.conversation) await memory.recordTurn({ conversationId: thread.conversation.id, question: message, answer });
+    // Every lookup the answer rested on, allowed or refused - as the JSON path records them.
+    for (const call of trace || []) {
+      audit.toolCall({
+        requestId, userId: context.userId, module: context.scope,
+        tool: call.name, ms: call.ms, allowed: !call.refused, code: call.code,
+      });
+    }
     audit.requestFinished({
       requestId, userId: context.userId, module: context.scope,
-      ms: Date.now() - startedAt, toolCount: 0, ok: true,
+      ms: Date.now() - startedAt, toolCount: (trace || []).length, ok: true,
     });
-    send("done", { proposals: proposals || [] });
+    send("done", {});
   } catch (error) {
     // The stream is open, so a failure is an event rather than a status code.
     send("error", { message: error?.message || "The assistant could not answer.", code: error?.code || "" });
@@ -488,27 +495,6 @@ async function voice(req, res) {
   } finally {
     // The recording is deleted whatever happened. It is somebody's voice.
     await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
-  }
-}
-
-/**
- * Runs a change the assistant proposed, now that a person has said yes.
- *
- * The token is the consent. A conversation saying "yes, do it" is not - the model has no way to
- * tell an instruction from a client's words quoted back at it.
- */
-async function confirm(req, res) {
-  const requestId = audit.newRequestId();
-  try {
-    if (!aiEnabled()) return res.status(503).json({ message: "The assistant is switched off.", code: "AI_DISABLED" });
-    const context = await buildAccessContext({ userId: req.user?.id, requestedModule: req.body?.module });
-    const outcome = await actions.confirmAction({ token: req.body?.token, context, requestId });
-    return res.json({ message: "Done.", data: outcome });
-  } catch (error) {
-    if (error instanceof actions.ActionError) {
-      return res.status(error.status).json({ message: error.message, code: error.code });
-    }
-    return sendAiError(res, error, "Unable to carry out that action.");
   }
 }
 
@@ -613,14 +599,14 @@ async function chat(req, res) {
     const greeting = greetingReply(message, context.scope);
     if (greeting) {
       if (conversation) await memory.recordTurn({ conversationId: conversation.id, question: message, answer: greeting });
-      return res.json({ data: { answer: greeting, module: context.scope, conversationId: conversation?.id || null, tools: [], proposals: [] } });
+      return res.json({ data: { answer: greeting, module: context.scope, conversationId: conversation?.id || null, tools: [] } });
     }
 
     // Outside the application entirely. Same rule as the streaming handler.
-    const offTopic = await refusalForOutOfScope(message, thread.messages, context, "english");
+    const offTopic = await refusalForOutOfScope(message, thread.messages, context);
     if (offTopic) {
       if (conversation) await memory.recordTurn({ conversationId: conversation.id, question: message, answer: offTopic });
-      return res.json({ data: { answer: offTopic, module: context.scope, conversationId: conversation?.id || null, tools: [], proposals: [] } });
+      return res.json({ data: { answer: offTopic, module: context.scope, conversationId: conversation?.id || null, tools: [] } });
     }
 
     /*
@@ -639,7 +625,7 @@ async function chat(req, res) {
         requestId, userId: context.userId, module: context.scope,
         ms: Date.now() - startedAt, toolCount: 0, ok: true,
       });
-      return res.json({ data: { answer, module: context.scope, conversationId: conversation?.id || null, tools: [], proposals: [] } });
+      return res.json({ data: { answer, module: context.scope, conversationId: conversation?.id || null, tools: [] } });
     }
 
     const history = thread.messages;
@@ -654,7 +640,7 @@ async function chat(req, res) {
      * better part of a minute. Without a cap, three people asking at once is the machine that also
      * has to serve the leads table.
      */
-    const { answer, trace, proposals } = await limits.withLimits(context.userId, () => answerWithTools({
+    const { answer, trace } = await limits.withLimits(context.userId, () => answerWithTools({
       system: systemPromptFor(context),
       messages: [...history.map((turn) => ({ role: turn.role, content: turn.content })), { role: "user", content: message }],
       context,
@@ -683,8 +669,6 @@ async function chat(req, res) {
         conversationId: conversation?.id || null,
         // Which tools ran, so the panel can show it and a wrong lookup is visible rather than silent.
         tools: trace,
-        // Changes waiting on a person. Each carries the token that runs it, and nothing else does.
-        proposals: proposals || [],
       },
     });
   } catch (error) {
@@ -692,4 +676,4 @@ async function chat(req, res) {
   }
 }
 
-module.exports = { health, chat, threadFor, chatStream, voice, confirm, tools, conversations, removeConversation, aiEnabled, systemPromptFor, promptWithHistory };
+module.exports = { health, chat, threadFor, chatStream, voice, tools, conversations, removeConversation, aiEnabled, systemPromptFor, promptWithHistory };

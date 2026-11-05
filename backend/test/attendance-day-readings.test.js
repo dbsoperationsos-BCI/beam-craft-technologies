@@ -16,7 +16,7 @@ const {
  * down. The other half is what is deliberately **not** a status: where somebody worked.
  */
 
-const at = (time) => new Date(`2026-09-08T${time}:00`);
+const at = (time) => new Date(`2026-09-08T${time}:00+05:30`);
 const day = (from, to) => ({ workDate: new Date("2026-09-08T00:00:00.000Z"), loginAt: at(from), logoutAt: at(to) });
 
 // A full studio configuration, unlike the older fixtures which predate these two rules.
@@ -24,9 +24,10 @@ const settings = {
   shiftStart: "09:30",
   shiftEnd: "18:30",
   lateGraceMinutes: 15,
-  // Four to five hours is a half day. Below four is too short to credit; above five is a full day.
+  // From four hours up to the full day (8h 30m) is a half day. Below four is too short to credit;
+  // reaching the full day is a full day.
   halfDayMinMinutes: 240,
-  halfDayMaxMinutes: 300,
+  dailyTargetMinutes: 510,
   earlyExitGraceMinutes: 15,
 };
 
@@ -41,15 +42,16 @@ test("a rule the studio has not configured stays off", () => {
   assert.equal(earlyExitCutoffMinutes({ earlyExitGraceMinutes: 15 }), null);
 });
 
-test("four to five hours is a half day, and both edges are inside it", () => {
-  // The two numbers somebody would actually name, and the rule has to include them: a threshold
-  // written as "under four hours" makes four hours exactly a *full* day, which is the wrong side of
-  // the one boundary anybody checks.
+test("from Half day from up to the full day is a half day - four hours inside, the full day outside", () => {
   assert.equal(attendanceDayStatus(day("09:30", "13:30"), { settings }).status, "Half day");
   assert.equal(attendanceDayStatus(day("09:30", "14:30"), { settings }).status, "Half day");
-  // Arriving late for a half day is still, first and foremost, a half day — that is the fact
-  // payroll and leave will both ask about.
+  // One minute short of the full day is still half a day.
+  assert.equal(attendanceDayStatus(day("09:30", "17:59"), { settings }).status, "Half day");
+  // Arriving late, or leaving early, on a day short of the full day is first and foremost a half day
+  // - that is the fact payroll and leave will both ask about.
   assert.equal(attendanceDayStatus(day("11:00", "15:30"), { settings }).status, "Half day");
+  assert.equal(attendanceDayStatus(day("10:30", "18:30"), { settings }).status, "Half day");
+  assert.equal(attendanceDayStatus(day("09:30", "16:00"), { settings }).status, "Half day");
 });
 
 test("under four hours earns nothing, and says so", () => {
@@ -67,21 +69,21 @@ test("under four hours earns nothing, and says so", () => {
   assert.equal(attendanceDayStatus(day("09:30", "09:30"), { settings }).status, "Absent");
 });
 
-test("over five hours is a full day, judged on when they came and went", () => {
-  // One minute past the band and the ordinary ladder takes over again.
-  assert.equal(attendanceDayStatus(day("09:30", "14:31"), { settings }).status, "Early exit");
+test("a day that reaches the full day is a full day, judged on when they came and went", () => {
+  // Exactly the full day, and the ordinary ladder takes over again.
+  assert.equal(attendanceDayStatus(day("09:30", "18:00"), { settings }).status, "Early exit");
   assert.equal(attendanceDayStatus(day("09:30", "18:30"), { settings }).status, "On time");
-  assert.equal(attendanceDayStatus(day("10:30", "18:30"), { settings }).status, "Late");
+  assert.equal(attendanceDayStatus(day("10:30", "19:00"), { settings }).status, "Late");
 });
 
 test("a floor of zero switches both rules off, and a bad band is no band", () => {
   // Unconfigured means the behaviour a studio had before either existed — no floor, no half days.
-  const off = { ...settings, halfDayMinMinutes: 0, halfDayMaxMinutes: 0 };
+  const off = { ...settings, halfDayMinMinutes: 0 };
   assert.equal(attendanceDayStatus(day("09:30", "11:30"), { settings: off }).status, "Early exit");
 
-  // A ceiling below the floor is not a band. The floor still applies — that part was configured and
-  // meant something — and everything above it is a full day.
-  const inverted = { ...settings, halfDayMinMinutes: 240, halfDayMaxMinutes: 120 };
+  // A full day no longer than the floor leaves no band. The floor still applies — that part was
+  // configured and meant something — and everything above it is a full day.
+  const inverted = { ...settings, halfDayMinMinutes: 240, dailyTargetMinutes: 120 };
   assert.equal(attendanceDayStatus(day("09:30", "11:30"), { settings: inverted }).status, "Absent");
   assert.equal(attendanceDayStatus(day("09:30", "14:00"), { settings: inverted }).status, "Early exit");
 });
@@ -90,24 +92,42 @@ test("leaving before the shift ends is an early exit, once past the grace", () =
   // 18:15 is exactly the cutoff, so it is not early.
   assert.equal(attendanceDayStatus(day("09:30", "18:15"), { settings }).status, "On time");
   assert.equal(attendanceDayStatus(day("09:30", "18:14"), { settings }).status, "Early exit");
-  // Long enough not to be a half day, short at the end: both readings are true and the day reports
-  // the one it is.
-  assert.equal(attendanceDayStatus(day("09:30", "16:00"), { settings }).status, "Early exit");
+  // Long enough not to be a half day, short at the end: an early start that still leaves early.
+  assert.equal(attendanceDayStatus(day("09:00", "17:45"), { settings }).status, "Early exit");
 });
 
 test("lateness is read before an early exit, because arriving is the first thing that happened", () => {
   // Late in and early out. One field, so it says the arrival.
-  assert.equal(attendanceDayStatus(day("10:30", "16:00"), { settings }).status, "Late");
+  // With an 8h 30m full day nobody can be both late and early without being short of it, so a
+  // shorter full day shows the order.
+  assert.equal(attendanceDayStatus(day("09:50", "18:00"), { settings: { ...settings, dailyTargetMinutes: 480 } }).status, "Late");
 });
 
 test("a permission covering the departure excuses it, exactly as one covering the arrival does", () => {
-  const leftAtFour = day("09:30", "16:00");
+  // In at nine and away at half five: a full day's hours, gone before the shift ends.
+  const leftEarly = day("09:00", "17:30");
   // Runs from before they left to the end of the shift: it explains the gap it is meant to.
-  assert.equal(attendanceDayStatus(leftAtFour, { settings, permissions: [{ fromTime: "15:30", toTime: "18:30" }] }).status, "Permitted");
+  assert.equal(attendanceDayStatus(leftEarly, { settings, permissions: [{ fromTime: "17:00", toTime: "18:30" }] }).status, "Permitted");
   // Stops before the shift does, so the rest of the afternoon is still unexplained.
-  assert.equal(attendanceDayStatus(leftAtFour, { settings, permissions: [{ fromTime: "15:30", toTime: "17:00" }] }).status, "Early exit");
-  // A morning permission says nothing about a four o'clock departure.
-  assert.equal(attendanceDayStatus(leftAtFour, { settings, permissions: [{ fromTime: "09:00", toTime: "10:00" }] }).status, "Early exit");
+  assert.equal(attendanceDayStatus(leftEarly, { settings, permissions: [{ fromTime: "17:00", toTime: "18:00" }] }).status, "Early exit");
+  // A morning permission says nothing about an afternoon departure.
+  assert.equal(attendanceDayStatus(leftEarly, { settings, permissions: [{ fromTime: "09:00", toTime: "10:00" }] }).status, "Early exit");
+  // An approved permission that covers the early departure keeps a short day from being a half day,
+  // or an absence: the person was allowed to go.
+  assert.equal(attendanceDayStatus(day("09:30", "16:00"), { settings, permissions: [{ fromTime: "15:30", toTime: "18:30" }] }).status, "Permitted");
+  assert.equal(attendanceDayStatus(day("09:30", "11:00"), { settings, permissions: [{ fromTime: "10:30", toTime: "18:30" }] }).status, "Permitted");
+  // And one that covers a late arrival, the same way.
+  assert.equal(attendanceDayStatus(day("12:30", "18:30"), { settings, permissions: [{ fromTime: "09:30", toTime: "12:30" }] }).status, "Permitted");
+  // Every shortfall has to be covered: a permitted late arrival does not excuse leaving early
+  // without one, so a short day like that is judged by its hours.
+  assert.equal(attendanceDayStatus(day("09:55", "10:15"), { settings, permissions: [{ fromTime: "09:00", toTime: "10:00" }] }).status, "Absent");
+  assert.equal(attendanceDayStatus(day("12:30", "16:00"), { settings, permissions: [{ fromTime: "09:30", toTime: "12:30" }] }).status, "Absent");
+  assert.equal(attendanceDayStatus(day("11:00", "16:00"), { settings, permissions: [{ fromTime: "09:30", toTime: "11:00" }] }).status, "Half day");
+  // Both covered, and it is Permitted.
+  assert.equal(attendanceDayStatus(day("11:00", "16:00"), { settings, permissions: [{ fromTime: "09:30", toTime: "11:00" }, { fromTime: "15:30", toTime: "18:30" }] }).status, "Permitted");
+  // Without one - or with one that does not reach the shift's end - the hours decide.
+  assert.equal(attendanceDayStatus(day("09:30", "16:00"), { settings, permissions: [{ fromTime: "15:30", toTime: "17:00" }] }).status, "Half day");
+  assert.equal(attendanceDayStatus(day("09:30", "16:00"), { settings }).status, "Half day");
 
   assert.equal(permissionCoversDeparture([{ fromTime: "15:30", toTime: "18:30" }], 16 * 60, settings), true);
   assert.equal(permissionCoversDeparture([{ fromTime: "16:30", toTime: "18:30" }], 16 * 60, settings), false);

@@ -94,7 +94,10 @@ test("a missing permission answer reads as no", () => {
 test("a viewer who owns nothing still gets a menu rather than a broken one", () => {
   // The view-only branch has to know about the new answer too, or a Project Manager who does not
   // hold the sale's permission would fall into it and lose the Edit that is theirs.
-  assert.match(TABLE, /: !mayEditSale && !mayPlan && !mayEditRecord && !mayDeleteRecord \? \[\{ label: "View Project Details"/);
+  // The view-only menu, which now also carries the "Navigate to" entries - looking at the project on
+  // another board is not an edit, and somebody who may only read is exactly who wants it.
+  assert.match(TABLE, /: !mayEditSale && !mayPlan && !mayEditRecord && !mayDeleteRecord \? \[\n\s+\{ label: "View Project Details"/);
+  assert.match(TABLE, /\{ label: "View Project Details", onSelect: \(\) => onNotice\("Project details are available in the Info Panel\."\) \},\n\s+\.\.\.jumpItems,/);
 });
 
 test("both screens that offer the actions ask the same question, from one predicate", () => {
@@ -115,7 +118,9 @@ test("both screens that offer the actions ask the same question, from one predic
    * The plan of a project already running stays the Project Manager's: a coordinator works a stage
    * of it and does not re-plan it, so this is fed by the *narrow* predicate and not the wide one.
    */
-  assert.match(PROJECTS, /const canEditStarted = canDeleteProject;/);
+  // The running plan: the delete rule's people (Project Manager, branch administrator, whoever works
+  // every project) and whoever plans projects - PROJECT / Projects Read / Write is enough on this screen.
+  assert.match(PROJECTS, /const canEditStarted = useCallback\(\s*\(project\) => canPlanProjects \|\| canDeleteProject\(project\),/);
 });
 
 test("the Sales Manager screen is gated too, because one endpoint feeds both", () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BUNDLED_BRAND_NAME, brandNameInProse, brandingSavedNotice, hasBrandingChanges, haveSlidesChanged, normalizeBrandingDraft } from "../src/lib/studioBranding.mjs";
+import { BUNDLED_BRAND_NAME, brandNameInProse, brandingSavedNotice, hasBrandingChanges, haveSlidesChanged, logoFor, normalizeBrandingDraft, themeWantsDarkMark } from "../src/lib/studioBranding.mjs";
 
 const LOGO = "https://example.r2.dev/image-selection/branding/logo.webp";
 
@@ -42,18 +42,19 @@ test("picking, replacing or removing the logo is a change", () => {
 });
 
 test("the draft is normalised to the record's shape", () => {
-  const blankIcons = { loginCredentialName: "", faviconUrl: null };
+  // The dark-mode pair travels beside the light marks, and blank is null for them too.
+  const blankIcons = { loginCredentialName: "", galleryLogoDarkUrl: null, faviconUrl: null, faviconDarkUrl: null };
   assert.deepEqual(normalizeBrandingDraft({ studioName: "  Beam Craft ", galleryLogoUrl: "" }), { studioName: "Beam Craft", galleryLogoUrl: null, ...blankIcons });
   assert.deepEqual(normalizeBrandingDraft({ studioName: null, galleryLogoUrl: LOGO }), { studioName: "", galleryLogoUrl: LOGO, ...blankIcons });
   assert.deepEqual(normalizeBrandingDraft(undefined), { studioName: "", galleryLogoUrl: null, ...blankIcons });
   // The tab mark is cleared the way the logo is: "" from the form means null in the record.
   assert.deepEqual(
     normalizeBrandingDraft({ studioName: "", galleryLogoUrl: null, faviconUrl: "/brand/x.svg" }),
-    { studioName: "", loginCredentialName: "", galleryLogoUrl: null, faviconUrl: "/brand/x.svg" },
+    { studioName: "", loginCredentialName: "", galleryLogoUrl: null, galleryLogoDarkUrl: null, faviconUrl: "/brand/x.svg", faviconDarkUrl: null },
   );
   assert.deepEqual(
     normalizeBrandingDraft({ studioName: "", galleryLogoUrl: null, faviconUrl: "" }),
-    { studioName: "", loginCredentialName: "", galleryLogoUrl: null, faviconUrl: null },
+    { studioName: "", loginCredentialName: "", galleryLogoUrl: null, galleryLogoDarkUrl: null, faviconUrl: null, faviconDarkUrl: null },
   );
   // The credentials name is trimmed like the studio name, and blank means "use the shipped one".
   assert.equal(normalizeBrandingDraft({ loginCredentialName: "  Beam Craft Operations " }).loginCredentialName, "Beam Craft Operations");
@@ -110,4 +111,47 @@ test("login slides count as changed only when a picture or the order differs", (
   assert.equal(haveSlidesChanged(slides, [slides[1], slides[0]]), true);
   assert.equal(haveSlidesChanged(slides, [...slides, "data:image/webp;base64,AAAA"]), true);
   assert.equal(haveSlidesChanged(slides, ["data:image/webp;base64,AAAA", slides[1]]), true);
+});
+
+/*
+ * The dark-mode pair: a Global Logo and a tab mark for the dark themes and the dark tab strip,
+ * uploaded beside the light ones. Each is an edit of its own, named in the notice on its own.
+ */
+test("uploading or clearing a dark-mode logo or favicon is an edit worth saving, named as such", () => {
+  const saved = { studioName: "dhanush", galleryLogoUrl: LOGO, galleryLogoDarkUrl: null, faviconUrl: null, faviconDarkUrl: null };
+  const same = { studioName: "dhanush", galleryLogoUrl: LOGO };
+  assert.equal(hasBrandingChanges(saved, same), false);
+  assert.equal(hasBrandingChanges(saved, { ...same, galleryLogoDarkUrl: "data:image/webp;base64,AAAA" }), true);
+  assert.equal(hasBrandingChanges(saved, { ...same, faviconDarkUrl: "data:image/png;base64,AAAA" }), true);
+  assert.equal(hasBrandingChanges({ ...saved, galleryLogoDarkUrl: LOGO }, { ...same, galleryLogoDarkUrl: "" }), true);
+  assert.equal(brandingSavedNotice(saved, { ...same, galleryLogoDarkUrl: "data:image/webp;base64,AAAA" }), "Global Logo (dark mode) saved.");
+  assert.equal(
+    brandingSavedNotice(saved, { ...same, galleryLogoUrl: "", faviconDarkUrl: "data:image/png;base64,AAAA" }),
+    "Global Logo and Favicon (dark mode) saved.",
+  );
+});
+
+test("a surface wears the logo uploaded for its theme, borrows the other's, and says which it did", () => {
+  const DARK = "https://example.r2.dev/image-selection/branding/logo-dark.webp";
+  // Both uploaded: each theme wears its own.
+  assert.deepEqual(logoFor({ galleryLogoUrl: LOGO, galleryLogoDarkUrl: DARK }, false), { src: LOGO, ownMark: true });
+  assert.deepEqual(logoFor({ galleryLogoUrl: LOGO, galleryLogoDarkUrl: DARK }, true), { src: DARK, ownMark: true });
+  // One uploaded: the other theme borrows it, and is told it is borrowing - the dark bar inverts a
+  // borrowed light mark to read, and must leave a mark drawn for it alone.
+  assert.deepEqual(logoFor({ galleryLogoUrl: LOGO }, true), { src: LOGO, ownMark: false });
+  assert.deepEqual(logoFor({ galleryLogoDarkUrl: DARK }, false), { src: DARK, ownMark: false });
+  // Neither: nothing, which every reader draws as the bundled mark. Blank is nothing.
+  assert.deepEqual(logoFor(null, true), { src: "", ownMark: false });
+  assert.deepEqual(logoFor({ galleryLogoUrl: "  ", galleryLogoDarkUrl: "" }, false), { src: "", ownMark: false });
+  // The theme is unstated, and unstated is light.
+  assert.equal(logoFor({ galleryLogoUrl: LOGO, galleryLogoDarkUrl: DARK }).src, LOGO);
+});
+
+test("every appearance but the light one wants the dark-mode marks", () => {
+  assert.equal(themeWantsDarkMark("light"), false);
+  assert.equal(themeWantsDarkMark("dark"), true);
+  assert.equal(themeWantsDarkMark("enhanced-dark"), true);
+  // Nothing known yet - the server's frame - is not a dark theme.
+  assert.equal(themeWantsDarkMark(null), false);
+  assert.equal(themeWantsDarkMark(""), false);
 });

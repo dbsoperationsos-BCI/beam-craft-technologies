@@ -5,6 +5,10 @@ import DataTable from "@/components/data-table/DataTable";
 import useTableSelection from "@/components/data-table/useTableSelection";
 import DataTableShell from "@/components/data-table/DataTableShell";
 import TableFooter from "@/components/data-table/TableFooter";
+import KanbanBoard, { columnsFromRows, groupValue } from "@/components/data-table/KanbanBoard";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
+import { verticalOptions } from "@/lib/crmOptions";
+import { columnCount } from "@/lib/kanbanSummary.mjs";
 import ModulePageHeader from "@/components/layout/ModulePageHeader";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import useCompactView from "@/components/shared/useCompactView";
@@ -16,7 +20,7 @@ import { commonProjectInfoSections, projectManagementInfoSections } from "@/cons
 import { usePermissions } from "@/components/auth/PermissionsProvider";
 import { ACTIONS_COLUMN, displayValue } from "@/components/data-table/tableCells";
 import { getContacts } from "@/services/contacts/contacts.service";
-import { getSalesProjects } from "@/services/sales/projects.service";
+import { getSalesProject } from "@/services/sales/projects.service";
 
 /**
  * Contacts.
@@ -124,6 +128,8 @@ const CONTACT_SECTIONS = [
 
 // Off until somebody asks for it, from the table's own Manage Columns dialog.
 const DEFAULT_COLUMN_VISIBILITY = { module: false };
+// A contact recorded in the last 30 days: the board's tag, and what each column counts.
+const contactFlag = (row) => (Boolean(row.recordedAt) && Date.now() - new Date(row.recordedAt).getTime() <= 30 * 86_400_000 ? "New" : "");
 
 export default function ContactsPage() {
   const [contacts, setContacts] = useState([]);
@@ -222,6 +228,11 @@ export default function ContactsPage() {
    * or deleted on this page - a contact is what a phone number's records add up to - so an Edit or
    * a Delete would be a menu item promising something this screen cannot do.
    */
+  // One list, read by the table row's ⋮ and the Board card's.
+  const contactActionItems = useCallback((row) => [
+    { label: "View", onSelect: () => openContact(row) },
+    { label: "Copy Number", disabled: !String(row.contact || "").trim(), onSelect: () => void copyNumber(row) },
+  ], [copyNumber, openContact]);
   const tableColumns = useMemo(() => [...columns, {
     ...ACTIONS_COLUMN,
     render: (row) => <OptionsMenu
@@ -234,12 +245,9 @@ export default function ContactsPage() {
        * menu still has a comfortable target and the row is the height of its own type.
        */
       triggerSize="xxs"
-      items={[
-        { label: "View", onSelect: () => openContact(row) },
-        { label: "Copy Number", disabled: !String(row.contact || "").trim(), onSelect: () => void copyNumber(row) },
-      ]}
+      items={contactActionItems(row)}
     />,
-  }], [copyNumber, openContact]);
+  }], [contactActionItems]);
 
   const loadContacts = useCallback(async () => {
     setLoading(true);
@@ -269,20 +277,18 @@ export default function ContactsPage() {
   /*
    * The project behind a double-clicked contact.
    *
-   * The register is read whole and the Event ID picked out of it, because that is the only way to
-   * ask for a project: `getSalesProjects` is what every project screen loads, and it is what
-   * carries the shoots, the services and the deliverables the record view lays out. Read on the
-   * double click rather than with the directory, so a page nobody opens a project from never asks
-   * for one.
+   * Read by its Event ID alone (`getSalesProject`), in the register's own shape - the shoots, the
+   * services and the deliverables the record view lays out - rather than the whole register
+   * downloaded to pick one out. Read on the double click rather than with the directory, so a page
+   * nobody opens a project from never asks for one.
    */
   useEffect(() => {
     if (!openProjectId) return undefined;
     let active = true;
-    void getSalesProjects()
+    void getSalesProject(openProjectId)
       .then((response) => {
         if (!active) return;
-        const rows = Array.isArray(response?.data) ? response.data : [];
-        const match = rows.find((project) => project.eventId === openProjectId) || null;
+        const match = response?.data || null;
         setOpenProject(match);
         // Said out loud rather than left as a double click that opened nothing: a project deleted
         // since the directory was read is a real answer, and the row is still honest about the
@@ -293,7 +299,7 @@ export default function ContactsPage() {
       .catch((error) => {
         if (!active) return;
         setOpenProjectId("");
-        showError(error?.message || "That project could not be opened.");
+        showError(error?.status === 404 ? "That project could not be found." : error?.message || "That project could not be opened.");
       });
     return () => { active = false; };
   }, [openProjectId, showError]);
@@ -347,8 +353,17 @@ export default function ContactsPage() {
    */
   const bulk = useTableSelection({ rows: contacts, rowId: (row) => row.key, noun: "contact" });
 
+  /*
+   * The Board: the same contacts in a column per vertical - the studio's three first, anything
+   * else A to Z, and the records with none (a vendor, a payee) under "—". A contact has no status
+   * and nothing here changes one, so it is a view only; a card opens the record as a double click
+   * on its row does.
+   */
+  const [layout, setLayout] = useTableBoardLayout("sales-contacts");
+  const boardColumns = useMemo(() => columnsFromRows(contacts, (row) => row.verticals, { order: verticalOptions.map((option) => option.value) }), [contacts]);
+
   return <section className="flex h-full min-h-0 w-full min-w-0 flex-col">
-    <ModulePageHeader title="Contacts" />
+    <ModulePageHeader title="Contacts" actions={<TableBoardSwitch value={layout} onChange={setLayout} />} />
 
     <FloatingNotice notice={notice} onClose={clearNotice} />
 
@@ -360,7 +375,25 @@ export default function ContactsPage() {
       rounded border instead, the table read as a panel sitting on the page rather than as the page
       — a seam under the header that no other module's table has.
     */}
-    <DataTableShell className="min-h-0 flex-1 rounded-none border-0" footer={footer}>
+    {layout === "board" ? <KanbanBoard
+      rows={contacts}
+      columns={boardColumns}
+      statusOf={(row) => groupValue(row.verticals)}
+      // The trend counts contacts by when their record was made.
+      dateOf={(row) => (row.recordedAt ? new Date(row.recordedAt).getTime() : null)}
+      // Under each vertical, the contacts recorded in the last 30 days.
+      columnAmount={(rows) => columnCount(rows, (row) => Boolean(contactFlag(row)), "New in last 30 days")}
+      cardFlag={contactFlag}
+      card={{ title: (row) => row.name, subtitle: (row) => [row.id, row.contact].filter(Boolean).join(" · "), meta: (row) => row.module }}
+      getRowId={(row) => row.key}
+      onOpen={openContact}
+      // The card's ⋮ is the row's ⋮.
+      cardActions={contactActionItems}
+      viewOnly="A contact's vertical comes from its lead. Change it in Leads & Followups."
+      loading={loading}
+      noun="contacts"
+      ariaLabel="Contacts board"
+    /> : <DataTableShell className="min-h-0 flex-1 rounded-none border-0" footer={footer}>
       {/* The pane every other module's table sits in, so the rows scroll inside the shell rather
           than the shell growing with them. */}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
@@ -394,7 +427,7 @@ export default function ContactsPage() {
           }}
         />
       </div>
-    </DataTableShell>
+    </DataTableShell>}
 
     {/* The CRM's own lead popup, opened here rather than on the CRM board. It reads and writes the
         lead through the same endpoints that board does, so what is done in it is done to the lead

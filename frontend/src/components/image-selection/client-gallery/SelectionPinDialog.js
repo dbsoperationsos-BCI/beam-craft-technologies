@@ -4,6 +4,7 @@ import ArrowForward from "@mui/icons-material/ArrowForward";
 import Autorenew from "@mui/icons-material/Autorenew";
 import { useEffect, useRef, useState } from "react";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import useFormErrors from "@/components/shared/useFormErrors";
 
 const PIN_LENGTH = 4;
 
@@ -15,12 +16,14 @@ export default function SelectionPinDialog({ onVerify, onClose }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const refs = useRef([]);
-  const complete = digits.every(Boolean);
+  // An incomplete PIN is said under the boxes; a wrong one keeps the server's message below them.
+  const fields = useFormErrors();
 
   useEffect(() => { refs.current[0]?.focus(); }, []);
   useEscapeKey(onClose, !busy);
 
   function update(index, raw) {
+    fields.clear("pin");
     const values = raw.replace(/\D/g, "").slice(0, PIN_LENGTH - index).split("");
     if (!values.length) { setDigits((items) => items.map((item, i) => (i === index ? "" : item))); return; }
     setDigits((items) => items.map((item, i) => (i >= index && i < index + values.length ? values[i - index] : item)));
@@ -30,14 +33,17 @@ export default function SelectionPinDialog({ onVerify, onClose }) {
     const pin = event.clipboardData.getData("text").replace(/\D/g, "").slice(0, PIN_LENGTH);
     if (!pin) return;
     event.preventDefault();
+    fields.clear("pin");
     setDigits(pin.padEnd(PIN_LENGTH, "").split(""));
     refs.current[Math.min(pin.length, PIN_LENGTH - 1)]?.focus();
   }
   async function submit(event) {
     event.preventDefault();
-    if (!complete || busy) return;
+    if (busy) return;
+    const pin = digits.join("");
+    if (!fields.check({ pin: pin.length === PIN_LENGTH ? "" : pin ? `Enter all ${PIN_LENGTH} digits.` : "Enter the PIN." })) return;
     setBusy(true); setError("");
-    try { await onVerify(digits.join("")); }
+    try { await onVerify(pin); }
     catch (cause) {
       setError(cause.message || "We couldn’t verify that PIN. Please try again.");
       setDigits(Array(PIN_LENGTH).fill("")); refs.current[0]?.focus();
@@ -64,12 +70,14 @@ export default function SelectionPinDialog({ onVerify, onClose }) {
               pattern="[0-9]*"
               maxLength={1}
               disabled={busy}
-              className="h-12 w-11 rounded-lg border border-slate-200 bg-slate-50 text-center text-lg font-semibold text-slate-900 outline-none transition focus:border-blue-600 focus:bg-white focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+              aria-invalid={fields.errors.pin && !digit ? true : undefined}
+              className={`h-12 w-11 rounded-lg border ${fields.errors.pin && !digit ? "border-red-400" : "border-slate-200"} bg-slate-50 text-center text-lg font-semibold text-slate-900 outline-none transition focus:border-blue-600 focus:bg-white focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60`}
             />
           ))}
         </fieldset>
+        {fields.errors.pin && <p role="alert" className="mt-2 text-xs font-normal text-red-600">{fields.errors.pin}</p>}
         {error && <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
-        <button type="submit" disabled={!complete || busy} className="mt-5 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+        <button type="submit" disabled={busy} className="mt-5 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
           {busy ? <><Autorenew className="animate-spin" style={{ fontSize: 16 }} aria-hidden="true" />Verifying</> : <>Enter Gallery <ArrowForward style={{ fontSize: 16 }} aria-hidden="true" /></>}
         </button>
         <button type="button" disabled={busy} onClick={onClose} className="mt-2 h-10 w-full rounded-lg bg-blue-50 text-sm font-medium text-blue-700 transition hover:bg-blue-100 disabled:opacity-50">Back to Photos</button>

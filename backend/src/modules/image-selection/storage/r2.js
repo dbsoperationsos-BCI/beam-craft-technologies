@@ -5,7 +5,7 @@
 // therefore protects the listing, not the image bytes. Only the object KEY is stored in
 // the database and the URL is composed from R2_PUBLIC_BASE_URL at read time, so changing
 // the custom domain later is a config edit rather than a data migration.
-const { S3Client, PutObjectCommand, CopyObjectCommand, DeleteObjectsCommand, HeadObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, CopyObjectCommand, DeleteObjectsCommand, HeadObjectCommand, GetObjectCommand, ListObjectsV2Command, GetBucketLifecycleConfigurationCommand } = require("@aws-sdk/client-s3");
 
 const accountId = process.env.R2_ACCOUNT_ID || "";
 const accessKeyId = process.env.R2_ACCESS_KEY_ID || "";
@@ -79,6 +79,51 @@ async function copyObject(sourceKey, destinationKey) {
   return destinationKey;
 }
 
+// One object as a readable stream, for a server-side consumer such as the Signature Album archive,
+// which folds many derivatives into one ZIP as it streams. Backpressure holds: nothing is read from
+// the bucket faster than the consumer takes it. Null for a key the bucket does not hold; `signal`
+// cancels the request itself when the consumer has gone away.
+async function getObjectStream(key, { signal } = {}) {
+  if (!isConfigured() || !key) return null;
+  try {
+    const response = await getClient().send(new GetObjectCommand({ Bucket: bucket, Key: key }), signal ? { abortSignal: signal } : undefined);
+    return response.Body || null;
+  } catch (error) {
+    if (error?.name === "NoSuchKey" || error?.$metadata?.httpStatusCode === 404) return null;
+    throw error;
+  }
+}
+
+// Every key under a prefix, with when each object was last written. One listing of the
+// photo-selection root is how the derivative audit learns what the bucket still holds; a HEAD
+// per row would be a request per photo, which a bucket of tens of thousands cannot afford.
+// Read-only, and an empty map where R2 is not configured or no prefix is named.
+async function listKeys(prefix) {
+  const keys = new Map();
+  if (!isConfigured() || !prefix) return keys;
+  let token;
+  do {
+    const response = await getClient().send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token, MaxKeys: 1000 }));
+    for (const item of response.Contents || []) keys.set(item.Key, item.LastModified || null);
+    token = response.IsTruncated ? response.NextContinuationToken : undefined;
+  } while (token);
+  return keys;
+}
+
+// The bucket's lifecycle rules, as S3 reports them: `{ rules }`, where no configuration at all is
+// `{ rules: [] }`, or `{ error }` naming why they could not be read - a token scoped to objects
+// gets AccessDenied here, and the caller decides what an unreadable answer means.
+async function lifecycleRules() {
+  if (!isConfigured()) return { error: "R2 is not configured" };
+  try {
+    const response = await getClient().send(new GetBucketLifecycleConfigurationCommand({ Bucket: bucket }));
+    return { rules: response.Rules || [] };
+  } catch (error) {
+    if (error?.name === "NoSuchLifecycleConfiguration") return { rules: [] };
+    return { error: error?.name || error?.message || "unknown error" };
+  }
+}
+
 async function objectExists(key) {
   if (!isConfigured() || !key) return false;
   try {
@@ -116,4 +161,4 @@ async function deleteObjects(keys) {
   return { deleted, failed };
 }
 
-module.exports = { isConfigured, missingConfig, publicUrl, putObject, copyObject, objectExists, deleteObjects, bucket };
+module.exports = { isConfigured, missingConfig, publicUrl, putObject, copyObject, getObjectStream, listKeys, lifecycleRules, objectExists, deleteObjects, bucket };

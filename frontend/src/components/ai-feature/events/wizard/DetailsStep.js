@@ -57,20 +57,20 @@ export default function DetailsStep({ details, onChange, problems, eventTypes, e
   const coverValue = details.coverImage === undefined ? existingCoverUrl || null : details.coverImage;
 
   return <div className="space-y-4">
-    <TextField label="Event Name" required value={details.name} onChange={fromInput("name")} error={problems.name} maxLength={191} placeholder="Arun & Priya's Wedding" autoFocus />
+    <TextField label="Event Name" helperText="The name guests see at the top of the event page." required value={details.name} onChange={fromInput("name")} error={problems.name} maxLength={191} placeholder="Arun & Priya's Wedding" autoFocus />
     <div className="grid gap-4 sm:grid-cols-2">
-      <Dropdown label="Event Type" required options={options} value={details.typeChoice} onChange={set("typeChoice")} error={problems.eventType} sorted={false} />
-      {details.typeChoice === OTHER_TYPE && <TextField label="Which type?" value={details.customType} onChange={fromInput("customType")} maxLength={60} placeholder="Housewarming" />}
+      <Dropdown label="Event Type" helperText="The kind of event; choose Other to type your own." required options={options} value={details.typeChoice} onChange={set("typeChoice")} error={problems.eventType} sorted={false} />
+      {details.typeChoice === OTHER_TYPE && <TextField label="Which type?" helperText="Your own event type when none in the list fits." value={details.customType} onChange={fromInput("customType")} maxLength={60} placeholder="Housewarming" />}
     </div>
     <div className="grid gap-4 sm:grid-cols-2">
-      <DateField label="Start Date" required value={details.startDate} onChange={set("startDate")} error={problems.startDate} />
-      <DateField label="End Date" value={details.endDate} onChange={set("endDate")} minDate={details.startDate} error={problems.endDate} placeholder="Same day" />
+      <DateField label="Start Date" helperText="The first day of the event." required value={details.startDate} onChange={set("startDate")} error={problems.startDate} />
+      <DateField label="End Date" helperText="The last day of the event; leave empty for a one-day event." value={details.endDate} onChange={set("endDate")} minDate={details.startDate} error={problems.endDate} placeholder="Same day" />
     </div>
     <div className="grid gap-4 sm:grid-cols-2">
-      <TextField label="Timezone" value={details.timezone} onChange={fromInput("timezone")} maxLength={64} placeholder="Asia/Kolkata" />
-      <TextField label="Location" value={details.location} onChange={fromInput("location")} maxLength={255} placeholder="Venue, city" />
+      <TextField label="Timezone" helperText="Time zone for the event's dates and times, like Asia/Kolkata." value={details.timezone} onChange={fromInput("timezone")} maxLength={64} placeholder="Asia/Kolkata" />
+      <TextField label="Location" helperText="The venue and city where the event takes place." value={details.location} onChange={fromInput("location")} maxLength={255} placeholder="Venue, city" />
     </div>
-    <TextAreaField label="Description" value={details.description} onChange={fromInput("description")} maxLength={4000} rows={3} placeholder="What guests see under the event name." />
-    <ImageUploadField label="Cover Image" value={coverValue} onChange={(dataUrl) => onChange("coverImage", dataUrl || null)} compress={{ maxBytes: 600 * 1024, maxDimension: 2000 }} />
+    <TextAreaField label="Description" helperText="Shown to guests under the event name." value={details.description} onChange={fromInput("description")} maxLength={4000} rows={3} placeholder="What guests see under the event name." />
+    <ImageUploadField label="Cover Image" helperText="The banner photo shown at the top of the guest page." value={coverValue} onChange={(dataUrl) => onChange("coverImage", dataUrl || null)} compress={{ maxBytes: 600 * 1024, maxDimension: 2000 }} />
   </div>;
 }

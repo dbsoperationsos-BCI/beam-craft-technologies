@@ -1,27 +1,21 @@
 "use client";
-import ArrowForward from "@mui/icons-material/ArrowForward";
 import { useState } from "react";
 import GallerySidebarShell, { SidebarToggle } from "./GallerySidebarShell";
 import { GalleryLogo } from "./GalleryBrand";
 import SelectionPhotoGrid from "./SelectionPhotoGrid";
+import PeoplePanel from "./PeoplePanel";
+import FolderCardList from "./FolderCardList";
 import { selectionProgressStatus } from "@/lib/selectionProgressStatus.mjs";
 import { PROGRESS_COLORS } from "@/lib/progressStatus.mjs";
+import Button from "@/components/shared/Button";
+import Tabs from "@/components/ui/Tabs";
+import SelectionStatusPill from "./SelectionStatusPill";
+import { galleryHeading, showsDeselectAll } from "@/lib/clientGalleryHome.mjs";
+import { galleryEmptyMessage } from "@/lib/galleryEmptyState.mjs";
+import SelectionFooter from "./SelectionFooter";
 
 function formatDate(value) {
   return value ? new Date(value).toLocaleDateString("en-GB") : "";
-}
-
-// Completion across every selection item. The target is how many photos the client has to
-// pick in total — the sum of the limits — not how many photos the gallery holds.
-function overallCompletion(deliverables, selectionCounts) {
-  const totals = deliverables.reduce(
-    (acc, item) => {
-      const limit = Number(item.selectionLimit) || 0;
-      return { limit: acc.limit + limit, done: acc.done + Math.min(selectionCounts[item.id] || 0, limit) };
-    },
-    { limit: 0, done: 0 },
-  );
-  return { ...totals, percentage: totals.limit ? Math.round((totals.done / totals.limit) * 100) : 0 };
 }
 
 /**
@@ -36,17 +30,21 @@ export function foldersToShow(folders, activeFolderGroupId) {
   return group && group.total ? [group] : children;
 }
 
-// `tab` switches the body between the folder cards and the photos already picked for the
-// selection item in the sidebar. The Selected tab used to leave for the read-only review page,
-// which cost the client the sidebar, the heading and their place; it now shares the in-folder
-// grid so a photo can be unpicked or filed elsewhere without going back into a folder.
+// `tab` switches the body between the folder cards, the People tab and the photos already picked
+// for the selection item in the sidebar. The Selected tab used to leave for the read-only review
+// page, which cost the client the sidebar, the heading and their place; it now shares the in-folder
+// grid so a photo can be unpicked or filed elsewhere without going back into a folder. The People
+// tab is the face-recognition result for the whole gallery over these same folder cards, counted
+// for the chosen people - `people` carries everything `PeoplePanel` draws, and a card there opens
+// the same folder view, narrowed to those people's photos, through `people.onOpenFolder`.
 export default function FolderCards({
   client, folders, deliverables = [], overall, selectionCounts = {}, activeFolderGroupId, activeDeliverableId,
-  onSelectDeliverable, onOpenFolder, onReviewAndSend, onDeselectAll, clearing = false,
+  onSelectDeliverable, onOpenFolder, onReviewAndSend, onSubmitAll, onDeselectAll, clearing = false,
   tab = "all", onTabChange, selectedItems = [], selectedLoading = false, sessionToken, onToggleSelect, onOpenImage,
+  people = {},
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const clientName = [client?.groomName, client?.brideName].filter(Boolean).join(" & ") || client?.clientName || "Your gallery";
+  const heading = galleryHeading(client);
   const expiryDate = formatDate(client?.expiresAt);
   const active = deliverables.find((item) => item.id === activeDeliverableId);
   const selected = active ? selectionCounts[active.id] || 0 : 0;
@@ -55,8 +53,6 @@ export default function FolderCards({
   // Images Selected for Retouches" beside a card claiming two were.
   const folderSelected = (folder) => (active ? folder.selectedByDeliverable?.[active.id] || 0 : folder.selected || 0);
   const progress = selectionProgressStatus(selected, active?.selectionLimit || 0);
-  const enabled = deliverables.filter((item) => item.enabled !== false);
-  const completion = overallCompletion(enabled, selectionCounts);
   // A selection item derived from Post Production Allocation belongs to one shoot, so it is listed
   // under the folder that shoot created. An item the studio typed on a manually named project has
   // no shoot behind it and applies to the whole project, so it is offered under every folder.
@@ -74,11 +70,6 @@ export default function FolderCards({
   // unsubmitted items of the shoot folder in view.
   const activeGroup = groups.find((group) => group.outer.folderId === activeFolderGroupId) || null;
   const groupPending = (activeGroup?.items || []).filter((item) => item.enabled !== false && !item.submittedAt);
-  const activeSubmitted = Boolean(active?.submittedAt);
-  // Whether this item may be sent. One photo is enough: the limit is a ceiling on how many the
-  // client may pick, not a quota they have to fill, and the server applies the same rule.
-  const canSubmit = Boolean(active) && !activeSubmitted && selected > 0;
-
   const sidebar = (
     <>
       {/* Centred rather than flush left: a logo can be any proportion — a wide wordmark or a square
@@ -132,40 +123,82 @@ export default function FolderCards({
     <main className="min-h-screen bg-slate-50 lg:grid lg:grid-cols-[240px_minmax(0,1fr)]">
       <GallerySidebarShell open={menuOpen} onClose={() => setMenuOpen(false)} label="Selection items">{sidebar}</GallerySidebarShell>
 
-      <div className="flex min-h-screen min-w-0 flex-col pb-28 sm:pb-24 lg:pb-16">
+      <div className="flex min-h-screen min-w-0 flex-col pb-40 sm:pb-24 lg:pb-20">
         <div className="flex items-center gap-2 border-b border-slate-200 bg-white px-3 py-2 lg:hidden">
           <SidebarToggle onClick={() => setMenuOpen(true)} />
           <GalleryLogo studioName={client?.studioName} logoUrl={client?.galleryLogoUrl} variant="clientSelectionMobile" />
         </div>
-        <header className="bg-white px-4 pt-5 sm:px-8 sm:pt-6">
-          <h1 className="font-serif text-3xl leading-tight tracking-tight text-slate-950 sm:text-5xl xl:text-6xl">{clientName}</h1>
+        <header className="bg-white px-4 pt-6 sm:px-8 sm:pt-8">
+          {/* The client's name, centred over the content pane - the sidebar is beside the pane,
+              not over it, so this is the pane's centre - with the status and count under it. */}
+          <h1 className="text-center text-4xl font-semibold leading-tight tracking-tight text-slate-950 [overflow-wrap:anywhere] sm:text-5xl xl:text-6xl">{heading}</h1>
+          {/* On a phone the badge takes its own line and the sentence balances its two lines
+              under it; from `sm` up they share one line as before. */}
           {active ? (
-            <p className="mt-4 flex flex-wrap items-center gap-2 text-base text-slate-800">
-              <span className="rounded-md px-2 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: progress.color }}>{progress.label}</span>
-              <span><strong>{selected}</strong> out of <strong>{active.selectionLimit}</strong> Images Selected for <strong>{active.name}</strong></span>
+            <p className="mt-4 flex flex-wrap items-center justify-center gap-2 text-center text-base text-slate-800 max-sm:mt-3 max-sm:flex-col max-sm:gap-1.5">
+              <SelectionStatusPill status={progress} plain />
+              <span className="max-sm:text-balance max-sm:leading-snug"><strong>{selected}</strong> out of <strong>{active.selectionLimit}</strong> Images Selected for <strong>{active.name}</strong></span>
             </p>
           ) : (
-            <p className="mt-4 text-base text-slate-800">
+            <p className="mt-4 text-center text-base text-slate-800">
               <strong>{overall.selected}</strong> out of <strong>{overall.total}</strong> Images Selected
             </p>
           )}
-          <div className="mt-5 flex flex-wrap items-end justify-between gap-3 border-b border-slate-200">
-            <div className="flex gap-6 text-[13px] font-medium">
-              <button type="button" onClick={() => onTabChange("all")} className={`border-b-2 px-1 pb-2 ${tab === "all" ? "border-blue-600 text-blue-600" : "border-transparent text-slate-600 hover:text-blue-600"}`}>All Photos</button>
-              <button type="button" onClick={() => onTabChange("selected")} className={`border-b-2 px-1 pb-2 ${tab === "selected" ? "border-blue-600 text-blue-600" : "border-transparent text-slate-600 hover:text-blue-600"}`}>Selected{active ? ` (${selected})` : ""}</button>
-            </div>
+          {/* The tabs underlined on one divider, with the expiry on its right; on a narrow screen
+              the expiry wraps under the tabs rather than squeezing them. People keeps its β and
+              the testing note - one word on a phone, the sentence from `sm` up - said once to a
+              screen reader in the tab's name. Same values, same handler. */}
+          <div className="mt-5 flex flex-wrap items-end justify-between gap-x-6 gap-y-1 border-b border-slate-200">
+            <Tabs
+              size="inline"
+              ariaLabel="Gallery view"
+              className="gap-3 min-[400px]:gap-4 sm:gap-6"
+              value={tab}
+              onChange={onTabChange}
+              tabs={[
+                { id: "all", label: "All Photos" },
+                {
+                  id: "people",
+                  label: <>People <span aria-hidden="true">β</span><span className="sr-only"> (beta, under testing)</span><span aria-hidden="true" className="ml-1 text-[11px] font-normal text-slate-500">(<span className="sm:hidden">testing</span><span className="hidden sm:inline">this feature is under testing</span>)</span></>,
+                },
+                { id: "selected", label: `Selected${active ? ` (${selected})` : ""}` },
+              ]}
+            />
             {expiryDate && (
-              <p className="pb-2 text-xs text-slate-600">
+              <p className="pb-2 text-xs text-slate-600 max-sm:w-full max-sm:pt-1 max-sm:text-center">
                 Photo selection will expire on <strong className="text-slate-900">{expiryDate}</strong>
               </p>
             )}
           </div>
         </header>
 
-        <section className="flex-1 px-4 py-5 sm:px-8 sm:py-6">
+        <section className="flex-1 px-4 pt-5 pb-6 sm:px-8 sm:pt-6">
           {/* "Add to" offers only the shoot in view, and only what is still open: a submitted
               item is locked, so it is not somewhere a photo can still be filed. */}
-          {tab === "selected" ? (
+          {tab === "people" ? (
+            <PeoplePanel
+              people={people.people}
+              peopleInfo={people.info}
+              activePersonIds={people.activePersonIds}
+              onSelectPerson={people.onSelectPerson}
+              onOpenMore={people.onOpenMore}
+              totalCount={people.totalCount}
+              totalPeople={people.totalPeople}
+              sessionToken={sessionToken}
+              locked={Boolean(active?.submittedAt)}
+              /* One grid of this shoot's photographs - all of them, or the ones the chosen people
+                 are in together - picked into the same selection item the cards would have. */
+              photos={people.photos}
+              personLabel={people.personLabel}
+              /* The Scene filter beside the people - the scenes the culling run read in these photos. */
+              scenes={people.scenes}
+              deliverables={deliverables}
+              menuDeliverables={groupPending}
+              selectionCounts={selectionCounts}
+              onToggleSelect={onToggleSelect}
+              onOpenImage={people.onOpenPeopleImage}
+            />
+          ) : tab === "selected" ? (
             <SelectionPhotoGrid
               items={selectedItems}
               loading={selectedLoading}
@@ -176,75 +209,41 @@ export default function FolderCards({
               locked={Boolean(active?.submittedAt)}
               onToggleSelect={onToggleSelect}
               onOpenImage={onOpenImage}
-              emptyMessage={active ? `No photos selected yet for ${active.name}.` : "Select a Selection Setting to see what you have picked."}
+              emptyMessage={active ? `No photos selected yet for ${active.name}.` : "Choose a selection item to see what you have picked."}
             />
           ) : (
-          <div className="max-w-2xl space-y-4">
-            {visibleFolders.length ? (
-              visibleFolders.map((folder) => (
-                <article key={folder.folderId} className="rounded-xl bg-white px-4 py-4 shadow-sm sm:px-6 sm:py-5">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <h2 className="min-w-0 flex-1 truncate text-lg text-slate-500 sm:text-xl">{folder.name}</h2>
-                    {/* After the selection is submitted the folder is view-only, and the button
-                        says so — the same door, no longer promising a choice. */}
-                    <button type="button" onClick={() => onOpenFolder(folder.folderId)} className="inline-flex h-9 shrink-0 items-center gap-2 rounded-md bg-blue-600 px-3 text-xs font-medium text-white hover:bg-blue-700">
-                      {active?.submittedAt ? "See Photos" : "Select Photos"} <ArrowForward style={{ fontSize: 14 }} />
-                    </button>
-                  </div>
-                  {/* The count alone, not "3/5": the limit belongs to the selection item across every
-                      folder, so a ratio on one card read as that folder's own quota. The limit is
-                      already stated once, in the heading above the cards. */}
-                  <p className="mt-3 text-xs text-slate-600">
-                    Total: {folder.total} | {folderSelected(folder)} Selected
-                  </p>
-                </article>
-              ))
-            ) : (
-              <p className="py-12 text-center text-sm text-slate-500">Select a Selection Setting to view its gallery folders.</p>
-            )}
-          </div>
+          <FolderCardList folders={visibleFolders} folderSelected={folderSelected} locked={Boolean(active?.submittedAt)} onOpenFolder={onOpenFolder} sessionToken={sessionToken} emptyMessage={galleryEmptyMessage({ item: active, groupFolderId: activeFolderGroupId, folders, hasItems: deliverables.length > 0 })} />
           )}
         </section>
       </div>
 
-      <footer className="fixed inset-x-0 bottom-0 flex flex-col gap-2 border-t border-slate-200 bg-white px-4 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:flex-row sm:items-center sm:justify-between sm:gap-6 sm:px-8 lg:pl-66">
-        <div className="min-w-0 flex-1">
-          <p className="text-[10px] text-slate-600">Overall Completion: {completion.percentage}%</p>
-          <div className="mt-1 flex max-w-md items-center gap-3">
-            <div className="h-1 min-w-0 flex-1 rounded-full bg-slate-100">
-              <div className="h-1 rounded-full bg-blue-600" style={{ width: `${completion.percentage}%` }} />
-            </div>
-            <span className="shrink-0 text-[10px] text-slate-500">{completion.done} of {completion.limit} Photos</span>
-          </div>
-        </div>
-        {activeSubmitted ? (
-          <p className="shrink-0 text-xs font-semibold text-emerald-600">{active?.name || "This selection item"} submitted</p>
-        ) : (
-          <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
-          {/* Between the progress and Review & Submit: the way back from a selection the client
-              wants to start over. Absent rather than disabled once the item is submitted, because
-              nothing can be unpicked then — that is the branch above. */}
-          <button
+      {/* The gallery's footer, shared with an open card. Pinned to the bottom here, and from lg it
+          starts after the 240px sidebar column instead of running under it. Deselect All
+          joins it only on the Selected tab, where the picks it releases are the ones on screen,
+          and only once something is picked - absent once the item is submitted, because nothing
+          can be unpicked then. */}
+      <SelectionFooter
+        deliverables={deliverables}
+        selectionCounts={selectionCounts}
+        active={active}
+        onReviewAndSend={onReviewAndSend}
+        onSubmitAll={onSubmitAll}
+        className="fixed inset-x-0 bottom-0 lg:left-60"
+        leading={showsDeselectAll(tab, selected) ? (
+          <Button
             type="button"
-            disabled={!selected || clearing}
+            variant="danger"
+            size="none"
+            busy={clearing}
+            busyLabel="Deselecting..."
             onClick={onDeselectAll}
-            title={selected ? `Deselect all ${selected} photos picked for ${active?.name || "this selection item"}.` : "No photos are selected yet."}
-            className="h-9 w-full shrink-0 rounded-md bg-red-600 px-4 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-40 sm:w-auto"
+            title={`Deselect all ${selected} photos picked for ${active?.name || "this selection item"}.`}
+            className="h-11 flex-1 whitespace-nowrap rounded-lg px-4 !text-sm max-sm:px-3 max-sm:!text-[13px] sm:h-10 sm:flex-none"
           >
-            {clearing ? "Deselecting..." : "Deselect All"}
-          </button>
-          <button
-            type="button"
-            disabled={!canSubmit}
-            onClick={onReviewAndSend}
-            title={canSubmit ? undefined : `Pick at least one photo for ${active?.name || "this selection item"} first.`}
-            className="h-9 w-full shrink-0 rounded-md bg-slate-700 px-5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40 sm:w-auto"
-          >
-            Review &amp; Submit{active ? ` · ${active.name}` : ""}
-          </button>
-          </div>
-        )}
-      </footer>
+            Deselect All
+          </Button>
+        ) : null}
+      />
     </main>
   );
 }

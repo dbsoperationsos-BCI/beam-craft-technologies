@@ -8,14 +8,32 @@ import DataTableShell from "@/components/data-table/DataTableShell";
 import DataTable from "@/components/data-table/DataTable";
 import { ACTIONS_COLUMN } from "@/components/data-table/tableCells";
 import TableFooter from "@/components/data-table/TableFooter";
+import KanbanBoard from "@/components/data-table/KanbanBoard";
+import { columnNext } from "@/lib/kanbanSummary.mjs";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import InfoPanelShell from "@/components/data-table/InfoPanelShell";
+import HelpTip from "@/components/shared/HelpTip";
+import { detailHelpFor } from "@/constants/detailHelp";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import Button from "@/components/shared/Button";
 import IconButton from "@/components/shared/IconButton";
 import Dropdown from "@/components/shared/Dropdown";
+import MultiSelectField from "@/components/shared/MultiSelectField";
 import ScheduleMeetDialog from "@/components/sales/ScheduleMeetDialog";
 import MeetingReminders from "@/components/sales/MeetingReminders";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
+import RaiseRequestLauncher from "@/components/hrm/RaiseRequestLauncher";
+import ProjectBookingPanel from "@/components/sales/ProjectBookingPanel";
+import CalendarDayTimeline from "@/components/sales/CalendarDayTimeline";
+import CalendarWeekLanes from "@/components/sales/CalendarWeekLanes";
+import { calendarShootMenuItems } from "@/lib/calendarShootMenu.mjs";
+import { PROJECT_BOARDS, shootBoardHref } from "@/lib/boardJumps.mjs";
+import ShootRunDialog from "@/components/project-management/shoot-board/ShootRunDialog";
+import { PROJECT_COLOURS } from "@/lib/shootBoard.mjs";
+import { hourLabel } from "@/lib/dayTimeline.mjs";
+import BlockPeriodDialog from "@/components/sales/BlockPeriodDialog";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import { removeCalendarBlock } from "@/services/schedule/calendarBlocks.service";
 import useStickyTab from "@/components/shared/useStickyTab";
 import ChevronLeftRoundedIcon from "@mui/icons-material/ChevronLeftRounded";
 import ChevronRightRoundedIcon from "@mui/icons-material/ChevronRightRounded";
@@ -48,22 +66,36 @@ import {
   meetingSourceLabel,
   meetingStatusLabel,
   permittedSources,
+  attendanceClock,
+  attendanceWorked,
   rowDateText,
+  rowOwner,
+  rowReference,
+  rowTimeText,
   rowTitle,
   sourceColumns,
   sourceEmptyMessage,
   sourceRows,
   sourceScheduleEntries,
+  branchScheduleEntries,
+  scheduleBranches,
+  branchRows,
+  rowBranches,
 } from "@/lib/meetingSources";
-import { monthGrid, scheduleByDay, scheduleEntryCell, scheduleEntryLead, scheduleKind, SCHEDULE_WEEKDAYS } from "@/lib/schedule";
+import { blockClock, monthShootCounts, shootRunOf, periodCells, periodLabel, scheduleByDay, scheduleEntryCell, scheduleEntryLead, scheduleKind, SCHEDULE_PERIODS, SCHEDULE_WEEKDAYS, stepPeriod } from "@/lib/schedule";
 import { getSchedule } from "@/services/schedule/schedule.service";
 import { getSalesProjects } from "@/services/sales/projects.service";
-// The one place that knows how a shoot's length reads - "2h 0m", "10-12 Hours (Full)" - so the
+// The one place that knows how a shoot's length reads - "2h 0m", "8-10 Hours (Full)" - so the
 // calendar says it exactly as the shoot list and the project info panel do.
 import { formatSessionTiming } from "@/components/project-management/AddShootDialog";
 import { applyFiltersAndSort, buildFilterOptions, columnValue } from "@/lib/tableColumns";
 import { createExportFileName, exportToCsv } from "@/lib/tableExport";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import { verticalLabel } from "@/components/sales/whatsappGroupNameUtils";
+import TeamAttendancePeople from "@/components/sales/TeamAttendancePeople";
+import Dialog from "@/components/ui/Dialog";
+import CalendarShootsDialog from "@/components/sales/CalendarShootsDialog";
+import { PROJECT_STATUSES } from "@/lib/projectStatuses.mjs";
 
 /**
  * Meetings: the studio's diary, in one place.
@@ -104,22 +136,19 @@ const STATUS_DOTS = {
  * outline these two briefly carried was this page inventing a control the design system does not
  * have.
  *
- * Only the width is set, and only so the control cannot resize under the reader: moving from "All"
- * to "Post Production", or from "List view" to "Calendar view", must not shift the tabs beneath or
- * nudge Add Meet sideways. The trigger keeps its own natural width inside that, so the chevron sits
- * against its label rather than being pushed to a far edge with nothing between.
+ * No width is set here. The Dropdown already sizes a switch to its longest option, so it cannot
+ * resize under the reader as the choice changes; a fixed width on top of that only left empty space
+ * after the chevron before the next filter.
  */
 // Against the title, so it carries the same left divider the CRM's vertical switch does - it is
 // what separates the switch from the heading it sits beside.
-//
-// Wide enough for the longest label, which is "Employee Attendance" rather than "Post Production".
-// The menu takes its width from the control, so a control sized to the second-longest wrapped that
-// entry onto two lines and left the list ragged - the one place a switch has to be easy to read
-// down.
-const SOURCE_SWITCH_CLASS = "w-[13.5rem] shrink-0 border-l border-slate-200 pl-3";
+const SOURCE_SWITCH_CLASS = "shrink-0 border-l border-slate-200 pl-3";
+// Beside it: a long branch name is cut short rather than pushing the row past a phone's width.
+// After it, the narrowest: Month, Week or Day.
+const PERIOD_SWITCH_CLASS = "shrink-0 border-l border-slate-200 pl-3";
 // In the action row, where the gap between controls already separates it from Nebula and there is
 // nothing for a divider to divide.
-const VIEW_SWITCH_CLASS = "w-[10rem] shrink-0";
+const VIEW_SWITCH_CLASS = "shrink-0";
 
 // Monday first, the way a working week is read here and what en-GB formatting assumes.
 // The headings and the grid under them are `lib/schedule`'s, so the Settings holiday calendar
@@ -150,6 +179,14 @@ const VISIBLE_PER_DAY_CELL = 3;
 
 /** The row's identity, module-level so the memoised rows are never rebuilt for a fresh arrow. */
 const scheduleRowId = (row) => row.id;
+// The board's trend counts a row by when it was booked (a meeting or project's createdAt), else by its own day.
+const bookedOn = (row) => {
+  const booked = row.meeting?.createdAt || row.project?.createdAt;
+  const time = booked ? new Date(booked).getTime() : new Date(`${row.day || ""}T00:00:00`).getTime();
+  return Number.isNaN(time) ? null : time;
+};
+// When the row happens, for the Board's "Next": a meeting's start, else the row's own day.
+const happensOn = (row) => row.meeting?.startAt || (row.day ? `${row.day}T00:00:00` : null);
 /** What the tick box calls its row. */
 const scheduleRowLabel = (row) => row.title || "this row";
 
@@ -196,7 +233,8 @@ function entryTiming(entry) {
   const on = entry.day ? formatMeetingDate(`${entry.day}T00:00:00`) : "";
   // A main event and a holiday are both a plain day. The lines below are the shoot's, which reads
   // a session length out of `meta` - a holiday has no meta at all and would fall through them.
-  if (entry.kind === "project" || entry.kind === "holiday") return on;
+  if (entry.kind === "holiday") return on;
+  if (entry.kind === "block") return [on, [blockClock(entry.meta?.startTime), blockClock(entry.meta?.endTime)].filter(Boolean).join(" – ")].filter(Boolean).join(" · ");
   if (entry.kind === "interview") return [on, entry.meta?.clock].filter(Boolean).join(" · ");
   const fixed = [entry.meta?.eventStartTime, entry.meta?.eventEndTime].filter(Boolean).join(" – ");
   const length = fixed || formatSessionTiming(entry.meta || {});
@@ -206,7 +244,8 @@ function entryTiming(entry) {
 /** Everything about an entry that will not fit in a day cell, for its hover title. */
 function entryTooltip(entry) {
   // Whose it is, in the kind's own word: a shoot has an owner, an interview has an interviewer.
-  const owner = entry.owner && `${entry.kind === "interview" ? "Interviewer" : "Owner"}: ${entry.owner}`;
+  // Not on My Attendance, which is only ever the viewer's own.
+  const owner = entry.owner && entry.kind !== "attendance" && `${entry.kind === "interview" ? "Interviewer" : "Owner"}: ${entry.owner}`;
   return [entryTiming(entry), entry.title, entry.reference, entry.location, owner]
     .filter(Boolean)
     .join(" · ");
@@ -227,7 +266,7 @@ export default function MeetingsPage() {
   // Whether a shoot or a main event on the calendar can be followed to its project. The board has
   // its own permission, and sending somebody to a screen that will refuse them is worse than
   // showing them what the calendar already knows.
-  const { hasPermission } = usePermissions();
+  const { hasPermission, isAdministrator } = usePermissions();
   const canOpenProjects = hasPermission("PROJECT", "Projects", "READ");
   /*
    * Which sources the List view may offer this viewer, in the header switch's own order.
@@ -238,8 +277,8 @@ export default function MeetingsPage() {
    * all - a control with one option is a label pretending to be a choice.
    */
   const sourceOptions = useMemo(
-    () => permittedSources(({ module, feature }) => hasPermission(module, feature, "READ")),
-    [hasPermission],
+    () => permittedSources(({ module, feature }) => hasPermission(module, feature, "READ"), { isAdministrator }),
+    [hasPermission, isAdministrator],
   );
   const sourceValues = useMemo(() => sourceOptions.map((entry) => entry.value), [sourceOptions]);
   // Whether the projects register has to be fetched at all. A viewer with no production permission
@@ -266,12 +305,14 @@ export default function MeetingsPage() {
   // A booking the calendar has selected that is not a meeting; meetings keep their own selection,
   // because opening one still goes to its row in the List view as it always has.
   const [selectedEntry, setSelectedEntry] = useState(null);
+  // The shoots a click opened in the Shoot Board's shoot window (`shootRunOf`), or null.
+  const [shootRun, setShootRun] = useState(null);
   const [loading, setLoading] = useState(true);
   /*
    * Whether the calendar's own read has answered yet, kept apart from the meetings' `loading`.
    *
    * Two sources are read *out of* `/api/schedule` rather than from an endpoint of their own -
-   * Interviews and Employee Attendance - so before it answers they have no rows and no reason
+   * Interviews and My Attendance - so before it answers they have no rows and no reason
    * given. Without this the table says "No interviews scheduled yet" for the moment the request is
    * in flight, which sends somebody to HRM to set a date that is already set.
    */
@@ -279,7 +320,39 @@ export default function MeetingsPage() {
   // The app's snackbar, and its tones: a failure leads with the red mark, a finished action
   // with the green tick, and anything else is said plainly.
   const { notice, showNotice, showSuccess, showError, clearNotice } = useNotice();
+  /*
+   * A day's ⋮: what may be started on that day, each offered only to somebody holding the permission
+   * its own endpoint asks for - so the menu never offers what the server would refuse.
+   *   Add Meet            SALES / CRM Leads, Read & Write     (POST /api/sales/crm-leads/:id/meetings)
+   *   Create Project      SALES / Sales Manager, Read & Write (POST /api/sales/projects)
+   *   Block Period        SALES / Block Period, Read & Write  (POST /api/schedule/blocks)
+   *   Raise Request       HRM / Requests or Employee Attendance, Read - not an administrator, as the
+   *                       account menu's own Raise Request (POST /api/hrm/attendance/requests)
+   * `dayAction` is the one open: `{ kind, day }`.
+   */
+  const [dayAction, setDayAction] = useState(null);
+  // A blocked period is freed from its details, by somebody who may block periods - after a confirm.
+  const canFreeBlocks = hasPermission("SALES", "Block Period", "READ_WRITE");
+  const [freeing, setFreeing] = useState(null);
+  // A Team Attendance chip opened: its day's names, in a pop-up rather than the side panel.
+  const [teamDay, setTeamDay] = useState(null);
+  // A month day's "Shoots · 6" chip opened: its projects, then a project's shoots.
+  const [shootsDay, setShootsDay] = useState(null);
+  const [freeBusy, setFreeBusy] = useState(false);
+  const dayActions = useMemo(() => [
+    ...(hasPermission("SALES", "CRM Leads", "READ_WRITE") ? [{ kind: "meet", label: "Add Meet" }] : []),
+    ...(hasPermission("SALES", "Sales Manager", "READ_WRITE") ? [{ kind: "project", label: "Create Project" }] : []),
+    ...(hasPermission("SALES", "Block Period", "READ_WRITE") ? [{ kind: "block", label: "Block Period" }] : []),
+    ...(!isAdministrator && (hasPermission("HRM", "Requests", "READ") || hasPermission("HRM", "Employee Attendance", "READ")) ? [{ kind: "request", label: "Raise Request" }] : []),
+  ], [hasPermission, isAdministrator]);
   const [view, setView] = useState("calendar");
+  // The calendar's branch: "" is every branch.
+  /*
+   * The branches on screen - any number of them, as the Assets register reads its own. Empty is
+   * every branch, which is also the way back. Ids as strings, because that is what a picker's values
+   * are; `branchScheduleEntries` and `branchRows` compare them by number.
+   */
+  const [branchIds, setBranchIds] = useState([]);
   /*
    * The view actually on screen, which is not always the one chosen.
    *
@@ -316,17 +389,20 @@ export default function MeetingsPage() {
   // null while closed. Open it with a `YYYY-MM-DD` to start the form on that day, or with ""
   // from the Add Meet button, which leaves the date to be picked in the dialog.
   const [addMeetDate, setAddMeetDate] = useState(null);
+  // The hour an hour's ⋮ opened Add Meet at, "HH:MM", or "".
+  const [addMeetTime, setAddMeetTime] = useState("");
   const [pendingCancel, setPendingCancel] = useState(null);
   const [cancelling, setCancelling] = useState(false);
   // Escape backs out of the cancel confirmation - but not while the cancellation is being carried
   // out, which is not undone by looking away.
   useEscapeKey(() => setPendingCancel(null), Boolean(pendingCancel) && !cancelling);
-  // The first of the month the calendar is showing. A date rather than a year/month pair, so
-  // stepping over a year boundary is the Date constructor's problem rather than this page's.
-  const [month, setMonth] = useState(() => {
-    const today = new Date();
-    return new Date(today.getFullYear(), today.getMonth(), 1);
-  });
+  /*
+   * What the calendar draws: a month, a week or a day (`period`), around `anchor` - a date rather
+   * than a year/month pair, so stepping over a year boundary is the Date constructor's problem
+   * rather than this page's. Picking a period starts it on today: this month, this week, today.
+   */
+  const [period, setPeriod] = useState("month");
+  const [anchor, setAnchor] = useState(() => new Date());
 
   /*
    * The meetings table, for the List view and for opening a meeting from a day cell.
@@ -378,7 +454,7 @@ export default function MeetingsPage() {
   /** The projects register, for the sources read out of it. Only fetched where one is offered. */
   const loadProjects = useCallback(async () => {
     try {
-      const response = await getSalesProjects();
+      const response = await getSalesProjects({ summary: true });
       setProjects(Array.isArray(response?.data) ? response.data : []);
     } catch (error) {
       showError(error.message || "Unable to load projects.");
@@ -428,6 +504,16 @@ export default function MeetingsPage() {
     () => schedule.filter((entry) => entry?.kind === "attendance"),
     [schedule],
   );
+  // The production team's own shoots, for My Shoots' table - off `schedule`, as attendance is.
+  const shootEntries = useMemo(
+    () => schedule.filter((entry) => entry?.kind === "shoot"),
+    [schedule],
+  );
+  // Everybody's absences, for an administrator - the same entries the calendar draws, as rows.
+  const teamAttendanceEntries = useMemo(
+    () => schedule.filter((entry) => entry?.kind === "teamAttendance"),
+    [schedule],
+  );
 
   /*
    * The interviews the calendar was already sent, for the table to read as rows.
@@ -442,10 +528,13 @@ export default function MeetingsPage() {
   );
 
   // Everything the source holds, before the column filters and before the tab.
-  const allRows = useMemo(
-    () => sourceRows(activeSource, { meetings, projects, attendance: attendanceEntries, interviews: interviewEntries, sources: sourceValues }),
-    [activeSource, meetings, projects, attendanceEntries, interviewEntries, sourceValues],
+  const sourceRowsAll = useMemo(
+    () => sourceRows(activeSource, { meetings, projects, attendance: attendanceEntries, teamAttendance: teamAttendanceEntries, interviews: interviewEntries, shoots: shootEntries, sources: sourceValues }),
+    [activeSource, meetings, projects, attendanceEntries, teamAttendanceEntries, interviewEntries, shootEntries, sourceValues],
   );
+  // The branches the list's rows are in, then its rows narrowed to the branch picked.
+  const listBranches = useMemo(() => rowBranches(sourceRowsAll), [sourceRowsAll]);
+  const allRows = useMemo(() => branchRows(sourceRowsAll, branchIds), [sourceRowsAll, branchIds]);
 
   const rows = useMemo(
     () => applyFiltersAndSort(allRows, columns, filters, sort),
@@ -488,7 +577,7 @@ export default function MeetingsPage() {
     ((activeSource === "all" || activeSource === "meetings") && loading) ||
     ((activeSource === "all" || PROJECT_SOURCES.includes(activeSource)) && readsProjects && projectsLoading) ||
     // The two sources read out of the calendar's own request rather than an endpoint of their own.
-    ((activeSource === "all" || activeSource === "interviews" || activeSource === "attendance") && scheduleLoading);
+    ((activeSource === "all" || activeSource === "interviews" || activeSource === "attendance" || activeSource === "team-attendance" || activeSource === "shoots") && scheduleLoading);
 
   /*
    * The calendar's bookings, narrowed to the source the header switch is on.
@@ -498,15 +587,21 @@ export default function MeetingsPage() {
    * but "what am I looking at" is a question about the diary rather than about a table, and having
    * to answer it twice in two places was the awkward part of this screen.
    */
-  const calendarEntries = useMemo(
+  const sourceEntries = useMemo(
     () => sourceScheduleEntries(activeSource, schedule, { projects, sources: sourceValues }),
     [activeSource, schedule, projects, sourceValues],
   );
+  // The branches the source's entries are in - only what this viewer may already see - and the
+  // entries of the one picked, with the holidays and the viewer's own attendance that have none.
+  const calendarBranches = useMemo(() => scheduleBranches(sourceEntries), [sourceEntries]);
+  const calendarEntries = useMemo(() => branchScheduleEntries(sourceEntries, branchIds), [sourceEntries, branchIds]);
 
   // Filed by day and in running order inside each. What each booking is, its colour says.
   const byDay = useMemo(() => scheduleByDay(calendarEntries), [calendarEntries]);
+  // What the grid actually draws: the bookings on its own days, not on the neighbouring months' blanks.
+  const shownCount = useMemo(() => periodCells(period, anchor).filter((cell) => !cell.outside).reduce((sum, cell) => sum + (byDay.get(cell.key) || []).length, 0), [byDay, period, anchor]);
 
-  const grid = useMemo(() => monthGrid(month), [month]);
+  const grid = useMemo(() => periodCells(period, anchor), [period, anchor]);
   const todayKey = dayKey(new Date());
 
   /*
@@ -563,10 +658,7 @@ export default function MeetingsPage() {
    */
   const panelEntry = selectedEntry || selected?.interview || null;
 
-  const monthLabel = useMemo(
-    () => new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(month),
-    [month],
-  );
+  const monthLabel = useMemo(() => periodLabel(period, anchor), [period, anchor]);
 
   /**
    * Opening something from a day cell.
@@ -592,7 +684,33 @@ export default function MeetingsPage() {
    * Anything else opens in the panel beside the calendar, which is still a real answer rather than
    * a refusal.
    */
-  function openEntry(entry) {
+  /*
+   * What pressing a shoot does, in the shoot window and a day's "Shoots · 6" pop-up alike: the
+   * Projects board on **All**, filtered to the shoot's Shoot ID, so the project opens on that shoot's
+   * row (`shootBoardHref`). The ⋮ beside it offers every other board. Nothing where the viewer cannot
+   * open Projects, which leaves the card as plain text rather than a control that answers a press
+   * with a refusal.
+   */
+  const projectsBoard = PROJECT_BOARDS.find((board) => board.key === "projects");
+  const openOnProjects = (eventId, shootId) => router.push(shootBoardHref(projectsBoard, eventId, { shootId }));
+  const shootOpener = canOpenProjects
+    ? { onOpen: (shoot) => openOnProjects(shoot.eventId, shoot.shootId), canOpen: (shoot) => Boolean(shoot.eventId || shoot.shootId) }
+    : { onOpen: undefined, canOpen: () => false };
+
+  // A shoot card's ⋮ - in the shoot window and in a day's "Shoots · 6" pop-up alike.
+  const shootMenuFor = (shoot) => calendarShootMenuItems({ shoot, can: hasPermission, onGo: (href) => router.push(href) });
+
+  function openEntry(entry, group = null) {
+    // A shoot - or a project's shoots that run into each other on the Day view - opens the Shoot
+    // Board's shoot window, its cards opening the project for somebody who may open Projects.
+    if (entry.kind === "shoot") {
+      setShootRun(shootRunOf(group?.length ? group : [entry]));
+      return;
+    }
+    if (entry.kind === "shootCount") {
+      setShootsDay(entry);
+      return;
+    }
     if (entry.kind === "meeting") {
       const meeting = meetings.find((row) => `meeting:${row.id}` === entry.id);
       if (meeting) {
@@ -605,12 +723,24 @@ export default function MeetingsPage() {
      * an Event ID - so a meeting that could not be matched to a row above would otherwise be
      * followed to `?project=hiee`, a project that does not exist, and land on an empty board.
      */
-    if ((entry.kind === "shoot" || entry.kind === "project") && entry.subject && canOpenProjects) {
-      router.push(`/project-management/projects?project=${encodeURIComponent(entry.subject)}`);
+    // A day's absences are a list of people, read and closed - a pop-up, not the booking panel.
+    if (entry.kind === "teamAttendance") {
+      setTeamDay(entry);
       return;
     }
     setSelectedEntry(entry);
     setPanelState("expanded");
+  }
+
+  /**
+   * A shoot picked in the "Shoots · 6" pop-up opens on Projects, as one in the shoot window does;
+   * without Projects, the Shoot Board's shoot window the calendar has always opened, which needs no
+   * board of its own.
+   */
+  function openShootForm(shoot) {
+    if (canOpenProjects && (shoot.subject || shoot.reference)) return openOnProjects(shoot.subject, shoot.reference);
+    setShootsDay(null);
+    setShootRun(shootRunOf([shoot]));
   }
 
   /**
@@ -662,8 +792,23 @@ export default function MeetingsPage() {
   }, []);
 
   function stepMonth(offset) {
-    setMonth((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1));
+    setAnchor((current) => stepPeriod(period, current, offset));
   }
+
+  /*
+   * A day's ⋮ choice - or an hour's, on the Day view, when `time` ("14:00") is that hour. Add Meet and
+   * Block Period then open starting at it; either can still be changed in the dialog.
+   */
+  function startDayAction(kind, day, time = "") {
+    if (kind === "meet") { setAddMeetDate(day); setAddMeetTime(time); return; }
+    setDayAction({ kind, day, time });
+  }
+
+  function changePeriod(value) {
+    setPeriod(value || "month");
+    setAnchor(new Date());
+  }
+
 
   /*
    * asc <-> desc, and a fresh column starts at asc. The table proposes asc, desc, then none; this
@@ -721,8 +866,11 @@ export default function MeetingsPage() {
     if (!meeting || cancelling) return;
     setCancelling(true);
     try {
+      // A lead's meeting through its lead; one with no lead (the Calendar's Add Meet) on its own.
       await apiRequest(
-        `/api/sales/crm-leads/${encodeURIComponent(meeting.enquiryId)}/meetings/${encodeURIComponent(meeting.id)}`,
+        meeting.enquiryId
+          ? `/api/sales/crm-leads/${encodeURIComponent(meeting.enquiryId)}/meetings/${encodeURIComponent(meeting.id)}`
+          : `/api/sales/crm-meetings/${encodeURIComponent(meeting.id)}`,
         { method: "DELETE" },
       );
       await loadMeetings();
@@ -772,11 +920,43 @@ export default function MeetingsPage() {
     if (meeting.meetLink) {
       items.push({ label: "Join Meet", onSelect: () => window.open(meeting.meetLink, "_blank", "noopener,noreferrer") });
     }
-    if (canWrite && !isCancelled(meeting)) {
+    // A meeting with no lead is cancelled only by whoever booked it - a guest sees it but may not.
+    if (canWrite && !isCancelled(meeting) && (meeting.enquiryId || meeting.mine)) {
       items.push({ label: "Cancel meeting", tone: "danger", onSelect: () => setPendingCancel(meeting) });
     }
     return items;
   }, [selectRow, canOpenProjects, canWrite, router]);
+
+  /*
+   * The List view's Board: the same rows - after the source, branch, column filters and the When
+   * tab, which is a date rather than a status and so stays - in a column per value of the source's
+   * own Status column, in that column's filter order. A card opens the row's panel, as a click on
+   * its table row does. The only status this screen changes is a meeting's, to Cancelled, so that
+   * is the one drop: offered exactly where the row's ⋮ offers Cancel meeting, and it opens the
+   * same confirmation.
+   */
+  const [layout, setLayout] = useTableBoardLayout("calendar-list");
+  const onBoard = activeView === "list" && layout === "board";
+  const statusColumn = useMemo(() => columns.find((column) => column.id === "status"), [columns]);
+  // A project status in the project's own flow (`PROJECT_STATUSES`) rather than A-Z; any other source's
+  // statuses keep the order their list gives, after those.
+  const boardColumns = useMemo(
+    () => [...(filterOptions.status || statusColumn?.options || [])]
+      .sort((a, b) => (PROJECT_STATUSES.includes(a) ? PROJECT_STATUSES.indexOf(a) : PROJECT_STATUSES.length) - (PROJECT_STATUSES.includes(b) ? PROJECT_STATUSES.indexOf(b) : PROJECT_STATUSES.length))
+      .map((value) => ({ value, className: STATUS_DOTS[value] ? `${STATUS_DOTS[value]} text-white` : undefined })),
+    [filterOptions, statusColumn],
+  );
+  const boardStatusOf = useCallback((row) => (statusColumn ? columnValue(statusColumn, row) : ""), [statusColumn]);
+  const canDropRow = useCallback(
+    (row, to) => to === "Cancelled" && Boolean(row.meeting) && canWrite && !isCancelled(row.meeting) && Boolean(row.meeting.enquiryId || row.meeting.mine),
+    [canWrite],
+  );
+  const dropRow = useCallback((row) => setPendingCancel(row.meeting), []);
+  const boardCard = useMemo(() => ({
+    title: rowTitle,
+    subtitle: (row) => [rowReference(row), rowOwner(row)].filter(Boolean).join(" · "),
+    meta: (row) => [rowDateText(row), rowTimeText(row)].filter(Boolean).join(" · "),
+  }), []);
 
   // The row menu, as the table draws it into its actions column. Stable, or the table would rebuild
   // its columns on every render for a fresh arrow.
@@ -825,9 +1005,9 @@ export default function MeetingsPage() {
          * it would read All, Meetings, Post Production, Pre Production, Projects, which puts post
          * before pre.
          */
-        titleAddon={sourceOptions.length > 1 ? (
+        titleAddon={(
           <div className="flex items-center gap-3">
-            <Dropdown
+            {sourceOptions.length > 1 && <Dropdown
               mode="switch"
               ariaLabel="Calendar source"
               value={activeSource}
@@ -836,9 +1016,21 @@ export default function MeetingsPage() {
               sorted={false}
               placeholder="Select"
               className={SOURCE_SWITCH_CLASS}
-            />
+            />}
+            {/* The calendar's period: a month, a week or a day, starting on today and stepped by its
+                arrows. The list holds every date. */}
+            {activeView === "calendar" && <Dropdown
+              mode="switch"
+              ariaLabel="Calendar period"
+              value={period}
+              onChange={changePeriod}
+              options={SCHEDULE_PERIODS}
+              sorted={false}
+              placeholder="Month"
+              className={PERIOD_SWITCH_CLASS}
+            />}
           </div>
-        ) : null}
+        )}
         /*
          * How it is being read, at the end of the row beside Add Meet.
          *
@@ -848,11 +1040,28 @@ export default function MeetingsPage() {
          * stays last: it is the one thing on this row that changes a record, and a primary button
          * that moved about would be one nobody could aim at.
          */
+        /*
+         * The branch, ahead of the row's own controls: it scopes what is on screen rather than doing
+         * anything to it. Several at once, and kept between the two views - the branches what is on
+         * screen is in. Nothing ticked is every branch.
+         */
+        leadingActions={<MultiSelectField
+          hideLabel
+          size="sm"
+          label="Branch"
+          className="w-36 sm:w-48"
+          placeholder="All branches"
+          options={(activeView === "calendar" ? calendarBranches : listBranches).map((branch) => ({ value: String(branch.id), label: branch.name }))}
+          values={branchIds}
+          onChange={setBranchIds}
+          searchable={(activeView === "calendar" ? calendarBranches : listBranches).length > 8}
+        />}
         actions={(
           <>
             {/* Offered only where both views hold something, for the same reason the source
                 switch above it is: a switch between a calendar and an empty table is a control
                 that can only make the screen worse. */}
+            {activeView === "list" && <TableBoardSwitch value={layout} onChange={setLayout} />}
             {canListAnything && <Dropdown
               mode="switch"
               ariaLabel="Calendar view"
@@ -879,18 +1088,17 @@ export default function MeetingsPage() {
               <span>
                 {activeView !== "calendar"
                   ? "Scheduling and cancelling keep Google Calendar in step."
-                  : canWrite
-                    ? "Click a day to schedule on it, or a booking to open its details."
-                    // Without the write there is nothing to start by clicking a day, so the line
-                    // says what the grid *is* rather than offering an action that will not happen.
-                    : "Everything booked this month, and the studio's declared holidays."}
+                  // With nothing that may be started on a day, the line says what the grid *is*.
+                  : dayActions.length
+                    ? ""
+                    : `Everything booked ${period === "day" ? "this day" : `this ${period}`}, and the studio's declared holidays.`}
               </span>
               {/* Each view counts what it is actually drawing, and both are now read through the
                   same source switch - so the calendar says how many of the diary's bookings that
                   source holds rather than how many the diary holds altogether. */}
               <span>
                 {activeView === "calendar"
-                  ? `Showing ${calendarEntries.length.toLocaleString()} of ${schedule.length.toLocaleString()} booked`
+                  ? `Showing ${shownCount.toLocaleString()} of ${schedule.length.toLocaleString()} booked`
                   : `Showing ${listRows.length.toLocaleString()} of ${allRows.length.toLocaleString()}`}
               </span>
             </TableFooter>
@@ -902,27 +1110,63 @@ export default function MeetingsPage() {
                 {/* Month control: back, forward, and a way straight back to today, which is
                     the one place anyone who has paged too far actually wants. */}
                 <div className="flex shrink-0 items-center gap-3 border-b border-slate-200 px-3 py-2">
-                  <IconButton variant="ghost" ariaLabel="Previous month" onClick={() => stepMonth(-1)}>
+                  <IconButton variant="ghost" ariaLabel={`Previous ${period}`} onClick={() => stepMonth(-1)}>
                     <ChevronLeftRoundedIcon sx={{ fontSize: 20 }} />
                   </IconButton>
-                  <IconButton variant="ghost" ariaLabel="Next month" onClick={() => stepMonth(1)}>
+                  <IconButton variant="ghost" ariaLabel={`Next ${period}`} onClick={() => stepMonth(1)}>
                     <ChevronRightRoundedIcon sx={{ fontSize: 20 }} />
                   </IconButton>
                   <span className="text-xs font-medium text-slate-800">{monthLabel}</span>
                 </div>
 
+                {/* One day is read hour by hour, the way the Shoot Board reads days; a week and a
+                    month keep their day cells. */}
+                {period === "day" ? grid.slice(0, 1).map((cell) => <CalendarDayTimeline
+                  key={cell.key}
+                  dateLabel={`${WEEKDAY_LABELS[(cell.date.getDay() + 6) % 7]}, ${formatMeetingDate(cell.date)}`}
+                  isToday={cell.key === todayKey}
+                  entries={byDay.get(cell.key) || []}
+                  hourMenu={dayActions.length > 0 ? (hour) => <OptionsMenu
+                    ariaLabel={`Actions for ${hourLabel(hour)} on ${formatMeetingDate(cell.date)}`}
+                    triggerSize="sm"
+                    items={dayActions.map((action) => ({ label: action.label, onSelect: () => startDayAction(action.kind, cell.key, `${String(hour).padStart(2, "0")}:00`) }))}
+                  /> : null}
+                  onOpen={openEntry}
+                  tooltip={entryTooltip}
+                />) : <>
                 <div className="grid shrink-0 grid-cols-7 border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                   {WEEKDAY_LABELS.map((label) => (
                     <div key={label} className="px-3 py-1.5 text-center">{label}</div>
                   ))}
                 </div>
 
-                <div className="grid min-h-0 flex-1 grid-cols-7 auto-rows-fr">
+                {/* A week row is never shorter than its days: rows stretch to fill the pane, but a six-week
+                    month (November 2026 starts on a Sunday) used to squeeze them below their cells, which
+                    spilled into the row beneath and hid the lines between the weeks. Now the grid grows
+                    instead, and the pane scrolls. */}
+                {/* Week: each booking a bar over its days, a project's run of shoots one continuous bar
+                    on one line, as on the Shoot Board. Month keeps its day boxes. */}
+                {period === "week" ? <CalendarWeekLanes
+                  days={grid}
+                  byDay={byDay}
+                  todayKey={todayKey}
+                  dayMenu={dayActions.length > 0 ? (cell) => <OptionsMenu
+                    ariaLabel={`Actions for ${formatMeetingDate(cell.date)}`}
+                    triggerSize="sm"
+                    items={dayActions.map((action) => ({ label: action.label, onSelect: () => startDayAction(action.kind, cell.key) }))}
+                  /> : null}
+                  onOpen={openEntry}
+                  tooltip={entryTooltip}
+                /> : <div className="grid flex-1 grid-cols-7 auto-rows-[minmax(min-content,1fr)]">
                   {grid.map((cell) => {
-                    const dayEntries = byDay.get(cell.key) || [];
+                    // The neighbouring months' days only keep the weekdays lined up: an empty cell,
+                    // with no date, nothing booked and nothing to start.
+                    if (cell.outside) return <div key={cell.key} aria-hidden="true" className="min-h-[6rem] border-b border-r border-slate-200 bg-slate-50/60" />;
+                    // A month day's shoots are one "Shoots · 6" chip, opening to its projects.
+                    const dayEntries = monthShootCounts(byDay.get(cell.key) || []);
                     const isToday = cell.key === todayKey;
                     return (
-                      // Any day can be booked, this month's or either neighbour's. Clicking the
+                      // Any day of the month can be booked. Clicking the
                       // cell opens Add Meet already set to that day - without this the only way
                       // to schedule was the header button, which always started on no date.
                       //
@@ -934,19 +1178,8 @@ export default function MeetingsPage() {
                       // something. The bookings inside it are still their own buttons.
                       <div
                         key={cell.key}
-                        role={canWrite ? "button" : undefined}
-                        tabIndex={canWrite ? 0 : undefined}
-                        aria-label={canWrite ? `Schedule a meeting on ${formatMeetingDate(cell.date)}` : undefined}
                         title={dayEntries.length ? `${dayEntries.length} booked on ${formatMeetingDate(cell.date)}` : undefined}
-                        onClick={canWrite ? () => setAddMeetDate(cell.key) : undefined}
-                        onKeyDown={canWrite ? (event) => {
-                          if (event.target !== event.currentTarget) return;
-                          if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            setAddMeetDate(cell.key);
-                          }
-                        } : undefined}
-                        className={`group relative min-h-[6rem] border-b border-r border-slate-200 p-1 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-300 ${canWrite ? "cursor-pointer hover:bg-blue-50/40" : ""} ${cell.outside ? "bg-slate-50/60" : "bg-white"}`}
+                        className={`group relative flex min-h-[6rem] flex-col border-b border-r border-slate-200 p-1 transition ${dayActions.length ? "hover:bg-blue-50/40" : ""} bg-white`}
                       >
                         <div className="mb-1 flex items-center justify-between px-1">
                           {/* Today is marked on the number itself rather than by shading the
@@ -955,7 +1188,7 @@ export default function MeetingsPage() {
                             className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[11px] ${
                               isToday
                                 ? "bg-blue-600 font-semibold text-white"
-                                : cell.outside ? "text-slate-300" : "text-slate-500"
+                                : "text-slate-500"
                             }`}
                           >
                             {cell.date.getDate()}
@@ -963,16 +1196,19 @@ export default function MeetingsPage() {
                           {/* How many the day holds, once it holds more than the cell shows at
                               rest. The list below scrolls to the rest, so this is a count rather
                               than a warning that something is out of reach. */}
-                          {dayEntries.length > VISIBLE_PER_DAY_CELL ? (
-                            <span className="text-[11px] text-slate-400">{dayEntries.length}</span>
-                          ) : (
-                            // Shown on hover only, so a month at rest stays readable while the
-                            // cell still says what clicking it does - and only where clicking it
-                            // does anything.
-                            <span aria-hidden="true" className={`text-sm leading-none text-blue-500 opacity-0 transition ${canWrite ? "group-hover:opacity-100" : ""}`}>
-                              +
-                            </span>
-                          )}
+                          <span className="flex items-center gap-1">
+                            {dayEntries.length > VISIBLE_PER_DAY_CELL && <span className="text-[11px] text-slate-400">{dayEntries.length}</span>}
+                            {/* What may be started on this day - only what this person's permissions
+                                allow, and no ⋮ at all where that is nothing. Faint at rest so a month
+                                stays readable, full on hover or focus. */}
+                            {dayActions.length > 0 && <span className="opacity-60 transition group-hover:opacity-100 focus-within:opacity-100">
+                              <OptionsMenu
+                                ariaLabel={`Actions for ${formatMeetingDate(cell.date)}`}
+                                triggerSize="sm"
+                                items={dayActions.map((action) => ({ label: action.label, onSelect: () => startDayAction(action.kind, cell.key) }))}
+                              />
+                            </span>}
+                          </span>
                         </div>
                         {/*
                           Everything booked that day, and the cell scrolls to the rest.
@@ -988,7 +1224,12 @@ export default function MeetingsPage() {
                           end, which is what makes a short flick inside a cell move the cell rather
                           than the month behind it.
                         */}
-                        <div className="max-h-[5.5rem] space-y-1 overflow-y-auto overscroll-contain pr-0.5">
+                        {/* The list takes the day's whole height - all of it on Week, its share of the pane on
+                            Month - and scrolls only once that is full. Laid over its own space rather than
+                            in the flow, so a crowded day never stretches the grid: the height comes from the
+                            row, never from the list. */}
+                        <div className="relative min-h-[4rem] flex-1">
+                        <div className="absolute inset-0 space-y-1 overflow-y-auto overscroll-contain pr-0.5">
                           {dayEntries.map((entry) => {
                             // The kind's own colour, except on attendance - where the chip is
                             // coloured by whether the person was there. See `scheduleEntryCell`.
@@ -1024,11 +1265,33 @@ export default function MeetingsPage() {
                             );
                           })}
                         </div>
+                        </div>
                       </div>
                     );
                   })}
-                </div>
+                </div>}
+                </>}
               </div>
+            ) : onBoard ? (
+              <KanbanBoard
+                rows={listRows}
+                columns={boardColumns}
+                statusOf={boardStatusOf}
+                dateOf={bookedOn}
+                // The nearest booking still to come in the column, "Next 6 Nov" - none under Cancelled.
+                columnAmount={(rows, column) => (column.value === "Cancelled" ? null : columnNext(rows, happensOn))}
+                card={boardCard}
+                getRowId={scheduleRowId}
+                onOpen={selectRow}
+                // The card's ⋮ is the row's ⋮.
+                cardActions={rowActions}
+                canDropAt={canDropRow}
+                onDrop={dropRow}
+                loading={listLoading}
+                noun="records"
+                filtered={Object.values(filters).some((value) => String(value || "").trim())}
+                ariaLabel="Schedule board"
+              />
             ) : (
               <DataTable
                 ariaLabel="Schedule table"
@@ -1083,7 +1346,7 @@ export default function MeetingsPage() {
             <InfoPanelShell
               title={
                 panelEntry
-                  ? `${scheduleKind(panelEntry.kind).label.replace(/s$/, "")} details`
+                  ? `${panelEntry.kind === "attendance" ? "Attendance" : scheduleKind(panelEntry.kind).label.replace(/s$/, "")} details`
                   : selected?.project ? "Project details" : "Meeting details"
               }
               state={selected || selectedEntry ? panelState : "collapsed"}
@@ -1120,17 +1383,31 @@ export default function MeetingsPage() {
                          */
                         [panelEntry.kind === "shoot" ? "Shoot ID" : panelEntry.kind === "interview" ? "Candidate ID" : "Reference", panelEntry.reference],
                         [panelEntry.kind === "meeting" ? "Enquiry" : panelEntry.kind === "interview" ? "Position" : "Project", panelEntry.subject],
-                        ["Status", panelEntry.kind === "interview" ? panelEntry.meta?.status || "" : ""],
+                        /*
+                         * An attendance day says what it was here as well as in its heading: the
+                         * list carries one Attendance column now, so this panel is where the day is
+                         * read in full - what it was, when the register opened and closed it, and
+                         * the hours behind that. A row with nothing in it drops itself, so a day
+                         * with no times shows the status alone.
+                         */
+                        ["Status", panelEntry.kind === "interview" ? panelEntry.meta?.status || "" : panelEntry.kind === "attendance" ? panelEntry.meta?.status || panelEntry.title || "" : ""],
+                        ["Branch", panelEntry.kind === "block" ? panelEntry.branch?.name || "" : ""],
+                        ["Time", panelEntry.kind === "block" ? [blockClock(panelEntry.meta?.startTime), blockClock(panelEntry.meta?.endTime)].filter(Boolean).join(" – ") : ""],
+                        ["Reason", panelEntry.kind === "block" ? panelEntry.title : ""],
                         ["Date", panelEntry.day ? formatMeetingDate(`${panelEntry.day}T00:00:00`) : formatMeetingDate(panelEntry.startAt)],
                         // As the register wrote it: an interview has an hour but no instant, so
                         // there is no `Date` to read a clock time back out of.
                         ["Time", panelEntry.kind === "interview" ? panelEntry.meta?.clock || "" : ""],
                         ["Session Timing", panelEntry.kind === "shoot" ? formatSessionTiming(panelEntry.meta || {}) : ""],
+                        // The register's own times behind an attendance day, as its List view reads them.
+                        ["Login", panelEntry.kind === "attendance" ? attendanceClock(panelEntry.meta?.loginAt) : ""],
+                        ["Logout", panelEntry.kind === "attendance" ? attendanceClock(panelEntry.meta?.logoutAt) : ""],
+                        ["Worked", panelEntry.kind === "attendance" ? attendanceWorked({ attendance: panelEntry }) : ""],
                         ["Shoot Type", panelEntry.meta?.shootType || ""],
                         ["Main Event", panelEntry.meta?.isMainEvent ? "Yes" : ""],
                         [panelEntry.kind === "interview" ? "Mode & Branch" : "Location", panelEntry.location],
                         ["Department", panelEntry.kind === "interview" ? panelEntry.meta?.department || "" : ""],
-                        [panelEntry.kind === "interview" ? "Interviewer" : "Owner", panelEntry.owner],
+                        [panelEntry.kind === "interview" ? "Interviewer" : panelEntry.kind === "block" ? "Blocked by" : "Owner", panelEntry.owner],
                         ["Phone", panelEntry.kind === "interview" ? panelEntry.meta?.phone || "" : ""],
                         ["Email", panelEntry.kind === "interview" ? panelEntry.meta?.email || "" : ""],
                         /*
@@ -1156,11 +1433,15 @@ export default function MeetingsPage() {
                         .filter(([, value]) => value && value !== "—")
                         .map(([label, value]) => (
                           <div key={label}>
-                            <dt className="text-[13px] font-semibold text-slate-500">{label}</dt>
+                            <dt className="flex items-center text-[13px] font-semibold text-slate-500">{label}<HelpTip text={detailHelpFor("Calendar Entry", label)} /></dt>
                             <dd className="mt-[3px] text-[15px] break-words text-slate-800">{value}</dd>
                           </div>
                         ))}
                     </dl>
+                    {/* Freeing the hours: only for somebody who may block periods, after a confirm. */}
+                    {panelEntry.kind === "block" && canFreeBlocks && (
+                      <Button type="button" variant="danger" size="sm" className="mt-2" onClick={() => setFreeing(panelEntry)}>Remove Block</Button>
+                    )}
                   </div>
                 </div>
               ) : selected?.project ? (
@@ -1192,7 +1473,7 @@ export default function MeetingsPage() {
                         ["Project Status", selected.project.projectStatus || ""],
                         ["Event ID", selected.project.eventId || ""],
                         ["Enquiry ID", selected.project.enquiryId || ""],
-                        ["Verticals", selected.project.vertical || ""],
+                        ["Verticals", verticalLabel(selected.project.vertical)],
                         ["Source Branch", selected.project.sourceBranch || ""],
                         ["Main Event Date", rowDateText(selected)],
                         ["Client Main Number", selected.project.clientMainNumber || ""],
@@ -1207,7 +1488,7 @@ export default function MeetingsPage() {
                         .filter(([, value]) => value)
                         .map(([label, value]) => (
                           <div key={label}>
-                            <dt className="text-[13px] font-semibold text-slate-500">{label}</dt>
+                            <dt className="flex items-center text-[13px] font-semibold text-slate-500">{label}<HelpTip text={detailHelpFor("Calendar Project", label)} /></dt>
                             <dd className="mt-[3px] text-[15px] break-words text-slate-800">{value}</dd>
                           </div>
                         ))}
@@ -1255,7 +1536,7 @@ export default function MeetingsPage() {
                         .filter(([, value]) => value)
                         .map(([label, value]) => (
                           <div key={label}>
-                            <dt className="text-[13px] font-semibold text-slate-500">{label}</dt>
+                            <dt className="flex items-center text-[13px] font-semibold text-slate-500">{label}<HelpTip text={detailHelpFor("Meeting", label)} /></dt>
                             <dd className="mt-[3px] text-[15px] break-words text-slate-800">{value}</dd>
                           </div>
                         ))}
@@ -1273,10 +1554,93 @@ export default function MeetingsPage() {
       </div>
 
 
+      {dayAction?.kind === "project" && <ProjectBookingPanel
+        prefill={{ mainEventDateKnown: true, mainEventDate: dayAction.day }}
+        onClose={() => setDayAction(null)}
+        // Not closed here: the panel shows the client's login first and closes itself after it.
+        onSaved={() => { showSuccess("The project is created."); void loadSchedule(); }}
+        onNotice={showSuccess}
+        onError={showError}
+      />}
+      <RaiseRequestLauncher
+        open={dayAction?.kind === "request"}
+        prefill={dayAction?.kind === "request" ? { fromDate: dayAction.day, toDate: dayAction.day } : null}
+        onClose={() => setDayAction(null)}
+      />
+      {/*
+        * Every employee sees the shoots; opening one is still a permission.
+        *
+        * Its project on the Projects board, on that shoot, for a viewer who holds Projects, and
+        * **nothing** otherwise - no refusal and no message, the card simply is not a button. A door that will not open is
+        * worse than no door, which is the rule the Shoot Board's cards already follow.
+        */}
+      {shootRun && <ShootRunDialog
+        project={{ ...shootRun.project, colour: PROJECT_COLOURS[1] }}
+        run={shootRun.run}
+        onOpen={shootOpener.onOpen}
+        canOpen={shootOpener.canOpen}
+        menuFor={shootMenuFor}
+        onClose={() => setShootRun(null)}
+      />}
+      {dayAction?.kind === "block" && <BlockPeriodDialog
+        date={dayAction.day}
+        startTime={dayAction.time}
+        onClose={() => setDayAction(null)}
+        onSaved={() => { setDayAction(null); showSuccess("The period is blocked."); void loadSchedule(); }}
+      />}
+      {shootsDay && <CalendarShootsDialog
+        entry={shootsDay}
+        dateLabel={shootsDay.day ? formatMeetingDate(`${shootsDay.day}T00:00:00`) : ""}
+        onOpenShoot={openShootForm}
+        menuFor={shootMenuFor}
+        onClose={() => setShootsDay(null)}
+      />}
+      {teamDay && <Dialog
+        title={teamDay.title}
+        /*
+         * The day, and what it was made of - "02 Nov 2026 · Absent 2 · On leave 3" - so the
+         * breakdown the chip no longer carries is read before the names under it.
+         */
+        description={[
+          teamDay.day ? formatMeetingDate(`${teamDay.day}T00:00:00`) : "",
+          ...(teamDay.meta?.groups || []).map((group) => `${group.status} ${group.count}`),
+        ].filter(Boolean).join(" · ")}
+        // A steady medium card whatever the count; a long day scrolls inside it.
+        size="md"
+        height="mid"
+        onClose={() => setTeamDay(null)}
+      >
+        <TeamAttendancePeople people={teamDay.meta?.people || []} />
+      </Dialog>}
+      <ConfirmDialog
+        open={Boolean(freeing)}
+        title="Remove this block?"
+        message={freeing ? [`${freeing.branch?.name || "The branch"} is free again ${entryTiming(freeing)}.`, freeing.title ? `Blocked for: ${freeing.title}.` : ""].filter(Boolean).join(" ") : ""}
+        confirmLabel="Remove Block"
+        busyLabel="Removing..."
+        loading={freeBusy}
+        onCancel={() => { if (!freeBusy) setFreeing(null); }}
+        onConfirm={async () => {
+          setFreeBusy(true);
+          try {
+            await removeCalendarBlock(freeing.meta?.blockId);
+            setFreeing(null);
+            setSelectedEntry(null);
+            showSuccess("The block is removed - those hours are free.");
+            void loadSchedule();
+          } catch (error) {
+            showError(error?.data?.message || error?.message || "Unable to remove the block.");
+          } finally {
+            setFreeBusy(false);
+          }
+        }}
+      />
+
       {addMeetDate !== null && (
         <ScheduleMeetDialog
           initialDate={addMeetDate}
-          onClose={() => setAddMeetDate(null)}
+          initialTime={addMeetTime}
+          onClose={() => { setAddMeetDate(null); setAddMeetTime(""); }}
           onScheduled={(message) => {
             showNotice(message);
             void loadMeetings();

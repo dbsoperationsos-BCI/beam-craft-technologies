@@ -1,18 +1,13 @@
 const express = require("express");
-const { createRateLimiter, clientIp } = require("../../../middleware/rateLimit");
+const { createPublicLinkLimiter } = require("../../../middleware/rateLimit");
 const { getPublicInvite, verifyPublicInvite, submitPublicInvite } = require("./controller");
 
 const router = express.Router();
 
 // These routes are public and now resolve short codes as well as 64-hex tokens, so they must not
-// be enumerable: without a throttle a script could walk the code space for live invites. One real
-// candidate filling the form fits in a fraction of this allowance; a scanner does not.
-router.use(createRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  max: 60,
-  keys: (req) => [`onboarding:${clientIp(req)}`],
-  message: (minutes) => `Too many requests. Please try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
-}));
+// be enumerable: without a throttle a script could walk the code space for live invites. Only a
+// miss is counted, so HR opening many real links in a row is never refused; a scanner is.
+router.use(createPublicLinkLimiter("onboarding"));
 
 /*
  * Never cached, and this one is not a precaution - it is a bug that was found in the wild.

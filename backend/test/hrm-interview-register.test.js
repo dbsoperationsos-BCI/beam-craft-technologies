@@ -44,11 +44,22 @@ test("deleting a candidate removes the row, the way a CRM lead is removed", () =
   assert.match(body, /\$transaction\(\[/, "the candidate and its invites are no longer removed together");
 });
 
-test("deleting a sheet link removes the candidates it imported, rather than hiding them", () => {
-  const body = fn(SYNC, "async function deleteCandidatesFromSheet(", "\nmodule.exports");
-  assert.match(body, /hrmInterviewCandidate\.deleteMany\(/, "the link's candidates are being hidden again");
-  assert.match(body, /hrmInterviewApplicationInvite\.deleteMany\(/, "their screening forms are left behind");
-  assert.doesNotMatch(body, /data: \{ deletedAt: new Date\(\) \}/, "the soft delete is back on the link path");
+test("deleting a sheet link removes no candidate at all", () => {
+  /*
+   * It used to delete everything the link had imported, on the argument that deleting a source deletes
+   * what it produced. The studio's rule is the opposite and it is absolute: once a row is in the
+   * register it is the studio's record, and the only thing that removes it is somebody pressing Delete
+   * on it. Not unlinking, not a row vanishing from the spreadsheet, not a sync that fails halfway.
+   *
+   * What that was costing is the reason: a candidate with rounds booked, a remark history and a
+   * screening form out with them, gone because somebody tidied up an integration.
+   */
+  const LINKS = src("sheetLinksController.js");
+  assert.equal(SYNC.includes("deleteCandidatesFromSheet"), false, "the helper should not exist at all");
+  assert.equal(LINKS.includes("deleteCandidatesFromSheet"), false, "unlinking must not reach the register");
+  assert.equal(/hrmInterviewCandidate\.deleteMany/.test(SYNC), false, "nothing in the sync path deletes a candidate");
+  // The link itself still goes, because stopping the sync is the whole point of unlinking.
+  assert.match(LINKS, /data: \{ deletedAt: new Date\(\) \}/, "unlinking should still stop the sync");
 });
 
 test("the register is read a page at a time, newest first, with a stable order", () => {
@@ -93,4 +104,80 @@ test("the forms are read for the candidates asked about, not for the whole regis
   assert.match(body, /where = asked\.length \? \{ candidateId: \{ in: asked/, "naming candidates no longer narrows the read");
   // Capped either way: an unbounded list is how this became the slowest thing on the screen.
   assert.match(body, /take: INVITE_LIST_LIMIT/, "the read is unbounded again");
+});
+
+test("a whole selection is deleted in batches, not one candidate per round trip", () => {
+  /*
+   * The request was capped at 2,000 because `removeBulk` called `deleteCandidate` in a loop: each
+   * candidate cost its own two statements and its own transaction, so a large selection was
+   * thousands of round trips and long enough to risk a gateway timeout - which leaves somebody with
+   * no idea how much of it happened. The CRM lead board has never had that problem; it slices.
+   */
+  const body = fn(SERVICE, "async function deleteCandidates(", "\n/**");
+  assert.match(body, /BULK_DELETE_SLICE/, "the selection is no longer sliced");
+  assert.match(body, /hrmInterviewCandidate\.deleteMany\(\{ where: \{ id: \{ in: liveIds \} \} \}\)/, "candidates are not removed in one statement per slice");
+  // The invites go in the same transaction, or a failure between the two leaves forms naming a
+  // candidate that no longer exists - the orphans this whole area was cleaned up for.
+  assert.match(body, /\$transaction\(\[/);
+  assert.match(body, /hrmInterviewApplicationInvite\.deleteMany\(\{ where: \{ candidateId: \{ in: liveIds \} \} \}\)/);
+  /*
+   * Read before the delete: afterwards there is no way to tell which of the ids asked for were
+   * real, and the screen reports how many were found as well as how many went.
+   */
+  const read = body.indexOf("findMany({");
+  const wrote = body.indexOf("$transaction([");
+  assert.ok(read !== -1 && wrote !== -1 && read < wrote, "the ids are deleted before it is known which were live");
+
+  /*
+   * A failing slice must not take the rest with it. The loop this replaced caught per candidate and
+   * carried on, so one bad row cost one row; letting a slice throw would make the whole call a 500
+   * that the screen reads as "nothing happened" - while the slices before it have already
+   * committed, leaving somebody to guess how much of their selection went.
+   */
+  assert.match(body, /\} catch \(error\) \{/, "a failing slice now blanks the whole reply");
+  assert.ok(body.indexOf("try {") < body.indexOf("$transaction(["), "the batch is not guarded");
+});
+
+test("the delete route takes a selection the size the board can actually make", () => {
+  /*
+   * Select-all answers up to 20,000 ids, and the delete used to refuse anything over 2,000 - so the
+   * one path that produces a large selection could not be acted on. The cap now bounds the request
+   * rather than the loop, at the CRM lead board's own number.
+   */
+  assert.match(CONTROLLER, /const bulkDeleteIds = .*\.max\(200000\);/, "the delete cap is not the CRM board's");
+  const body = fn(CONTROLLER, "async function removeBulk(", "\n/**");
+  assert.match(body, /z\.object\(\{ ids: bulkDeleteIds \}\)/, "the delete route still uses the row-at-a-time cap");
+  assert.match(body, /service\.deleteCandidates\(parsed\.data\.ids\)/, "the route still deletes one candidate at a time");
+  assert.doesNotMatch(body, /for \(const id of ids\)/, "the per-candidate loop is back");
+  // The reply is unchanged, so the screen reports what it always did.
+  assert.match(body, /data: \{ deletedIds, missedIds \}/);
+  // And select-all still stops well inside it, rather than the two caps disagreeing.
+  assert.match(SERVICE, /const SELECT_ALL_MAX = 20000;/);
+});
+
+test("a lapsed form is listed as Expired without the list writing it", () => {
+  /*
+   * "Expired" is only written when somebody next touches the link - opens it, sends it, submits it -
+   * so a form nobody touched after its deadline still held Created or Verified, and sat under that
+   * column on the board and in the table. The serializer reports it by the same rule those writes
+   * use, and the GET still only reads.
+   */
+  const { reportedInviteStatus } = require("../src/modules/hrm/interview/invites");
+  const now = new Date("2026-11-04T12:00:00Z");
+  const past = new Date("2026-11-01T00:00:00Z");
+  const future = new Date("2026-11-10T00:00:00Z");
+  assert.equal(reportedInviteStatus({ status: "Created", expiresAt: past }, now), "Expired");
+  assert.equal(reportedInviteStatus({ status: "Verified", expiresAt: past.toISOString() }, now), "Expired");
+  assert.equal(reportedInviteStatus({ status: "Verified", expiresAt: now }, now), "Expired", "the lazy writes expire at the deadline itself (<=)");
+  assert.equal(reportedInviteStatus({ status: "Created", expiresAt: future }, now), "Created");
+  assert.equal(reportedInviteStatus({ status: "Verified", expiresAt: future }, now), "Verified");
+  // A finished form keeps what it finished as, however long ago its link lapsed.
+  assert.equal(reportedInviteStatus({ status: "Submitted", expiresAt: past }, now), "Submitted");
+  assert.equal(reportedInviteStatus({ status: "Cancelled", expiresAt: past }, now), "Cancelled");
+  assert.equal(reportedInviteStatus({ status: "Expired", expiresAt: future }, now), "Expired");
+
+  const INVITES = src("invites.js");
+  assert.match(fn(INVITES, "function serializeInvite(", "\n}"), /status: reportedInviteStatus\(invite\)/, "the list reports the stored status again");
+  const list = fn(INVITES, "async function listInvites(", "\n/**");
+  assert.doesNotMatch(list, /\.update(Many)?\(/, "listing the forms writes to them");
 });

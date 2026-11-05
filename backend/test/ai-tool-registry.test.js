@@ -29,12 +29,11 @@ test("a tool takes its permission from its module, not from itself", () => {
   assert.strictEqual(tool.requiredLevel, "READ");
 });
 
-test("a write tool requires write permission", () => {
-  const low = registry.registerTool({ ...valid, name: "sales.addRemark", risk: "LOW_RISK_WRITE" });
-  assert.strictEqual(low.requiredLevel, "READ_WRITE");
-
-  const bulk = registry.registerTool({ ...valid, name: "sales.reassignLeads", risk: "HIGH_RISK_WRITE" });
-  assert.strictEqual(bulk.requiredLevel, "READ_WRITE");
+test("Nebula is read-only: a tool that would change data is refused at load", () => {
+  // Answers, summaries and explanations only - so a write cannot be registered, whatever it costs.
+  for (const [name, risk] of [["sales.addRemark", "LOW_RISK_WRITE"], ["sales.reassignLeads", "HIGH_RISK_WRITE"], ["sales.deleteLead", "DESTRUCTIVE"]]) {
+    assert.throws(() => registry.registerTool({ ...valid, name, risk }), /read-only/, name);
+  }
 });
 
 test("a tool's name must match the module it is filed under", () => {

@@ -56,13 +56,9 @@ test("every depth fits inside the column, so no chevron is cut off", () => {
   }
 });
 
-test("a service's pricing line is still a leaf, so it still draws the rule", () => {
-  // `canExpand` reads the service's own `lines`; a line carries none, so it can never expand and
-  // the cell it draws is exactly the one it drew before.
-  assert.match(PANEL, /expandable=\{\{ label: "the pricing lines of this service", getSubRows: \(row\) => row\.lines \|\| \[\], canExpand: \(row\) => \(row\.lines \|\| \[\]\)\.length > 0 \}\}/);
-  const start = PANEL.indexOf("const lineRowsOf = useCallback(");
-  const lineRows = PANEL.slice(start, PANEL.indexOf("}, [labelOf, money]);", start));
-  assert.doesNotMatch(lineRows, /\blines:/, "a pricing line carries lines of its own, so it would now expand");
+test("the Services table no longer expands: a service is one row at one price", () => {
+  assert.doesNotMatch(PANEL, /the pricing lines of this service/);
+  assert.doesNotMatch(PANEL, /const lineRowsOf = useCallback\(/);
 });
 
 test("a quotation's earlier version is still a leaf, so it still draws the rule", () => {
@@ -72,8 +68,8 @@ test("a quotation's earlier version is still a leaf, so it still draws the rule"
 
 test("only the Deliverables table nests a second time", () => {
   assert.match(PANEL, /getSubRows: \(row\) => row\.brands \|\| row\.variants \|\| \[\],/);
-  // Three expandable tables in the application, and the count is asserted so a fourth arriving is
+  // Two expandable tables in the application, and the count is asserted so a third arriving is
   // read against this rule rather than inheriting it unnoticed.
   const expandable = [PANEL, QUOTATIONS].flatMap((source) => [...source.matchAll(/expandable[:=]/g)]);
-  assert.equal(expandable.length, 3);
+  assert.equal(expandable.length, 2);
 });

@@ -178,17 +178,16 @@ test("Today New Leads is the leads whose Enquiry Date is today", () => {
   assert.match(QUERY_SERVICE, /function dateRangeClauses[\s\S]*?\$\{enquiryDaySql\(\)\} >= \?/);
 });
 
-test("the three pending tabs are cut by the Next Followup Date, and Overall carries the backlog", () => {
+test("the three pending tabs are cut by the Next Followup Date alone, whatever the status", () => {
   /*
-   * A "pending followup" is a call that is **owed**, so these three are dated by the lead's Next
-   * Followup Date. Today Pending is the calls owed today, Yesterday Pending the calls owed
-   * yesterday, and Overall Pending everything owed yesterday or earlier.
+   * A booked call is a call owed, so these three are dated by the lead's Next Followup Date and by
+   * nothing else. Today Pending is the calls booked for today, Yesterday Pending those booked for
+   * yesterday, and Overall Pending everything booked for today or earlier.
    *
-   * They were briefly cut by the Enquiry Date instead, so that the date visible in the table was the
-   * date the tab was cut by. It reads well and answers the wrong question: a lead that enquired in
-   * July with a call booked for yesterday is work owed yesterday, and cutting by the enquiry date
-   * filed it under July and left the call in no dated tab at all. A worklist is dated by when the
-   * work is due.
+   * They used to ask for status Followup as well, which hid every booked call on a lead at any other
+   * status - a lead at Yet to connect with a call booked for today was owed a call and on no tab.
+   * And they are not cut by the Enquiry Date: a lead that enquired in July with a call booked for
+   * yesterday is work owed yesterday.
    */
   const clauseFor = (view) => {
     const found = QUERY_SERVICE.match(new RegExp(`if \\(view === "${view}"\\)[\\s\\S]*?\\n    return ([\\s\\S]*?);\\n  \\}`));
@@ -196,80 +195,40 @@ test("the three pending tabs are cut by the Next Followup Date, and Overall carr
     return found[1];
   };
 
-  // Every one of them asks the same question of the status, off `statusKey` rather than the raw
-  // column - so a Qua Qua lead inside an occasion is chased on that occasion's status. All three,
-  // Today included: the tab is the follow-up owed today, not the leads nobody has rung.
   for (const view of ["pending", "yesterdayPending", "overallPending"]) {
-    assert.match(clauseFor(view), /REPLACE\(\$\{statusKey\},'-',''\) = 'followup'/, `"${view}" no longer reads the status the lead is worked at`);
     assert.match(clauseFor(view), /\$\{followUpDay\}/, `"${view}" is no longer dated by the call that is owed`);
+    // The one status they ask about is Converted, which none of them shows - on any vertical.
+    assert.match(clauseFor(view), /AND \$\{notConverted\}\)`$/, `"${view}" is showing converted leads again`);
+    assert.doesNotMatch(clauseFor(view), /'followup'/, `"${view}" is asking for status Followup again`);
     assert.doesNotMatch(clauseFor(view), /enquiryDaySql/, `"${view}" is back on the day the enquiry came in`);
   }
-  /*
-   * Today Pending is checked on its own as well, because it is the one dated by the client's own
-   * today rather than a day derived from it - and because of what it must *not* be cut by.
-   *
-   * It read **Yet to connect** for a while, on the reasoning that the tab was the calls still to be
-   * made today. That made the three tabs two different questions under one name, and lost the case
-   * in between: a lead at Followup with a call booked for today was owed a call today and appeared
-   * in none of the three, then surfaced in Yesterday Pending the next morning as though it had been
-   * missed. Before that it carried two more ways in - the whole Yet to connect queue, and everything
-   * that arrived today - which made "Today Pending Followups (673)" tell a studio it owed 673 calls
-   * when most of those leads had no follow-up booked at all. Both of those readings have tabs of
-   * their own, so this one is the follow-up owed today and nothing else.
-   */
+  assert.match(clauseFor("pending"), /^`\(\$\{followUpDay\} = \? AND \$\{notConverted\}\)`$/, "Today Pending is no longer just the calls booked for today");
+  // Plain Converted only, read NULL-safe so a lead with no status is not dropped.
+  assert.match(QUERY_SERVICE, /const notConverted = `REPLACE\(REPLACE\(COALESCE\(\$\{statusKey\}, ''\), ' ', ''\), '-', ''\) <> 'converted'`;/);
   const pendingBlock = QUERY_SERVICE.slice(QUERY_SERVICE.indexOf('if (view === "pending") {'), QUERY_SERVICE.indexOf('if (view === "yesterdayPending")'));
-  assert.match(
-    pendingBlock,
-    /return `\(\$\{followUpDay\} = \? AND REPLACE\(\$\{statusKey\},'-',''\) = 'followup'\)`/,
-    "Today Pending is no longer the follow-up calls owed today",
-  );
-  assert.doesNotMatch(pendingBlock, /readsYetToConnectSql/, "Today Pending is back on the untouched queue rather than the follow-up owed today");
-  assert.doesNotMatch(pendingBlock, /enquiryDaySql/, "Today Pending is counting today's arrivals again");
+  assert.doesNotMatch(pendingBlock, /readsYetToConnectSql/, "Today Pending is back on the untouched queue");
 
-  /*
-   * Both ways the label arrives, or the tab lists half of what its name promises: a lead with no
-   * status reads Yet to connect by derivation, and an imported one whose file said so carries the
-   * words as stored text. `statusDisplaySql` folds neither onto anything else, so both print the
-   * same thing on the row.
-   */
+  // One definition of "nobody has rung", still read by Yet to connect.
   const readsBlock = QUERY_SERVICE.slice(QUERY_SERVICE.indexOf("function readsYetToConnectSql("), QUERY_SERVICE.indexOf("* Tab definitions"));
   assert.match(readsBlock, /yetToConnectSql\(statusKey\)/, "the derived half of Yet to connect is gone");
   assert.match(readsBlock, /= 'yettoconnect'/, "a lead that stores the words 'yet to connect' is no longer recognised");
-
-  // One definition of "nobody has rung", read by both tabs that need it.
   assert.match(QUERY_SERVICE, /function yetToConnectSql\(statusKey\) \{/);
 
-  // Yesterday is one day, derived from the client's today rather than from the server's clock, so
-  // the tabs agree about where the boundary falls.
-  assert.match(clauseFor("yesterdayPending"), /\$\{followUpDay\} = \?/);
+  // Yesterday is one day, derived from the client's today rather than the server's clock.
+  assert.match(clauseFor("yesterdayPending"), /^`\(\$\{followUpDay\} = \? AND \$\{notConverted\}\)`$/);
   const yesterday = QUERY_SERVICE.slice(QUERY_SERVICE.indexOf('if (view === "yesterdayPending")'), QUERY_SERVICE.indexOf('if (view === "overallPending")'));
   assert.match(yesterday, /params\.push\(previousDay\(today\)\)/);
 
   /*
-   * Overall is `<=` **today**, and the two halves of that matter separately.
-   *
-   * `<=` rather than `<`: the tab is everything still owed and today is part of it, so a call owed
-   * today is in both Today Pending and Overall, and one owed yesterday in both Yesterday and
-   * Overall. The three deliberately overlap and their counts do not add up to the board.
-   *
-   * Bounded at today rather than yesterday. It was yesterday, on the reading that the tab was the
-   * work somebody was behind on and a call booked for today is not yet late; the studio reads it as
-   * the total still owed, and leaving today out made the one number meant to answer "how much is
-   * outstanding" short by a whole day's work, every day.
+   * Overall is `<=` **today**: everything still owed, today included, so it overlaps the other two.
+   * And no `IS NULL`: with the status gone, an undated lead is any lead nobody booked a call on, and
+   * taking those in would put most of the board in the tab.
    */
   const overall = QUERY_SERVICE.slice(QUERY_SERVICE.indexOf('if (view === "overallPending")'), QUERY_SERVICE.indexOf("Qua Qua's two date-driven tabs"));
   assert.match(overall, /params\.push\(today\)/, "Overall Pending is no longer bounded at today");
   assert.doesNotMatch(overall, /params\.push\(previousDay\(today\)\)/, "Overall Pending is back to leaving today's calls out");
-  assert.match(clauseFor("overallPending"), /\$\{followUpDay\} <= \?/, "Overall Pending no longer carries the days before its bound");
-  assert.doesNotMatch(clauseFor("overallPending"), /\$\{followUpDay\} < \?/, "Overall Pending excludes its own bound again");
-
-  /*
-   * And the half that keeps the tab honest: `follow_up_day` is NULL both when the date was never
-   * filled in and when what was typed cannot be read as one. Either way the call is owed on a day
-   * the board cannot name, and without this those leads sit in no pending tab and are chased by
-   * nobody.
-   */
-  assert.match(clauseFor("overallPending"), /\$\{followUpDay\} IS NULL/, "a lead with no readable follow-up date falls through every pending tab");
+  assert.match(clauseFor("overallPending"), /^`\(\$\{followUpDay\} <= \? AND \$\{notConverted\}\)`$/, "Overall Pending is no longer every call booked up to today");
+  assert.doesNotMatch(clauseFor("overallPending"), /IS NULL/, "Overall Pending is taking in every lead with no follow-up booked");
 });
 
 test("Newborns and Birthdays are cut by their own calculation, and by nothing else", () => {

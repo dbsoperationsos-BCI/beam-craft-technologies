@@ -4,13 +4,18 @@ const activity = require("../shared/activity");
 const { loadEvent } = require("../shared/eventAccess");
 const { serializeGuest, serializeGroup } = require("../shared/serializers");
 const storage = require("../shared/storage");
+const { everyChunk } = require("../../../services/wordChunks");
 
 const normalizePhone = (value) => (value ? String(value).replace(/[\s()-]/g, "") : null);
 
 async function list(eventId, query) {
   await loadEvent(eventId);
-  const where = { eventId };
-  if (query.search) where.OR = [{ name: { contains: query.search } }, { phone: { contains: normalizePhone(query.search) || query.search } }, { email: { contains: query.search } }];
+  // A guest still at the join's code step (Confirm phone numbers by SMS) has not joined yet.
+  const where = { eventId, NOT: { source: "LINK", joinedAt: null } };
+  // Word Chunk Search: every word typed, any order. A phone typed with spaces ("98765 43210") still
+  // matches whole, after the same normalisation as before.
+  const chunks = everyChunk(query.search, (chunk) => ({ OR: [{ name: { contains: chunk } }, { phone: { contains: normalizePhone(chunk) || chunk } }, { email: { contains: chunk } }] }));
+  if (chunks.length) where.AND = [{ OR: [{ phone: { contains: normalizePhone(query.search) } }, { AND: chunks }] }];
   if (query.groupId) where.groupId = query.groupId === "none" ? null : query.groupId;
   if (query.rsvp !== "all") where.rsvp = query.rsvp;
   if (query.selfie !== "all") where.selfieStatus = query.selfie;
@@ -61,6 +66,9 @@ async function update(eventId, guestId, body, user) {
   const data = {};
   if (body.name !== undefined) data.name = body.name;
   if (body.phone !== undefined) data.phone = normalizePhone(body.phone);
+  // A new number is a new holder: whoever held a session under the old one is signed out, and the
+  // WhatsApp consent given for the old number does not carry over to the new one.
+  if (data.phone !== undefined && data.phone !== existing.phone) Object.assign(data, { sessionVersion: { increment: 1 }, ...(existing.whatsappOptInAt ? { whatsappOptInAt: null } : {}) });
   if (body.email !== undefined) data.email = body.email;
   if (body.rsvp !== undefined) data.rsvp = body.rsvp;
   if (body.notes !== undefined) data.notes = body.notes;

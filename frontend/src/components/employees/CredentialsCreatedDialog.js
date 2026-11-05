@@ -3,6 +3,10 @@
 import Button from "@/components/shared/Button";
 import Dialog from "@/components/ui/Dialog";
 import ShareableMessage from "@/components/shared/ShareableMessage";
+import { useState } from "react";
+import SendWhatsAppButton from "@/components/shared/SendWhatsAppButton";
+import useWhatsappSender from "@/components/shared/useWhatsappSender";
+import { sendCredentialsWhatsApp } from "@/services/hrm/employees.service";
 import useMessageTemplate from "@/components/shared/useMessageTemplate";
 import { renderMessageOr } from "@/lib/messageTemplate.mjs";
 import { publicOrigin } from "@/lib/publicOrigin";
@@ -26,7 +30,7 @@ import { publicOrigin } from "@/lib/publicOrigin";
  * change at first sign-in, and hiding it here would only mean somebody typing it from the email they
  * cannot open.
  */
-export default function CredentialsCreatedDialog({ employeeName, username, loginEmail, temporaryPassword, sentTo, emailSent, warning, onClose }) {
+export default function CredentialsCreatedDialog({ title = "Login credentials created", employeeId, employeeName, username, loginEmail, temporaryPassword, sentTo, emailSent, warning, onClose }) {
   /*
    * The message as it will be sent, not a list of fields to be assembled by whoever reads it.
    *
@@ -63,6 +67,33 @@ export default function CredentialsCreatedDialog({ employeeName, username, login
     "You will be asked to choose your own password the first time you sign in.",
     "Please do not share these details with anybody.",
   ].join("\n");
+  // Whether this person has a WhatsApp of their own to send from, and what to say when they do not.
+  // Absent while WhatsApp is not linked, or this message is switched off under Settings → Templates.
+  const { canSend } = useWhatsappSender("LOGIN_CREDENTIALS");
+  // The wording as the box holds it, for the footer's Send WhatsApp to act on.
+  const [messageText, setMessageText] = useState("");
+  const [whatsappNotice, setWhatsappNotice] = useState("");
+  const [whatsappError, setWhatsappError] = useState("");
+
+  /**
+   * The credentials, sent to the employee on WhatsApp from the sender's own account.
+   *
+   * The text is taken from the box rather than rebuilt: the temporary password is readable only at
+   * this moment - the server never sends one back - so this message cannot be composed anywhere
+   * else. The employee's **number** is not sent; the server reads it off their record, so this can
+   * only reach the person whose login was just made.
+   */
+  async function sendOnWhatsApp(text) {
+    setWhatsappNotice("");
+    setWhatsappError("");
+    try {
+      const result = await sendCredentialsWhatsApp(employeeId, text);
+      setWhatsappNotice(result?.message || "Login credentials sent on WhatsApp.");
+    } catch (requestError) {
+      setWhatsappError(requestError.data?.message || requestError.message || "Unable to send these credentials on WhatsApp.");
+    }
+  }
+
   const message = renderMessageOr(builtInMessage, template, {
     "employee name": employeeName || "there",
     username: username || "—",
@@ -72,7 +103,7 @@ export default function CredentialsCreatedDialog({ employeeName, username, login
   });
 
   return <Dialog
-    title="Login credentials created"
+    title={title}
     description={emailSent
       ? `Emailed to ${sentTo || "the employee"}. Copy them below if you would rather hand them over yourself.`
       : "The account exists, but the email did not go out — copy these and pass them on."}
@@ -80,7 +111,15 @@ export default function CredentialsCreatedDialog({ employeeName, username, login
     // Over the form panel it was created from, which stacks above a plain dialog.
     layer="dialogOverPanel"
     onClose={onClose}
-    footer={<Button type="button" variant="primary" onClick={onClose}>Done</Button>}
+    footer={<>
+      {/* In the footer beside Done, where the invite dialog keeps its own - the two are the same
+          act, and a reader who has met one should find the other in the same place.
+
+          Only where the record is known: without an id there is no employee to read a number off,
+          so a button here would be one that always fails. */}
+      {employeeId && canSend && <SendWhatsAppButton className="max-sm:flex-1" message={messageText} onSend={sendOnWhatsApp} />}
+      <Button className="max-sm:flex-1" type="button" variant="primary" onClick={onClose}>Done</Button>
+    </>}
   >
     <div className="space-y-4">
       {!emailSent && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
@@ -94,7 +133,14 @@ export default function CredentialsCreatedDialog({ employeeName, username, login
         * twice and deciding which copy to use. Handing them over is the whole point of the screen,
         * so the thing that gets handed over is the thing that is shown.
         */}
-      <ShareableMessage label="Message to send them" message={message} rows={12} />
+      <ShareableMessage
+        label="Message to send them"
+        message={message}
+        rows={12}
+        onTextChange={setMessageText}
+      />
+      {whatsappNotice && <p role="status" className="mt-2 text-sm text-emerald-700">{whatsappNotice}</p>}
+      {whatsappError && <p role="alert" className="mt-2 text-sm text-red-600">{whatsappError}</p>}
     </div>
   </Dialog>;
 }

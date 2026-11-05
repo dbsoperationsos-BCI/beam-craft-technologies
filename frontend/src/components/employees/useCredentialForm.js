@@ -1,10 +1,12 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getRoles } from "@/services/admin/admin.service";
 import { createLoginCredentials, getLoginCredentials, getLoginCredentialsDraft, saveLoginCredentialsDraft, updateLoginCredentials } from "@/services/hrm/employees.service";
 import { getMasterData } from "@/services/hrm/master-data.service";
 import RolePicker from "@/components/shared/RolePicker";
+import Checkbox from "@/components/shared/Checkbox";
 import MultiSelectField from "@/components/shared/MultiSelectField";
 import { useNotice } from "@/components/shared/FloatingNotice";
 import { loadStudioBranding } from "@/components/shared/useStudioBranding";
@@ -12,7 +14,9 @@ import useBranchRegistry from "@/components/shared/useBranchRegistry";
 import { draftFrom, mergeProposals, touchedByDraft } from "./credentialDraft";
 import { FALLBACK_LOGIN_EMAIL_DOMAIN, loginEmailDomain } from "@/lib/employeeName.mjs";
 import { generateTemporaryPassword } from "@/lib/temporaryPassword.mjs";
+import { loginIdentityProblems } from "@/lib/loginCredentials.mjs";
 import { workingEmployees } from "@/lib/employmentStatus.mjs";
+import EmployeeWhatsAppGroups from "@/components/employees/EmployeeWhatsAppGroups";
 
 /**
  * Everything the Login Credentials page of onboarding needs: the account this employee signs in
@@ -33,8 +37,6 @@ function matchBranch(employee, branches) {
   return found ? String(found.id) : "";
 }
 
-const USERNAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/;
 
 /** The same rules the API enforces, checked here so a problem is shown against its own field. */
 function validate(values, { managing = false } = {}) {
@@ -46,14 +48,8 @@ function validate(values, { managing = false } = {}) {
    * insisting on them here would refuse a save over fields the page does not have — and the first
    * of them, the password, is never even shown once an account has one.
    */
-  if (!managing) {
-    if (!values.username?.trim()) errors.username = "A username is required.";
-    else if (values.username.trim().length < 3) errors.username = "Use at least three characters.";
-    else if (!USERNAME_PATTERN.test(values.username.trim())) errors.username = "Letters, numbers, dots, underscores and hyphens only.";
-    if (!values.email?.trim()) errors.email = "A login email is required.";
-    else if (!EMAIL_PATTERN.test(values.email.trim())) errors.email = "Enter a valid email address.";
-    if (!values.temporaryPassword) errors.temporaryPassword = "Generate a temporary password.";
-  }
+  // The rules every new sign-in shares - an employee's here, a client's on Create Project.
+  if (!managing) Object.assign(errors, loginIdentityProblems(values));
   // Each alternative menu hides the other's pick, so this only catches a pair that arrived equal
   // some other way - a backstop, blamed on the second slot.
   if (values.alternative1EmployeeId && values.alternative1EmployeeId === values.alternative2EmployeeId) {
@@ -72,7 +68,7 @@ function validate(values, { managing = false } = {}) {
  */
 const coverCandidates = (employees, employee) => workingEmployees(employees)
   .filter((row) => row.id !== employee?.id)
-  .map((row) => ({ value: String(row.id), label: `${row.employeeName}${row.employeeId ? ` — ${row.employeeId}` : ""}` }));
+  .map((row) => ({ value: String(row.id), label: `${row.employeeName}${row.employeeId ? ` — ${row.employeeId}` : ""}`, avatar: avatarOf(row) }));
 
 /**
  * `employee` is the record credentials are being created for — a page of onboarding cannot ask for
@@ -80,7 +76,16 @@ const coverCandidates = (employees, employee) => workingEmployees(employees)
  * create a login against before then. Pass `null` until that happens; the hook answers `ready:
  * false` and does nothing that needs one.
  */
-export default function useCredentialForm(employee, employees = [], onCreated, { manage = false, onUpdated } = {}) {
+/*
+ * `departmentSignal` is the employee form's **live** department text.
+ *
+ * The WhatsApp Groups section offers the groups of the employee's departments, read from the saved
+ * record. This page holds the employee as it was when the panel opened, so a department changed on
+ * Employment Details - saved on the spot, but on another page of the same panel - never reached it:
+ * the box stayed empty right after somebody had chosen departments. Handed down, a change to it
+ * re-reads the groups.
+ */
+export default function useCredentialForm(employee, employees = [], onCreated, { manage = false, onUpdated, departmentSignal = "" } = {}) {
   const ready = Boolean(employee?.id);
   /*
    * Whether this page is issuing an account or looking after one that exists.
@@ -123,10 +128,13 @@ export default function useCredentialForm(employee, employees = [], onCreated, {
     alternative2EmployeeId: "",
     leaveApproverIds: [],
     permissionApproverEmployeeId: "",
+    regularizationApproverEmployeeId: "",
     temporaryPassword: openedWithPassword,
     roleIds: [],
     // Off. Nobody is held to WhatsApp until an administrator ticks it on their account.
     whatsappAllowed: false,
+    excludeFromAttendance: false,
+    allowFlexibleShift: false,
   }));
   /*
    * Which fields the person has answered themselves. Once touched, a field is theirs — including
@@ -234,10 +242,13 @@ export default function useCredentialForm(employee, employees = [], onCreated, {
             branchId: found.branchId === null || found.branchId === undefined ? "" : String(found.branchId),
             roleIds: found.roleIds || [],
             whatsappAllowed: found.whatsappRequired === true,
+            excludeFromAttendance: found.excludeFromAttendance === true,
+            allowFlexibleShift: found.allowFlexibleShift === true,
             alternative1EmployeeId: found.alternative1EmployeeId ? String(found.alternative1EmployeeId) : "",
             alternative2EmployeeId: found.alternative2EmployeeId ? String(found.alternative2EmployeeId) : "",
             leaveApproverIds: (found.leaveApproverIds || []).map(String),
             permissionApproverEmployeeId: found.permissionApproverEmployeeId ? String(found.permissionApproverEmployeeId) : "",
+            regularizationApproverEmployeeId: found.regularizationApproverEmployeeId ? String(found.regularizationApproverEmployeeId) : "",
           };
           setValues((current) => ({ ...current, ...applied }));
           setTouched((current) => ({ ...current, ...Object.fromEntries(Object.keys(applied).map((key) => [key, true])) }));
@@ -406,12 +417,15 @@ export default function useCredentialForm(employee, employees = [], onCreated, {
         await updateLoginCredentials(employee.id, {
           roleIds: shown.roleIds,
           whatsappRequired: shown.whatsappAllowed === true,
+          excludeFromAttendance: shown.excludeFromAttendance === true,
+          allowFlexibleShift: shown.allowFlexibleShift === true,
           alternative1EmployeeId: shown.alternative1EmployeeId ? Number(shown.alternative1EmployeeId) : null,
           alternative2EmployeeId: shown.alternative2EmployeeId ? Number(shown.alternative2EmployeeId) : null,
           leaveApprover1EmployeeId: shown.leaveApproverIds[0] ? Number(shown.leaveApproverIds[0]) : null,
           leaveApprover2EmployeeId: shown.leaveApproverIds[1] ? Number(shown.leaveApproverIds[1]) : null,
           leaveApprover3EmployeeId: shown.leaveApproverIds[2] ? Number(shown.leaveApproverIds[2]) : null,
           permissionApproverEmployeeId: shown.permissionApproverEmployeeId ? Number(shown.permissionApproverEmployeeId) : null,
+          regularizationApproverEmployeeId: shown.regularizationApproverEmployeeId ? Number(shown.regularizationApproverEmployeeId) : null,
         });
         setSavedDraft(JSON.stringify(draftPayload));
         await onUpdated?.();
@@ -430,12 +444,15 @@ export default function useCredentialForm(employee, employees = [], onCreated, {
         branchId: shown.branchId ? Number(shown.branchId) : null,
         roleIds: shown.roleIds,
         whatsappRequired: shown.whatsappAllowed === true,
+        excludeFromAttendance: shown.excludeFromAttendance === true,
+        allowFlexibleShift: shown.allowFlexibleShift === true,
         alternative1EmployeeId: shown.alternative1EmployeeId ? Number(shown.alternative1EmployeeId) : null,
         alternative2EmployeeId: shown.alternative2EmployeeId ? Number(shown.alternative2EmployeeId) : null,
         leaveApprover1EmployeeId: shown.leaveApproverIds[0] ? Number(shown.leaveApproverIds[0]) : null,
         leaveApprover2EmployeeId: shown.leaveApproverIds[1] ? Number(shown.leaveApproverIds[1]) : null,
         leaveApprover3EmployeeId: shown.leaveApproverIds[2] ? Number(shown.leaveApproverIds[2]) : null,
         permissionApproverEmployeeId: shown.permissionApproverEmployeeId ? Number(shown.permissionApproverEmployeeId) : null,
+        regularizationApproverEmployeeId: shown.regularizationApproverEmployeeId ? Number(shown.regularizationApproverEmployeeId) : null,
       });
       setResult(response);
       /*
@@ -472,6 +489,8 @@ export default function useCredentialForm(employee, employees = [], onCreated, {
        * a mistake to prevent.
        */
       permissionApproverOptions: candidates,
+      // The same colleagues: anybody but the person themselves may decide their regularizations.
+      regularizationApproverOptions: candidates,
     },
     renderers: {
       leaveApproverIds: () => <MultiSelectField
@@ -523,10 +542,10 @@ export default function useCredentialForm(employee, employees = [], onCreated, {
        * hand-over dialog by whoever is onboarding them; masking it here would hide it from the one
        * person who needs to see it while changing nothing about who else can.
        */
-      temporaryPassword: () => <div className="block text-[11px] font-semibold text-slate-600 sm:text-xs">
+      temporaryPassword: ({ error }) => <div className="block text-[11px] font-semibold text-slate-600 sm:text-xs">
         <span>Temporary Password<span aria-hidden="true" className="ml-0.5 text-rose-500">*</span></span>
         <div className="mt-1.5 flex flex-wrap gap-2">
-          <input readOnly aria-label="Temporary password" value={shown.temporaryPassword} className="min-h-9 min-w-0 flex-1 rounded-lg border border-slate-300 bg-slate-100 px-3 font-mono text-xs font-normal tracking-wide text-slate-700 sm:text-sm" />
+          <input readOnly aria-label="Temporary password" aria-invalid={error ? "true" : undefined} value={shown.temporaryPassword} className={`min-h-9 min-w-0 flex-1 rounded-lg border ${error ? "border-red-400" : "border-slate-300"} bg-slate-100 px-3 font-mono text-xs font-normal tracking-wide text-slate-700 sm:text-sm`} />
           <button
             type="button"
             disabled={saving}
@@ -534,6 +553,8 @@ export default function useCredentialForm(employee, employees = [], onCreated, {
             className="min-h-9 shrink-0 rounded-lg border border-slate-300 px-3 text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400 sm:text-sm"
           >Regenerate</button>
         </div>
+        {/* Only an old draft saved without one can bring it back blank; Regenerate clears the mark. */}
+        {error && <p role="alert" className="mt-1.5 font-normal text-red-600">{error}</p>}
         <p className="mt-1.5 font-normal text-slate-500">Generated for this account alone and emailed to the address above. Regenerate for a different one — whatever is shown here at the moment the account is created is the password that is sent.</p>
       </div>,
       roleIds: () => (rolesError
@@ -542,8 +563,9 @@ export default function useCredentialForm(employee, employees = [], onCreated, {
           roles={roles}
           selected={selectedRoles}
           busy={saving}
-          onAdd={(added) => change("roleIds", [...shown.roleIds, ...added.filter((id) => !shown.roleIds.includes(id))])}
-          onRemove={(roleId) => change("roleIds", shown.roleIds.filter((id) => id !== roleId))}
+          // A tick is the role on the form: this page is saved as a whole, so there is no separate
+          // Add step whose skipping would save the account without the roles it shows ticked.
+          onChange={(next) => change("roleIds", next)}
           emptyText="No roles yet. This account will be able to sign in and nothing else until one is added."
         />),
       /*
@@ -572,8 +594,48 @@ export default function useCredentialForm(employee, employees = [], onCreated, {
           </span>
         </span>
       </label>,
+      // The same tick box as Allow WhatsApp, for whether this person is kept out of attendance.
+      excludeFromAttendance: () => <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-white px-3 py-3">
+        <input
+          type="checkbox"
+          className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus-visible:ring-blue-500"
+          checked={shown.excludeFromAttendance === true}
+          disabled={saving}
+          onChange={(event) => {
+            change("excludeFromAttendance", event.target.checked);
+            // Flexible Shift is how attendance is counted - kept out of attendance, it goes too.
+            if (event.target.checked) change("allowFlexibleShift", false);
+          }}
+        />
+        <span className="min-w-0">
+          <span className="block text-xs font-semibold text-slate-700 sm:text-sm">Exclude From Attendance</span>
+          <span className="mt-1 block text-xs font-normal text-slate-500">
+            Tick to keep this person out of the Attendance module - not listed, not counted, and their days and details not shown there.
+          </span>
+        </span>
+      </label>,
+      // The WhatsApp groups this person is in, and adding them to more - on its own, not with Save.
+      whatsappGroups: () => <EmployeeWhatsAppGroups employeeId={employee?.id} phone={employee?.contactNumber || ""} departmentSignal={departmentSignal} />,
+      // The same tick box again, for whether this person may log in on a Flexible Shift.
+      allowFlexibleShift: () => <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-white px-3 py-3">
+        <Checkbox
+          className="mt-0.5 shrink-0"
+          checked={shown.allowFlexibleShift === true && shown.excludeFromAttendance !== true}
+          // Not for somebody excluded from attendance: it only says how their attendance is counted.
+          disabled={saving || shown.excludeFromAttendance === true}
+          onChange={(checked) => change("allowFlexibleShift", checked)}
+        />
+        <span className="min-w-0">
+          <span className="block text-xs font-semibold text-slate-700 sm:text-sm">Allow Flexible Shift</span>
+          <span className="mt-1 block text-xs font-normal text-slate-500">
+            {shown.excludeFromAttendance === true
+              ? "Not available while Exclude From Attendance is ticked - this person's attendance is not counted."
+              : "Tick to let this person log in at any time. Their day is counted from login to logout by the Half day and Full day hours set in Attendance Rules, and never marked Late or Early exit."}
+          </span>
+        </span>
+      </label>,
     },
-  }), [candidates, change, roles, rolesError, saving, selectedRoles, showNotice, shown.alternative1EmployeeId, shown.alternative2EmployeeId, shown.email, shown.leaveApproverIds, shown.roleIds, shown.temporaryPassword, shown.whatsappAllowed, shown.username]);
+  }), [candidates, change, roles, rolesError, saving, selectedRoles, showNotice, shown.alternative1EmployeeId, shown.alternative2EmployeeId, shown.email, shown.leaveApproverIds, shown.temporaryPassword, shown.whatsappAllowed, shown.excludeFromAttendance, shown.allowFlexibleShift, shown.username, employee?.id, employee?.contactNumber, departmentSignal]);
 
   // `values` is what the form shows — typed answers over the record's proposals. See `shown`.
   // `managing` says which page this is: an account being issued, or one being looked after. The

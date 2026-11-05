@@ -2,78 +2,48 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import useStickyTab from "@/components/shared/useStickyTab";
-import ProjectDataTable from "@/components/data-table/ProjectDataTable";
+import useLinkedProject from "@/components/shared/useLinkedProject";
+import ProjectDataTable, { ProjectRecordPanel, useProjectRowActions } from "@/components/data-table/ProjectDataTable";
+import KanbanBoard from "@/components/data-table/KanbanBoard";
+import useProjectMoney from "@/components/project-management/useProjectMoney";
+import { moneyColumn, moneyFlag } from "@/lib/projectMoney.mjs";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
+import { projectManagementInfoSections } from "@/constants/infoPanelConfig";
+import { PROJECT_BOARD_CARD, projectBoardStatus, projectColumnAmount } from "@/lib/projectStatuses.mjs";
 import ModulePageHeader from "@/components/layout/ModulePageHeader";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import IconButton from "@/components/shared/IconButton";
 import useCompactView from "@/components/shared/useCompactView";
 import { getSalesProjects } from "@/services/sales/projects.service";
-// Which stage a project is in the hands of. Shared with the Meetings list, which now reads the
-// same register through the same two questions - one rule, so the two can never disagree about
-// whether a project is in pre-production.
-import { inPostProduction, inPreProduction } from "@/lib/projectStages";
+// Which stage a project is in the hands of. Shared with the Meetings list, which reads the same
+// register through the same questions. Pre Production has its own page (PreProductionPage).
+import { inPostProduction } from "@/lib/projectStages";
 
 const tabs = ["All", "Yet to Start", "In Progress", "Completed"];
-const inProgressStatuses = new Set([
-  "Work in Progress - Pre & Production",
-  "Work in Progress - Post Production",
-]);
 
-function belongsToStatusTab(project, tab) {
-  const status = project.projectStatus || "Yet to Start";
-  if (tab === "All") return true;
-  if (tab === "Yet to Start") return status === "Yet to Start";
-  if (tab === "In Progress") return inProgressStatuses.has(status);
-  return status === "Delivered";
+/*
+ * The Board's columns: the status tabs, in their order, then any other status a project here holds
+ * (On Hold, Rejected), so no project is left out of the Board the way it is left to All on the tabs.
+ * The board is read-only, as the table is - nothing on it changes a project.
+ */
+function boardColumns(projects) {
+  const base = tabs.filter((tab) => tab !== "All");
+  const others = [...new Set(projects.map(projectBoardStatus))].filter((status) => !base.includes(status));
+  return [...base, ...others].map((status) => ({ value: status, label: status }));
 }
 
+function belongsToStatusTab(project, tab) {
+  // An old status (Delivered, Work in Progress...) is under the tab that replaced it, as on Projects
+  // and as on the Board beside it.
+  return tab === "All" || projectBoardStatus(project) === tab;
+}
+
+/**
+ * The workflow boards that list projects. Pre Production and Production are not among them any more:
+ * their rows are shoots rather than projects, so each has its own screen (PreProductionPage,
+ * production/ProductionPage).
+ */
 const moduleRules = {
-  "pre-production": {
-    title: "Pre Production",
-    tableTitle: "Pre Production Projects",
-    infoTitle: "Pre Production Project Details",
-    fileName: "pre-production-projects",
-    matches: inPreProduction,
-  },
-  "pre-production-dum-dum": {
-    title: "Pre Production - Dum Dum",
-    tableTitle: "Dum Dum Pre Production Projects",
-    infoTitle: "Dum Dum Pre Production Project Details",
-    fileName: "pre-production-dum-dum-projects",
-    matches: (project) =>
-      inPreProduction(project) &&
-      ["DUM DUM", "WED"].includes(
-        String(project.vertical || "").trim().toUpperCase(),
-      ),
-  },
-  "pre-production-qua-qua": {
-    title: "Pre Production - Qua Qua",
-    tableTitle: "Qua Qua Pre Production Projects",
-    infoTitle: "Qua Qua Pre Production Project Details",
-    fileName: "pre-production-qua-qua-projects",
-    matches: (project) =>
-      inPreProduction(project) &&
-      ["QUA QUA", "QQ"].includes(
-        String(project.vertical || "").trim().toUpperCase(),
-      ),
-  },
-  "pre-production-corp": {
-    title: "Pre Production - Corp",
-    tableTitle: "Corp Pre Production Projects",
-    infoTitle: "Corp Pre Production Project Details",
-    fileName: "pre-production-corp-projects",
-    matches: (project) =>
-      inPreProduction(project) &&
-      String(project.vertical || "").trim().toUpperCase() === "CORP",
-  },
-  production: {
-    title: "Production",
-    tableTitle: "Production Projects",
-    infoTitle: "Production Project Details",
-    fileName: "production-projects",
-    matches: (project) =>
-      project.projectStatus === "Work in Progress - Pre & Production",
-  },
   "post-production": {
     title: "Post Production",
     tableTitle: "Post Production Projects",
@@ -139,6 +109,37 @@ export default function ProjectWorkflowModulePage({ moduleKey }) {
     [activeTab, moduleProjects],
   );
 
+  /*
+   * A "Navigate to" from another board names its project in the address. The board comes to All if the
+   * project is not on the tab in front of the reader - otherwise the link lands on a list that does
+   * not contain it - and the table then selects the row and scrolls to it.
+   */
+  const [linkedEventId, clearLinkedProject] = useLinkedProject({ tab: activeTab, onTab: setActiveTab });
+
+  const [layout, setLayout] = useTableBoardLayout(`workflow-${moduleKey}`);
+  const onBoard = layout === "board";
+  // The projects' money under each column, and "Balance due ₹…" on a card whose client still owes - only for
+  // somebody who may see a project's Payments tab (`useProjectMoney`), and only while the Board is open.
+  const money = useProjectMoney(onBoard ? moduleProjects : null);
+  const columns = useMemo(() => boardColumns(moduleProjects), [moduleProjects]);
+  const [viewing, setViewing] = useState(null);
+  // The tab the board's record opens on: Activity for the ⋮'s "View activity", else its details.
+  const [viewingTab, setViewingTab] = useState(null);
+  // The card's ⋮ is the row's ⋮ - read-only here, like the table below: View, its activity, the other boards.
+  const projectActions = useProjectRowActions({
+    board: moduleKey,
+    onView: (project) => { setViewingTab(null); setViewing(project); },
+    onViewActivity: (project) => { setViewingTab("activity"); setViewing(project); },
+    onNotice: showNotice,
+    readOnly: true,
+  });
+  // A "Jump to" from another board filters the table to its project, so it brings the table back.
+  useEffect(() => {
+    if (!linkedEventId || !onBoard) return undefined;
+    const timer = window.setTimeout(() => setLayout("table"), 0);
+    return () => window.clearTimeout(timer);
+  }, [linkedEventId, onBoard, setLayout]);
+
   async function refresh() {
     clearNotice();
     if (await loadProjects({ notifyOnError: false })) showNotice(`${rule.title} projects refreshed.`);
@@ -149,16 +150,38 @@ export default function ProjectWorkflowModulePage({ moduleKey }) {
     <section className="flex h-full min-h-0 w-full min-w-0 flex-col">
       <ModulePageHeader
         title={rule.title}
-        tabs={tabs.map((tab) => ({ id: tab, label: tab, count: tabCounts[tab] || 0 }))}
+        // The Board stands every project under its status, so the status tabs step aside while it shows.
+        tabs={onBoard ? undefined : tabs.map((tab) => ({ id: tab, label: tab, count: tabCounts[tab] || 0 }))}
         tabValue={activeTab}
         onTabChange={setActiveTab}
         tabsAriaLabel={`${rule.title} project status filters`}
-        actions={<IconButton onClick={() => void refresh()} label={`Refresh ${rule.title} projects`}>↻</IconButton>}
+        actions={<>
+          <TableBoardSwitch value={layout} onChange={setLayout} />
+          <IconButton onClick={() => void refresh()} label={`Refresh ${rule.title} projects`}>↻</IconButton>
+        </>}
       />
       <FloatingNotice notice={notice} onClose={clearNotice} />
-      <div className="min-h-0 flex-1">
+      {onBoard ? <KanbanBoard
+        rows={moduleProjects}
+        columns={columns}
+        statusOf={projectBoardStatus}
+        card={PROJECT_BOARD_CARD}
+        columnAmount={money ? (rows) => moneyColumn(rows, money) : projectColumnAmount}
+        cardFlag={money ? (row) => moneyFlag(row, money) : undefined}
+        onOpen={setViewing}
+        cardActions={projectActions}
+        viewOnly="A project's status is changed on the Projects page."
+        loading={loading}
+        noun="projects"
+        ariaLabel={`${rule.title} board`}
+      /> : <div className="min-h-0 flex-1">
         <ProjectDataTable
           key={activeTab}
+          // Which board this is, so a row's ⋮ offers the other three rather than this one.
+          board={moduleKey}
+          // A "Navigate to" from another board: the table is filtered to the project, nothing opened.
+          revealEventId={linkedEventId}
+          onRevealed={clearLinkedProject}
           projects={tabProjects}
           density={density}
           loading={loading}
@@ -171,10 +194,13 @@ export default function ProjectWorkflowModulePage({ moduleKey }) {
           onNotice={showNotice}
           infoPanelTitle={rule.infoTitle}
           projectManagement
+          showActivity
           readOnly
           fillAvailableHeight
         />
-      </div>
+      </div>}
+      {/* The record a double-click on a row opens, the same panel with the same sections. */}
+      {onBoard && <ProjectRecordPanel project={viewing} initialTab={viewingTab} sections={projectManagementInfoSections} projectManagement showActivity onClose={() => { setViewing(null); setViewingTab(null); }} />}
     </section>
   );
 }

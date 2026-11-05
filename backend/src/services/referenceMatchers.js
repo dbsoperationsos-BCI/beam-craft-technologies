@@ -78,9 +78,13 @@ const BRANCH_ALIASES = new Map([
   ["vizag", "visakhapatnam ap"],
 ]);
 
+/** The strings a row's `aliases` column holds, folded, or none for a row that has no list. */
+const aliasesOf = (row) => (Array.isArray(row?.aliases) ? row.aliases : []).map(norm).filter(Boolean);
+
 function branchMatcher(branches) {
   const byName = new Map(branches.map((b) => [norm(b.name), b]));
-
+  // The branch code - `ERODE_TN` - which never changes, so a sheet may hold it and survive a rename.
+  const byCode = new Map(branches.filter((b) => b.code).map((b) => [norm(b.code), b]));
   const withoutState = new Map();
   const shared = new Set();
   for (const b of branches) {
@@ -94,10 +98,33 @@ function branchMatcher(branches) {
     withoutState.set(bare, b);
   }
 
+  /*
+   * The other spellings each branch answers to: its former names, written at the moment of a rename,
+   * and the studio's own short forms. A spelling that is some branch's *current* name is never an
+   * alias of another, and one that two branches both claim is nobody's - the register wins, and a
+   * guess is refused the way it is for two employees with one name.
+   */
+  const byAlias = new Map();
+  const sharedAlias = new Set();
+  for (const b of branches) {
+    for (const alias of aliasesOf(b)) {
+      // A former name answers in both the forms a current name does: whole, and without its state -
+      // "Erode TN" given up means a sheet still saying "Erode" is still this branch.
+      const words = alias.split(" ");
+      const forms = words.length >= 2 ? [alias, words.slice(0, -1).join(" ")] : [alias];
+      for (const form of forms) {
+        if (byName.has(form) || withoutState.has(form) || shared.has(form)) continue;
+        if (byAlias.has(form) && byAlias.get(form) !== b) sharedAlias.add(form);
+        byAlias.set(form, b);
+      }
+    }
+  }
+
   return (raw) => {
     const key = norm(raw);
     if (!key) return { kind: "blank" };
     if (byName.has(key)) return { kind: "exact", target: byName.get(key) };
+    if (byCode.has(key)) return { kind: "code", target: byCode.get(key) };
     if (shared.has(key)) return { kind: "ambiguous" };
     if (withoutState.has(key)) return { kind: "without-state", target: withoutState.get(key) };
     /*
@@ -107,6 +134,9 @@ function branchMatcher(branches) {
      */
     const aliased = BRANCH_ALIASES.get(key);
     if (aliased && byName.has(aliased)) return { kind: "alias", target: byName.get(aliased) };
+    // And the names on the rows themselves - former names and taught spellings - last of all.
+    if (sharedAlias.has(key)) return { kind: "ambiguous" };
+    if (byAlias.has(key)) return { kind: "alias", target: byAlias.get(key) };
     return { kind: "unmatched" };
   };
 }
@@ -147,6 +177,18 @@ function employeeMatcher(employees) {
   }
   const byCode = new Map(employees.map((e) => [norm(e.employeeId), e]));
   const byUsername = new Map(employees.filter((e) => e.loginUsername).map((e) => [norm(e.loginUsername), e]));
+  // Former full names, written at the moment of a rename. Checked after every current name, so a
+  // name somebody holds *now* is theirs and never resolves to whoever used to have it; and one two
+  // people both used to have is nobody's.
+  const byFormerName = new Map();
+  const sharedFormer = new Set();
+  for (const e of employees) {
+    for (const former of aliasesOf(e)) {
+      if (byName.has(former)) continue;
+      if (byFormerName.has(former) && byFormerName.get(former) !== e) sharedFormer.add(former);
+      byFormerName.set(former, e);
+    }
+  }
   return (raw) => {
     const key = norm(raw);
     if (!key) return { kind: "blank" };
@@ -154,6 +196,8 @@ function employeeMatcher(employees) {
     if (byUsername.has(key)) return { kind: "username", target: byUsername.get(key) };
     if (ambiguous.has(key)) return { kind: "ambiguous" };
     if (byName.has(key)) return { kind: "exact", target: byName.get(key) };
+    if (sharedFormer.has(key)) return { kind: "ambiguous" };
+    if (byFormerName.has(key)) return { kind: "former-name", target: byFormerName.get(key) };
     return { kind: "unmatched" };
   };
 }
@@ -180,9 +224,9 @@ function invalidate() { cached = null; }
 
 async function load() {
   const [branches, verticals, employees] = await Promise.all([
-    prisma.branch.findMany({ select: { id: true, name: true, code: true } }),
+    prisma.branch.findMany({ select: { id: true, name: true, code: true, aliases: true } }),
     prisma.vertical.findMany({ select: { id: true, name: true, code: true, documentCode: true, identifierCode: true } }),
-    prisma.employee.findMany({ select: { id: true, employeeId: true, employeeName: true, loginUsername: true } }),
+    prisma.employee.findMany({ select: { id: true, employeeId: true, employeeName: true, loginUsername: true, aliases: true } }),
   ]);
   const branch = branchMatcher(branches);
   const vertical = verticalMatcher(verticals);

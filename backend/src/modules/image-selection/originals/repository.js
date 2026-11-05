@@ -37,9 +37,11 @@ function createOriginalsRepository(client = prisma) {
       },
       orderBy: { createdAt: "asc" },
     }),
-    // The studio has taken the selected originals out. Dated now, and read by the dashboard
-    // against the latest submission, so a later submission reopens the project for download.
-    markSelectedDownloaded: (projectId, at = new Date()) => client.imageSelectionProject.update({ where: { id: projectId }, data: { selectedDownloadedAt: at }, select: { id: true, selectedDownloadedAt: true } }),
+    // The studio has taken the selected originals out: dated by the selection state that was copied,
+    // and read by the dashboard against the latest submission, so a later submission reopens the
+    // project for download. Never backwards - a stamp already newer stands.
+    // The same stamping the browser's run uses, on this repository's client: only the items covered.
+    markSelectedDownloaded: (projectId, at = new Date(), deliverableConfigIds = null) => require("../gallery/repository").stampSelectedDownloaded(client, projectId, at, deliverableConfigIds),
     findDeliverableConfig: (projectId, configId) => client.imageSelectionDeliverableConfig.findFirst({ where: { id: configId, imageSelectionProjectId: projectId }, select: { id: true, name: true, shootDeliverable: { select: { deliverableName: true } }, postProductionAllocation: { select: { serviceName: true } } } }),
   };
 }

@@ -48,7 +48,7 @@ async function frontend() {
 
 /** Every screen the menu lists, with the module heading it sits under. */
 const screens = (SIDEBAR_MODULES) => SIDEBAR_MODULES.flatMap((group) =>
-  (group.items || []).map((item) => ({ ...item, group: group.title, groupModule: group.module })));
+  (group.items || []).flatMap((item) => (item.children || [item]).map((screen) => ({ ...screen, group: group.title, groupModule: group.module }))));
 
 const key = (permission) => `${permission.module} / ${permission.feature}`;
 const CATALOGUE = new Set(PERMISSIONS.map(key));
@@ -61,10 +61,25 @@ const CATALOGUE = new Set(PERMISSIONS.map(key));
  * omission nobody notices.
  */
 const NO_MENU_ENTRY = new Map([
+  /*
+   * Deciding a payment request, not a screen of its own: Approve, Reject and the correction an
+   * approver makes before deciding, on the Payment Requests screen that `ACCOUNTS / Payment Request`
+   * opens. The two are deliberately separate - one person asking for money and allowing it was a
+   * single tick in Role Management - so the raiser holds Payment Request and may view and withdraw,
+   * and the approver holds this beside it. Granting it alone opens nothing, which is correct.
+   */
+  ["ACCOUNTS / Payment Request Approver", "Approve, Reject and Edit on the Payment Requests screen, which ACCOUNTS / Payment Request opens"],
   ["ASSET / Asset Administration", "Add Asset on the Asset Management screen, and POST /api/assets behind it"],
   ["ASSET / Asset Request Approval", "Accept and reject, on the Asset Management screen"],
+  ["CLIENT / Request Approval", "Review and Submit Decision on a raised request, on the Client Requests screen's Raised Requests view"],
   ["HRM / All Tasks", "The All Tasks tab of the Tasks screen"],
   ["HRM / Interview Select All", "The tick boxes on the Interview table, and the actions over a selection"],
+  ["HRM / Event Download", "Download on each card and in the viewer on the Events screen"],
+  ["HRM / Attendance Rules", "Changing the rules in Settings → Employee → Attendance Rules"],
+  ["HRM / All Requests", "Everybody's requests on HRM → Request's status tabs"],
+  ["HRM / Attendance WhatsApp Report", "The Attendance Register's WhatsApp button: linking the daily report's group, and sending it"],
+  ["HRM / Payroll After Payday", "Changing a Payroll -> Main Page month after its payable date (PUT/DELETE/POST on /api/hrm/payroll-register)"],
+  ["SALES / Block Period", "Block Period in a Calendar day's ⋮, the grey blocked periods on the Calendar, and /api/schedule/blocks"],
   /*
    * The tick boxes on every other table, rather than a screen of its own - the general case the two
    * `Select All` rows above are the special cases of. Granted beside whatever screens a role already
@@ -78,6 +93,9 @@ const NO_MENU_ENTRY = new Map([
    * nothing, which is correct - it is given *beside* `PROJECT / Projects`, never instead of it.
    */
   ["PROJECT / Show All Projects", "Project Management → Projects: which rows it lists, and whether its Edit, Start and Delete are offered"],
+  ["PROJECT / View All Feedback", "Project Management → Feedback: whether the list holds everybody's feedback or only the reader's own"],
+  ["PROJECT / Production Execution", "Project Management → Production → a shoot's Execution tab: whether a person named on the shoot runs its steps"],
+  ["SALES / Booking Edit", "The Edit action on a booking's row - Bookings & Converted and Projects - and the PATCH behind it"],
   ["SALES / CRM Lead Deletion", "The Delete action on the CRM board - the row menu and the selection button"],
   ["SALES / CRM Lead Select All", "The tick boxes on the Leads & Followups table, and the actions over a selection"],
   ["SALES / CRM Lead Import", "The Import entry in the Leads & Followups ⋮ menu"],
@@ -85,12 +103,15 @@ const NO_MENU_ENTRY = new Map([
   // inside the screen `IMAGE_SELECTION / AI Feature` opens.
   ["IMAGE_SELECTION / AI Face Management", "The People and Face Recognition tabs inside an AI event, and the match reviews and retries on them"],
   ["IMAGE_SELECTION / AI Event Default Settings", "AI Feature → More → Event Default Settings"],
-  ["ADMIN / User Management", "Administration, reached from the Employee Repository heading"],
-  ["ADMIN / Role Management", "Administration, reached from the Employee Repository heading"],
+  ["ADMIN / User Management", "Administration, reached from the User Management heading (the Employee Repository screen)"],
+  ["ADMIN / Role Management", "Administration, reached from the User Management heading (the Employee Repository screen)"],
+  ["ADMIN / User Activity Logs", "Administration → User Activity Logs, reached from the User Management heading (the Employee Repository screen)"],
   // The Settings overlay is reached from the top bar rather than from the menu, so none of its
-  // thirteen rail entries has a sidebar entry - and each is named here rather than the module
-  // being waved through, so a fourteenth is a line somebody writes rather than one nobody sees.
+  // rail entries has a sidebar entry - and each is named here rather than the module being waved
+  // through, so another one is a line somebody writes rather than one nobody sees.
   ["SETTINGS / User Settings", "Settings → User Settings"],
+  ["SETTINGS / WhatsApp Activity Log", "Settings → User Settings → WhatsApp Activity Log"],
+  ["SETTINGS / Automatic WhatsApp Message", "Settings → User Settings → Automatic WhatsApp Message → Photo Selection Submitted"],
   ["SETTINGS / Table Settings", "Settings → Overall → Table"],
   ["SETTINGS / Field Settings", "Settings → Overall → Fields"],
   ["SETTINGS / Project Settings", "Settings → Overall → Project"],
@@ -99,19 +120,32 @@ const NO_MENU_ENTRY = new Map([
   ["SETTINGS / Quotation Settings", "Settings → Quotation Settings"],
   ["SETTINGS / Employee Referral", "Settings → Employee Referral, the amount behind HRM's register"],
   ["SETTINGS / Message Template", "Settings → Message Template"],
+  ["SETTINGS / Template Settings", "Settings → Template Settings"],
+  ["SETTINGS / Wishes", "Settings → Wishes"],
   ["SETTINGS / Organization", "Settings → Organization, and Image Selection's own settings panel"],
   ["SETTINGS / Holidays", "Settings → Holidays"],
   ["SETTINGS / Login Slide", "Settings → Login Slide"],
+  ["SETTINGS / Client Page Images", "Settings → Project Management → Client page images"],
+  ["SETTINGS / Payment Reminder", "Settings → Project Management → Payment reminder"],
+  ["SETTINGS / Shoot Crew Notice", "Settings → Project Management → Shoot crew notice"],
   ["SETTINGS / Application Monitoring", "Settings → Application Monitoring, and the email health check"],
+  ["SETTINGS / Activity Log Purge", "Settings → Activity Log Purge"],
   ["IMAGE_SELECTION / Album Proofing QC", "The QC review panel inside the Album Proofing screen"],
   ["ADMIN / Branch Administration", "Opens no screen: it decides whose records every screen shows"],
-  // Three boards with pages and guards that the menu deliberately does not carry yet - they are not
-  // ready to be handed to the studio, and are reached by address until they are. Listed so the
-  // assertion above reads them as a decision rather than as three grants that lead nowhere; the
-  // entries move to the sidebar registry when the boards are ready, and these three lines go.
-  ["PROJECT / Pre Production", "Reached by address; not in the menu until the board is ready"],
-  ["PROJECT / Production", "Reached by address; not in the menu until the board is ready"],
+  // A board with a page and a guard that the menu deliberately does not carry yet - it is not ready
+  // to be handed to the studio, and is reached by address until it is. Listed so the assertion above
+  // reads it as a decision rather than as a grant that leads nowhere; the entry moves to the sidebar
+  // registry when the board is ready, and this line goes. Pre Production and Production made that
+  // move first.
   ["PROJECT / Post Production", "Reached by address; not in the menu until the board is ready"],
+  // Both live inside Employee Attendance's own section dropdown, asked for by name there - the
+  // same way `Rules` is a section of that page rather than a screen of its own.
+  ["HRM / Speak-up", "The Speak-up section of the Employee Attendance page"],
+  ["HRM / Speak-up Review", "The Speak-up Review section of the Employee Attendance page"],
+  ["HRM / Payroll Recovery", "The Recovery section of the Payroll page, and /api/hrm/payroll-recoveries behind it"],
+  ["HRM / Payroll Policy Breach", "The Policy Breach section of the Payroll page, and /api/hrm/payroll-policy-breaches behind it"],
+  ["HRM / Payroll Advance", "The Advance Salary section of the Payroll page, and /api/hrm/payroll-advances behind it"],
+  ["HRM / Payroll Register", "The Main Page section of the Payroll page and Settings → Payroll rules, and /api/hrm/payroll-register behind them"],
 ]);
 
 test("every screen in the menu is governed by a permission that exists", async () => {

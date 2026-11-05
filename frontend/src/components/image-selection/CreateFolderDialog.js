@@ -18,7 +18,7 @@ export default function CreateFolderDialog({ parentName, onClose, onCreate }) {
       <Button type="submit" variant="primary" disabled={saving}>{saving ? "Creating…" : "Create"}</Button>
     </>}
   >
-    <TextField label="Folder name" autoFocus maxLength={191} value={name} error={error} onChange={(event) => { setName(event.target.value); setError(""); }} />
+    <TextField label="Folder name" helperText="The name the new folder is listed under." autoFocus maxLength={191} value={name} error={error} onChange={(event) => { setName(event.target.value); setError(""); }} />
     {!error && <p className="mt-2 text-xs text-slate-500">Location: {parentName || "Project root"}</p>}
   </Dialog>;
 }

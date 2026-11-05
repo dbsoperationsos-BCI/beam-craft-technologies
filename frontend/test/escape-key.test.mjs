@@ -146,7 +146,7 @@ test("the overlays people spend the day in all close on Escape", () => {
     // the × and Cancel, not a quicker one that skips the question.
     ["Add Lead", /useEscapeKey\(requestCloseAddLead, showAddLead\)/],
     ["the lead popup", /useEscapeKey\(\(\) => onClose\?\.\(\), Boolean\(open && lead\)\)/],
-    ["Update Details", /useEscapeKey\(\(\) => setShowBulkUpdateDialog\(false\), showBulkUpdateDialog\)/],
+    ["Update Details", /useEscapeKey\(\(\) => setShowBulkUpdateDialog\(false\), showBulkUpdateDialog && !confirmVerticalMove\)/],
     ["the delete confirmation", /useEscapeKey\(\(\) => setPendingDeleteLead\(null\), Boolean\(pendingDeleteLead\) && !deletingLead\)/],
     ["the convert confirmation", /useEscapeKey\(\(\) => setConvertLead\(null\), Boolean\(convertLead\)\)/],
     ["the import dialog", /useEscapeKey\(\(\) => setShowImportDialog\(false\), showImportDialog && !isImporting\)/],
@@ -187,30 +187,19 @@ test("the panel stack that was invented locally is gone", () => {
 });
 
 /*
- * An overlay opened from another overlay: the calculator raised from the lead popup.
+ * An overlay opened from another overlay - the calculator raised from the lead popup - **was** the
+ * case a missing registration hides in, and it is worth keeping the finding even though the screen
+ * it was found on has gone.
  *
- * This is the case a missing registration hides in. `QuotationCalculatorModal` never joined the
- * stack, so with both on screen the top of it was still the *popup* - and a press meant for the
- * calculator closed the lead behind it while the calculator stayed. Escape appeared to work in
- * reverse rather than to be missing, which is why it was worth writing down.
+ * `QuotationCalculatorModal` never joined the stack, so with both on screen the top of it was still
+ * the *popup*: a press meant for the calculator closed the lead behind it while the calculator
+ * stayed. Escape appeared to work in reverse rather than to be missing, which is the shape of the
+ * bug this file exists to prevent. The fix was to register on the flag that shows it, not for the
+ * whole mount - a child's effect runs before its parent's, so registering unconditionally would have
+ * put it *under* the popup and pressed the same fault from the other side.
+ *
+ * The calculator is a **page** since 2026-10-08 (`/sales/quotation-calculator`), and a page is not
+ * dismissed by Escape - it is navigated away from - so there is nothing left here to assert about it.
+ * What the rule became is above: anything that opens registers, keyed on what shows it, and the one
+ * listener and the stack decide the order. The test below holds that for every overlay that remains.
  */
-test("an overlay opened from another one closes before the one that opened it", () => {
-  const board = read("components/sales/CRMPage.js");
-  const start = board.indexOf("function QuotationCalculatorModal(");
-  assert.notEqual(start, -1, "QuotationCalculatorModal was not found");
-  const body = board.slice(start, board.indexOf("\nfunction ", start + 1));
-
-  assert.match(body, /useEscapeKey\(\(\) => onClose\?\.\(\), open\)/, "the calculator must take its turn on the stack");
-  /*
-   * Keyed on `open`, and that is the ordering rather than a tidiness: the component stays mounted
-   * for as long as the popup is, so registering unconditionally would put it on the stack *below*
-   * the popup - a child's effect runs before its parent's - and Escape would close the wrong one
-   * again, from the other direction.
-   */
-  assert.ok(
-    !/useEscapeKey\(\(\) => onClose\?\.\(\)\)/.test(body),
-    "registering for the whole mount would put the calculator under the popup that opens it",
-  );
-  // It renders nothing until it is open, so there is no window where it is on the stack unseen.
-  assert.match(body, /if \(!open\) return null;/);
-});

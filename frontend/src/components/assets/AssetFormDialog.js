@@ -1,5 +1,6 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useMemo, useState } from "react";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
 import SchemaFormSection from "@/components/schema-form/SchemaFormSection";
@@ -27,12 +28,20 @@ function toDateInput(value) {
   return value ? String(value).slice(0, 10) : "";
 }
 
-function getInitialForm(asset, initialTopCategoryId, categories = [], prefill = null) {
+/*
+ * Subcategory "Others": a subcategory not on the list. Chosen, a box beside it asks what it is; the
+ * asset is saved under its Category, with the typed name as `subCategoryOther`.
+ */
+const OTHER_SUBCATEGORY = "__OTHER__";
+
+function getInitialForm(asset, categories = [], prefill = null) {
   const selectedCategory = categories.find((item) => item.id === asset?.categoryId) || asset?.category;
+  const other = Boolean(asset?.subCategoryOther);
   return {
     assetName: asset?.assetName || prefill?.assetName || "",
-    topCategoryId: rootCategory(selectedCategory)?.id || prefill?.topCategoryId || initialTopCategoryId || "",
-    categoryId: asset?.categoryId || prefill?.categoryId || "",
+    topCategoryId: rootCategory(selectedCategory)?.id || prefill?.topCategoryId || "",
+    categoryId: other ? OTHER_SUBCATEGORY : asset?.categoryId || prefill?.categoryId || "",
+    subCategoryOther: asset?.subCategoryOther || "",
     company: asset?.company || "",
     specification: asset?.specification || "",
     color: asset?.color || "",
@@ -88,8 +97,8 @@ const assetEntryTypeChoices = [
   { value: "BULK", label: "Bulk Assets" },
 ];
 
-export default function AssetFormDialog({ asset, request, initialTopCategoryId, categories, branches, employees, saving, error, onClose, onSave }) {
-  const [form, setForm] = useState(() => getInitialForm(asset, initialTopCategoryId, categories, prefillFromRequest(request, categories)));
+export default function AssetFormDialog({ asset, request, categories, branches, employees, saving, error, onClose, onSave }) {
+  const [form, setForm] = useState(() => getInitialForm(asset, categories, prefillFromRequest(request, categories)));
   const [errors, setErrors] = useState({});
   // Approving a request adds the one asset that was asked for, so the choice is not offered there.
   // Otherwise adding starts on Single and the radio at the top of the form switches it.
@@ -111,15 +120,21 @@ export default function AssetFormDialog({ asset, request, initialTopCategoryId, 
   }
 
   function changeCategory(value) {
-    setForm((current) => ({ ...current, topCategoryId: value, categoryId: "" }));
+    setForm((current) => ({ ...current, topCategoryId: value, categoryId: "", subCategoryOther: "" }));
     clearError("topCategoryId");
   }
 
   function changeAssetType(value) {
+    if (value === OTHER_SUBCATEGORY) {
+      setForm((current) => ({ ...current, categoryId: OTHER_SUBCATEGORY }));
+      clearError("categoryId");
+      return;
+    }
     const category = categories.find((item) => item.id === value);
     setForm((current) => ({
       ...current,
       categoryId: value,
+      subCategoryOther: "",
       topCategoryId: rootCategory(category)?.id || current.topCategoryId,
     }));
     clearError("categoryId", "topCategoryId");
@@ -131,6 +146,7 @@ export default function AssetFormDialog({ asset, request, initialTopCategoryId, 
       assetName: current.assetName.trim() ? "" : "Asset Name is required.",
       topCategoryId: current.topCategoryId ? "" : "Category is required.",
       categoryId: current.categoryId ? "" : "Subcategory is required.",
+      subCategoryOther: current.categoryId === OTHER_SUBCATEGORY && !current.subCategoryOther.trim() ? "Say which subcategory." : "",
       branchId: current.branchId ? "" : "Branch is required.",
     };
   }
@@ -155,7 +171,9 @@ export default function AssetFormDialog({ asset, request, initialTopCategoryId, 
     }
     const payload = {
       assetName: form.assetName,
-      categoryId: form.categoryId || null,
+      // "Others" files the asset under its Category, with the typed name beside it.
+      categoryId: form.categoryId === OTHER_SUBCATEGORY ? form.topCategoryId || null : form.categoryId || null,
+      subCategoryOther: form.categoryId === OTHER_SUBCATEGORY ? form.subCategoryOther.trim() : null,
       company: form.company || null,
       specification: form.specification || null,
       color: form.color || null,
@@ -227,12 +245,13 @@ export default function AssetFormDialog({ asset, request, initialTopCategoryId, 
     : bulkRowGap < 0 ? `Add details for ${-bulkRowGap} more asset${bulkRowGap === -1 ? "" : "s"}.` : "";
 
   return (
-    <SchemaFormPanel title={asset ? "Edit Asset" : request ? `Approve ${request.requestCode}` : "Add Asset"} description={request ? "Approving this request adds the asset that was asked for. Fill in the rest of its details." : "Store the most specific asset type for this record."} sections={sections} onClose={onClose} onSubmit={submit} error={error} footer={<><Button className="max-sm:flex-1" type="button" onClick={onClose} disabled={saving}>Cancel</Button><Button className="ml-auto max-sm:flex-1" variant="primary" disabled={saving || !bulkComplete}>{saving ? "Saving..." : entryType === "BULK" ? `Upload ${quantity || ""} Assets` : request ? "Approve & Add Asset" : asset ? "Update Asset" : "Save Asset"}</Button></>}>
+    <SchemaFormPanel title={asset ? "Edit Asset" : request ? `Approve ${request.requestCode}` : "Add Asset"} description={request ? "Approving this request adds the asset that was asked for. Fill in the rest of its details." : "Store the most specific asset type for this record."} sections={sections} onClose={onClose} onSubmit={submit} error={error} footer={<><Button className="max-sm:flex-1" type="button" onClick={onClose} disabled={saving}>Cancel</Button><Button className="max-sm:flex-1" variant="primary" disabled={saving || !bulkComplete}>{saving ? "Saving..." : entryType === "BULK" ? `Upload ${quantity || ""} Assets` : request ? "Approve & Add Asset" : asset ? "Update Asset" : "Save Asset"}</Button></>}>
       {/* One asset or many. Above the first heading because it is not one of the Basic Details —
           it is the question the whole form answers, and the fields below react as it changes. */}
       {!asset && !request && <div className="w-full max-w-[1040px] border-b border-slate-200 px-4 py-4 sm:px-6 sm:py-5">
         <RadioGroupField
           label="Entry Type"
+          helperText="Single adds one asset; Bulk adds several of the same kind at once."
           value={entryType}
           onChange={(value) => { setEntryType(value); setErrors({}); }}
           options={assetEntryTypeChoices}
@@ -242,44 +261,45 @@ export default function AssetFormDialog({ asset, request, initialTopCategoryId, 
       <SchemaFormSection id="basic-details" title="Basic Details">
         <div className="grid gap-4 md:grid-cols-2">
           {request && <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900 sm:text-sm md:col-span-2">Requested by {request.requestedByName || "—"}{request.remarks ? ` — "${request.remarks}"` : ""}</div>}
-          {!asset && entryType === "BULK" && <TextField required error={errors.quantity} label="Quantity" type="number" min="2" max="100" step="1" value={quantity} onChange={(event) => changeQuantity(event.target.value)} />}
-          <TextField label="Asset ID" value={asset?.assetCode || ""} placeholder="Generated on save" readOnly />
-          <TextField required error={errors.assetName} label="Asset Name" value={form.assetName} onChange={(event) => update("assetName", event.target.value)} />
-          <Dropdown searchable required error={errors.topCategoryId} label="Category" value={form.topCategoryId} onChange={changeCategory} placeholder="Select category" options={topCategories.map((item) => ({ value: item.id, label: item.name }))} />
-          <Dropdown searchable required error={errors.categoryId} label="Subcategory" value={form.categoryId} onChange={changeAssetType} placeholder="Select subcategory" options={(form.topCategoryId ? assetTypes : allAssetTypes).map((item) => ({ value: item.id, label: item.name }))} />
-          {(asset || entryType === "SINGLE") && <TextField label="Brand Name" value={form.company} onChange={(event) => update("company", event.target.value)} />}
-          {(asset || entryType === "SINGLE") && <TextField label="Color" value={form.color} onChange={(event) => update("color", event.target.value)} />}
-          {(asset || entryType === "SINGLE") && <TextField label="Serial Number" value={form.serialNumber} onChange={(event) => update("serialNumber", event.target.value)} />}
-          <Dropdown searchable required error={errors.branchId} label="Branch" value={form.branchId} onChange={(value) => update("branchId", value)} placeholder="Select branch" options={branches.map((item) => ({ value: String(item.id), label: branchLabel(item.name) }))} />
-          <Dropdown searchable label="Assigned Person" value={form.assignedPersonId} onChange={(value) => update("assignedPersonId", value)} placeholder="Unassigned" options={employees.map((item) => ({ value: String(item.id), label: `${item.employeeName} (${item.employeeId || "—"})` }))} />
-          <Dropdown searchable label="Manager" value={form.managerId} onChange={(value) => update("managerId", value)} placeholder="No manager" options={employees.map((item) => ({ value: String(item.id), label: `${item.employeeName} (${item.employeeId || "—"})` }))} />
-          <TextAreaField className="md:col-span-2" label="Specification" value={form.specification} onChange={(event) => update("specification", event.target.value)} />
-          <TextAreaField className="md:col-span-2" label="Remarks" value={form.remarks} onChange={(event) => update("remarks", event.target.value)} />
+          {!asset && entryType === "BULK" && <TextField required error={errors.quantity} label="Quantity" helperText="How many of this asset you are adding, between 2 and 100." type="number" min="2" max="100" step="1" value={quantity} onChange={(event) => changeQuantity(event.target.value)} />}
+          <TextField label="Asset ID" helperText="The studio's code for this asset, given automatically when it is saved." value={asset?.assetCode || ""} placeholder="Generated on save" readOnly />
+          <TextField required error={errors.assetName} label="Asset Name" helperText="What the studio calls this item, shown in the asset list and searches." value={form.assetName} onChange={(event) => update("assetName", event.target.value)} />
+          <Dropdown searchable required error={errors.topCategoryId} label="Category" helperText="The main group this asset belongs to; it narrows the subcategory list." value={form.topCategoryId} onChange={changeCategory} placeholder="Select category" options={topCategories.map((item) => ({ value: item.id, label: item.name }))} />
+          <Dropdown searchable required error={errors.categoryId} label="Subcategory" helperText="The most specific type of asset; pick Others to type a new one." value={form.categoryId} onChange={changeAssetType} placeholder="Select subcategory" sorted={false} options={[...(form.topCategoryId ? assetTypes : allAssetTypes).map((item) => ({ value: item.id, label: item.name })).sort((a, b) => a.label.localeCompare(b.label)), ...(form.topCategoryId ? [{ value: OTHER_SUBCATEGORY, label: "Others" }] : [])]} />
+          {form.categoryId === OTHER_SUBCATEGORY && <TextField required error={errors.subCategoryOther} label="Subcategory (Others)" helperText="The asset type, when none of the listed subcategories fits." placeholder="Type the subcategory" maxLength={191} value={form.subCategoryOther} onChange={(event) => update("subCategoryOther", event.target.value)} />}
+          {(asset || entryType === "SINGLE") && <TextField label="Brand Name" helperText="The maker of the item, for example Canon or Sony." value={form.company} onChange={(event) => update("company", event.target.value)} />}
+          {(asset || entryType === "SINGLE") && <TextField label="Color" helperText="The item's colour, which helps tell matching assets apart." value={form.color} onChange={(event) => update("color", event.target.value)} />}
+          {(asset || entryType === "SINGLE") && <TextField label="Serial Number" helperText="The number printed on the item, used to identify it for warranty and insurance." value={form.serialNumber} onChange={(event) => update("serialNumber", event.target.value)} />}
+          <Dropdown searchable required error={errors.branchId} label="Branch" helperText="The branch that holds this asset; it decides who can see it." value={form.branchId} onChange={(value) => update("branchId", value)} placeholder="Select branch" options={branches.map((item) => ({ value: String(item.id), label: branchLabel(item.name) }))} />
+          <Dropdown searchable label="Assigned Person" helperText="The employee currently using this asset; leave empty if nobody has it." value={form.assignedPersonId} onChange={(value) => update("assignedPersonId", value)} placeholder="Unassigned" options={employees.map((item) => ({ value: String(item.id), label: `${item.employeeName} (${item.employeeId || "—"})`, avatar: avatarOf(item) }))} />
+          <Dropdown searchable label="Manager" helperText="The employee responsible for looking after this asset." value={form.managerId} onChange={(value) => update("managerId", value)} placeholder="No manager" options={employees.map((item) => ({ value: String(item.id), label: `${item.employeeName} (${item.employeeId || "—"})`, avatar: avatarOf(item) }))} />
+          <TextAreaField className="md:col-span-2" label="Specification" helperText="Model details such as lens range, storage size or resolution." value={form.specification} onChange={(event) => update("specification", event.target.value)} />
+          <TextAreaField className="md:col-span-2" label="Remarks" helperText="Any other note about this asset for whoever handles it next." value={form.remarks} onChange={(event) => update("remarks", event.target.value)} />
         </div>
         {!asset && entryType === "BULK" && <div className="mt-6 border-t border-slate-200 pt-5">
           <div className="mb-4 flex items-center justify-between gap-3"><div><h3 className="text-sm font-medium text-slate-800">Individual asset details</h3><p className="mt-1 text-xs text-slate-500">{bulkItems.length} of {quantity || 0} assets added</p></div><Button type="button" size="sm" variant="secondary" onClick={addBulkItem} disabled={!Number.isInteger(Number(quantity)) || Number(quantity) < 2 || bulkItems.length >= Number(quantity)}> Add asset</Button></div>
           {(bulkRowMessage || errors.bulkItems) && <p role="alert" className="mb-3 text-xs text-red-600">{bulkRowMessage || errors.bulkItems}</p>}
-          <div className="space-y-4">{bulkItems.map((item, index) => <div key={index} className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 sm:p-4"><div className="mb-3 flex items-center justify-between"><h4 className="text-xs font-semibold text-slate-700 sm:text-sm">Asset {index + 1}</h4>{bulkItems.length > 1 && <IconButton label={`Remove asset ${index + 1}`} size="sm" className="text-red-600 hover:bg-red-50" onClick={() => removeBulkItem(index)}><DeleteOutlineIcon sx={{ fontSize: 19 }} /></IconButton>}</div><div className="grid gap-4 md:grid-cols-3"><TextField required error={errors[`serialNumber-${index}`]} label="Serial Number" value={item.serialNumber} onChange={(event) => updateBulkItem(index, "serialNumber", event.target.value)} /><TextField required error={errors[`company-${index}`]} label="Brand Name" value={item.company} onChange={(event) => updateBulkItem(index, "company", event.target.value)} /><TextField required error={errors[`color-${index}`]} label="Color" value={item.color} onChange={(event) => updateBulkItem(index, "color", event.target.value)} /></div></div>)}</div>
+          <div className="space-y-4">{bulkItems.map((item, index) => <div key={index} className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 sm:p-4"><div className="mb-3 flex items-center justify-between"><h4 className="text-xs font-semibold text-slate-700 sm:text-sm">Asset {index + 1}</h4>{bulkItems.length > 1 && <IconButton label={`Remove asset ${index + 1}`} size="sm" className="text-red-600 hover:bg-red-50" onClick={() => removeBulkItem(index)}><DeleteOutlineIcon sx={{ fontSize: 19 }} /></IconButton>}</div><div className="grid gap-4 md:grid-cols-3"><TextField required error={errors[`serialNumber-${index}`]} label="Serial Number" helperText="The number printed on this item, to tell it apart from the others." value={item.serialNumber} onChange={(event) => updateBulkItem(index, "serialNumber", event.target.value)} /><TextField required error={errors[`company-${index}`]} label="Brand Name" helperText="The maker of this item, for example Canon or Sony." value={item.company} onChange={(event) => updateBulkItem(index, "company", event.target.value)} /><TextField required error={errors[`color-${index}`]} label="Color" helperText="This item's colour, which helps tell matching assets apart." value={item.color} onChange={(event) => updateBulkItem(index, "color", event.target.value)} /></div></div>)}</div>
         </div>}
       </SchemaFormSection>
       <SchemaFormSection id="inspection-purchase" title="Inspection & Purchase">
         <div className="grid gap-4 md:grid-cols-2">
-          <DateField label="Purchase Date" value={form.purchaseDate} onChange={(value) => update("purchaseDate", value)} restriction="future" />
-          <TextField label="Inspection Period (months)" type="number" min="0" max="600" step="1" value={form.inspectionPeriodMonths} onChange={(event) => update("inspectionPeriodMonths", event.target.value)} />
-          <DateField label="Last Inspected Date" value={form.lastInspectedDate} onChange={(value) => update("lastInspectedDate", value)} restriction="future" />
-          <TextField label="Purchase Price" type="number" min="0" step="0.01" value={form.purchasePrice} onChange={(event) => update("purchasePrice", event.target.value)} />
-          <TextField label="Purchased From" value={form.purchasedFrom} onChange={(event) => update("purchasedFrom", event.target.value)} />
-          <TextField label="Invoice Number" value={form.invoiceNumber} onChange={(event) => update("invoiceNumber", event.target.value)} />
-          <TextField label="Warranty in Months" type="number" min="0" value={form.warrantyMonths} onChange={(event) => update("warrantyMonths", event.target.value)} />
+          <DateField label="Purchase Date" helperText="When the studio bought it; also the start for the first inspection date." value={form.purchaseDate} onChange={(value) => update("purchaseDate", value)} restriction="future" />
+          <TextField label="Inspection Period (months)" helperText="How often it should be inspected; sets the next inspection date." type="number" min="0" max="600" step="1" value={form.inspectionPeriodMonths} onChange={(event) => update("inspectionPeriodMonths", event.target.value)} />
+          <DateField label="Last Inspected Date" helperText="When it was last checked; the next inspection is counted from here." value={form.lastInspectedDate} onChange={(value) => update("lastInspectedDate", value)} restriction="future" />
+          <TextField label="Purchase Price" helperText="What the studio paid for it, in rupees." type="number" min="0" step="0.01" value={form.purchasePrice} onChange={(event) => update("purchasePrice", event.target.value)} />
+          <TextField label="Purchased From" helperText="The shop or vendor it was bought from." value={form.purchasedFrom} onChange={(event) => update("purchasedFrom", event.target.value)} />
+          <TextField label="Invoice Number" helperText="The number on the purchase bill, for warranty and insurance claims." value={form.invoiceNumber} onChange={(event) => update("invoiceNumber", event.target.value)} />
+          <TextField label="Warranty in Months" helperText="How long the maker's warranty lasts from the purchase date." type="number" min="0" value={form.warrantyMonths} onChange={(event) => update("warrantyMonths", event.target.value)} />
         </div>
       </SchemaFormSection>
       <SchemaFormSection id="insurance-attachments" title="Insurance & Attachments">
         <div className="grid gap-4 md:grid-cols-2">
-          <TextAreaField label="Insurance Details" value={form.insuranceDetails} onChange={(event) => update("insuranceDetails", event.target.value)} />
-          <DateField label="Insurance Expiry" value={form.insuranceExpiry} onChange={(value) => update("insuranceExpiry", value)} restriction="past" />
-          <ImageUploadField label="Primary Image" value={form.photoData} onChange={(value) => update("photoData", value)} />
-          <FileUploadField label="Images" image value={form.images} onChange={(value) => update("images", value)} accept=".avif,.gif,.jpeg,.jpg,.png,.webp" />
-          <FileUploadField className="md:col-span-2" label="Documents" value={form.documents} onChange={(value) => update("documents", value)} accept=".pdf,.doc,.docx,.xls,.xlsx,.txt" />
+          <TextAreaField label="Insurance Details" helperText="The insurer, policy number and cover for this asset, if insured." value={form.insuranceDetails} onChange={(event) => update("insuranceDetails", event.target.value)} />
+          <DateField label="Insurance Expiry" helperText="The date the insurance policy for this asset ends." value={form.insuranceExpiry} onChange={(value) => update("insuranceExpiry", value)} restriction="past" />
+          <ImageUploadField label="Primary Image" helperText="The main photo shown for this asset in the list and details." value={form.photoData} onChange={(value) => update("photoData", value)} />
+          <FileUploadField label="Images" helperText="More photos of the asset, up to ten, for example its condition." image value={form.images} onChange={(value) => update("images", value)} accept=".avif,.gif,.jpeg,.jpg,.png,.webp" />
+          <FileUploadField className="md:col-span-2" label="Documents" helperText="Bills, warranty cards or manuals for this asset, up to ten files." value={form.documents} onChange={(value) => update("documents", value)} accept=".pdf,.doc,.docx,.xls,.xlsx,.txt" />
         </div>
       </SchemaFormSection>
     </SchemaFormPanel>

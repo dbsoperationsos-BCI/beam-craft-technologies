@@ -1,10 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import DataTableShell from "./DataTableShell";
 import OptionsMenu from "@/components/ui/OptionsMenu";
+import { usePermissions } from "@/components/auth/PermissionsProvider";
+import { boardJumpItems } from "@/lib/boardJumps.mjs";
 import DataTableInfoPanel from "./DataTableInfoPanel";
 import ProjectPaymentsView from "@/components/project-management/ProjectPaymentsView";
+import ProjectStageView from "@/components/project-management/ProjectStageView";
+import ProjectActivityTab from "@/components/project-management/ProjectActivityTab";
+import ProjectLinesTab from "@/components/project-management/ProjectLinesTab";
+import { getProjectActivity } from "@/services/project-management/project-workflow.service";
 import RecordViewPanel from "./RecordViewPanel";
 import TableFooter from "./TableFooter";
 import DataTable from "./DataTable";
@@ -13,12 +20,17 @@ import { commonProjectInfoSections, productionProjectInfoSections, projectManage
 import { formatSessionTiming } from "@/components/project-management/AddShootDialog";
 import { canDuplicateProject } from "@/components/sales/projectBooking";
 import { verticalCode } from "@/components/sales/whatsappGroupNameUtils";
+// The one name every screen gives a deliverable line - its brand and size where it was sold as a variant.
+import { deliverableRowLabel } from "@/lib/deliverableBrands.mjs";
+import ProjectHoldBadge from "@/components/project-management/ProjectHoldBadge";
+import { holdLabel, paymentsDueLabel } from "@/lib/projectHolds.mjs";
 
+// `shootLabel`: the heading where the column also carries each shoot's value (Projects, ▸).
 const projectManagementColumns = [
-  { id: "projectStatus", label: "Project Status" },
-  { id: "eventId", label: "Event ID" },
+  { id: "projectStatus", label: "Project Status", shootLabel: "Project Status / Shoot Type" },
+  { id: "eventId", label: "Event ID", shootLabel: "Event ID / Shoot ID" },
   { id: "enquiryId", label: "Enquiry ID" },
-  { id: "whatsappGroupName", label: "WhatsApp Group Name" },
+  { id: "whatsappGroupName", label: "WhatsApp Group Name", shootLabel: "WhatsApp Group Name / Shoot" },
   { id: "clientMainNumber", label: "Client Main Number" },
   { id: "vertical", label: "Vertical" },
   { id: "waBranch", label: "W/A Branch" },
@@ -38,7 +50,7 @@ const projectManagementColumns = [
   { id: "salesProductionRemarks", label: "Sales Production Remarks" },
   { id: "salesPostProductionRemarks", label: "Sales Post Production Remarks" },
   { id: "mainEventDateKnown", label: "Main Event Date Known" },
-  { id: "mainEventDate", label: "Main Event Date", type: "date" },
+  { id: "mainEventDate", label: "Main Event Date", type: "date", shootLabel: "Main Event Date / Shoot Date" },
   { id: "initialConvertedValue", label: "Initial Converted Value", type: "number" },
   { id: "crmName", label: "CRM Name" },
   { id: "createdAt", label: "Created At", type: "date" },
@@ -124,7 +136,44 @@ function projectForInfo(project) {
 }
 
 
+/*
+ * A project row opens (▸) to its shoots on Projects, one row each. A shoot row is told apart by having
+ * a Shoot ID and no shoots of its own; it shows its own value in the columns that describe a shoot -
+ * its ID and name, type, date and time, place, its services and deliverables - and is blank in the
+ * rest.
+ */
+const isShootRow = (row) => Boolean(row?.shootId) && !Array.isArray(row?.shoots);
+
+function shootDisplayValue(shoot, columnId) {
+  const services = (shoot.postProductionAllocations || []).map((item) => item.serviceName).filter(Boolean);
+  const deliverables = (shoot.deliverables || []).map((item) => deliverableRowLabel(item)).filter(Boolean);
+  const name = `${shoot.isMainEvent ? "★ " : ""}${shoot.shoot || "Shoot"}`;
+  const time = [shoot.eventStartTime, shoot.eventEndTime].filter(Boolean).join(" – ");
+  const values = {
+    projectStatus: shoot.shootType,
+    eventId: shoot.shootId,
+    whatsappGroupName: [name, shoot.shootPlace].filter(Boolean).join(" · "),
+    mainEventDate: [formatDate(shoot.dateCreated), time].filter((value) => value && value !== "—").join(" · "),
+    shootCount: "",
+    shootIds: shoot.shootId,
+    shootNames: name,
+    shootDates: formatDate(shoot.dateCreated),
+    shootPlaces: shoot.shootPlace,
+    shootDistricts: shoot.district,
+    shootStates: shoot.state,
+    sessionTimings: formatSessionTiming(shoot),
+    productionServiceCount: services.length,
+    productionServices: services.join(", "),
+    postProductionDeliverableCount: deliverables.length,
+    postProductionDeliverables: deliverables.join(", "),
+  };
+  if (!Object.prototype.hasOwnProperty.call(values, columnId)) return "";
+  const value = values[columnId];
+  return value === null || value === undefined || value === "" ? "—" : value;
+}
+
 function displayValue(project, columnId) {
+  if (isShootRow(project)) return shootDisplayValue(project, columnId);
   const shoots = Array.isArray(project.shoots) ? project.shoots : [];
   const services = shoots.flatMap((shoot) => (shoot.postProductionAllocations || []).map((item) => ({ ...item, shoot })));
   const postProductionDeliverables = shoots.flatMap((shoot) => (shoot.deliverables || []).map((item) => ({ ...item, shoot })));
@@ -152,6 +201,8 @@ function displayValue(project, columnId) {
    * *about* the project, so it reads the short code the studio uses. `displayValue` feeds the cell,
    * the filter and the CSV alike, so all three say the same word.
    */
+  // A project held in one of its departments says where, beside its own status: "WIP - Pre & Production · On Hold (Pre-Production)".
+  if (columnId === "projectStatus") return [project.projectStatus || "—", project.holds?.length ? holdLabel(project.projectStatus, project.holds) : null, paymentsDueLabel(project.projectStatus, project.paymentsDue)].filter(Boolean).join(" · ");
   if (columnId === "vertical") return verticalCode(project.vertical) || "—";
   if (columnId === "mainEventDate" || columnId === "createdAt" || columnId === "updatedAt") return formatDate(project[columnId]);
   if (columnId === "mainEventDateKnown") return project.mainEventDateKnown ? "Yes" : "No";
@@ -169,7 +220,7 @@ function displayValue(project, columnId) {
   if (columnId === "productionServices") return join(services.map((item) => `${item.shoot.shootId || "—"}: ${item.serviceName}`));
   if (columnId === "productionServiceDetails") return join(services.map((item) => item.serviceDetails ? `${item.shoot.shootId || "—"}: ${item.serviceDetails}` : null));
   if (columnId === "postProductionDeliverableCount") return postProductionDeliverables.length;
-  if (columnId === "postProductionDeliverables") return join(postProductionDeliverables.map((item) => `${item.shoot.shootId || "—"}: ${item.deliverableName}`));
+  if (columnId === "postProductionDeliverables") return join(postProductionDeliverables.map((item) => `${item.shoot.shootId || "—"}: ${deliverableRowLabel(item)}`));
   if (columnId === "postProductionDeliverableQuantities") return join(postProductionDeliverables.map((item) => `${item.shoot.shootId || "—"}: ${item.quantity}`));
   return project[columnId] ?? "—";
 }
@@ -193,8 +244,41 @@ function sortValue(project, column) {
  * came from, so the two are asked for separately, and the half whose handlers a screen does not
  * pass is simply absent from the menu.
  */
-function ProjectRowActions({ project, onView, onNotice, onEditSaleDetails, onStartProject, onEditProject, onDelete, onDuplicate, onAssignProduction, readOnly, canEditSale, canPlan, canEditStarted, canEditProject, canDeleteProject }) {
+/**
+ * Which form a project's Edit opens for this viewer - "plan" (Start / Edit, the project's own form) for
+ * whoever may plan it, else "sale" (Edit Sale Details) for whoever may change the booking, else null.
+ * The project's row and each of its shoots' rows ask this one question, so the two always agree.
+ */
+function projectEditRoute(project, { readOnly, canEditSale, canPlan, canEditStarted, canEditProject, onEditSaleDetails, onStartProject, onEditProject }) {
+  if (readOnly) return null;
   const canStartProject = project.projectStatus === "Yet to Start";
+  const mayPlan = Boolean(onStartProject && onEditProject) && (canPlan ?? true) && (canStartProject || !canEditStarted || canEditStarted(project));
+  if (mayPlan) return "plan";
+  const mayEditRecord = Boolean(canEditSale || canPlan) && typeof canEditProject === "function" && canEditProject(project);
+  return mayEditRecord && onEditSaleDetails ? "sale" : null;
+}
+
+/**
+ * A shoot's row under its project: Open project, and Edit - the project's form, opened on this shoot -
+ * wherever the project's own Edit is offered to this viewer (`route`).
+ */
+function ShootRowActions({ shoot, project, onOpenProject, onEditShoot, route }) {
+  return <OptionsMenu ariaLabel={`Actions for ${shoot.shootId}`} items={[
+    { label: "Open project", onSelect: () => onOpenProject(project) },
+    ...(route && onEditShoot ? [{ label: "Edit", onSelect: () => onEditShoot(project, shoot, route) }] : []),
+  ]} />;
+}
+
+/**
+ * A project row's ⋮, as an item list - the one source for the table's ⋮ (`ProjectRowActions`) and
+ * for a Board card's (`useProjectRowActions`), so the two can never offer different things. `can`
+ * is the viewer's `hasPermission`.
+ */
+export function projectRowActionItems(project, { onView, onViewActivity, onNotice, onEditSaleDetails, onStartProject, onEditProject, onUpdateStatus, onSendBack, onDelete, onDuplicate, onAssignProduction, onJump, board, readOnly, canEditSale, canPlan, canEditStarted, canEditProject, canDeleteProject, can }) {
+  const canStartProject = project.projectStatus === "Yet to Start";
+  // Offered on every variant of this menu, including the view-only one: looking at the project on
+  // another board is not an edit, and somebody who may only read is exactly who wants it.
+  const jumpItems = boardJumpItems({ from: board, boards: project.boards, eventId: project.eventId, can, onJump });
   /*
    * Each half stands on its own handlers rather than on all four arriving together. Sales Manager
    * offers the sale's actions and nothing else - starting a project is PROJECT / Projects' - and
@@ -264,7 +348,11 @@ function ProjectRowActions({ project, onView, onNotice, onEditSaleDetails, onSta
   const items = onAssignProduction && !readOnly ? [
     { label: "View Project Details", onSelect: () => onNotice("Project details are available in the Info Panel.") },
     { label: "Assign", onSelect: () => onAssignProduction(project) },
-  ] : !mayEditSale && !mayPlan && !mayEditRecord && !mayDeleteRecord ? [{ label: "View Project Details", onSelect: () => onNotice("Project details are available in the Info Panel.") }] : [
+    ...jumpItems,
+  ] : !mayEditSale && !mayPlan && !mayEditRecord && !mayDeleteRecord ? [
+    { label: "View Project Details", onSelect: () => onNotice("Project details are available in the Info Panel.") },
+    ...jumpItems,
+  ] : [
     /*
      * One entry, whatever the viewer holds.
      *
@@ -305,15 +393,43 @@ function ProjectRowActions({ project, onView, onNotice, onEditSaleDetails, onSta
       ? [{ label: "Edit Sale Details", onSelect: () => onEditSaleDetails(project) }]
       : []),
     ...(mayDuplicate ? [{ label: "Duplicate", onSelect: () => onDuplicate(project) }] : []),
+    // One project's status, as Update does over the ticked ones - passed only to whoever may plan projects.
+    ...(!readOnly && onUpdateStatus ? [{ label: "Update status", onSelect: () => onUpdateStatus(project) }] : []),
+    // Back to Bookings & Converted to be corrected - offered only where the page passes it (Projects,
+    // to whoever may write PROJECT / Projects) and never on one already sent back.
+    ...(!readOnly && onSendBack && !project.sentBackAt ? [{ label: "Send Back", onSelect: () => onSendBack(project) }] : []),
     // `mayDeleteRecord`, never `mayEditRecord`: a coordinator staffed on the project gets the Edit
     // above and no Delete here, which is the whole difference between the two rules.
     ...(mayDeleteRecord && onDelete ? [{ label: "Delete", tone: "danger", onSelect: () => onDelete(project) }] : []),
+    // The same project on the other boards - offered where the viewer may open one and the project
+    // is actually on it (`lib/boardJumps.mjs`).
+    ...jumpItems,
   ];
   // Reading the record leads the menu, and replaces the "look in the Info Panel" note the two
   // read-only branches offered: on a touch screen this is the only way to open the record view,
   // because a double-click there is the browser's zoom gesture.
-  const withView = onView ? [{ label: "View", onSelect: () => onView(project) }, ...items.filter((item) => item.label !== "View Project Details")] : items;
-  return <OptionsMenu ariaLabel={`Actions for ${project.eventId || project.enquiryId}`} items={withView} />;
+  // "View activity" opens the same record straight on its Activity tab - offered only where the
+  // screen's record has one.
+  return onView ? [
+    { label: "View", onSelect: () => onView(project) },
+    ...(onViewActivity ? [{ label: "View activity", onSelect: () => onViewActivity(project) }] : []),
+    ...items.filter((item) => item.label !== "View Project Details"),
+  ] : items;
+}
+
+function ProjectRowActions({ project, ...options }) {
+  const { hasPermission } = usePermissions();
+  return <OptionsMenu ariaLabel={`Actions for ${project.eventId || project.enquiryId}`} items={projectRowActionItems(project, { ...options, can: hasPermission })} />;
+}
+
+/**
+ * `cardActions` for a Board of projects: the same items the table's ⋮ offers, from the same props the
+ * page hands `ProjectDataTable`, plus the page's own `onView` / `onViewActivity` for its record panel.
+ */
+export function useProjectRowActions(options) {
+  const { hasPermission } = usePermissions();
+  const router = useRouter();
+  return (project) => projectRowActionItems(project, { ...options, can: hasPermission, onJump: (href) => router.push(href) });
 }
 
 /**
@@ -328,24 +444,44 @@ function ProjectRowActions({ project, onView, onNotice, onEditSaleDetails, onSta
  * this is: the production boards, the sales register and Project Management each read the same
  * project through their own list of fields.
  */
-export function ProjectRecordPanel({ project, sections, projectManagement = false, showPayments = false, onClose, zIndexClassName }) {
+export function ProjectRecordPanel({ project, sections, projectManagement = false, showPayments = false, showStatus = false, showOverallStatus = false, showActivity = showStatus, initialTab, onClose, zIndexClassName }) {
   /*
    * Payments is asked for by name rather than following `projectManagement`: the production boards
    * pass that flag too, and their viewers hold Pre / Production / Post rather than the Projects
    * permission the payments answer to.
    */
-  const extraTabs = useMemo(() => (showPayments && project
-    ? [{ id: "payments", label: "Payments", render: () => <ProjectPaymentsView projectId={project.id} readOnly /> }]
-    : []), [showPayments, project]);
+  /*
+   * Status is asked for by name too. `showStatus` is the Projects page's pair - Overall Status and the
+   * Activity of what was done from Projects; `showOverallStatus` the Overall Status alone, read-only,
+   * for the other screens that list a project (Bookings & Converted). Both read under the register's
+   * readers. `showActivity` (on with `showStatus`) is the project's whole flow, enquiry to feedback,
+   * whose server leaves out each stage the viewer's role cannot open.
+   */
+  const projectId = project?.id;
+  const loadActivity = useCallback(() => getProjectActivity(projectId), [projectId]);
+  const extraTabs = useMemo(() => (project ? [
+    // The project's services and deliverables, shoot by shoot, as tables to edit or remove from -
+    // whether the team added them or they were approved from the client's requests.
+    ...(projectManagement ? [{ id: "lines", label: "Services & Deliverables", render: () => <ProjectLinesTab projectId={project.id} /> }] : []),
+    ...(showPayments ? [{ id: "payments", label: "Payments", render: () => <ProjectPaymentsView projectId={project.id} readOnly /> }] : []),
+    ...(showStatus || showOverallStatus ? [{ id: "status", label: "Overall Status", render: () => <ProjectStageView projectId={project.id} /> }] : []),
+    ...(showActivity ? [
+      // Everything that has happened to it, enquiry to feedback, newest first.
+      { id: "activity", label: "Activity", render: () => <ProjectActivityTab load={loadActivity} /> },
+    ] : []),
+  ] : []), [projectManagement, showPayments, showStatus, showOverallStatus, showActivity, project, loadActivity]);
 
   if (!project) return null;
 
   return <RecordViewPanel
     title={projectHeading(project)}
+    titleAddon={<ProjectHoldBadge status={project.projectStatus} holds={project.holds} paymentsDue={project.paymentsDue} />}
     description={project.eventId || undefined}
     entity={{ ...projectForInfo(project), ...(projectManagement ? { startProjectStatus: "Not started" } : {}) }}
     sections={sections}
     extraTabs={extraTabs}
+    initialTab={initialTab}
+    detailsLabel="Identification"
     formatters={projectInfoFormatters}
     sidebarAriaLabel="Project sections"
     // Named only where this opens on top of something - CRM's Converted History opens it from
@@ -357,7 +493,12 @@ export function ProjectRecordPanel({ project, sections, projectManagement = fals
 
 export default function ProjectDataTable({
   openEventId = "",
-  onCloseOpenedEvent, projects, loading, lastUpdated, title, fileName, emptyMessage, noMatchMessage, loadingMessage, onNotice, onEditSaleDetails, onStartProject, onEditProject, onDelete, onDuplicate, onAssignProduction, canEditSale, canPlan, canEditStarted, canEditProject, canDeleteProject, infoPanelTitle = "Sales Details", projectManagement = false, showPayments = false, readOnly = false, fillAvailableHeight = false, tableVariant, density, onToggleCompact,
+  // Which of the four boards this table *is*, so the row menu offers the other three.
+  board = "projects",
+  // The project a "Navigate to" named, by Event ID, and the page's way of hearing it has landed.
+  revealEventId = "",
+  onRevealed,
+  onCloseOpenedEvent, projects, loading, lastUpdated, title, fileName, emptyMessage, noMatchMessage, loadingMessage, onNotice, onEditSaleDetails, onStartProject, onEditProject, onEditShoot, onUpdateStatus, onSendBack, onDelete, onDuplicate, onAssignProduction, canEditSale, canPlan, canEditStarted, canEditProject, canDeleteProject, infoPanelTitle = "Sales Details", projectManagement = false, showShoots, showOverallStatus = false, showPayments = false, showStatus = false, showActivity = showStatus, readOnly = false, fillAvailableHeight = false, tableVariant, density, onToggleCompact,
   /*
    * Passed straight through to the shared table, which owns the Import item and its dialog.
    *
@@ -380,6 +521,10 @@ export default function ProjectDataTable({
   // this table used to open that edit flow straight from the double-click, which put a live form on
   // screen for a gesture people make while trying to select a row.
   const [viewingProject, setViewingProject] = useState(null);
+  // The tab the record opens on: its Activity for the row menu's "View activity", else its details.
+  const [viewingTab, setViewingTab] = useState(null);
+  const viewActivity = useCallback((project) => { setViewingTab("activity"); setViewingProject(project); }, []);
+  const viewDetails = useCallback((project) => { setViewingTab(null); setViewingProject(project); }, []);
 
   /*
    * A project named from outside this table - the calendar links a shoot or a main event straight
@@ -403,22 +548,52 @@ export default function ProjectDataTable({
     const timer = window.setTimeout(() => setViewingProject(match), 0);
     return () => window.clearTimeout(timer);
   }, [openEventId, projects]);
+  /*
+   * A project the page was linked to - a "Navigate to" from another board - **filters the board to
+   * it**: the Event ID column takes its id, so the project is the row on screen and the filter box
+   * says why. Nothing is opened: arriving answers "here it is, on this board", and a panel would
+   * answer a question nobody asked.
+   *
+   * The event id arrives as a prop rather than being read from the address here, because the page
+   * owns the tabs: a project on a tab the board is not showing is not in `projects` at all, so the
+   * page comes to All first (`useLinkedProject`).
+   */
+  const [landedOn, setLandedOn] = useState("");
+  useEffect(() => {
+    if (!revealEventId || landedOn === revealEventId) return undefined;
+    const timer = window.setTimeout(() => { setLandedOn(revealEventId); onRevealed?.(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [landedOn, onRevealed, revealEventId]);
+
   const [infoPanelState, setInfoPanelState] = useState("collapsed");
   const [tableStats, setTableStats] = useState({ total: projects.length });
   const tableColumns = tableVariant === "production" ? productionProjectColumns : projectManagement ? projectManagementColumns : salesProjectColumns;
   const updatedText = lastUpdated ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(lastUpdated) : "—";
 
+  // A shoot row stands for its project wherever a project is asked for: the Info panel, the record.
+  const parentOf = useCallback((row) => (isShootRow(row) ? projects.find((project) => project.id === row.projectId) || null : row), [projects]);
+  const selectSharedProject = (row) => { const project = parentOf(row); if (!project) return; setSelectedProject(project); setInfoPanelState("expanded"); };
+  // Shoots under each project on Projects (Project Management) and on Bookings & Converted
+  // (`showShoots`), not on the production assignment view; ticks stay on the projects.
+  const showsShoots = (showShoots ?? projectManagement) && tableVariant !== "production";
+  // Where a "Navigate to" entry goes. `push`, not `replace`: the board you came from stays in the
+  // history, so Back is the way home.
+  const router = useRouter();
+  const jumpTo = useCallback((href) => router.push(href), [router]);
   const sharedColumns = useMemo(() => tableColumns.map((column) => ({
-    ...column, header: column.label,
+    ...column, header: showsShoots && column.shootLabel ? column.shootLabel : column.label,
     accessorFn: (project) => displayValue(project, column.id),
     sortingFn: (first, second) => { const a = sortValue(first.original, column); const b = sortValue(second.original, column); return typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b), undefined, { numeric: true }); },
-    cell: column.id === "actions" ? ({ row }) => <ProjectRowActions project={row.original} onView={setViewingProject} onNotice={onNotice} onEditSaleDetails={onEditSaleDetails} onStartProject={onStartProject} onEditProject={onEditProject} onDelete={onDelete} onDuplicate={onDuplicate} onAssignProduction={onAssignProduction} readOnly={readOnly} canEditSale={canEditSale} canPlan={canPlan} canEditStarted={canEditStarted} canEditProject={canEditProject} canDeleteProject={canDeleteProject} /> : ({ row }) => displayValue(row.original, column.id),
+    cell: column.id === "actions" ? ({ row }) => isShootRow(row.original) ? <ShootRowActions shoot={row.original} project={parentOf(row.original)} onOpenProject={setViewingProject} onEditShoot={onEditShoot} route={projectEditRoute(parentOf(row.original), { readOnly, canEditSale, canPlan, canEditStarted, canEditProject, onEditSaleDetails, onStartProject, onEditProject })} /> : <ProjectRowActions project={row.original} onView={viewDetails} onViewActivity={showActivity ? viewActivity : undefined} onNotice={onNotice} onEditSaleDetails={onEditSaleDetails} onStartProject={onStartProject} onEditProject={onEditProject} onUpdateStatus={onUpdateStatus} onSendBack={onSendBack} onDelete={onDelete} onDuplicate={onDuplicate} onAssignProduction={onAssignProduction} board={board} onJump={jumpTo} readOnly={readOnly} canEditSale={canEditSale} canPlan={canPlan} canEditStarted={canEditStarted} canEditProject={canEditProject} canDeleteProject={canDeleteProject} /> : ({ row }) => displayValue(row.original, column.id),
     exportValue: (project) => displayValue(project, column.id), width: column.id === "actions" ? 56 : 180, minWidth: column.id === "actions" ? 56 : 160,
-  })), [canDeleteProject, canEditProject, canEditSale, canEditStarted, canPlan, onAssignProduction, onDelete, onDuplicate, onEditProject, onEditSaleDetails, onNotice, onStartProject, readOnly, tableColumns]);
+    // Every column here is 180px wide, so a long value - a shoot named for several at once - ends
+    // in "..."; this is what it says in full when it is hovered or read out.
+    title: (project) => displayValue(project, column.id),
+  })), [canDeleteProject, canEditProject, canEditSale, canEditStarted, canPlan, showActivity, viewActivity, viewDetails, onAssignProduction, onDelete, onDuplicate, onEditProject, onEditSaleDetails, onEditShoot, onNotice, onSendBack, onStartProject, onUpdateStatus, readOnly, tableColumns, showsShoots, parentOf, board, jumpTo]);
 
-  const selectSharedProject = (project) => { setSelectedProject(project); setInfoPanelState("expanded"); };
+  const tableSelection = useMemo(() => (selection ? { ...selection, canSelectRow: (row) => !isShootRow(row) && (!selection.canSelectRow || selection.canSelectRow(row)) } : selection), [selection]);
   const infoSections = tableVariant === "production" ? productionProjectInfoSections : projectManagement ? projectManagementInfoSections : commonProjectInfoSections;
 
 
-  return <DataTableShell className={fillAvailableHeight ? "h-full min-h-0" : "h-[calc(100dvh-14rem)] min-h-[21rem]"} footer={<TableFooter spread><span>Last updated: {updatedText}</span><span>Total rows: {tableStats.total}</span></TableFooter>}><div className="relative flex min-h-0 flex-1 overflow-hidden"><DataTable columns={sharedColumns} data={projects} importConfig={importConfig} density={density} onToggleCompact={onToggleCompact} loading={loading} loadingMessage={loadingMessage} emptyMessage={emptyMessage} noMatchMessage={noMatchMessage} selectedRowId={selectedProject?.id} onRowClick={selectSharedProject} onRowDoubleClick={setViewingProject} defaultColumnVisibility={defaultColumnVisibility} onVisibleRowsChange={setTableStats} ariaLabel={`${title} table`} features={{ filtering: true, sorting: true, columnVisibility: true, infiniteScroll: { pageSize: 50 }, csvExport: { enabled: true, fileName, onResult: (exported) => onNotice(exported ? `${title} CSV export downloaded.` : "No rows available to export.") }, selection }} /><DataTableInfoPanel title={infoPanelTitle} entity={selectedProject && { ...projectForInfo(selectedProject), ...(projectManagement ? { startProjectStatus: "Not started" } : {}) }} state={infoPanelState} onToggle={() => setInfoPanelState((current) => current === "expanded" ? "collapsed" : "expanded")} sections={infoSections} formatters={projectInfoFormatters} emptyText="Select a project row to view details." /></div><ProjectRecordPanel project={viewingProject} sections={infoSections} projectManagement={projectManagement} showPayments={showPayments} onClose={() => { setViewingProject(null); onCloseOpenedEvent?.(); }} /></DataTableShell>;
+  return <DataTableShell className={fillAvailableHeight ? "h-full min-h-0" : "h-[calc(100dvh-14rem)] min-h-[21rem]"} footer={<TableFooter spread><span>Last updated: {updatedText}</span><span>Total rows: {tableStats.total}</span></TableFooter>}><div className="relative flex min-h-0 flex-1 overflow-hidden"><DataTable columns={sharedColumns} data={projects} importConfig={importConfig} density={density} onToggleCompact={onToggleCompact} loading={loading} loadingMessage={loadingMessage} emptyMessage={emptyMessage} noMatchMessage={noMatchMessage} selectedRowId={selectedProject?.id} filterPreset={landedOn ? { id: "eventId", value: landedOn } : undefined} onRowClick={selectSharedProject} onRowDoubleClick={(row) => setViewingProject(parentOf(row))} defaultColumnVisibility={defaultColumnVisibility} onVisibleRowsChange={setTableStats} ariaLabel={`${title} table`} features={{ filtering: true, sorting: true, columnVisibility: true, infiniteScroll: { pageSize: 50 }, csvExport: { enabled: true, fileName, onResult: (exported) => onNotice(exported ? `${title} CSV export downloaded.` : "No rows available to export.") }, selection: tableSelection, ...(showsShoots ? { expandable: { label: "this project's shoots", canExpand: (row) => !isShootRow(row) && row.shoots?.length > 0, getSubRows: (row) => (isShootRow(row) ? undefined : row.shoots) } } : {}) }} /><DataTableInfoPanel title={infoPanelTitle} entity={selectedProject && { ...projectForInfo(selectedProject), ...(projectManagement ? { startProjectStatus: "Not started" } : {}) }} state={infoPanelState} onToggle={() => setInfoPanelState((current) => current === "expanded" ? "collapsed" : "expanded")} sections={infoSections} formatters={projectInfoFormatters} emptyText="Select a project row to view details." /></div><ProjectRecordPanel project={viewingProject} sections={infoSections} projectManagement={projectManagement} showPayments={showPayments} showStatus={showStatus} showOverallStatus={showOverallStatus} showActivity={showActivity} initialTab={viewingTab} onClose={() => { setViewingProject(null); setViewingTab(null); onCloseOpenedEvent?.(); }} /></DataTableShell>;
 }

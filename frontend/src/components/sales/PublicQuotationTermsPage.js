@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import ExpiredClientLink from "@/components/shared/ExpiredClientLink";
+import DeviceViewport from "@/components/shared/DeviceViewport";
+import { expiredLinkFrom } from "@/lib/expiredLink.mjs";
 import AppLogo, { DocumentLogo } from "@/components/shared/AppLogo";
 import useStudioBranding from "@/components/shared/useStudioBranding";
 import { getPublicQuotation } from "@/services/sales/public-quotation.service";
-import { GOLD, GOLD_DEEP, INK, RuledTitle, SHEET_CSS, sheetBackground } from "./PublicQuotationPage";
+import { GOLD, GOLD_DEEP, INK, QUOTATION_BODY_FONT, RuledTitle, SHEET_CSS, sheetBackground } from "./PublicQuotationPage";
 import { templateContentFor } from "./quotationTemplateContent";
 
 /*
@@ -23,14 +26,14 @@ export default function PublicQuotationTermsPage({ token }) {
   const [quotation, setQuotation] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [expired, setExpired] = useState(false);
+  const [expired, setExpired] = useState(null);
   const branding = useStudioBranding();
 
   useEffect(() => {
     let active = true;
     getPublicQuotation(token)
-      .then((response) => { if (active) { setQuotation(response.data); setError(""); setExpired(false); } })
-      .catch((requestError) => { if (active) { setExpired(Boolean(requestError.expired)); setError(requestError.message || "Unable to load quotation."); } })
+      .then((response) => { if (active) { setQuotation(response.data); setError(""); setExpired(null); } })
+      .catch((requestError) => { if (active) { setExpired(expiredLinkFrom(requestError)); setError(requestError.message || "Unable to load quotation."); } })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [token]);
@@ -39,18 +42,21 @@ export default function PublicQuotationTermsPage({ token }) {
 
   // The same three states the quotation settles in, said the same way.
   if (loading) return <main className="grid min-h-dvh place-items-center bg-white p-6 text-slate-500">Loading terms…</main>;
-  if (expired || error) return <main data-quotation-state={expired ? "expired" : "error"} className="grid min-h-dvh place-items-center bg-white p-6 text-center">
+  if (expired) return <ExpiredClientLink {...expired} data-quotation-state="expired" />;
+  // Laid out for the phone itself, as the expired card is: in the sheet's 1112px viewport it was
+  // drawn at a third of its size. An error is not gone back from, so the viewport stays switched.
+  if (error) return <DeviceViewport><main data-quotation-state="error" className="grid min-h-dvh place-items-center bg-white p-6 text-center">
     <div className="w-full max-w-md">
       <AppLogo variant="print" />
-      <h1 className="mt-8 text-2xl font-normal" style={{ fontFamily: "Georgia, 'Times New Roman', serif", color: INK }}>{expired ? "This link has expired" : "Unable to load these terms"}</h1>
+      <h1 className="mt-8 text-2xl font-normal" style={{ fontFamily: "Georgia, 'Times New Roman', serif", color: INK }}>Unable to load these terms</h1>
       <p className="mt-3 text-sm leading-relaxed text-slate-600">{error}</p>
     </div>
-  </main>;
+  </main></DeviceViewport>;
 
   return <main
     data-quotation-state="ready"
     className="min-h-dvh bg-[#e9e6df] px-0 py-0 sm:px-4 sm:py-8"
-    style={{ fontFamily: "var(--q-font-body), 'Plus Jakarta Sans', 'Helvetica Neue', Arial, sans-serif", color: INK }}
+    style={{ fontFamily: QUOTATION_BODY_FONT, color: INK }}
   >
     <style>{SHEET_CSS}</style>
 

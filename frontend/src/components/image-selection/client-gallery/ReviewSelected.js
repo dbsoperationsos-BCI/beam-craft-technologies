@@ -6,6 +6,7 @@ import GallerySidebarShell, { SidebarToggle } from "./GallerySidebarShell";
 import { GalleryLogo } from "./GalleryBrand";
 import PublicGalleryLazyImage from "./PublicGalleryLazyImage";
 import { selectionProgressStatus } from "@/lib/selectionProgressStatus.mjs";
+import { selectionSentMessage } from "@/lib/clientGalleryHome.mjs";
 
 // `itemName` is the selection item this review is about to submit; selection goes to the studio
 // one item at a time, so the header and the send button both name it. Null on the read-only
@@ -38,7 +39,7 @@ export default function ReviewSelected({ items, folders = [], deliverables = [],
     items.forEach((image) => (image.photoSelections || []).forEach((selection) => { result[selection.imageSelectionDeliverableConfigId] = (result[selection.imageSelectionDeliverableConfigId] || 0) + 1; }));
     return result;
   }, [items]);
-  async function send() { setBusy(true); clearNotice(); try { await onSend(); showSuccess(`${itemName ? `${itemName} sent` : "Sent"} to your photographer`); } catch (cause) { showError(cause.message || "Unable to send your selection. Please try again."); } finally { setBusy(false); } }
+  async function send() { setBusy(true); clearNotice(); try { await onSend(); showSuccess(selectionSentMessage(itemName, studioName)); } catch (cause) { showError(cause.message || "Unable to send your selection. Please try again."); } finally { setBusy(false); } }
   return (
     // The viewport is the frame and only the photo area scrolls: the sidebar, the header and the
     // send footer hold still while the review moves — the folder screen's exact behavior.
@@ -81,7 +82,7 @@ export default function ReviewSelected({ items, folders = [], deliverables = [],
         <section className="min-h-0 flex-1 overflow-y-auto bg-white px-3 py-5 sm:px-5">
           <div className="space-y-8 sm:space-y-10">{Object.keys(groups).length ? Object.entries(groups).map(([shoot, settings]) => <section key={shoot}>{Object.values(settings).map(({ deliverable, folders: settingFolders }, index) => <section key={deliverable.id} className={index ? "mt-6" : ""}><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="min-w-0 truncate text-base font-semibold text-slate-800">{deliverable.name}</h3><span className="text-xs text-slate-500">{Object.values(settingFolders).flat().length}/{deliverable.selectionLimit} selected</span></div>{Object.entries(settingFolders).map(([folderName, images]) => <section key={folderName} className="mt-4"><h4 className="mb-2 text-sm font-medium text-slate-600">{folderName}</h4><div className="grid grid-cols-3 gap-1 sm:grid-cols-5 sm:gap-2 xl:grid-cols-6">{images.map((image) => <div key={`${deliverable.id}-${image.id}`}><div className="aspect-square overflow-hidden rounded-lg bg-slate-100"><PublicGalleryLazyImage src={image.thumbnailUrl} alt={image.fileName} sessionToken={sessionToken} className="h-full w-full" /></div><p className="mt-0.5 truncate px-0.5 text-center text-[9px] text-slate-600 sm:text-[10px]" title={image.fileName}>{image.fileName}</p></div>)}</div></section>)}</section>)}</section>) : <p className="py-12 text-center text-sm text-slate-500">No selected photos to review.</p>}</div>
         </section>
-        <footer className="flex shrink-0 flex-col gap-2 border-t border-slate-200 bg-white px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-8">{sent ? <p className="w-full text-center text-xs text-slate-600 sm:text-sm">{itemName ? `${itemName} has been submitted.` : "Your selection has been submitted."}</p> : canSend ? <><span className="text-xs text-slate-600 sm:text-sm">Review is read-only. Go back to change selections.</span><button type="button" disabled={busy || visibleCount === 0} onClick={send} className="h-11 w-full shrink-0 rounded-lg bg-blue-600 px-6 text-sm font-semibold text-white disabled:opacity-60 sm:w-auto">{busy ? "Sending…" : itemName ? `Send ${itemName}` : "Send"}</button></> : <span className="text-xs text-slate-600 sm:text-sm">Review is read-only. Go back to change selections.</span>}</footer>
+        <footer className="flex shrink-0 flex-col gap-2 border-t border-slate-200 bg-white px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:px-8">{sent ? <p className="w-full text-center text-xs text-slate-600 sm:text-sm">{itemName ? `${itemName} has been submitted.` : "Your selection has been submitted."}</p> : canSend ? <><span className="text-xs text-slate-600 sm:text-sm">Review is read-only. Go back to change selections.</span><button type="button" disabled={busy || visibleCount === 0} onClick={send} className="h-11 w-full shrink-0 rounded-lg bg-blue-600 px-6 text-sm font-semibold text-white disabled:opacity-60 sm:w-auto">{busy ? "Submitting…" : "Submit"}</button></> : <span className="text-xs text-slate-600 sm:text-sm">Review is read-only. Go back to change selections.</span>}</footer>
       </div>
       <FloatingNotice notice={notice} onClose={clearNotice} />
     </main>

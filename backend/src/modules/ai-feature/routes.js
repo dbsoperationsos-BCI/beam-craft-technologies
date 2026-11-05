@@ -2,6 +2,7 @@ const express = require("express");
 const { protect } = require("../../middleware/authMiddleware");
 const { requireModule, checkPermission } = require("../../middleware/permissionMiddleware");
 const { MODULE, FEATURE, FACE_FEATURE } = require("./shared/permissions");
+const { gate, desktopAiEnabled, ingestLimiter } = require("../desktop/flags");
 const events = require("./events/controller");
 const subEvents = require("./sub-events/controller");
 const guests = require("./guests/controller");
@@ -37,6 +38,7 @@ router.post("/events/:eventId/restore", events.restoreEvent);
 router.get("/events/:eventId/settings", events.getSettings);
 router.put("/events/:eventId/settings", events.saveSettings);
 router.get("/events/:eventId/activity", activity.listActivity);
+router.get("/events/:eventId/detection", overview.getEventDetection);
 
 router.get("/events/:eventId/sub-events", subEvents.listSubEvents);
 router.post("/events/:eventId/sub-events", subEvents.createSubEvent);
@@ -64,10 +66,11 @@ router.post("/events/:eventId/media/batch", media.noteBatch);
 router.get("/events/:eventId/media/:mediaId", media.getMedia);
 router.delete("/events/:eventId/media/:mediaId", media.deleteMedia);
 router.get("/events/:eventId/processing", media.getProcessing);
-router.get("/events/:eventId/faces/:faceId/thumbnail", media.faceThumbnail);
 
 router.get("/events/:eventId/share", share.getShare);
+router.get("/events/:eventId/share/poster", share.getSharePoster);
 router.post("/events/:eventId/share", share.createShare);
+router.patch("/events/:eventId/share", share.updateShare);
 router.delete("/events/:eventId/share", share.revokeShare);
 
 // Faces and people: Read on AI Face Management to look, Read / Write to decide. Retrying failed
@@ -75,6 +78,13 @@ router.delete("/events/:eventId/share", share.revokeShare);
 const faceRead = checkPermission(MODULE, FACE_FEATURE, "READ");
 const faceWrite = checkPermission(MODULE, FACE_FEATURE, "READ_WRITE");
 router.post("/events/:eventId/processing/retry-failed", faceWrite, media.retryFailed);
+// The Virtual Curation desktop's hand-off of one photo's faces, found with this server's own engine
+// on the original. A face-pipeline write like retry-failed, so AI Face Management Read / Write; the
+// gate keeps the path a 404 until both desktop switches (DESKTOP_VIRTUAL_CURATION_ENABLED,
+// DESKTOP_AI_ENABLED) are on - before the permission, so a switched-off server answers exactly as
+// it did when the route did not exist.
+router.post("/events/:eventId/media/:mediaId/faces", gate(desktopAiEnabled), ingestLimiter, faceWrite, media.ingestFaces);
+router.get("/events/:eventId/faces/:faceId/thumbnail", faceRead, media.faceThumbnail);
 router.get("/events/:eventId/people", faceRead, people.listPeople);
 router.get("/events/:eventId/people/:personId", faceRead, people.getPerson);
 router.patch("/events/:eventId/people/:personId", faceWrite, people.renamePerson);

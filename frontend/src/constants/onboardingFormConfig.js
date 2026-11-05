@@ -32,6 +32,7 @@ export const fieldNormalizers = {
   ifscCode: (value) => String(value || "").replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 11),
   accountNumber: (value) => String(value || "").replace(/\D/g, "").slice(0, 18),
   contactNumber: (value) => String(value || "").replace(/[^\d+\s-]/g, "").slice(0, 20),
+  companyGivenNumber: (value) => String(value || "").replace(/[^\d+\s-]/g, "").slice(0, 20),
   emergencyContactNumber: (value) => String(value || "").replace(/[^\d+\s-]/g, "").slice(0, 20),
   reference1PersonPhone: (value) => String(value || "").replace(/[^\d+\s-]/g, "").slice(0, 20),
   reference2PersonPhone: (value) => String(value || "").replace(/[^\d+\s-]/g, "").slice(0, 20),
@@ -51,25 +52,29 @@ export const onboardingFormSections = [
        * read it — and a photograph is far harder to collect after the fact than during the one
        * sitting where somebody is filling in everything else about themselves.
        */
-      { name: "profilePhoto", label: "Profile Photo", type: "image", required: true, colSpan: 2 },
-      { name: "firstName", label: "First Name", required: true },
-      { name: "lastName", label: "Last Name", required: true },
-      { name: "gender", label: "Gender", type: "select", required: true, options: "genders" },
+      { name: "profilePhoto", label: "Profile Photo", type: "image", required: true, colSpan: 2, helperText: "A clear, recent photo of your face for your staff profile." },
+      { name: "firstName", label: "First Name", required: true, helperText: "Your first name as it should appear on your staff record." },
+      { name: "lastName", label: "Last Name", required: true, helperText: "Your surname or initial as it should appear on your staff record." },
+      { name: "gender", label: "Gender", type: "select", required: true, options: "genders", helperText: "Choose the gender to be recorded on your staff record." },
       /*
        * The studio does not take anybody on under eighteen, so the calendar stops at the last day
        * that still leaves the candidate that age. `props` is read at render time rather than at
        * import, so a form left open overnight does not keep yesterday's boundary, and the form's
        * own check says why if an out-of-range date arrives any other way.
        */
-      { name: "dateOfBirth", label: "Date Of Birth", type: "date", required: true, props: () => ({ restriction: "future", maxDate: latestDateOfBirth() }) },
-      { name: "contactNumber", label: "Contact Number", type: "phone", required: true },
-      { name: "emailId", label: "Personal Email ID", required: true, props: { type: "email" } },
-      { name: "dateOfJoining", label: "Date Of Joining", type: "date", required: true },
-      { name: "workType", label: "Work Type", type: "select", required: true, options: "workTypes" },
-      { name: "bloodGroup", label: "Blood Group", type: "select", required: true, options: "bloodGroups" },
+      { name: "dateOfBirth", label: "Date Of Birth", type: "date", required: true, props: () => ({ restriction: "future", maxDate: latestDateOfBirth() }), helperText: "As on your ID proof; you must be at least 18." },
+      { name: "contactNumber", label: "Contact Number", type: "phone", required: true, helperText: "Your own mobile number, which the studio will call you on." },
+      // Most candidates do not have one yet - the studio issues these after somebody joins - so
+      // this is the one phone field on the form that is not required.
+      { name: "companyGivenNumber", label: "Company Given Number", type: "phone", helperText: "The studio-issued phone number, if you have one; otherwise leave blank." },
+      { name: "emailId", label: "Personal Email ID", required: true, props: { type: "email" }, helperText: "Your own email address; password reset links are sent here." },
+      { name: "dateOfJoining", label: "Date Of Joining", type: "date", required: true, helperText: "The date you start, as agreed with the studio's HR team." },
+      { name: "workType", label: "Work Type", type: "select", required: true, options: "workTypes", helperText: "How you will work with the studio, such as full time or intern." },
+      { name: "bloodGroup", label: "Blood Group", type: "select", required: true, options: "bloodGroups", helperText: "Your blood group, kept on record for medical emergencies." },
       {
         name: "currentAddress",
         label: "Current Address",
+        helperText: "Where you live now, with door number, street, city and PIN.",
         type: "textarea",
         required: true,
         colSpan: 2,
@@ -78,6 +83,7 @@ export const onboardingFormSections = [
       {
         name: "sameAsCurrentAddress",
         label: "Permanent address is the same as the current address",
+        helperText: "Tick to copy your current address into the permanent address.",
         type: "checkbox",
         colSpan: 2,
         derive: (checked, values) => checked ? { permanentAddress: values.currentAddress } : undefined,
@@ -85,18 +91,19 @@ export const onboardingFormSections = [
       {
         name: "permanentAddress",
         label: "Permanent Address",
+        helperText: "Your home address; filled in for you when the tick above is on.",
         type: "textarea",
         required: true,
         colSpan: 2,
         // Copied from above while the toggle is on, so the two can never disagree.
         props: (values) => ({ disabled: Boolean(values.sameAsCurrentAddress) }),
       },
-      // Both tick-lists follow a full-width field, so the row is already broken and the two always
-      // land side by side however many fields are added above them.
+      // Each tick-list takes the full width, Skills above Languages Known - side by side, each long
+      // list was squeezed into half the form. The same as the Add Employee form draws them.
       // Required like everything else, which for a tick-list means at least one ticked: an empty
       // array reads as unanswered rather than as "none of these".
-      { name: "skills", label: "Skills", type: "custom", required: true },
-      { name: "languagesKnown", label: "Languages Known", type: "custom", required: true },
+      { name: "skills", label: "Skills", type: "custom", required: true, colSpan: 2, helperText: "Tick every skill you have, such as photography, editing or videography." },
+      { name: "languagesKnown", label: "Languages Known", type: "custom", required: true, colSpan: 2, helperText: "Tick every language you can speak with clients and the team." },
     ],
   },
   {
@@ -118,16 +125,16 @@ export const onboardingFormSections = [
     id: "family",
     title: "Family Details",
     fields: [
-      { name: "fatherName", label: "Father’s Name", required: true },
-      { name: "fatherOccupation", label: "Father’s Occupation", required: true },
-      { name: "motherName", label: "Mother’s Name", required: true },
-      { name: "motherOccupation", label: "Mother’s Occupation", required: true },
+      { name: "fatherName", label: "Father’s Name", required: true, helperText: "Your father's full name, kept on your family record." },
+      { name: "fatherOccupation", label: "Father’s Occupation", required: true, helperText: "What your father does for a living, for example Farmer or Retired." },
+      { name: "motherName", label: "Mother’s Name", required: true, helperText: "Your mother's full name, kept on your family record." },
+      { name: "motherOccupation", label: "Mother’s Occupation", required: true, helperText: "What your mother does for a living, for example Homemaker or Teacher." },
       // Asked before the two it decides, and clearing it takes their answers with it so a spouse
       // cannot be left behind on someone who has since said they are single.
-      { name: "maritalStatus", label: "Marital Status", type: "select", required: true, options: "maritalStatuses", clears: ["spouseName", "weddingAnniversary", "children"] },
+      { name: "maritalStatus", label: "Marital Status", type: "select", required: true, options: "maritalStatuses", clears: ["spouseName", "weddingAnniversary", "children"], helperText: "Choosing married also asks for your spouse, anniversary and children." },
       // Required like the rest of the family, but only of somebody the marital status shows them for.
-      { name: "spouseName", label: "Spouse Name", required: true, when: isMarried },
-      { name: "weddingAnniversary", label: "Wedding Anniversary", type: "date", required: true, when: isMarried, props: { restriction: "future" } },
+      { name: "spouseName", label: "Spouse Name", required: true, when: isMarried, helperText: "Your husband's or wife's full name." },
+      { name: "weddingAnniversary", label: "Wedding Anniversary", type: "date", required: true, when: isMarried, props: { restriction: "future" }, helperText: "The date you got married; future dates are not allowed." },
       // Asked of a married candidate, never required: plenty of married people have no children,
       // which is why the list opens empty and says so rather than starting with a blank row.
       { name: "children", label: "Children Details", type: "custom", when: isMarried, colSpan: 2 },
@@ -137,51 +144,51 @@ export const onboardingFormSections = [
     id: "identity",
     title: "Identity Details",
     fields: [
-      { name: "aadharCardNumber", label: "Aadhar Card Number", required: true, props: { inputMode: "numeric", maxLength: 12, placeholder: "12 digits" } },
-      { name: "panCardNumber", label: "PAN Card Number", required: true, props: { maxLength: 10, placeholder: "ABCDE1234F" } },
-      { name: "aadharCardImage", label: "Aadhar Card Photo", type: "image", required: true },
-      { name: "panCardImage", label: "PAN Card Photo", type: "image", required: true },
+      { name: "aadharCardNumber", label: "Aadhar Card Number", required: true, props: { inputMode: "numeric", maxLength: 12, placeholder: "12 digits" }, helperText: "The 12-digit number printed on your Aadhaar card, without spaces." },
+      { name: "panCardNumber", label: "PAN Card Number", required: true, props: { maxLength: 10, placeholder: "ABCDE1234F" }, helperText: "The 10-character PAN: five letters, four digits, then one letter." },
+      { name: "aadharCardImage", label: "Aadhar Card Photo", type: "image", required: true, helperText: "A clear photo of your Aadhaar card with the number readable." },
+      { name: "panCardImage", label: "PAN Card Photo", type: "image", required: true, helperText: "A clear photo of your PAN card with the number readable." },
     ],
   },
   {
     id: "bank",
     title: "Bank Details",
     fields: [
-      { name: "bankName", label: "Bank Name", required: true },
-      { name: "bankLocation", label: "Bank Location / Address", required: true },
-      { name: "accountNumber", label: "Account Number", required: true, props: { inputMode: "numeric", maxLength: 18, placeholder: "9 to 18 digits" } },
-      { name: "ifscCode", label: "IFSC Code", required: true, props: { maxLength: 11, placeholder: "SBIN0001234" } },
+      { name: "bankName", label: "Bank Name", required: true, helperText: "The bank of the account your salary should be paid into." },
+      { name: "bankLocation", label: "Bank Location / Address", required: true, helperText: "The branch name or address of that bank account." },
+      { name: "accountNumber", label: "Account Number", required: true, props: { inputMode: "numeric", maxLength: 18, placeholder: "9 to 18 digits" }, helperText: "Your bank account number, 9 to 18 digits, with no spaces." },
+      { name: "ifscCode", label: "IFSC Code", required: true, props: { maxLength: 11, placeholder: "SBIN0001234" }, helperText: "The 11-character branch code printed on your cheque book or passbook." },
     ],
   },
   {
     id: "emergency",
     title: "Emergency Contact",
     fields: [
-      { name: "emergencyContactName", label: "Emergency Contact Name", required: true },
-      { name: "emergencyContactNumber", label: "Emergency Contact Number", type: "phone", required: true },
-      { name: "emergencyContactRelationship", label: "Emergency Contact Relationship", type: "combobox", required: true, options: "emergencyContactRelationships" },
+      { name: "emergencyContactName", label: "Emergency Contact Name", required: true, helperText: "Someone the studio should call if anything happens to you." },
+      { name: "emergencyContactNumber", label: "Emergency Contact Number", type: "phone", required: true, helperText: "A number where that person can be reached at any time." },
+      { name: "emergencyContactRelationship", label: "Emergency Contact Relationship", type: "combobox", required: true, options: "emergencyContactRelationships", helperText: "How they are related to you; pick one or type your own." },
     ],
   },
   {
     id: "references",
     title: "References",
     fields: [
-      { name: "reference1PersonName", label: "Reference-1 Person’s Name", required: true },
-      { name: "reference1PersonPhone", label: "Reference-1 Person’s Phone", type: "phone", required: true },
-      { name: "reference1PersonAddress", label: "Reference-1 Person’s Address", type: "textarea", required: true, colSpan: 2 },
-      { name: "reference2PersonName", label: "Reference-2 Person’s Name", required: true },
-      { name: "reference2PersonPhone", label: "Reference-2 Person’s Phone", type: "phone", required: true },
-      { name: "reference2PersonAddress", label: "Reference-2 Person’s Address", type: "textarea", required: true, colSpan: 2 },
+      { name: "reference1PersonName", label: "Reference-1 Person’s Name", required: true, helperText: "Someone who knows your work or character and can vouch for you." },
+      { name: "reference1PersonPhone", label: "Reference-1 Person’s Phone", type: "phone", required: true, helperText: "A number the studio can call to speak to this reference." },
+      { name: "reference1PersonAddress", label: "Reference-1 Person’s Address", type: "textarea", required: true, colSpan: 2, helperText: "Where this reference lives, with city and PIN code." },
+      { name: "reference2PersonName", label: "Reference-2 Person’s Name", required: true, helperText: "A second person, other than Reference-1, who can vouch for you." },
+      { name: "reference2PersonPhone", label: "Reference-2 Person’s Phone", type: "phone", required: true, helperText: "A number the studio can call to speak to this reference." },
+      { name: "reference2PersonAddress", label: "Reference-2 Person’s Address", type: "textarea", required: true, colSpan: 2, helperText: "Where this reference lives, with city and PIN code." },
     ],
   },
   {
     id: "nominees",
     title: "Nominee Details",
     fields: [
-      { name: "nominee1PersonName", label: "Nominee-1 Person’s Name", required: true },
-      { name: "nominee1PersonPhone", label: "Nominee-1 Person’s Phone", type: "phone", required: true },
-      { name: "nominee2PersonName", label: "Nominee-2 Person’s Name", required: true },
-      { name: "nominee2PersonPhone", label: "Nominee-2 Person’s Phone", type: "phone", required: true },
+      { name: "nominee1PersonName", label: "Nominee-1 Person’s Name", required: true, helperText: "The person you name to receive your benefits if something happens to you." },
+      { name: "nominee1PersonPhone", label: "Nominee-1 Person’s Phone", type: "phone", required: true, helperText: "A number the studio can reach this nominee on." },
+      { name: "nominee2PersonName", label: "Nominee-2 Person’s Name", required: true, helperText: "A second person you name to receive your benefits." },
+      { name: "nominee2PersonPhone", label: "Nominee-2 Person’s Phone", type: "phone", required: true, helperText: "A number the studio can reach this nominee on." },
     ],
   },
 ];

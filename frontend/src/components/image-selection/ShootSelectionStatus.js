@@ -2,7 +2,7 @@
 
 import ExpandMore from "@mui/icons-material/ExpandMore";
 import { PROGRESS_CHIP_CLASS, PROGRESS_COLORS, progressChipStyle } from "@/lib/progressStatus.mjs";
-import { normalizedShootName, unmatchedFolderShoots } from "@/lib/shootGroups.mjs";
+import { unmatchedFolderShoots } from "@/lib/shootGroups.mjs";
 
 /**
  * The project's shoots with the selection items allocated under each, read-only: a collapsed row
@@ -19,14 +19,14 @@ function groupByShoot(deliverables, folderShoots) {
   const groups = new Map();
   deliverables.forEach((item) => {
     const key = item.shootId || "unassigned";
-    if (!groups.has(key)) groups.set(key, { id: key, name: item.shoot?.shoot || "Other deliverables", items: [] });
+    if (!groups.has(key)) groups.set(key, { id: key, name: item.shoot?.shoot || "Other deliverables", shoot: item.shoot || null, items: [] });
     groups.get(key).items.push(item);
   });
   const saved = [...groups.values()];
   // A manual project's root folders are its shoots even before any item is saved under them,
-  // deduped against the saved groups by the same shared rule the Selection Settings table uses.
-  const folders = unmatchedFolderShoots(saved.map((group) => group.name), folderShoots)
-    .map((name) => ({ id: `folder:${normalizedShootName(name)}`, name, items: [] }));
+  // matched to the saved groups by folder id - the same shared rule the Selection Settings table uses.
+  const folders = unmatchedFolderShoots(saved.map((group) => group.shoot), folderShoots)
+    .map((folder) => ({ id: `folder:${folder.id}`, name: folder.name, items: [] }));
   return [...saved, ...folders];
 }
 

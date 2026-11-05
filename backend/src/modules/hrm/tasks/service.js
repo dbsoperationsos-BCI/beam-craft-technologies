@@ -1,9 +1,13 @@
+const { isSuperAdmin: isSuperAdminUser } = require("../../../services/administrator");
 const { optionNames, namesWithFlag } = require("../../../services/optionLists");
 const prisma = require("../../../config/db");
+const { listPhotoUrl } = require("../../../services/employeeOptionLists");
 const dataScope = require("../../../services/dataScope.service");
 const { lookups: referenceLookups } = require("../../../services/referenceMatchers");
 const { notify, TYPES } = require("../../../services/notifications");
+const iamService = require("../../../services/iam.service");
 const attachments = require("./attachments");
+const feedbackIssues = require("../../project-management/feedback/issues");
 
 /**
  * Tasks: one person asking another to do something, and what became of it.
@@ -24,7 +28,11 @@ const attachments = require("./attachments");
  * record of who completed it.
  */
 
-const STATUSES = ["PENDING", "IN_PROGRESS", "COMPLETED", "REASSIGNED", "CANCELLED"];
+/*
+ * `SUBMITTED` (read "Finish & Send Back") is work its holder finished and sent back to whoever
+ * assigned it. Still open: only the assigner closes it (`approve`), or revokes and reassigns it.
+ */
+const STATUSES = ["PENDING", "IN_PROGRESS", "SUBMITTED", "COMPLETED", "REASSIGNED", "CANCELLED"];
 /**
  * The states nothing further happens from: the task is over, one way or the other.
  *
@@ -98,6 +106,10 @@ const ACTIONS = {
   // anything else - "the brief was replaced on the 4th" is exactly what somebody asks later.
   ATTACHED: "ATTACHED",
   ATTACHMENT_REMOVED: "ATTACHMENT_REMOVED",
+  // Finished by its holder and sent back to whoever assigned it.
+  SUBMITTED: "SUBMITTED",
+  // Taken back by whoever assigned it - and, when they chose someone, given to them.
+  REVOKED: "REVOKED",
 };
 
 /**
@@ -108,7 +120,7 @@ const ACTIONS = {
  * the task carries on. Handing it back is still possible — it is a reassignment to the giver — but
  * it is now a destination somebody chose rather than the only way out.
  */
-const RECEIVER_ACTIONS = ["start", "complete", "reassign"];
+const RECEIVER_ACTIONS = ["start", "complete", "reassign", "resolve"];
 
 /**
  * The verbs that belong to whoever set the task.
@@ -118,10 +130,25 @@ const RECEIVER_ACTIONS = ["start", "complete", "reassign"];
  * row, one typed against the wrong person - and takes it out of every list instead. They are two
  * different statements, which is why deleting is not "cancel, but harder".
  */
-const GIVER_ACTIONS = ["cancel", "delete", "edit"];
+// `approve` is Mark as Completed (only once it is sent back); `revoke` takes it back to reassign it.
+const GIVER_ACTIONS = ["cancel", "delete", "edit", "approve", "revoke"];
 
 /** The roles that may act on a task they did not set. Compared case-insensitively and trimmed. */
 const isSuperAdmin = (role) => String(role || "").trim().toUpperCase() === "SUPER_ADMIN";
+
+/**
+ * The role these rules read for `userId`: `SUPER_ADMIN` for either kind of Super Admin.
+ *
+ * The login token carries only the account's own `role` column, which is how the first Super Admins
+ * were made. Somebody given the **SUPER_ADMIN role** in Role Management holds it as a role instead,
+ * and reading the column alone treated them as an ordinary user for Reassign, Edit and Delete. So
+ * an active role of that name counts too - `isSuperAdmin` in services/administrator.js. Read once at
+ * each entry point, so the menu's answers and the write path's refusals are given the same role.
+ */
+async function taskRole(userId, role = "") {
+  if (isSuperAdmin(role) || !userId) return role;
+  return (await isSuperAdminUser(userId)) ? "SUPER_ADMIN" : role;
+}
 
 const httpError = (status, message) => Object.assign(new Error(message), { status });
 
@@ -192,6 +219,19 @@ function refusalFor(task, action, userId, role = "") {
    * A deleted task is not editable; a cancelled or completed one is, because correcting the record
    * of something that already happened is exactly when this is needed.
    */
+  /*
+   * A feedback issue - a client's Average or Poor review given to somebody to answer - ends one way:
+   * its holder answers it Issues sorted or Rejected (`resolve`), which also moves the feedback. It is
+   * not marked complete, called off or deleted, any of which would leave the feedback waiting on an
+   * answer that can now never come. Handing it to somebody else is still open to its holder.
+   */
+  if (task.feedbackIssue) {
+    if (action === "complete" || action === "approve") return "Answer this feedback issue as Issues sorted or Rejected instead.";
+    if (action === "cancel" || action === "delete") return "A feedback issue cannot be cancelled or deleted. Reassign it, or answer it as Issues sorted or Rejected.";
+  } else if (action === "resolve") {
+    return "Only a feedback issue is answered as Issues sorted or Rejected.";
+  }
+
   if (action === "edit") {
     if (task.deletedAt) return `${task.taskCode} has been deleted.`;
     if (!isGiver && !isSuperAdmin(role)) return "Only the person who gave this task, or a Super Admin, can edit it.";
@@ -210,9 +250,43 @@ function refusalFor(task, action, userId, role = "") {
     return null;
   }
 
+  /*
+   * Mark as Completed belongs to whoever assigned the task, and only once its holder has finished
+   * it and sent it back. Until then the work is still the holder's.
+   */
+  if (action === "approve") {
+    if (!isGiver) return "Only the person who assigned this task can mark it as completed.";
+    if (CLOSED_STATUSES.includes(task.status)) return `${task.taskCode} is already ${statusLabel(task.status).toLowerCase()}.`;
+    if (task.status !== "SUBMITTED") return `${task.assignedToName || "The assignee"} has not finished and sent back ${task.taskCode} yet.`;
+    return null;
+  }
+
+  /*
+   * Revoking: whoever assigned the task takes it back from its holder - at any point while it is
+   * open, sent back included - and may reassign it to anyone in the same step, which starts the
+   * flow again for that person.
+   */
+  if (action === "revoke") {
+    if (!isGiver) return "Only the person who assigned this task can revoke it.";
+    if (CLOSED_STATUSES.includes(task.status)) return `${task.taskCode} is already ${statusLabel(task.status).toLowerCase()} and cannot be changed.`;
+    if (isReceiver) return "This task is already with you. Reassign it instead.";
+    return null;
+  }
+
+  /*
+   * Reassigning is also a Super Admin's, on any open task - the studio's way of moving work off
+   * somebody who is away or overloaded without waiting for them to hand it on themselves. Starting
+   * and completing stay the holder's alone: those are statements about doing the work.
+   */
+  if (action === "reassign" && !isReceiver && isSuperAdmin(role)) {
+    if (CLOSED_STATUSES.includes(task.status)) return `${task.taskCode} is already ${statusLabel(task.status).toLowerCase()} and cannot be changed.`;
+    return null;
+  }
   // Starting, completing and reassigning are the holder's, and only while the task is still open.
   if (!isReceiver) return "Only the person this task is assigned to can do that.";
   if (CLOSED_STATUSES.includes(task.status)) return `${task.taskCode} is already ${statusLabel(task.status).toLowerCase()} and cannot be changed.`;
+  // Finished and sent back: nothing more is the holder's until it is completed or revoked.
+  if (task.status === "SUBMITTED") return `${task.taskCode} has been sent back to ${task.assignedByName} and is waiting for them.`;
   /*
    * A reassigned task is startable, which is why `REASSIGNED` is tested alongside `PENDING` rather
    * than the check being left as "must be PENDING". It has landed on somebody new and none of the
@@ -249,6 +323,7 @@ const canRead = (task, userId, canSeeAll = false, scope = null) => Boolean(
 const STATUS_LABELS = {
   PENDING: "Pending",
   IN_PROGRESS: "In Progress",
+  SUBMITTED: "Finish & Send Back",
   COMPLETED: "Completed",
   REASSIGNED: "Reassigned",
   CANCELLED: "Cancelled",
@@ -260,10 +335,28 @@ const PRIORITY_LABELS = { LOW: "Low", MEDIUM: "Medium", HIGH: "High", CRITICAL: 
 /** The name a task should record for a login: the person's name, falling back to what it has. */
 const nameOf = (user) => user?.name || user?.username || user?.email || `User ${user?.id ?? "?"}`;
 
+/** What a task row carries of the feedback issue it is, if it is one. */
+const FEEDBACK_ISSUE_SELECT = {
+  select: {
+    id: true,
+    feedbackId: true,
+    reviewKey: true,
+    review: true,
+    status: true,
+    remarks: true,
+    projectFeedback: { select: { feedbackCode: true, stage: true, project: { select: { eventId: true, whatsappGroupName: true } }, shoot: { select: { shootId: true } } } },
+  },
+};
+
+// Whether a speak-up raised this task - asked only to know it came from somewhere other than a person.
+const SPEAK_UP_SELECT = { select: { id: true } };
+
 const include = {
   activities: { orderBy: { createdAt: "asc" } },
   // Oldest first, so the rows read as the chain in the order it actually happened.
   holders: { orderBy: { heldAt: "asc" } },
+  feedbackIssue: FEEDBACK_ISSUE_SELECT,
+  speakUp: SPEAK_UP_SELECT,
 };
 
 /**
@@ -272,6 +365,13 @@ const include = {
  * `viewerRole` is carried only so `canDelete` can be answered for a Super Admin reading somebody
  * else's task; every other flag is decided by who the viewer is *on this task*.
  */
+/**
+ * A task's status as it is read. A reassigned task is written Pending - it is waiting for its new
+ * holder - and one reassigned before that rule still says `REASSIGNED` on its row, so it reads as
+ * Pending too rather than being rewritten.
+ */
+const readStatus = (status) => (status === "REASSIGNED" ? "PENDING" : status);
+
 function toRow(task, viewerId, viewerRole = "") {
   return {
     id: task.id,
@@ -285,8 +385,15 @@ function toRow(task, viewerId, viewerRole = "") {
     priorityLabel: PRIORITY_LABELS[task.priority] || task.priority,
     department: task.department,
     branch: task.branch,
-    status: task.status,
-    statusLabel: statusLabel(task.status),
+    status: readStatus(task.status),
+    statusLabel: statusLabel(readStatus(task.status)),
+    /*
+     * Whether this reader once held the task and has passed it on - what their Reassigned tab lists.
+     * The task itself is Pending on its new holder, who sees it under Pending like any other task
+     * waiting for them; the reassignment is the previous holder's to look back on, not the new one's.
+     */
+    passedOn: Boolean(viewerId) && task.assignedToUserId !== viewerId
+      && (task.reassignedFromUserId === viewerId || (task.holders || []).some((holder) => holder.userId === viewerId)),
     assignedToUserId: task.assignedToUserId,
     assignedToName: task.assignedToName,
     assignedByUserId: task.assignedByUserId,
@@ -313,8 +420,21 @@ function toRow(task, viewerId, viewerRole = "") {
      * once, by the same function the write path refuses with. The two can then never disagree.
      */
     canComplete: refusalFor(task, "complete", viewerId) === null,
+    // Whether finishing sends it back to whoever assigned it, or closes it (they hold it themselves).
+    completeSendsBack: Boolean(task.assignedByUserId) && task.assignedByUserId !== viewerId,
+    canApprove: refusalFor(task, "approve", viewerId) === null,
+    canRevoke: refusalFor(task, "revoke", viewerId) === null,
+    // A feedback issue is answered rather than completed: Issues sorted or Rejected, by its holder.
+    feedbackIssue: feedbackIssues.issueOnTask(task.feedbackIssue),
+    canResolveFeedback: refusalFor(task, "resolve", viewerId) === null,
     canStart: refusalFor(task, "start", viewerId) === null,
-    canReassign: refusalFor(task, "reassign", viewerId) === null,
+    /*
+     * Duplicating is for work somebody wrote down by hand. A task another module raised - a
+     * feedback issue, an assigned speak-up - is one particular case, and a copy of it would be a
+     * second task about the same thing with nothing behind it.
+     */
+    canDuplicate: !task.feedbackIssue && !task.speakUp,
+    canReassign: refusalFor(task, "reassign", viewerId, viewerRole) === null,
     canCancel: refusalFor(task, "cancel", viewerId) === null,
     /*
      * Whether this reader may take the task out of the studio's lists altogether - the giver, or a
@@ -399,10 +519,25 @@ const linkTo = (task) => `/hrm/tasks?task=${task.id}`;
 async function assignableUsers() {
   const users = await prisma.user.findMany({
     where: { status: "ACTIVE" },
-    select: { id: true, name: true, username: true, email: true },
+    // The photo is the linked employee's, else the login's own (the standalone Super Admin has no employee).
+    select: { id: true, name: true, username: true, email: true, profilePhotoUrl: true, linkedEmployee: { select: { profilePhotoUrl: true } } },
     orderBy: { name: "asc" },
   });
-  return users.map((user) => ({ id: user.id, name: nameOf(user) }));
+  return users.map((user) => ({ id: user.id, name: nameOf(user), profilePhotoUrl: listPhotoUrl(user.linkedEmployee?.profilePhotoUrl || user.profilePhotoUrl) }));
+}
+
+/**
+ * Whether a login can answer a task given to it: open its Tasks and act on one, which is
+ * HRM / Task Management with write. Work another module raises as a task (a feedback issue, an
+ * assigned speak-up) is given only to somebody who passes this, or it would wait for good.
+ */
+const canAnswerTasks = (userId) => iamService.hasPermission(userId, "HRM", "Task Management", "READ_WRITE").catch(() => false);
+
+/** The active logins a task raised by another module can be given to: the ones who can answer it. */
+async function taskAnswerers() {
+  const users = await assignableUsers();
+  const able = await Promise.all(users.map((user) => canAnswerTasks(user.id)));
+  return users.filter((_, index) => able[index]);
 }
 
 /**
@@ -451,54 +586,69 @@ async function createTask(values, actor) {
   if (!assignee) throw httpError(400, "The person this task is for could not be found.");
   if (assignee.status !== "ACTIVE") throw httpError(400, "That login is not active, so it cannot be given a task.");
   await assertDepartmentAndBranch(values);
+  // Cleared unless the type is the one that asks for it, so a detail typed and then thought better
+  // of cannot be stored against "Client" where nothing would ever show it. The controller has already
+  // refused the case where one asks and nothing was said, so this is the other half: a type that
+  // does not ask never carries a stray description from a form that showed the box before it changed.
+  const taskTypeOther = (await taskTypesAskingForDetails()).includes(values.taskType) ? values.taskTypeOther || null : null;
+  const branchId = (await referenceLookups()).branchId(values.branch);
 
   return prisma.$transaction(async (client) => {
-    const task = await client.hrmTask.create({
-      data: {
-        taskCode: await nextTaskCode(client),
-        title: values.title,
-        description: values.description,
-        taskType: values.taskType,
-        // Cleared unless the type is the one that asks for it, so a detail typed and then thought
-        // better of cannot be stored against "Client" where nothing would ever show it.
-        // Kept only for a type that asks for it. The controller has already refused the case where
-        // one asks and nothing was said, so this is the other half: a type that does not ask never
-        // carries a stray description from a form that showed the box before the type changed.
-        taskTypeOther: (await taskTypesAskingForDetails()).includes(values.taskType) ? values.taskTypeOther || null : null,
-        priority: values.priority,
-        department: values.department,
-        branch: values.branch,
-        branchId: (await referenceLookups()).branchId(values.branch),
-        status: "PENDING",
-        assignedToUserId: assignee.id,
-        ownerEmployeeId: assignee.linkedEmployeeId ?? null,
-        assignedToName: nameOf(assignee),
-        assignedByUserId: actor.id || null,
-        // Usually the giver, but an administrator can raise one on somebody else's behalf.
-        createdByUserId: actor.id || null,
-        assignedByName: nameOf(actor),
-        dueOn: values.dueOn ? new Date(values.dueOn) : null,
-      },
-    });
-
-    await logActivity(client, task.id, ACTIONS.CREATED, `${task.taskCode} created with ${PRIORITY_LABELS[task.priority]} priority.`, actor);
-    await logActivity(client, task.id, ACTIONS.ASSIGNED, `Assigned to ${task.assignedToName}.`, actor);
-    // The first link in the chain. My Tasks reads the holder rows rather than `assignedToUserId`,
-    // so a task created without one would not appear on the list of the person it was given to.
-    await rememberHolder(client, task.id, assignee.id, nameOf(assignee));
-    await notify(client, {
-      userId: assignee.id,
-      actorId: actor.id,
-      type: TYPES.TASK_ASSIGNED,
-      title: `New task: ${task.title}`,
-      body: `${nameOf(actor)} assigned you ${task.taskCode} · ${PRIORITY_LABELS[task.priority]} priority${task.dueOn ? ` · due ${task.dueOn.toISOString().slice(0, 10)}` : ""}`,
-      entityType: "HRM_TASK",
-      entityId: task.id,
-      link: linkTo(task),
-    });
-
+    const task = await insertTask(client, { ...values, taskTypeOther, branchId }, assignee, actor);
     return toRow({ ...task, activities: [], holders: [] }, actor.id);
   });
+}
+
+/**
+ * Writes a task for `assignee` inside `client`'s transaction, with its first two history lines, its
+ * first holder and the assignee's notice - everything `createTask` does once the values are settled.
+ *
+ * Its own function so work raised by another module rides in that module's transaction: a feedback's
+ * Average or Poor review is given to somebody as a task in the same write as the feedback, so neither
+ * exists without the other. `values` arrive already checked - `branchId` resolved, `taskTypeOther`
+ * settled - and `assignee` is an active login with its `linkedEmployeeId`.
+ */
+async function insertTask(client, values, assignee, actor) {
+  const task = await client.hrmTask.create({
+    data: {
+      taskCode: await nextTaskCode(client),
+      title: values.title,
+      description: values.description,
+      taskType: values.taskType,
+      taskTypeOther: values.taskTypeOther || null,
+      priority: values.priority,
+      department: values.department || null,
+      branch: values.branch || null,
+      branchId: values.branchId ?? null,
+      status: "PENDING",
+      assignedToUserId: assignee.id,
+      ownerEmployeeId: assignee.linkedEmployeeId ?? null,
+      assignedToName: nameOf(assignee),
+      assignedByUserId: actor.id || null,
+      // Usually the giver, but an administrator can raise one on somebody else's behalf.
+      createdByUserId: actor.id || null,
+      assignedByName: nameOf(actor),
+      dueOn: values.dueOn ? new Date(values.dueOn) : null,
+    },
+  });
+
+  await logActivity(client, task.id, ACTIONS.CREATED, `${task.taskCode} created with ${PRIORITY_LABELS[task.priority]} priority.`, actor);
+  await logActivity(client, task.id, ACTIONS.ASSIGNED, `Assigned to ${task.assignedToName}.`, actor);
+  // The first link in the chain. My Tasks reads the holder rows rather than `assignedToUserId`,
+  // so a task created without one would not appear on the list of the person it was given to.
+  await rememberHolder(client, task.id, assignee.id, nameOf(assignee));
+  await notify(client, {
+    userId: assignee.id,
+    actorId: actor.id,
+    type: TYPES.TASK_ASSIGNED,
+    title: `New task: ${task.title}`,
+    body: `${nameOf(actor)} assigned you ${task.taskCode} · ${PRIORITY_LABELS[task.priority]} priority${task.dueOn ? ` · due ${task.dueOn.toISOString().slice(0, 10)}` : ""}`,
+    entityType: "HRM_TASK",
+    entityId: task.id,
+    link: linkTo(task),
+  });
+
+  return task;
 }
 
 /**
@@ -521,13 +671,14 @@ const TASK_SCOPE_COLUMNS = { branch: "branchId", employee: "ownerEmployeeId", us
 const allTasksScope = (userId) => dataScope.resolve({ userId, module: "HRM", feature: "All Tasks", columns: TASK_SCOPE_COLUMNS });
 
 async function listTasks({ scope, userId, role = "", status = "" }) {
+  role = await taskRole(userId, role);
   /*
    * Deleted tasks are gone from all three lists, whichever question is being asked - including All
    * Tasks, which is the studio's whole list and would otherwise be the one place a deleted task
    * carried on being read. Stated here rather than per scope, so a fourth view added below cannot
    * be the one that forgets.
    */
-  const where = { deletedAt: null };
+  const where = { deletedAt: null, ...NOT_ON_A_BINNED_PROJECT };
   /*
    * My Tasks is everything I hold *or have held*, not only what is on me now.
    *
@@ -556,10 +707,11 @@ async function listTasks({ scope, userId, role = "", status = "" }) {
 }
 
 async function getTask(id, userId, canSeeAll = false, role = "") {
+  role = await taskRole(userId, role);
   // `findFirst` rather than `findUnique`, because a deleted task must answer as a task that is not
   // there - including to the link in somebody's bell, which is the one way to reach a task by id
   // without having seen it in a list first.
-  const task = await prisma.hrmTask.findFirst({ where: { id, deletedAt: null }, include });
+  const task = await prisma.hrmTask.findFirst({ where: { id, deletedAt: null, ...NOT_ON_A_BINNED_PROJECT }, include });
   if (!task) throw httpError(404, "That task could not be found.");
   // The same answer for a task that is not yours as for one that does not exist: whether a
   // colleague was given a particular task is not something this endpoint should confirm.
@@ -611,7 +763,8 @@ async function rememberHolder(client, taskId, userId, name) {
  * there.
  */
 async function updateTask(id, values, actor, { canSeeAll = false } = {}) {
-  const task = await prisma.hrmTask.findFirst({ where: { id, deletedAt: null }, include: { holders: true } });
+  actor = { ...actor, role: await taskRole(actor.id, actor.role) };
+  const task = await prisma.hrmTask.findFirst({ where: { id, deletedAt: null }, include: { holders: true, feedbackIssue: FEEDBACK_ISSUE_SELECT, speakUp: SPEAK_UP_SELECT } });
   if (!task) throw httpError(404, "That task could not be found.");
   // The same "not found" a read would give: a task this reader cannot see must not be told apart
   // from one that does not exist by which refusal comes back.
@@ -677,17 +830,20 @@ async function updateTask(id, values, actor, { canSeeAll = false } = {}) {
   });
 }
 
-async function transition(id, action, actor, { reason = null, assignToUserId = null, canSeeAll = false } = {}) {
-  // With `holders`, so `canRead` can answer for somebody who has held this task and passed it on.
+async function transition(id, action, actor, { reason = null, assignToUserId = null, canSeeAll = false, outcome = null, remarks = null } = {}) {
+  actor = { ...actor, role: await taskRole(actor.id, actor.role) };
+  // With `holders`, so `canRead` can answer for somebody who has held this task and passed it on,
+  // and with the feedback issue it may be, which decides how it may end.
   // A deleted task is not there to be started, completed, reassigned or cancelled.
-  const task = await prisma.hrmTask.findFirst({ where: { id, deletedAt: null }, include: { holders: true } });
+  const task = await prisma.hrmTask.findFirst({ where: { id, deletedAt: null }, include: { holders: true, feedbackIssue: FEEDBACK_ISSUE_SELECT, speakUp: SPEAK_UP_SELECT } });
   if (!task) throw httpError(404, "That task could not be found.");
   if (!canRead(task, actor.id, canSeeAll, canSeeAll ? await allTasksScope(actor.id) : null)) throw httpError(404, "That task could not be found.");
 
-  const refusal = refusalFor(task, action, actor.id);
+  const refusal = refusalFor(task, action, actor.id, actor.role);
   if (refusal) throw httpError(403, refusal);
 
   const now = new Date();
+  const sendsBack = action === "complete" && Boolean(task.assignedByUserId) && task.assignedByUserId !== actor.id;
   const actorName = nameOf(actor);
 
   return prisma.$transaction(async (client) => {
@@ -701,7 +857,69 @@ async function transition(id, action, actor, { reason = null, assignToUserId = n
       // No notice: starting is the receiver getting on with it, and the giver does not need a bell
       // for every task somebody opens. Completion and reverting are the answers they are waiting on.
       notice = null;
+    } else if (sendsBack) {
+      // Finish & Send Back: the work is done, and whoever assigned it marks it completed or revokes it.
+      data = { status: "SUBMITTED", completedByUserId: actor.id || null, completedByName: actorName };
+      activity = [ACTIONS.SUBMITTED, `Finished by ${actorName} and sent back to ${task.assignedByName}.`];
+      notice = {
+        userId: task.assignedByUserId,
+        type: TYPES.TASK_COMPLETED,
+        title: `Task finished and sent back: ${task.title}`,
+        body: `${actorName} finished ${task.taskCode} and sent it back to you. Mark it as completed, or revoke it.`,
+      };
+    } else if (action === "approve") {
+      // Mark as Completed by whoever assigned it. Who did the work stays whoever sent it back.
+      data = { status: "COMPLETED", completedAt: now, completedByUserId: task.completedByUserId ?? actor.id ?? null, completedByName: task.completedByName || actorName };
+      activity = [ACTIONS.COMPLETED, `Marked as completed by ${actorName}.`];
+      notice = task.assignedToUserId && task.assignedToUserId !== actor.id ? {
+        userId: task.assignedToUserId,
+        type: TYPES.TASK_COMPLETED,
+        title: `Task completed: ${task.title}`,
+        body: `${actorName} marked ${task.taskCode} as completed.`,
+      } : null;
+    } else if (action === "revoke") {
+      /*
+       * Taken back by whoever assigned it. With someone chosen it goes straight to them, waiting to
+       * be started - the same flow from the beginning; without, it comes back to the assigner.
+       */
+      const why = reason ? String(reason).trim() : "";
+      const toId = assignToUserId || actor.id;
+      if (toId === task.assignedToUserId) throw httpError(400, "This task is already assigned to them.");
+      const next = await client.user.findUnique({ where: { id: toId }, select: { id: true, name: true, username: true, email: true, status: true, linkedEmployeeId: true } });
+      if (!next || next.status !== "ACTIVE") throw httpError(400, "That person cannot be given tasks.");
+      const nextName = nameOf(next);
+      const fromName = task.assignedToName;
+      data = {
+        status: "PENDING",
+        assignedToUserId: next.id,
+        assignedToName: nextName,
+        ownerEmployeeId: next.linkedEmployeeId ?? null,
+        reassignedAt: now,
+        reassignReason: why || null,
+        reassignedFromUserId: task.assignedToUserId || null,
+        reassignedFromName: fromName,
+        completedByUserId: null,
+        completedByName: null,
+      };
+      activity = [ACTIONS.REVOKED, `Revoked from ${fromName} by ${actorName}${assignToUserId ? ` and reassigned to ${nextName}` : ""}.${why ? ` Reason: ${why}` : ""}`];
+      notice = [
+        task.assignedToUserId ? {
+          userId: task.assignedToUserId,
+          type: TYPES.TASK_REASSIGNED,
+          title: `Task revoked: ${task.title}`,
+          body: `${actorName} took ${task.taskCode} back from you.${why ? ` Reason: ${why}` : ""}`,
+        } : null,
+        assignToUserId ? {
+          userId: next.id,
+          type: TYPES.TASK_ASSIGNED,
+          title: `New task: ${task.title}`,
+          body: `${actorName} assigned you ${task.taskCode}.${why ? ` Reason: ${why}` : ""}`,
+        } : null,
+      ];
+      await rememberHolder(client, task.id, task.assignedToUserId, task.assignedToName);
+      if (assignToUserId) await rememberHolder(client, task.id, next.id, nextName);
     } else if (action === "complete") {
+      // Held by whoever assigned it (revoked back to them), or assigned by nobody: closed at once.
       data = { status: "COMPLETED", completedAt: now, completedByUserId: actor.id || null, completedByName: actorName };
       activity = [ACTIONS.COMPLETED, `Completed by ${actorName}.`];
       notice = {
@@ -727,9 +945,14 @@ async function transition(id, action, actor, { reason = null, assignToUserId = n
       const next = await client.user.findUnique({ where: { id: assignToUserId }, select: { id: true, name: true, username: true, email: true, status: true, linkedEmployeeId: true } });
       if (!next || next.status !== "ACTIVE") throw httpError(400, "That person cannot be given tasks.");
       const nextName = nameOf(next);
+      // Who the task is taken from: its holder, who is the actor unless a Super Admin is moving it.
+      const fromName = task.assignedToName || actorName;
+      const byAnother = Boolean(task.assignedToUserId) && task.assignedToUserId !== actor.id;
+      const why = String(reason).trim();
 
       data = {
-        status: "REASSIGNED",
+        // Pending for the person picking it up; the previous holder finds it under Reassigned.
+        status: "PENDING",
         assignedToUserId: next.id,
         assignedToName: nextName,
         /*
@@ -743,15 +966,15 @@ async function transition(id, action, actor, { reason = null, assignToUserId = n
         ownerEmployeeId: next.linkedEmployeeId ?? null,
         reassignedAt: now,
         reassignReason: String(reason).trim(),
-        reassignedFromUserId: actor.id || null,
-        reassignedFromName: actorName,
+        reassignedFromUserId: task.assignedToUserId || actor.id || null,
+        reassignedFromName: fromName,
         /*
          * The clock starts again for the person picking it up. A task half-done by somebody else is
          * not half-done for them, and leaving `IN_PROGRESS` on it would let them mark work complete
          * they never started.
          */
       };
-      activity = [ACTIONS.REASSIGNED, `Reassigned from ${actorName} to ${nextName}. Reason: ${String(reason).trim()}`];
+      activity = [ACTIONS.REASSIGNED, `Reassigned from ${fromName} to ${nextName}${byAnother ? ` by ${actorName}` : ""}. Reason: ${why}`];
       /*
        * The new holder is told, and so is whoever set the task: the person waiting on the work has
        * to know it changed hands, or the first they hear of it is a name they did not choose
@@ -764,11 +987,19 @@ async function transition(id, action, actor, { reason = null, assignToUserId = n
           title: `Task reassigned to you: ${task.title}`,
           body: `${actorName} reassigned ${task.taskCode} to you. Reason: ${String(reason).trim()}`,
         },
-        ...(task.assignedByUserId && task.assignedByUserId !== next.id ? [{
+        ...(task.assignedByUserId && task.assignedByUserId !== next.id && task.assignedByUserId !== actor.id ? [{
           userId: task.assignedByUserId,
           type: TYPES.TASK_REASSIGNED,
           title: `Task reassigned: ${task.title}`,
-          body: `${actorName} reassigned ${task.taskCode} to ${nextName}. Reason: ${String(reason).trim()}`,
+          body: `${actorName} reassigned ${task.taskCode} to ${nextName}. Reason: ${why}`,
+        }] : []),
+        // Taken off somebody by a Super Admin: they are told it has gone, rather than finding it
+        // missing from My Tasks.
+        ...(byAnother && task.assignedToUserId !== task.assignedByUserId ? [{
+          userId: task.assignedToUserId,
+          type: TYPES.TASK_REASSIGNED,
+          title: `Task moved off you: ${task.title}`,
+          body: `${actorName} reassigned ${task.taskCode} to ${nextName}. Reason: ${why}`,
         }] : []),
       ];
       /*
@@ -781,6 +1012,23 @@ async function transition(id, action, actor, { reason = null, assignToUserId = n
        */
       await rememberHolder(client, task.id, task.assignedToUserId, task.assignedToName);
       await rememberHolder(client, task.id, next.id, nextName);
+    } else if (action === "resolve") {
+      /*
+       * A feedback issue answered: Issues sorted or Rejected, with a remark (required for Rejected).
+       * The task is done, and the issue takes the answer - which moves the feedback out of Issues once
+       * every issue on it is answered (`feedbackIssues.answerIssue`, in this same transaction).
+       */
+      const answer = feedbackIssues.validAnswer(outcome, remarks);
+      if (answer.problem) throw httpError(400, answer.problem);
+      await feedbackIssues.answerIssue(client, task.feedbackIssue, { outcome: answer.outcome, remarks: answer.remarks, userId: actor.id || null });
+      data = { status: "COMPLETED", completedAt: now, completedByUserId: actor.id || null, completedByName: actorName };
+      activity = [ACTIONS.COMPLETED, `${answer.outcome} by ${actorName}.${answer.remarks ? ` Remarks: ${answer.remarks}` : ""}`];
+      notice = {
+        userId: task.assignedByUserId,
+        type: TYPES.TASK_COMPLETED,
+        title: `Feedback issue answered: ${task.title}`,
+        body: `${actorName} answered ${task.taskCode}: ${answer.outcome}.`,
+      };
     } else if (action === "cancel") {
       data = { status: "CANCELLED", cancelledAt: now };
       activity = [ACTIONS.CANCELLED, reason ? `Cancelled by ${actorName}. Reason: ${String(reason).trim()}` : `Cancelled by ${actorName}.`];
@@ -833,7 +1081,8 @@ async function transition(id, action, actor, { reason = null, assignToUserId = n
  * than a row to put on screen.
  */
 async function deleteTask(id, actor, { canSeeAll = false } = {}) {
-  const task = await prisma.hrmTask.findFirst({ where: { id, deletedAt: null }, include: { holders: true } });
+  actor = { ...actor, role: await taskRole(actor.id, actor.role) };
+  const task = await prisma.hrmTask.findFirst({ where: { id, deletedAt: null }, include: { holders: true, feedbackIssue: FEEDBACK_ISSUE_SELECT, speakUp: SPEAK_UP_SELECT } });
   if (!task) throw httpError(404, "That task could not be found.");
   // The same 404 for a task that is not yours as for one that does not exist, exactly as reading it
   // answers - whether a colleague holds a particular task is not something this confirms.
@@ -999,7 +1248,18 @@ async function removeTaskAttachment(taskId, attachmentId, actor, { canSeeAll = f
   return { id: removed.id };
 }
 
+/**
+ * Not a feedback-issue task of a project in Resource Management → Recycling Bin. The task is kept -
+ * Restore brings the project back with its feedback - but it is off every list, count and link while
+ * the project is there. `NOT … is` matches a task with no feedback issue at all.
+ */
+const NOT_ON_A_BINNED_PROJECT = { NOT: { feedbackIssue: { is: { projectFeedback: { project: { deletedAt: { not: null } } } } } } };
+
 module.exports = {
+  NOT_ON_A_BINNED_PROJECT,
+  logActivity,
+  rememberHolder,
+  taskRole,
   addAttachment,
   updateTask,
   attachmentList,
@@ -1022,10 +1282,14 @@ module.exports = {
   refusalFor,
   canRead,
   assignableUsers,
+  canAnswerTasks,
+  taskAnswerers,
   createTask,
+  insertTask,
   taskDepartments,
   taskBranches,
   listTasks,
+  allTasksScope,
   getTask,
   transition,
   deleteTask,

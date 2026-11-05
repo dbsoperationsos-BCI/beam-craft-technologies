@@ -1,5 +1,5 @@
-import ProjectWorkflowModulePage from "@/components/project-management/ProjectWorkflowModulePage";
+import PreProductionBoard from "@/components/project-management/PreProductionPage";
 
 export default function PreProductionPage() {
-  return <ProjectWorkflowModulePage moduleKey="pre-production" />;
+  return <PreProductionBoard moduleKey="pre-production" />;
 }

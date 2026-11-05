@@ -39,7 +39,7 @@ function scrollableAncestor(element) {
  * Refs throughout, not state: this is read and written many times a second by an animation frame,
  * and re-rendering the list on each would make the drag stutter just when it has to be smooth.
  */
-function useEdgeScroll() {
+export function useEdgeScroll() {
   const scroller = useRef(null);
   const run = useRef({ frame: 0, speed: 0 });
 

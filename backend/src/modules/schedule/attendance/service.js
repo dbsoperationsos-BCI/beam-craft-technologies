@@ -1,4 +1,6 @@
 const prisma = require("../../../config/db");
+const { workedMinutes } = require("../../hrm/attendance/attendanceRules");
+const { studioDayStart, studioDayEnd, studioDaySql } = require("../../../services/studioDay");
 
 /*
  * ── Who was working, derived from what the application measured ───────────────────────────────
@@ -71,9 +73,11 @@ function isStatus(value) {
  * What each person actually did, per day, from the measured sessions.
  *
  * Keyed `userId|day`. The same grouping the Work Hours report makes and for the same reasons: by the
- * day a stretch *began*, so the two screens cannot disagree about which day a late evening belongs
- * to, and the `app` context alone - the contexts run concurrently, so summing them would count a
- * minute in the chat panel twice and report a nine-hour day as fourteen.
+ * day a stretch *began* - the studio's day, read off the stored UTC column through `studioDaySql`
+ * and bounded through `studioDayStart` / `studioDayEnd`, the same helper Reports uses - so the two
+ * screens cannot disagree about which day a late evening belongs to, and the `app` context alone -
+ * the contexts run concurrently, so summing them would count a minute in the chat panel twice and
+ * report a nine-hour day as fourteen.
  *
  * Answers an empty map on any failure. A studio that has not run the application since the heartbeat
  * was added has no rows, and an older database may not have the table at all; either way the
@@ -82,7 +86,7 @@ function isStatus(value) {
 async function measuredDays({ from, to }) {
   try {
     const rows = await prisma.$queryRawUnsafe(
-      "SELECT `s`.`user_id` AS `userId`, DATE(`s`.`started_at`) AS `day`,"
+      `SELECT \`s\`.\`user_id\` AS \`userId\`, ${studioDaySql("\`s\`.\`started_at\`")} AS \`day\`,`
       + "       SUM(TIMESTAMPDIFF(SECOND, `s`.`started_at`, `s`.`ended_at`)) AS `seconds`,"
       + "       MIN(`s`.`started_at`) AS `firstAt`, MAX(`s`.`ended_at`) AS `lastAt`"
       + "  FROM `app_usage_session` AS `s`"
@@ -92,9 +96,9 @@ async function measuredDays({ from, to }) {
       // nothing new and is what MySQL can actually narrow the table by.
       + "   AND `s`.`ended_at` >= ?"
       + " GROUP BY `s`.`user_id`, `day`",
-      `${from} 00:00:00`,
-      `${to} 23:59:59`,
-      `${from} 00:00:00`,
+      studioDayStart(from),
+      studioDayEnd(to),
+      studioDayStart(from),
     );
     const byDay = new Map();
     for (const row of rows) {
@@ -143,7 +147,7 @@ async function checkedInDays({ ids, from, to }) {
         employeeId: { in: [...userByEmployee.keys()] },
         workDate: { gte: new Date(`${from}T00:00:00Z`), lte: new Date(`${to}T00:00:00Z`) },
       },
-      select: { employeeId: true, workDate: true, loginAt: true, logoutAt: true },
+      select: { employeeId: true, workDate: true, loginAt: true, logoutAt: true, awayMinutes: true },
     });
 
     const byDay = new Map();
@@ -151,9 +155,8 @@ async function checkedInDays({ ids, from, to }) {
       const userId = userByEmployee.get(session.employeeId);
       const day = dayKey(session.workDate);
       if (!userId || !day) continue;
-      const minutes = session.logoutAt
-        ? Math.max(0, Math.round((new Date(session.logoutAt) - new Date(session.loginAt)) / 60000))
-        : null;
+      // The attendance module's own reading, so time logged out between two logins is not counted.
+      const minutes = session.logoutAt ? workedMinutes(session) : null;
       byDay.set(`${userId}|${day}`, { firstAt: session.loginAt, lastAt: session.logoutAt, minutes });
     }
     return byDay;

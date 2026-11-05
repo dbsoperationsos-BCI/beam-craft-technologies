@@ -31,7 +31,13 @@ const PAIRING_COOLDOWN_MS = 15 * 1000;
  * allowed to link - once per lapse, the way the gate does it, so a code that expires unscanned is
  * replaced rather than leaving an empty square.
  */
-export function useImageSelectionWhatsappSession(active = true, { autoStart = false } = {}) {
+/**
+ * This person's WhatsApp session, polled while `active`, with a pairing code asked for on demand
+ * (or at once, with `autoStart`). `readSession` and `connectSession` are the two endpoints it calls -
+ * each screen that pairs WhatsApp has its own pair behind its own permission; they must be stable
+ * (module-level functions), since the hook's callbacks depend on them.
+ */
+export function useWhatsappPairingSession(active = true, { autoStart = false, readSession, connectSession } = {}) {
   const [session, setSession] = useState(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
@@ -42,12 +48,12 @@ export function useImageSelectionWhatsappSession(active = true, { autoStart = fa
 
   const refresh = useCallback(async () => {
     try {
-      const response = await getImageSelectionWhatsappSession();
+      const response = await readSession();
       if (response?.data) setSession((current) => ({ ...(current || {}), ...response.data }));
     } catch (cause) {
       setError(cause?.message || "Unable to read the WhatsApp session.");
     }
-  }, []);
+  }, [readSession]);
 
   const start = useCallback(async () => {
     if (starting || Date.now() < nextAllowedRef.current) return;
@@ -56,14 +62,14 @@ export function useImageSelectionWhatsappSession(active = true, { autoStart = fa
     setStarting(true);
     setError("");
     try {
-      const response = await connectImageSelectionWhatsapp();
+      const response = await connectSession();
       if (response?.data) setSession((current) => ({ ...(current || {}), ...response.data }));
     } catch (cause) {
       setError(cause?.message || "Unable to start WhatsApp pairing.");
     } finally {
       setStarting(false);
     }
-  }, [starting]);
+  }, [starting, connectSession]);
 
   useEffect(() => {
     if (!active) return undefined;
@@ -104,6 +110,11 @@ export function useImageSelectionWhatsappSession(active = true, { autoStart = fa
  * screen, and the code and the line that stands in for it share one frame so nothing moves as
  * WhatsApp rotates the code.
  */
+/** Image Selection's own: the session read and paired through its endpoints. */
+export function useImageSelectionWhatsappSession(active = true, { autoStart = false } = {}) {
+  return useWhatsappPairingSession(active, { autoStart, readSession: getImageSelectionWhatsappSession, connectSession: connectImageSelectionWhatsapp });
+}
+
 export function WhatsAppPairingCode({ session, starting, error, waiting, onStart }) {
   const switchedOff = session?.chatEnabled === false || session?.userChatEnabled === false;
   return (

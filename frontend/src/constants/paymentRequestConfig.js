@@ -86,7 +86,18 @@ export const requestTableFields = [
   ["branch", "Branch", undefined, 170, 140],
   ["vendorName", "Vendor", undefined, 180, 150],
   ["expenseCount", "Lines", undefined, 100, 90],
-  ["cashEntryCode", "Cash Entry", undefined, 150, 130],
+  ["cashEntryCode", "Cash Entries", undefined, 150, 130],
+  /*
+    * Approved is not paid: the money leaves when Accounts releases it, which is a second step, and
+    * this column is the one that answers for it ("Awaiting Payment" or "Paid").
+    *
+    * Plain text rather than a `status` column. There is one `statusStyles` map per table, and the
+    * board's columns and the Status column's filter list are both built from its keys - so a second
+    * status column would have put Paid on the board as a column to drag a request into. It names
+    * its own two answers as the tuple's `filterOptions` instead, which is a list filter without
+    * `listFilters` - passing that would have turned every other column on the table into a text box.
+    */
+  ["paymentStatus", "Payment", undefined, 150, 130, ["Awaiting Payment", "Paid"]],
   ["createdAt", "Raised On", "date", 150, 130],
   ["decidedAt", "Decided On", "date", 150, 130],
 ];
@@ -98,14 +109,48 @@ export const requestStatusStyles = {
   REJECTED: "bg-red-500",
 };
 
+/*
+ * Asset Management → Vendors → **Vendor Payments**: the same records read from the vendor's side.
+ *
+ * A bill rather than a request, because that is what it is to the vendor - so the code column is
+ * "Bill ID" here and "Request ID" on the Payment Requests screen, and the three money columns are
+ * the ledger reading: asked, gone out, still owed. `paid` and `balance` are the server's own sums of
+ * the cash entries the approval wrote, not arithmetic the screen does.
+ */
+export const vendorPaymentTableFields = [
+  ["requestCode", "Bill ID", undefined, 150, 130],
+  ["status", "Status", "status", 130, 110],
+  ["vendorName", "Vendor", undefined, 200, 160],
+  ["vendorCode", "Vendor ID", undefined, 140, 120],
+  ["billDate", "Bill Date", "date", 140, 120],
+  ["amount", "Amount", "amount", 150, 130],
+  ["paid", "Paid", "amount", 150, 130],
+  ["balance", "Balance", "amount", 150, 130],
+  ["branch", "Branch", undefined, 170, 140],
+  ["requestedByName", "Raised By", undefined, 190, 160],
+  ["cashEntryCode", "Cash Entries", undefined, 160, 130],
+  ["paidOn", "Paid On", "date", 140, 120],
+  ["createdAt", "Raised On", "date", 150, 130],
+  ["decidedAt", "Decided On", "date", 150, 130],
+];
+
+/** One bill read in full. Read-only: raising and deciding stay on the screens that own them. */
+export const vendorPaymentInfoSections = [
+  { title: "Bill", fields: [["requestCode", "Bill ID"], ["status", "Status"], ["billDate", "Bill Date", "date"], ["amount", "Amount", "amount"], ["paid", "Paid", "amount"], ["balance", "Balance", "amount"]] },
+  { title: "Vendor", fields: [["vendorName", "Vendor"], ["vendorCode", "Vendor ID"], ["vendorPhone", "Phone"]] },
+  { title: "Raised By", fields: [["requestedByName", "Employee Name"], ["requestedByCode", "Employee ID"], ["branch", "Branch"], ["createdAt", "Raised On", "date"], ["comments", "Description"]] },
+  { title: "Paid", fields: [["cashEntryCode", "Cash Entries"], ["paidOn", "Paid On", "date"], ["decidedAt", "Decided On", "date"]] },
+  { title: "Bills", fields: [["billUrls", "Bills", "gallery"]] },
+];
+
 export const requestInfoSections = [
   { title: "Request", fields: [["requestCode", "Request ID"], ["typeLabel", "Type"], ["status", "Status"], ["amount", "Amount", "amount"], ["createdAt", "Raised On", "date"]] },
-  { title: "Raised By", fields: [["requestedByName", "Name"], ["requestedByCode", "Employee ID"], ["requestedByDepartment", "Department"], ["branch", "Branch"]] },
+  { title: "Raised By", fields: [["requestedByName", "Employee Name"], ["requestedByCode", "Employee ID"], ["requestedByDepartment", "Department"], ["branch", "Branch"]] },
   { title: "Details", fields: [["reason", "Reason"], ["comments", "Description"], ["repaymentPlan", "Repayment"], ["repaymentMonths", "Repayment Months"], ["settlement", "Excess / Reimbursement"], ["vendorName", "Vendor"], ["vendorPhone", "Vendor Phone"]] },
   // Rendered by the `expenses` formatter the page supplies, so a request's breakdown is readable
-  // from the row without opening the approval form.
+  // from the row without opening the payment form.
   { title: "Expenses", fields: [["expenses", "Lines", "expenses"]] },
-  { title: "Decision", fields: [["decidedAt", "Decided On", "date"], ["decisionRemarks", "Remarks"], ["cashEntryCode", "Cash Entry"]] },
+  { title: "Decision", fields: [["decidedAt", "Decided On", "date"], ["decisionRemarks", "Remarks"], ["paymentStatus", "Payment"], ["cashEntryCode", "Cash Entries"]] },
   // Both galleries drop themselves when empty and take the section with them.
   { title: "Bills", fields: [["billUrls", "Bills", "gallery"]] },
   { title: "QR Code", fields: [["qrCodeUrls", "QR Code", "gallery"]] },
@@ -123,6 +168,7 @@ export const requestLeadFields = [
       required: true,
       colSpan: 2,
       options: requestTypeChoices,
+      helperText: "What kind of money you are asking for; changing it clears the answers below.",
       // A bare line of choices, no box: it introduces the form rather than sitting among inputs.
       props: { controlClassName: "px-0 py-0" },
       clears: ["amount", "reason", "comments", "repaymentPlan", "settlement", "vendorName", "vendorPhone"],
@@ -151,6 +197,7 @@ export const requestFormSections = [
         label: "Advance Salary Amount Requested",
         required: true,
         when: (values) => !computesTotal(values),
+        helperText: "How much of your salary you want in advance; it is recovered from later payslips.",
         props: { type: "number", min: 0, step: "0.01", inputMode: "decimal", placeholder: "0.00" },
       },
       {
@@ -161,6 +208,7 @@ export const requestFormSections = [
         when: isType("SALARY_ADVANCE"),
         options: REPAYMENT_PLANS,
         colSpan: 2,
+        helperText: "Whether the advance comes off your next salary in one go or over several months.",
         // Switching back to the single payment drops the count, so a stale number cannot be saved
         // against an arrangement that no longer has months in it.
         clears: ["repaymentMonths"],
@@ -170,6 +218,7 @@ export const requestFormSections = [
         label: "Over How Many Months",
         required: true,
         when: (values) => values.type === "SALARY_ADVANCE" && values.repaymentPlan === REPAYMENT_OVER_MONTHS,
+        helperText: `The number of monthly salary deductions it is spread over, 1 to ${MAX_REPAYMENT_MONTHS}.`,
         props: { type: "number", min: 1, max: MAX_REPAYMENT_MONTHS, step: 1, inputMode: "numeric", placeholder: `1 to ${MAX_REPAYMENT_MONTHS}` },
       },
       {
@@ -178,14 +227,35 @@ export const requestFormSections = [
         type: "select",
         required: true,
         when: isType("VENDOR_PAYMENT"),
+        /*
+         * Searched on the server where the screen offers one (`context.remote.vendors`): `options`
+         * carries a page of the register for the picker to open on, and typing reaches all of it.
+         * The vendor already chosen is kept in the list, since the field holds its id and the label
+         * comes from a list each search replaces.
+         */
+        /*
+         * `context.options.vendors` is already `{ value, label }`, built by the panel - which is also
+         * where the server-side search's results are labelled and the chosen vendor is kept in the
+         * list. Deliberately not built here: **this file imports nothing**, so that the tests which
+         * load it directly through Node need no module aliasing, and a label helper pulled in for one
+         * field would have broken that for every one of them.
+         */
         options: "vendors",
+        helperText: "The vendor to be paid; their name and number come from the vendor register.",
         // Picked from the vendor register rather than typed, so a name and a number already on
         // record cannot be re-entered differently here. The server reads both from that record.
-        props: (values, context) => ({
-          searchable: true,
-          disabled: !(context?.options?.vendors || []).length,
-          placeholder: (context?.options?.vendors || []).length ? "Select the vendor" : "No active vendors available",
-        }),
+        props: (values, context) => {
+          const ready = (context?.options?.vendors || []).length;
+          const remote = context?.remote?.vendors;
+          return {
+            searchable: true,
+            // Never disabled while it can be searched: typing is how the rest of the register is
+            // reached, and a disabled box cannot be typed into.
+            disabled: !ready && !remote,
+            placeholder: ready || remote ? "Select or search the vendor" : "No active vendors available",
+            ...(remote ? remote.props : {}),
+          };
+        },
       },
       {
         name: "settlement",
@@ -195,6 +265,7 @@ export const requestFormSections = [
         when: isType("EXPENSE_SUBMISSION"),
         options: SETTLEMENTS,
         colSpan: 2,
+        helperText: "Whether you are returning unspent advance money or claiming back what you spent extra.",
         // An excess asks for no QR code, so one attached before the switch is dropped with it.
         clears: ["qrCode"],
       },
@@ -205,6 +276,7 @@ export const requestFormSections = [
         required: true,
         when: isType("SALARY_ADVANCE"),
         colSpan: 2,
+        helperText: "Why you need the advance; the approver reads this before deciding.",
         props: { rows: 4, placeholder: "Why the money is needed." },
       },
       {
@@ -216,6 +288,7 @@ export const requestFormSections = [
         required: true,
         when: takesDescription,
         colSpan: 2,
+        helperText: "What the money is for and how it will be used; the approver reads this.",
         props: { rows: 4, placeholder: "Explain what this advance is for and how it will be used." },
       },
     ],
@@ -238,6 +311,7 @@ export const requestFormSections = [
         type: "file",
         when: takesBills,
         colSpan: 2,
+        helperText: "Photos of every bill behind this request, up to ten images.",
         props: { image: true, accept: ".avif,.jpeg,.jpg,.png,.webp", maxFiles: 10 },
       },
       {
@@ -254,37 +328,35 @@ export const requestFormSections = [
          */
         when: (values, context) => !(values.type === "EXPENSE_SUBMISSION"
           && values.settlement === (context?.options?.excessSettlement || SETTLEMENT_EXCESS)),
+        helperText: (values) => values.type === "VENDOR_PAYMENT" ? "The vendor's payment QR code, so the studio knows where to send the money." : "Your payment QR code, so the studio knows where to send the money.",
         // One only: the QR code is where this money should land, and two of them name two places.
         props: { image: true, accept: ".avif,.jpeg,.jpg,.png,.webp", maxFiles: 1 },
-      },
-      {
-        name: "acceptTerms",
-        label: "I agree to the terms & conditions",
-        type: "checkbox",
-        colSpan: 2,
       },
     ],
   },
 ];
 
 /**
- * What an admin adds when approving: how the money actually moves.
+ * What Accounts adds when it releases the money: how it actually moved.
  *
- * The request says who is owed what and why; it cannot know how it will be paid, so that is asked
- * at the moment of approval and the entry is written from both halves. The fields mirror the cash
- * entry's own, because that is exactly what they become — including the direction, since an expense
- * submission that came in under its advance is money returning to the studio.
+ * The request says who is owed what and why, and the approval says yes; neither knows how it was
+ * paid, so that is asked when the money leaves and the entry is written from both halves. The
+ * fields mirror the cash entry's own, because that is exactly what they become — including the
+ * direction, since an expense submission that came in under its advance is money returning.
+ *
+ * These were the approval form's until approving and paying were split in two. Approving asks for a
+ * remark and nothing else now; this is Accounts Manager → Pending → Record Payment.
  */
 /** Says where the accounts come from when the list is empty, rather than opening an empty dropdown. */
-const approvalAccountProps = (context, chosen) => {
+const paymentAccountProps = (context, chosen) => {
   const ready = (context?.options?.accounts || []).length;
   return { searchable: true, disabled: !ready, placeholder: ready ? chosen : "Add a bank account in Accounts Settings" };
 };
 
-export const approvalFormSections = [
+export const paymentFormSections = [
   {
     id: "decision",
-    title: "Approve & Record Payment",
+    title: "Record Payment",
     summary: (values, context) => [
       ["Request ID", context.request.requestCode],
       ["Type", context.request.typeLabel],
@@ -298,13 +370,14 @@ export const approvalFormSections = [
     // releasing money without seeing what it covers is the one thing this screen must not ask for.
     render: ({ context }) => context?.expenseBreakdown || null,
     fields: [
-      { name: "entryDate", label: "Payment Date", type: "date", required: true, props: { restriction: "future" } },
-      { name: "paymentMode", label: "Payment Mode", type: "select", required: true, options: "paymentModes", clears: ["transactionId", "receivedAccount", "paidFromAccount", "paymentModeOther"] },
+      { name: "entryDate", label: "Payment Date", type: "date", required: true, helperText: "The day the money actually moved; a future date is not allowed.", props: { restriction: "future" } },
+      { name: "paymentMode", label: "Payment Mode", type: "select", required: true, options: "paymentModes", helperText: "How the money moved; it decides which reference or account is asked next.", clears: ["transactionId", "receivedAccount", "paidFromAccount", "paymentModeOther"] },
       {
         name: "paymentModeOther",
         label: "Payment Mode Details",
         required: true,
         when: (values) => values.paymentMode === "Other",
+        helperText: "Say how this payment was actually made, since Other alone does not.",
         props: { placeholder: "e.g. Cheque, adjustment against an advance" },
       },
       {
@@ -312,6 +385,7 @@ export const approvalFormSections = [
         label: (values) => values.paymentMode === "UPI" ? "UPI Transaction ID" : `${values.paymentMode || "Payment"} Reference Number`,
         required: true,
         when: (values, context) => (context?.modesWithTransactionId || []).includes(values.paymentMode),
+        helperText: "The reference the payment app or bank gave, kept as proof the payment went through.",
         props: (values) => ({ placeholder: values.paymentMode === "UPI" ? "Reference from the payment app" : "Reference from the bank" }),
       },
       {
@@ -320,8 +394,9 @@ export const approvalFormSections = [
         required: true,
         type: "select",
         when: (values, context) => context?.received && (context?.modesWithAccount || []).includes(values.paymentMode),
+        helperText: "The studio account the returned money went into.",
         options: "accounts",
-        props: (values, context) => approvalAccountProps(context, "Account the money went into"),
+        props: (values, context) => paymentAccountProps(context, "Account the money went into"),
       },
       {
         name: "paidFromAccount",
@@ -329,8 +404,9 @@ export const approvalFormSections = [
         required: true,
         type: "select",
         when: (values, context) => !context?.received && (context?.modesWithAccount || []).includes(values.paymentMode),
+        helperText: "The studio account the money was paid out of.",
         options: "accounts",
-        props: (values, context) => approvalAccountProps(context, "Account the money was paid from"),
+        props: (values, context) => paymentAccountProps(context, "Account the money was paid from"),
       },
       {
         name: "handler",
@@ -338,6 +414,7 @@ export const approvalFormSections = [
         type: "select",
         required: true,
         options: "handlers",
+        helperText: "The employee who handled the money; choose Other for someone off the payroll.",
         clears: ["handlerOtherName"],
         props: (values, context) => ({ searchable: true, placeholder: context?.received ? "Select the employee who took the money" : "Select the employee who paid it out" }),
       },
@@ -346,6 +423,7 @@ export const approvalFormSections = [
         label: (values, context) => context?.received ? "Receiver's Name" : "Payer's Name",
         required: true,
         when: (values, context) => values.handler === context?.otherHandler,
+        helperText: "The full name of the person outside the payroll who handled the money.",
         props: (values, context) => ({ placeholder: context?.received ? "Name of the person who received it" : "Name of the person who paid it out" }),
       },
       {
@@ -356,6 +434,7 @@ export const approvalFormSections = [
         label: "Payment To",
         required: true,
         when: (values, context) => !context?.received,
+        helperText: "Filled in with the vendor or requester; change it if someone else was paid.",
         props: { placeholder: "Who the payment went to" },
       },
       {
@@ -365,9 +444,10 @@ export const approvalFormSections = [
         label: "Payment Proof",
         type: "file",
         colSpan: 2,
+        helperText: "Optional screenshot or receipt showing the money was paid, up to five images.",
         props: { image: true, accept: ".avif,.jpeg,.jpg,.png,.webp", maxFiles: 5 },
       },
-      { name: "remarks", label: "Remarks", type: "textarea", colSpan: 2, props: { rows: 3, placeholder: "Anything worth keeping with this decision." } },
+      { name: "remarks", label: "Remarks", type: "textarea", colSpan: 2, helperText: "Optional note kept on the cash entries this writes.", props: { rows: 3, placeholder: "Anything worth keeping with this payment." } },
     ],
   },
 ];
@@ -383,10 +463,85 @@ export const requestInitialValues = {
   settlement: "",
   qrCode: [],
   bills: [],
-  acceptTerms: false,
 };
 
 export const emptyExpenseLine = { shootId: "", expenseDate: "", expenseType: "", description: "", amount: "" };
+
+/**
+ * What the expense lines call themselves, which is not the same question in all three cases.
+ *
+ * One table was asking one set of words of three different things. Every line said "the day the
+ * money **was** spent" and "Expense Amount", which is true only of money already gone:
+ *
+ *   * An **advance against expenses** is money wanted *before* it is spent, so the day it asks for
+ *     is the day it is needed - which is usually still to come, and the form refused exactly that -
+ *     and the figure is an estimate, not a receipt.
+ *   * An **excess** is unspent advance money being handed *back*. There is nothing it was spent on,
+ *     so it is not asked (`asksExpenseType`), and the amount is what is being returned.
+ *   * A **reimbursement**, and a vendor's bill, are money already spent, which is what the original
+ *     wording described.
+ *
+ * Written here rather than in the table so the three readings sit side by side and can be compared,
+ * and so the server's own rule about the expense type has one counterpart to match.
+ */
+const LINES_SPENT = {
+  heading: "Expense lines",
+  item: "Expense",
+  shootHelp: "The shoot this was spent on; leave as General if none.",
+  dateLabel: "Expense Date",
+  dateHelp: "The day the money was spent; it cannot be a future day.",
+  // What the date box refuses, in DateField's own words: "future", "past", or "none" for a box that
+  // refuses nothing - which is what a day still to come needs.
+  dateRestriction: "future",
+  asksExpenseType: true,
+  typeHelp: "What the money was spent on, such as travel or food.",
+  typePlaceholder: "What was it spent on",
+  amountLabel: "Expense Amount",
+  amountHelp: "The amount spent in rupees; it adds up to the request total.",
+  descriptionHelp: "Any detail that helps the approver understand the expense.",
+  total: "Total Expenses Submitted",
+};
+
+const LINES_PLANNED = {
+  ...LINES_SPENT,
+  heading: "Planned expenses",
+  item: "Planned expense",
+  shootHelp: "The shoot this money is needed for; leave as General if none.",
+  dateLabel: "Date Needed",
+  dateHelp: "The day the money is needed by; a day still to come is expected.",
+  dateRestriction: "none",
+  typeHelp: "What the money will be spent on, such as travel or food.",
+  typePlaceholder: "What will it be spent on",
+  amountLabel: "Estimated Amount",
+  amountHelp: "What this is expected to cost; it adds up to the advance total.",
+  descriptionHelp: "Any detail that helps the approver understand what the money is for.",
+  total: "Estimated Advance Total",
+};
+
+const LINES_RETURNED = {
+  ...LINES_SPENT,
+  heading: "Money being returned",
+  item: "Return",
+  shootHelp: "The shoot the advance was taken for; leave as General if none.",
+  dateLabel: "Date Returned",
+  dateHelp: "The day the money is being handed back; it cannot be a future day.",
+  asksExpenseType: false,
+  amountLabel: "Amount Returned",
+  amountHelp: "The unspent amount being handed back; it adds up to the total returned.",
+  descriptionHelp: "Any detail that helps the approver understand what is being returned.",
+  total: "Total Being Returned",
+};
+
+/**
+ * Which of the three a form is filling in. `excessSettlement` comes down with the options, since
+ * which settlement means the money comes back is a flag on the studio's own list rather than the
+ * words "Expense Excess" - the same reading the QR code field and the server both take.
+ */
+export const expenseLineWording = ({ type, settlement, excessSettlement } = {}) => {
+  if (type === "ADVANCE_EXPENSE") return LINES_PLANNED;
+  if (type === "EXPENSE_SUBMISSION" && settlement === (excessSettlement || SETTLEMENT_EXCESS)) return LINES_RETURNED;
+  return LINES_SPENT;
+};
 
 /**
  * The shoots a line may name, each labelled with the project it belongs to.
@@ -396,44 +551,3 @@ export const emptyExpenseLine = { shootId: "", expenseDate: "", expenseType: "",
  * project off the shoot and stores both.
  */
 export const shootChoiceLabel = (shoot) => `${shoot.projectCode ? `${shoot.projectCode} — ` : ""}${shoot.shootId} ${shoot.shoot}`.trim();
-
-/**
- * Extra quotations, tabled the way every other module tables its records.
- *
- * `[key, header, type, size, minSize]`, the same shape the requests above use, so the column
- * menu, the resizing, the filters and the CSV export all behave identically — an extra is a
- * different record, not a different kind of screen.
- */
-export const extraQuotationTableFields = [
-  ["requestCode", "Request ID", undefined, 140, 120],
-  ["status", "Status", "status", 160, 140],
-  ["service", "Service", undefined, 200, 160],
-  ["amount", "Amount", "amount", 140, 120],
-  ["projectCode", "Event ID", undefined, 150, 130],
-  ["projectName", "Project", undefined, 220, 170],
-  ["shootCode", "Shoot ID", undefined, 140, 120],
-  ["shootName", "Shoot", undefined, 180, 150],
-  ["requestedByName", "Added By", undefined, 180, 150],
-  ["projectManager", "Approver", undefined, 180, 150],
-  ["remarks", "Remarks", undefined, 260, 200],
-  ["decisionRemarks", "Decision Remarks", undefined, 240, 180],
-  ["createdAt", "Raised On", "date", 150, 130],
-  ["decidedAt", "Decided On", "date", 150, 130],
-];
-
-/** Waiting, agreed, or turned down — the three states an extra can be read in. */
-export const extraQuotationStatusStyles = {
-  PENDING: "bg-amber-500",
-  APPROVED: "bg-emerald-500",
-  REJECTED: "bg-red-500",
-};
-
-export const extraQuotationInfoSections = [
-  { title: "Extra", fields: [["requestCode", "Request ID"], ["status", "Status"], ["service", "Service"], ["amount", "Amount", "amount"], ["createdAt", "Raised On", "date"]] },
-  { title: "Filed Against", fields: [["projectCode", "Event ID"], ["projectName", "Project"], ["shootCode", "Shoot ID"], ["shootName", "Shoot"], ["shootDate", "Shoot Date", "date"]] },
-  { title: "Raised By", fields: [["requestedByName", "Added By"], ["remarks", "Remarks"]] },
-  { title: "Decision", fields: [["projectManager", "Approver"], ["decidedAt", "Decided On", "date"], ["decisionRemarks", "Decision Remarks"]] },
-  // Drops itself when there is nothing attached, as the payment proof gallery does. The stored
-  // key is still `proofUrls`; only what the reader is shown changed.
-  { title: "Attachments", fields: [["proofUrls", "Files", "gallery"]] },
-];

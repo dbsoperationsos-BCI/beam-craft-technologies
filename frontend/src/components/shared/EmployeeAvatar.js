@@ -15,13 +15,15 @@ const PALETTE = [
 ];
 
 const SIZES = {
+  // A chip in a multi-select: the face inside the answer it names, no taller than the chip's text.
+  "2xs": "h-5 w-5 text-[9px]",
   // The top bar's user control: the face beside the name, no taller than the line it sits on.
   xs: "h-6 w-6 text-[10px]",
   sm: "h-8 w-8 text-[11px]",
   md: "h-10 w-10 text-sm",
   lg: "h-14 w-14 text-lg",
 };
-const SIZE_PIXELS = { xs: 24, sm: 32, md: 40, lg: 56 };
+const SIZE_PIXELS = { "2xs": 20, xs: 24, sm: 32, md: 40, lg: 56 };
 
 function initialsOf(name) {
   const words = String(name || "").trim().split(/\s+/).filter(Boolean);
@@ -39,12 +41,14 @@ function colorFor(seed) {
 /**
  * One person's face wherever the app shows people: their uploaded photo, or their initials on
  * one of four fixed colours. `seed` decides the colour and defaults to the name; pass something
- * stable like the employee id so a renamed person keeps their colour.
+ * stable like the employee id so a renamed person keeps their colour. `decorative` empties the
+ * photo's alt where the name is already written beside it - a picker's row or chip - so a screen
+ * reader does not say it twice.
  */
-export default function EmployeeAvatar({ name, photoUrl, seed, size = "md", className = "" }) {
+export default function EmployeeAvatar({ name, photoUrl, seed, size = "md", className = "", decorative = false }) {
   const pixels = SIZE_PIXELS[size] || SIZE_PIXELS.md;
   if (photoUrl) {
-    return <Image src={photoUrl} alt={`${name || "Employee"}'s photo`} width={pixels} height={pixels} unoptimized className={`${SIZES[size] || SIZES.md} shrink-0 rounded-full border border-slate-200 object-cover ${className}`} />;
+    return <Image src={photoUrl} alt={decorative ? "" : `${name || "Employee"}'s photo`} width={pixels} height={pixels} unoptimized className={`${SIZES[size] || SIZES.md} shrink-0 rounded-full border border-slate-200 object-cover ${className}`} />;
   }
   return (
     <span aria-hidden="true" className={`flex ${SIZES[size] || SIZES.md} shrink-0 items-center justify-center rounded-full font-bold ${colorFor(seed ?? name)} ${className}`}>

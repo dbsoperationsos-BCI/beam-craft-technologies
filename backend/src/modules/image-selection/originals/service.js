@@ -225,7 +225,9 @@ function createOriginalsService(repo = repository, dependencies = {}) {
    * of its root is refused — this server never resolves these paths, but the workstation that
    * copies originals later will.
    */
-  async function registerBatch(projectId, { folderId = null, storageRootId, files = [], userId = null }) {
+  // `holdForCulling`: registered through the AI Culling tab, so every new photo is held for
+  // culling before Photo Selection. A path already registered is a duplicate and stays as it is.
+  async function registerBatch(projectId, { folderId = null, storageRootId, files = [], userId = null, holdForCulling = false, holdForEditing = false }) {
     const project = await requireProject(projectId);
     const storageRoot = await repo.findStorageRoot(storageRootId);
     if (!storageRoot) throw httpError(404, "Storage root not found. Add it under Settings → Storage Roots first.");
@@ -269,6 +271,8 @@ function createOriginalsService(repo = repository, dependencies = {}) {
         ...(file.capturedAt ? { capturedAt: new Date(file.capturedAt) } : {}),
         createdByUserId: userId,
         completedAt: new Date(),
+        ...(holdForCulling ? { cullingHoldAt: new Date() } : {}),
+        ...(holdForEditing ? { editingHoldAt: new Date() } : {}),
       });
       known.add(key);
       registered.push({ id: upload.id, fileName: upload.fileName });
@@ -308,6 +312,9 @@ function createOriginalsService(repo = repository, dependencies = {}) {
     if (deliverableConfigId && !(await repo.findDeliverableConfig(project.id, deliverableConfigId)))
       throw httpError(404, "Selection item not found on this project.");
 
+    // The selection state this copy takes out, read before the selections are: a client submission
+    // landing while the files are being copied is newer than it, and stays to be downloaded.
+    const selectionAsOf = new Date();
     const images = await repo.listSelectedOriginals(project.id, deliverableConfigId);
     if (!images.length) throw httpError(409, "No photos have been selected for this project yet.");
 
@@ -345,9 +352,11 @@ function createOriginalsService(repo = repository, dependencies = {}) {
       }
     }
 
-    // A copy that wrote anything at all is a download: the dashboard's "Downloaded" reads this
-    // stamp. A run that found nothing to copy leaves the project where it was.
-    if (copied.length) await repo.markSelectedDownloaded(project.id).catch((error) => console.warn("Could not record the selected-originals download:", error?.message || error));
+    // Only a complete copy is a download, as for the browser's Download Selected: one that could not
+    // copy every original leaves the project on Yet to Download to be run again, and one that found
+    // nothing to copy leaves it where it was. The dashboard's "Downloaded" and "Yet to Download"
+    // read this stamp against the latest submission.
+    if (copied.length && !failed.length) await repo.markSelectedDownloaded(project.id, selectionAsOf, deliverableConfigId ? [deliverableConfigId] : null).catch((error) => console.warn("Could not record the selected-originals download:", error?.message || error));
     return { root: selectedRoot, destination: destinationRoot, total: copied.length + failed.length, copied, failed };
   }
 

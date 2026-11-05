@@ -164,6 +164,15 @@ rather than relying on the deploy to take one.
    both processes, `pm2 save`. It also writes a `RELEASE` file at the application root recording
    the version, the commit and the time, and passes the version into the frontend build as
    `NEXT_PUBLIC_APP_VERSION` — the two places the running system reports itself from.
+
+   The step may run for **40 minutes** (`command_timeout`; the action's own default is 10, and on
+   2026-10-29 two deploys in a row were killed at 10 minutes, one inside the backend's `npm ci`).
+   `npm ci` runs in each of `backend` and `frontend` only when its `package-lock.json` changed since
+   the last install that finished — the lock's hash is stamped into `node_modules`, which `npm ci`
+   deletes, so an install cut off part way is redone. `RELEASE` is written only after the
+   migrations and the build, just before the restart, and a run stops as "nothing new" only when
+   **`RELEASE`** already names its commit — never when `git HEAD` does. So a deploy killed part
+   way is finished by simply running the pipeline again.
 5. **IAM seed** — `node -r dotenv/config prisma/seeds/iam-roles-permissions.js`. A
    `{ module, feature }` row added in a release exists only in the source until it is seeded, and
    the permission it names cannot be granted to anyone (Rule 4). This seed is built to be re-run:
@@ -187,6 +196,12 @@ rather than relying on the deploy to take one.
    process that restarted onto the old build is indistinguishable from a healthy one otherwise.
    On a quiet night nothing is restarted, so a server with no `RELEASE` file warns instead of
    failing — the next deploy that actually ships writes one.
+
+   Last, it reads `faceEngine` from the same response and waits, up to two minutes, for the face
+   engine to finish loading its models: `ready` and `disabled` pass, `not-started` (an API whose
+   face workers run in another process) passes with a warning, and `offline` **fails the deploy**
+   with the reason and the `[face-engine]` log lines — the application is serving, but face
+   recognition is not, and that is what this gate is for.
 7. **tag** — after the health check has passed, tags the commit `v<version>` and opens a GitHub
    Release carrying that version's changelog section. It runs last on purpose: a tag existing
    means that version served a request in production, not merely that a deploy was attempted.
@@ -195,6 +210,62 @@ rather than relying on the deploy to take one.
 
 `git reset --hard` discards anything edited directly on the server. That is the existing rule —
 production files are never edited in place — but it is worth stating plainly.
+
+### The face engine's Python environment
+
+Face recognition — the AI Feature's event galleries and the client gallery's People filter — runs
+in a Python sidecar ([face_engine.py](../../backend/src/modules/ai-feature/face-engine/face_engine.py))
+that the backend spawns as a child of `dbs-erp-backend`; there is no PM2 process of its own. Its
+packages live in **`backend/.venv-face`**, a virtual environment that is the engine's alone: apart
+from Node, and apart from the call-transcript engine (faster-whisper), whose own environment is the
+repository-root `.venv`. Neither is ever pip-installed package by package on the server.
+
+[backend/scripts/face-engine-setup.sh](../../backend/scripts/face-engine-setup.sh) is the one
+implementation of that environment. **The deploy does not run it.** It is run by hand on the
+server once, and again whenever `backend/requirements-face.txt` changes; the environment is
+git-ignored, so the deploy's `git reset --hard` leaves it in place. It used to run on every
+deploy, where it upgraded pip and reinstalled every package nightly — minutes of CPU inside the
+deploy step's timeout (10 minutes then), which the half-finished deploy of 2026-09-24 ran out of. The
+deploy still checks the engine afterwards (the health gate above). What the script does:
+
+```text
+read AI_FACE_ENGINE_ENABLED from backend/.env  (--skip-if-disabled: not "true" → nothing to do)
+→ backend/.venv-face exists and runs?           (no → python3 -m venv, newest python3 ≥ 3.9 found)
+→ pip install -r backend/requirements-face.txt  (insightface itself with --no-deps: see the file)
+→ python face_engine.py --check                 (imports, model files fetched from the Hub, one detection)
+→ exit 0 with one JSON report, or exit 1 with what is missing and how to fix it
+```
+
+`requirements-face.txt` names every package the engine imports and every one insightface needs
+at runtime, with **`opencv-python-headless`** — the OpenCV build for a server without a display.
+insightface declares the desktop `opencv-python` as its dependency, which is why the script
+installs it with `--no-deps` and takes the rest from the file; the production error *"Face engine
+offline — ModuleNotFoundError: No module named 'cv2'"* was a server on which nothing had ever
+installed any OpenCV at all, because nothing in the deploy did.
+
+The server needs `python3` (3.9 or newer) with the `venv` module — on Ubuntu/Debian
+`sudo apt install python3 python3-venv` — and outbound HTTPS to `huggingface.co` once, for the two
+model files (`~/.insightface/models/buffalo_l/`, or `$INSIGHTFACE_HOME`). Without the network the
+files can be copied there by hand; the check reports which are missing.
+
+**Nothing else depends on it.** With the engine off, uninstalled or broken, `/api/health` still
+answers `ok: true`, Image Selection, Album Proofing, Project Management and every other module run
+as before, and only face recognition is unavailable: the AI Feature shows *Face engine offline* with
+the reason, the client gallery's People tab shows nobody. Queued face jobs are not failed — the workers
+park them (`FACE_ENGINE_UNAVAILABLE`, retried every minute) and re-queue anything left waiting at
+boot, so they resume by themselves once the engine answers.
+
+Two health endpoints: `GET /api/health` carries `faceEngine` (`disabled` / `ready` / `starting` /
+`not-started` / `offline`) and `faceEngineReason`; `GET /api/health/face-engine` (behind
+`SETTINGS / Application Monitoring`) adds the interpreter in use, whether `.venv-face` exists,
+whether each model file is on disk, and how many face jobs are waiting in each module. Repair on a
+server that says offline:
+
+```bash
+bash /var/www/dbs-operations-os/current/backend/scripts/face-engine-setup.sh
+pm2 restart dbs-erp-backend --update-env
+pm2 logs dbs-erp-backend --lines 40 --nostream | grep face-engine
+```
 
 Two deploys can never overlap, and a deploy is never cancelled midway: an interrupted run between
 `migrate deploy` and `pm2 restart` would leave production inconsistent.
@@ -284,7 +355,10 @@ checks are yours to make before you push.
 #    will ship under is:
 #        scripts/app-version.sh --next
 #    Rename "## Unreleased" to "## <that version> — <today>", open a fresh Unreleased above
-#    it, and commit. Edit VERSION in the same commit if this release is a major or a minor.
+#    it, and move the release that was below Unreleased to docs/changelog/<its version>.md
+#    with its links rewritten one level deeper (the changelog keeps only Unreleased and the
+#    release being shipped). Commit. Edit VERSION in the same commit if this release is a
+#    major or a minor.
 
 git checkout main
 git pull origin main            # main first, so the merge below is against the real tip
@@ -359,6 +433,11 @@ Production path: `/var/www/dbs-operations-os/current`
 ```bash
 cd /var/www/dbs-operations-os/current
 git pull origin main
+
+# Only on a new server, or when backend/requirements-face.txt changed: the face engine's Python
+# environment - created, updated and proved. Skips itself when backend/.env does not set
+# AI_FACE_ENGINE_ENABLED=true. Never pip install by hand instead.
+bash backend/scripts/face-engine-setup.sh --skip-if-disabled
 
 cd backend
 npm install

@@ -8,6 +8,7 @@ const { invalidate } = require("../src/services/referenceMatchers");
 const { listCrmLeadIds, crmLeadTabCounts } = require("../src/modules/sales/crm-leads/leadQueryService");
 const { getCrmLeadById, assignCrmLeads, referenceEntries } = require("../src/modules/sales/crm-leads/crmLeadService");
 const { buildWhere: reportWhere } = require("../src/modules/sales/crm-reports/filters");
+const { retrying } = require("./helpers/retrying");
 
 /*
  * CRM leads on the resolver: the one table read by hand-written SQL on every path, so the rule has
@@ -24,10 +25,10 @@ const F = {};
 const COLUMNS = { branch: "branchId", employee: "ownerEmployeeId" };
 
 async function withGrant(user, reachBranchIds, body) {
-  const roleRow = await prisma.role.create({ data: { name: tag(`r-${Math.random().toString(36).slice(2, 6)}`) } });
-  await prisma.rolePermission.create({ data: { roleId: roleRow.id, permissionId: F.permission.id, accessLevel: "READ" } });
-  await prisma.userRole.create({ data: { userId: user.id, roleId: roleRow.id } });
-  if (reachBranchIds.length) await prisma.roleBranch.createMany({ data: reachBranchIds.map((id) => ({ roleId: roleRow.id, branchId: id })) });
+  const roleRow = await retrying(() => prisma.role.create({ data: { name: tag(`r-${Math.random().toString(36).slice(2, 6)}`) } }));
+  await retrying(() => prisma.rolePermission.create({ data: { roleId: roleRow.id, permissionId: F.permission.id, accessLevel: "READ" } }));
+  await retrying(() => prisma.userRole.create({ data: { userId: user.id, roleId: roleRow.id } }));
+  if (reachBranchIds.length) await retrying(() => prisma.roleBranch.createMany({ data: reachBranchIds.map((id) => ({ roleId: roleRow.id, branchId: id })) }));
   try {
     return await body(await dataScope.resolve({ userId: user.id, module: "SALES", feature: "CRM Leads", columns: COLUMNS }));
   } finally {
@@ -43,18 +44,18 @@ const own = (ids) => ids.filter((id) => id.startsWith(`TDC-${STAMP}`)).map((id) 
 before(async () => {
   F.permission = await prisma.permission.findFirst({ where: { module: "SALES", feature: "CRM Leads" }, select: { id: true } });
   assert.ok(F.permission, "the seed no longer has SALES / CRM Leads");
-  F.br1 = await prisma.branch.create({ data: { code: tag("BR1"), name: `Lead Scope Branch ${STAMP}` } });
-  F.br2 = await prisma.branch.create({ data: { code: tag("BR2"), name: `Lead Scope Other ${STAMP}` } });
-  F.manager = await prisma.employee.create({ data: { employeeId: tag("manager"), employeeName: `Lead Scope Manager ${STAMP}` } });
-  F.report = await prisma.employee.create({ data: { employeeId: tag("report"), employeeName: `Lead Scope Report ${STAMP}`, reportsToEmployeeId: F.manager.id } });
-  F.stranger = await prisma.employee.create({ data: { employeeId: tag("stranger"), employeeName: `Lead Scope Stranger ${STAMP}` } });
-  F.me = await prisma.user.create({ data: { name: "Lead scope me", email: `${tag("me")}@test.local`.toLowerCase(), username: tag("me").toLowerCase(), password: "x", role: "ADMIN", branchId: F.br1.id, linkedEmployeeId: F.manager.id } });
+  F.br1 = await retrying(() => prisma.branch.create({ data: { code: tag("BR1"), name: `Lead Scope Branch ${STAMP}` } }));
+  F.br2 = await retrying(() => prisma.branch.create({ data: { code: tag("BR2"), name: `Lead Scope Other ${STAMP}` } }));
+  F.manager = await retrying(() => prisma.employee.create({ data: { employeeId: tag("manager"), employeeName: `Lead Scope Manager ${STAMP}` } }));
+  F.report = await retrying(() => prisma.employee.create({ data: { employeeId: tag("report"), employeeName: `Lead Scope Report ${STAMP}`, reportsToEmployeeId: F.manager.id } }));
+  F.stranger = await retrying(() => prisma.employee.create({ data: { employeeId: tag("stranger"), employeeName: `Lead Scope Stranger ${STAMP}` } }));
+  F.me = await retrying(() => prisma.user.create({ data: { name: "Lead scope me", email: `${tag("me")}@test.local`.toLowerCase(), username: tag("me").toLowerCase(), password: "x", role: "ADMIN", branchId: F.br1.id, linkedEmployeeId: F.manager.id } }));
   invalidate();
   // Written the way a write path would leave them - every reference in step with its text - so the
   // row-replay invariant (data-scope-backfill.test.js) holds while these rows exist.
   F.dumDum = await prisma.vertical.findFirst({ where: { code: "DUM_DUM" }, select: { id: true } });
   // Five Dum Dum leads: mine in my branch, my report's elsewhere, a stranger's in each, and one nobody owns.
-  const lead = (name, data) => prisma.salesCrmLead.create({ data: { enquiryId: tag(name), name: `Lead ${name}`, verticalName: "Dum Dum", verticalId: F.dumDum.id, ...data } });
+  const lead = (name, data) => retrying(() => prisma.salesCrmLead.create({ data: { enquiryId: tag(name), name: `Lead ${name}`, verticalName: "Dum Dum", verticalId: F.dumDum.id, ...data } }));
   await lead("mine", { assignedBranch: F.br1.name, branchId: F.br1.id, crm: F.manager.employeeName, ownerEmployeeId: F.manager.id });
   await lead("report", { assignedBranch: F.br2.name, branchId: F.br2.id, crm: F.report.employeeName, ownerEmployeeId: F.report.id });
   await lead("stranger-here", { assignedBranch: F.br1.name, branchId: F.br1.id, crm: F.stranger.employeeName, ownerEmployeeId: F.stranger.id });
@@ -175,7 +176,7 @@ test("every lead endpoint is held to the rule", () => {
    * what the scope already allowed, never a widening - and it has to reach the ids as well as the
    * rows, or a "select all" would resolve a bulk action against leads the board is not showing.
    */
-  assert.match(controller, /listCrmLeadsPage\(\{ \.\.\.parsed\.data, withTotal: !appending, scope, mine \}\)/);
+  assert.match(controller, /listCrmLeadsPage\(\{ \.\.\.parsed\.data, withTotal: !appending, withValues: !appending && parsed\.data\.values === "true", scope, mine \}\)/);
   assert.match(controller, /listCrmLeadIds\(\{ \.\.\.parsed\.data, scope: await leadScope\(req\), mine: await leadMine\(req, parsed\.data\.mine === "true"\) \}\)/);
   assert.equal((controller.match(/await allowedLeadIds\(req, parsed\.data\.ids\)/g) || []).length, 3, "delete, status and assign each drop ids the board would not show");
   // The duplicate check stays unscoped on purpose: it guards a write across every vertical.

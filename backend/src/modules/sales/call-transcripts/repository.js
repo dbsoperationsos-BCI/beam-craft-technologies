@@ -22,10 +22,11 @@ async function ensureTranscript({ callLogId, enquiryId, recordingUrl }) {
     where: { callLogId: id },
     // The lead can change - a call log is re-pointed when leads merge - and a recording URL can
     // appear on a later delivery. Neither resets a transcript that has already been made.
-    update: { enquiryId: String(enquiryId || ""), recordingUrl: recordingUrl || undefined },
+    update: { enquiryId: String(enquiryId || "").trim() || null, recordingUrl: recordingUrl || undefined },
     create: {
       callLogId: id,
-      enquiryId: String(enquiryId || ""),
+      // Nothing, not "", for a call the studio has not turned into an enquiry: the column is a key now.
+      enquiryId: String(enquiryId || "").trim() || null,
       recordingUrl: recordingUrl || null,
       status: "PENDING",
     },
@@ -150,6 +151,33 @@ function listForLead(enquiryId, limit = 100) {
   });
 }
 
+/**
+ * Every transcript against a set of calls, newest first, without the segments.
+ *
+ * Beside `listForLead` and selecting exactly what it selects. A lead is found by its enquiry id;
+ * a **candidate** has no enquiry id and never will - the Interview register knows a person by their
+ * number - so its calls are found first and their transcripts fetched by those ids.
+ *
+ * An empty list in means an empty list out rather than every transcript in the table: `in: []`
+ * would be a query nobody asked for, and the caller that passes nothing is a candidate with no
+ * calls, which has no transcripts by definition.
+ */
+function listForCallLogs(callLogIds = [], limit = 100) {
+  const ids = [...new Set((Array.isArray(callLogIds) ? callLogIds : []).map((id) => String(id || "").trim()).filter(Boolean))];
+  if (!ids.length) return Promise.resolve([]);
+  return prisma.salesCallTranscript.findMany({
+    where: { callLogId: { in: ids } },
+    orderBy: { createdAt: "desc" },
+    take: Math.min(Math.max(Number(limit) || 100, 1), 200),
+    select: {
+      id: true, callLogId: true, enquiryId: true, recordingUrl: true, status: true,
+      language: true, durationSeconds: true, provider: true, summary: true, sentiment: true,
+      callOutcome: true, nextAction: true, suggestions: true, appliedAt: true, appliedFields: true,
+      errorCode: true, errorMessage: true, attempts: true, createdAt: true,
+    },
+  });
+}
+
 function markApplied(id, { userId, fields }) {
   return prisma.salesCallTranscript.update({
     where: { id },
@@ -172,5 +200,5 @@ function listStuck(olderThanMs = 30 * 60 * 1000) {
 
 module.exports = {
   ensureTranscript, markProcessing, saveCompleted, markFailed,
-  findById, listForLead, markApplied, listStuck,
+  findById, listForLead, listForCallLogs, markApplied, listStuck,
 };

@@ -108,7 +108,9 @@ test("the field goes on showing the value it cannot read", () => {
    * row says, and would hide the very value somebody needs to see to know what to replace.
    */
   assert.match(FIELD, /const unrecognisedFormat = Boolean\(String\(value \?\? ""\)\.trim\(\)\) && parseDateKey\(datePart\) === null;/);
-  assert.match(FIELD, /displayValue\(value, withTime\) \|\| placeholder/);
+  assert.match(FIELD, /displayValue\(value, withTime\)\) \|\| placeholder/);
+  // A caller's `formatValue` rewords only a day the field can read; an unreadable value shows as it is.
+  assert.match(FIELD, /value && formatValue && !unrecognisedFormat \? formatValue\(value\) : displayValue\(value, withTime\)/);
   assert.doesNotMatch(FIELD, /unrecognisedFormat \?\s*""/, "the value is never swapped for an empty string");
 });
 

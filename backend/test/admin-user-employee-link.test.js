@@ -66,9 +66,9 @@ test("one employee answers for one login, and the message names the login in the
 
 test("the picker discloses a name and a place of work, and nothing else about a person", () => {
   // An administrator choosing who a login belongs to needs enough to tell two people apart. They
-  // are not thereby given the Employee Repository, so the row stops at the four public columns.
+  // are not thereby given the Employee Repository, so the row stops at the public columns and a photo link.
   assert.deepEqual(Object.keys(LINKABLE_EMPLOYEE_FIELDS).sort(), [
-    "department", "designation", "employeeId", "employeeName", "employmentStatus", "id",
+    "department", "designation", "employeeId", "employeeName", "employmentStatus", "id", "profilePhotoUrl",
   ]);
 });
 

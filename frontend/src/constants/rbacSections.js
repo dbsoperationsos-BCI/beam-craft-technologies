@@ -5,21 +5,20 @@ import { permissionForRoute } from "./modulePermissions.js";
 /**
  * The screens reached from the control beside the Employee Repository heading.
  *
- * Four screens, one heading: the repository itself, the referral register, and the two RBAC
- * screens. None of the last three is in the sidebar — Administration is deliberately absent from
- * `navigation.mjs`, and Employee Referral was taken off the menu — so this control is the only way
- * between them, and it is also what says which of them you are on.
+ * Five screens, one heading: the repository itself, the referral register, the activity log, and
+ * the two RBAC screens. None of the last four is in the sidebar — Administration is deliberately
+ * absent from `navigation.mjs`, Employee Referral was taken off the menu, and User Activity Logs
+ * never had an entry — so this control is the only way between them, and it is also what says which
+ * of them you are on.
  *
- * Grouped rather than listed flat. The first group is the registers of people and what the studio
- * owes them; the second is the access those people hold, which is a different question and reads as
- * one under its own heading.
+ * Grouped rather than listed flat. The first group is the registers about the studio's people - who
+ * they are, what the studio owes them, and what they have done in the application; the second is the
+ * access those people hold, which is a different question and reads as one under its own heading.
  */
 const SECTIONS = [
   {
     items: [
-      // Beam Craft's client companies, first: it is what the sidebar row is named and opens.
-      { label: "Client Details", value: "/hrm/client-details" },
-      { label: "Employees", value: "/employees" },
+      { label: "Administration", value: "/employees" },
       /*
        * The referral register, which used to be an HRM sidebar entry of its own. It belongs with
        * the repository rather than beside Tasks and Interview: it is read about the same people,
@@ -27,6 +26,12 @@ const SECTIONS = [
        * Settings. See `hidden` on its row in `navigation.mjs`.
        */
       { label: "Employee Referral", value: "/hrm/employee-referrals" },
+      /*
+       * Who did what, and when: every request a signed-in person made, as the server logged it.
+       * Read-only, and answering to `ADMIN / User Activity Logs` rather than to User Management -
+       * reading what somebody did is not the same grant as editing their account.
+       */
+      { label: "User Activity Logs", value: "/admin/activity-logs" },
     ],
   },
   {
@@ -46,7 +51,7 @@ const SECTIONS = [
  * door shut on a screen it was allowed to read, so the row opens the first of these the reader may
  * open rather than always `/employees`. See `useSidebarLayout`.
  */
-const DESTINATIONS = SECTIONS.flatMap((section) => section.items.map((item) => item.value));
+export const DESTINATIONS = SECTIONS.flatMap((section) => section.items.map((item) => item.value));
 
 /** The registry id of that one row, so the hook and this file cannot disagree about which it is. */
 export const FAMILY_SIDEBAR_ITEM_ID = "employee-repository";
@@ -74,7 +79,7 @@ function mayOpen(hasPermission, href) {
 }
 
 /**
- * The rows to draw, for one reader on one of the four screens.
+ * The rows to draw, for one reader on one of the five screens.
  *
  * A destination the reader's roles cannot open is **absent**, not listed and then refused by the
  * route guard a click later — the same rule the sidebar follows, asked of the same route map, so

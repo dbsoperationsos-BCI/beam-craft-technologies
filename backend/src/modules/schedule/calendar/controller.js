@@ -1,6 +1,7 @@
 const { z } = require("zod");
 const iamService = require("../../../services/iam.service");
 const { listSchedule } = require("./service");
+const { isAdministrator } = require("../../../services/administrator");
 
 function sendError(res, error, fallback) {
   console.error(fallback, error.message);
@@ -40,6 +41,8 @@ async function list(req, res) {
       viewer: { userId: req.user.id },
       from: parseDate(parsed.data.from),
       to: parseDate(parsed.data.to),
+      // Team Attendance - everybody's absences - is an administrator's, as the attendance Dashboard is.
+      isAdministrator: await isAdministrator(req.user.id),
     });
     // `kinds` is what this viewer may see, which is not the same as what happens to be booked -
     // the page needs the difference to draw a legend rather than guess it from the entries.

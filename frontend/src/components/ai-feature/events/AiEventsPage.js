@@ -10,6 +10,7 @@ import Button from "@/components/shared/Button";
 import { CardState } from "@/components/shared/DashboardCard";
 import Dropdown from "@/components/shared/Dropdown";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
+import HelpTip from "@/components/shared/HelpTip";
 import Tabs from "@/components/ui/Tabs";
 import { EVENT_FILTERS, EVENT_SORTS } from "@/lib/aiFeature.mjs";
 import { archiveAiEvent, deleteAiEvent, duplicateAiEvent, listAiEvents, restoreAiEvent } from "@/services/ai-feature/ai-feature.service";
@@ -154,8 +155,11 @@ export default function AiEventsPage() {
         </label>
         <div className="flex min-w-0 items-center justify-between gap-2 md:justify-end">
           <Tabs tabs={FILTER_TABS} value={status} onChange={(value) => narrow({ status: value })} ariaLabel="Event status" size="sm" className="min-w-0" />
-          <div className="w-32 shrink-0">
-            <Dropdown ariaLabel="Sort events" className="dashboard-range-picker" options={SORT_OPTIONS} value={sort} onChange={(value) => narrow({ sort: value })} sorted={false} />
+          <div className="flex shrink-0 items-center gap-1">
+            <div className="w-32">
+              <Dropdown ariaLabel="Sort events" className="dashboard-range-picker" options={SORT_OPTIONS} value={sort} onChange={(value) => narrow({ sort: value })} sorted={false} />
+            </div>
+            <HelpTip text="The order the event cards are listed in: newest, oldest, event date or name." />
           </div>
         </div>
       </div>

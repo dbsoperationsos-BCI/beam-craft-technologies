@@ -89,6 +89,17 @@ test("the wide role does not widen the narrow one", async () => {
   assert.deepEqual(forAssets, [F.br1.id], "the leads role widened the assets one");
 });
 
+test("the branches a picker is offered are those same ones, by name", async () => {
+  /*
+   * `reachableBranches` is the form a picker draws from - Assets' Branch filter above the table is
+   * read straight out of it, through `/api/assets`. Checked beside the ids because a picker is
+   * where a wider answer does its damage: it offers a branch, somebody chooses it, and the screen
+   * comes back empty because the scope narrowed what the picker had already promised.
+   */
+  const offered = await iamService.reachableBranches(F.user.id, { module: "ASSET", feature: "Asset Management" });
+  assert.deepEqual(offered, [{ id: F.br1.id, name: F.br1.name }], "the picker was offered more than the assets role names");
+});
+
 test("a permission no role grants reaches no branch at all", async () => {
   // Not "every branch". Reach comes from the roles that give the access; where none does, there is
   // nothing to give. The guard is what refuses the screen - this only says where, not whether.

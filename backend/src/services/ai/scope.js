@@ -73,6 +73,8 @@ const MODULE_DOMAIN = {
   HRM: [
     "employee", "staff", "headcount", "team", "attendance", "leave", "salary", "payroll",
     "designation", "department", "joining", "onboard", "separation", "hire", "hiring", "resign",
+    // HRM → Requests, in the words people use for it.
+    "hrm", "request", "approv", "permission", "on duty", "comp off",
   ],
   IMAGE_SELECTION: ["selection", "gallery", "folder", "image", "photo", "upload", "cull", "deliverable", "proof", "archive"],
   ASSET: [

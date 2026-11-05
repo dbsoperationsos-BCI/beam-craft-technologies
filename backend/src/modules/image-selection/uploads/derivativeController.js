@@ -6,8 +6,13 @@ const processingRepository = require("../processing/repository");
 const r2 = require("../storage/r2");
 const { buildDerivativeKey } = require("../storage/keys");
 const { derivativeSchema } = require("./validation");
+const { isPlainJpeg, isPlainWebp } = require("../../../services/imageBytes");
 // The People filter's hook: told, never awaited, once the photo is READY. See faces/hook.js.
 const faceHook = require("../faces/hook");
+// A culling run that began with the import is handed over by its last landing photo (never awaited).
+const cullingImportHook = require("../ai-culling/importHook");
+const { deferralRequested } = require("../../desktop/flags");
+const { saneCaptureDate } = require("../../../services/captureDate");
 
 /**
  * Receives the thumbnail and preview a browser built, and nothing else.
@@ -17,16 +22,30 @@ const faceHook = require("../faces/hook");
  * original to write, no queue to wait for and no worker to run: the row is READY the moment the two
  * derivatives are in R2. `originalPath` records the trail the browser reported so the same browser
  * can find the file again when the studio asks for the originals.
+ *
+ * This route is Photo Selection's (and Album Proofing's) way in, and only theirs. Photos for AI
+ * Culling and AI Editing are imported by the desktop app alone - registered through
+ * `originals/register-batch` with `holdForCulling` / `holdForEditing`, which is where the holds are
+ * set - so a browser upload asking for either hold is refused outright rather than quietly made a
+ * second way into those modules. The desktop's own derivative posts for registered photos never
+ * carry the flags; the holds are already on the row.
  */
+const DESKTOP_ONLY = "Photos for AI Culling and AI Editing are imported from the desktop app, which keeps the originals where they live.";
 function httpError(status, message) { const error = new Error(message); error.status = status; return error; }
 
 async function receiveDerivatives(req, res) {
   const result = derivativeSchema.safeParse(req.body);
   if (!result.success) return res.status(400).json({ message: "Invalid photo details.", errors: result.error.flatten() });
   const body = result.data;
+  if (body.holdForCulling || body.holdForEditing) return res.status(400).json({ message: DESKTOP_ONLY });
   const thumbnail = req.files?.thumbnail?.[0];
   const preview = req.files?.preview?.[0];
   if (!thumbnail || !preview) return res.status(400).json({ message: "Both a thumbnail and a preview are required." });
+  // The two files are stored exactly as they arrived and served to clients under the types below,
+  // so the bytes must be what the browser says they are - a WebP thumbnail and a JPEG preview,
+  // whole and made only of the image's own chunks or segments - and not whatever a form chose to
+  // call by those names, nor an image with a payload behind it.
+  if (!isPlainWebp(thumbnail.buffer) || !isPlainJpeg(preview.buffer)) return res.status(400).json({ message: "The thumbnail must be a WebP image and the preview a JPEG image." });
 
   try {
     if (!r2.isConfigured()) throw httpError(503, `Object storage is not configured: ${r2.missingConfig().join(", ")}.`);
@@ -63,6 +82,7 @@ async function receiveDerivatives(req, res) {
         await batchRepository.increment(body.batchId, ["uploadedFiles", "compressedFiles"]);
         await progress.publish(body.batchId, { id: existing.id, status: existing.status, progress: 100 }).catch(() => {});
       }
+      cullingImportHook.photoLanded(project.id);
       return res.status(200).json({ data: { duplicate: true, id: existing.id, message: "already registered" } });
     }
 
@@ -88,6 +108,8 @@ async function receiveDerivatives(req, res) {
       mimeType: body.mimeType,
       sizeBytes: BigInt(body.sizeBytes),
       uploadedBytes: BigInt(body.sizeBytes),
+      // The original's identity, when the sender read the bytes (the desktop app); a browser has none.
+      ...(body.checksum ? { sourceChecksum: body.checksum } : {}),
       chunkSize: 0,
       totalChunks: 0,
       uploadedChunks: 0,
@@ -99,14 +121,31 @@ async function receiveDerivatives(req, res) {
     // behave exactly as they do for a photo that went through the queue. Arrival is counted here
     // too, in the same transaction: there is no queue to wait for, so a photo that finishes has
     // arrived, and counting the two apart is what let a failure here strand the whole batch.
+    const capturedAt = saneCaptureDate(body.capturedAt);
     const ready = await processingRepository.markReady(upload.id, body.batchId || null, {
       thumbnailKey, previewKey, width: body.width, height: body.height, imageFormat: body.imageFormat || null, compressedSizeBytes: BigInt(preview.size),
+      // The capture time orders the folder and is what bursts, similar series and story moments
+      // are read from; only a sane one is kept.
+      ...(capturedAt ? { capturedAt } : {}),
       // A repaired row joins the batch that finished it, so it is not left filed under the run that
       // failed. Its folder already matches — that is what the lookup above matched on.
       ...(unfinished ? { batchId: body.batchId || null, completedAt: new Date() } : {}),
+      // Finishing a row the desktop registered is when the file's identity is known: the desktop
+      // read the bytes to build these derivatives, so its checksum lands now, and a size that was
+      // registered as 0 (never known) is repaired to the real one - a 0 would otherwise make the
+      // workstation skip the size check for good.
+      ...(unfinished && body.checksum ? { sourceChecksum: body.checksum } : {}),
+      ...(unfinished && !(Number(existing.sizeBytes) > 0) ? { sizeBytes: BigInt(body.sizeBytes), uploadedBytes: BigInt(body.sizeBytes) } : {}),
     }, { countUploaded: true });
-    faceHook.enqueueAfterReady(upload.id);
+    // A desktop that will describe the faces itself asks for the scan to wait for its hand-off;
+    // the worker's sweep takes the photo after all if that never comes. Otherwise, and always with
+    // the desktop switches off, the photo is queued as every upload is.
+    if (deferralRequested(body.deferFaceScan)) faceHook.recordDeferred(upload.id);
+    else faceHook.enqueueAfterReady(upload.id);
     if (body.batchId) await progress.publish(body.batchId, { id: upload.id, status: "READY", progress: 100, width: ready.width, height: ready.height, compressedSizeBytes: Number(preview.size) }).catch(() => {});
+    cullingImportHook.photoLanded(project.id);
+    // The desktop's photo is ready: a gallery held for being empty may come back (never awaited).
+    require("../publication/service").syncAvailabilitySoon(project.id);
     return res.status(201).json({ data: { id: upload.id, status: "READY" } });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });

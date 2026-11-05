@@ -26,7 +26,7 @@ test("a corrected spread overwrites the row it corrects instead of being dropped
 
 test("only the album's revised upload asks for that, and it reaches the request", () => {
   assert.match(front("components", "image-selection", "album-proofing", "AlbumPagesPane.js"), /replaceExisting=\{revisedUploadOpen\}/);
-  assert.match(front("components", "image-selection", "UploadManager.js"), /replaceExisting\s*\}\);/);
+  assert.match(front("components", "image-selection", "UploadManager.js"), /replaceExisting, compressionModule(, destination)?\s*\}\);/);
   assert.match(front("lib", "imageSelectionUploadStore.js"), /replaceExisting: session\.replaceExisting === true,/);
   assert.match(front("services", "image-selection", "image-selection.service.js"), /if \(replaceExisting\) form\.append\("replaceExisting", "true"\);/);
 });

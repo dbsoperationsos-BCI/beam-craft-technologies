@@ -16,7 +16,7 @@ const boothDefinition = {
   id: "s2", name: "360 Booth", complimentary: true, deliverableAdded: true, sizeEnabled: false, timingOptionSet: timingSet,
   pricing: [
     { shootType: "STUDIO", timingMode: "HALF_SESSION", duration: "4-5 Hours (Half)", price: 7000, deliverables: [{ deliverableId: "d4", brandId: "b9", variantId: "v9" }] },
-    { shootType: "OUTDOOR", timingMode: "FULL_SESSION", duration: "10-12 Hours (Full)", price: null },
+    { shootType: "OUTDOOR", timingMode: "FULL_SESSION", duration: "8-10 Hours (Full)", price: null },
     { shootType: "STUDIO", timingMode: "HOURS_MINUTES", hours: 3, price: 2800 },
   ],
 };
@@ -81,7 +81,8 @@ test("the choices become one shoot, dated from the calculator, booked as its lin
   assert.equal(shoot.foodTakenCareBy, "Studio");
   assert.equal(draft.vertical, "Dum Dum");
   assert.equal(draft.enquiryId, "DD-ERD-000123");
-  assert.equal(draft.discount, 20);
+  // The estimate said 20%; the quotation is handed it at the cap, the most it can be saved at.
+  assert.equal(draft.discount, 15);
   assert.equal(draft.additionalNotes, "");
 });
 
@@ -127,7 +128,9 @@ test("a deliverable is the row its variant makes, with its count and where it ca
   assert.equal(strip.autoFromService, draft.services[0].id);
   assert.equal(strip.autoSourceType, "SERVICE_PRICING");
   assert.equal(strip.autoServiceDefinitionId, "s2");
-  assert.equal(album.deliverableVariantLabel, "Album Printing - Pictoo - 12x36 - Sent flat.");
+  // Named without the Settings note, which arrives as the line's own editable Remarks instead.
+  assert.equal(album.deliverableVariantLabel, "Album Printing - Pictoo - 12x36");
+  assert.equal(album.remarks, "Sent flat.");
   assert.equal(album.deliverableBrandName, "Pictoo");
   assert.equal(album.size, "12x36");
   assert.equal(album.numberOfPhotos, 10);
@@ -143,9 +146,9 @@ test("a deliverable is the row its variant makes, with its count and where it ca
 test("the generator's own arithmetic gives the calculator's figure for the same choices", () => {
   const { draft } = build({ deliverableQuantities: { "d4::b9::v9": 1, "d3::b2::v3": 1 } });
   const totals = quotationTotals({ services: draft.services, deliverables: draft.deliverables, rates: {}, discountPercent: draft.discount });
-  // 2 × 7000 + 5000 + 80 + 1 × 10 × 3100, less 20%.
+  // 2 × 7000 + 5000 + 80 + 1 × 10 × 3100, less the 15% it was handed over at.
   assert.equal(totals.subtotal, 14000 + 5000 + 80 + 31000);
-  assert.equal(totals.amount, Math.round((14000 + 5000 + 80 + 31000) * 0.8));
+  assert.equal(totals.amount, Math.round((14000 + 5000 + 80 + 31000) * 0.85));
 });
 
 test("what the generator cannot carry stops the handoff and is named", () => {

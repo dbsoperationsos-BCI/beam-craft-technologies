@@ -97,5 +97,5 @@ test("both lists are offered under the two screens that ask for them, beside Sho
   // called is a wording decision made across all eighteen of them at once and not this test's.
   assert.match(lists, /value: "lead-relationships"[\s\S]{0,160}screens: \["leads-followups", "quotations"\]/);
   assert.match(lists, /value: "referral-sources"[\s\S]{0,160}screens: \["leads-followups", "quotations"\]/);
-  assert.match(lists, /value: "shoot-types"[\s\S]{0,160}screens: \["quotations"\]/, "Shoot Type must still be there, under Quotations");
+  assert.match(lists, /value: "shoot-types"[\s\S]{0,160}screens: \["leads-followups", "quotations"\]/, "Shoot Type must still be there, under Leads & Followups and Quotations");
 });

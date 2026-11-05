@@ -17,6 +17,67 @@ const { askAboutLead, streamAboutLead } = require("../../../services/ai/crmAssis
 const { askAboutCrm, streamAboutCrm } = require("../../../services/ai/crmAnalyst");
 const { analyzeCall } = require("../../../services/ai/callAnalyzer");
 const transcripts = require("../call-transcripts/repository");
+const { getCrmLeadById } = require("../crm-leads/crmLeadService");
+const limits = require("../../../services/ai/limits");
+const audit = require("../../../services/ai/audit");
+const { cancelOnDisconnect } = require("../../../services/ai/disconnect");
+
+/**
+ * Nebula's workflow, for one lead as for the module: the person's permission (the router's
+ * READ on CRM Leads), then the record - only a lead the CRM board would show this person - then a
+ * read-only lookup, under the same rate and concurrency limits as the module assistant, and only
+ * while Nebula is switched on. Out of scope reads as not found, exactly as the board's own record
+ * endpoints answer, so the assistant can never confirm a lead exists that the screen would hide.
+ */
+async function leadVisible(req, enquiryId) {
+  const id = String(enquiryId || "").trim();
+  // Fails closed: no lead named is no lead in reach.
+  if (!id) return false;
+  const [scope, record] = await Promise.all([leadScope(req), getCrmLeadById(id)]);
+  return Boolean(record && scope.allows(record.lead || {}));
+}
+
+/** Answered before any work while Nebula is switched off. False when it has replied. */
+function switchedOn(res) {
+  if (provider.enabled()) return true;
+  res.status(503).json({ message: "The assistant is switched off.", code: "AI_DISABLED" });
+  return false;
+}
+
+/**
+ * Answered before any work about one lead: switched off, no lead named, or a lead out of reach.
+ * False when it has replied. `notFound` is the refusal's wording, so a route about something the
+ * lead owns (a transcript) can refuse in its own words and say no more than "not found" either way.
+ */
+async function admitted(req, res, enquiryId, notFound = "That lead was not found.") {
+  if (!switchedOn(res)) return false;
+  if (!String(enquiryId || "").trim()) {
+    res.status(400).json({ message: "An enquiry id is required." });
+    return false;
+  }
+  if (!await leadVisible(req, enquiryId)) {
+    audit.accessDenied({ requestId: audit.newRequestId(), userId: Number(req.user?.id), module: "SALES", code: "AI_LEAD_OUT_OF_SCOPE" });
+    res.status(404).json({ message: notFound });
+    return false;
+  }
+  return true;
+}
+
+/** One answer under Nebula's limits, recorded start and finish - never its content. */
+async function limited(req, run) {
+  const userId = Number(req.user?.id);
+  const requestId = audit.newRequestId();
+  const startedAt = Date.now();
+  audit.requestStarted({ requestId, userId, module: "SALES", isSuperAdmin: false });
+  try {
+    const result = await limits.withLimits(userId, run);
+    audit.requestFinished({ requestId, userId, module: "SALES", ms: Date.now() - startedAt, toolCount: 0, ok: true });
+    return result;
+  } catch (error) {
+    audit.requestFinished({ requestId, userId, module: "SALES", ms: Date.now() - startedAt, toolCount: 0, ok: false });
+    throw error;
+  }
+}
 
 /**
  * The CRM's AI endpoints.
@@ -35,6 +96,10 @@ const transcripts = require("../call-transcripts/repository");
  */
 function sendAiError(res, error, fallback) {
   const code = error?.code || "";
+  // Too many at once, or too many from one person: said as the module assistant says it.
+  if (error instanceof limits.AiLimitError) {
+    return res.status(error.status).json({ message: error.message, code: error.code, retryable: true });
+  }
   if (code === "AI_UNAVAILABLE" || code === "AI_MODEL_MISSING") {
     return res.status(503).json({ message: error.message, code, retryable: false });
   }
@@ -63,7 +128,8 @@ async function health(_req, res) {
 
 async function analyzeLeadHandler(req, res) {
   try {
-    return res.json({ data: await analyzeLead(req.body?.enquiryId) });
+    if (!await admitted(req, res, req.body?.enquiryId)) return undefined;
+    return res.json({ data: await limited(req, () => analyzeLead(req.body?.enquiryId)) });
   } catch (error) {
     return sendAiError(res, error, "Unable to analyse that lead.");
   }
@@ -79,16 +145,28 @@ async function analyzeCallHandler(req, res) {
   try {
     const id = String(req.body?.transcriptId || "").trim();
     if (!id) return res.status(400).json({ message: "A transcript id is required." });
+    // One answer for "no such transcript" and "not yours to read", so an id says nothing either way.
+    const GONE = "That transcript no longer exists.";
     const row = await transcripts.findById(id);
-    if (!row) return res.status(404).json({ message: "That transcript no longer exists." });
+    if (!row) return res.status(404).json({ message: GONE });
+    /*
+     * A transcript is its lead's: out of reach with it. One tied to no lead belongs to nobody's
+     * board, so only somebody the scope does not narrow may read it - never "no lead, so allowed".
+     */
+    if (String(row.enquiryId || "").trim()) {
+      if (!await admitted(req, res, row.enquiryId, GONE)) return undefined;
+    } else {
+      if (!switchedOn(res)) return undefined;
+      if (!(await leadScope(req)).unlimited) return res.status(404).json({ message: GONE });
+    }
     if (!row.fullText) return res.status(400).json({ message: "That call has no transcript text to analyse." });
 
-    const analysis = await analyzeCall({
+    const analysis = await limited(req, () => analyzeCall({
       fullText: row.fullText,
       durationSeconds: row.durationSeconds,
       language: row.language,
       translated: String(row.provider || "").includes("translate") && row.language && row.language !== "en",
-    });
+    }));
     return res.json({ data: analysis });
   } catch (error) {
     return sendAiError(res, error, "Unable to analyse that call.");
@@ -97,7 +175,8 @@ async function analyzeCallHandler(req, res) {
 
 async function summarizeHandler(req, res) {
   try {
-    return res.json({ data: await analyzeConversation(req.body?.enquiryId) });
+    if (!await admitted(req, res, req.body?.enquiryId)) return undefined;
+    return res.json({ data: await limited(req, () => analyzeConversation(req.body?.enquiryId)) });
   } catch (error) {
     return sendAiError(res, error, "Unable to summarise that conversation.");
   }
@@ -105,11 +184,12 @@ async function summarizeHandler(req, res) {
 
 async function chatHandler(req, res) {
   try {
-    const data = await askAboutLead({
+    if (!await admitted(req, res, req.body?.enquiryId)) return undefined;
+    const data = await limited(req, () => askAboutLead({
       enquiryId: req.body?.enquiryId,
       question: req.body?.question,
       history: req.body?.history,
-    });
+    }));
     return res.json({ data });
   } catch (error) {
     return sendAiError(res, error, "Unable to answer that question.");
@@ -127,6 +207,13 @@ async function chatHandler(req, res) {
  * tokens themselves.
  */
 async function chatStreamHandler(req, res) {
+  // Refused before the stream opens, so a refusal is a status the panel can read, not an event.
+  try {
+    if (!await admitted(req, res, req.body?.enquiryId)) return;
+  } catch (error) {
+    sendAiError(res, error, "Unable to answer that question.");
+    return;
+  }
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
@@ -137,11 +224,13 @@ async function chatStreamHandler(req, res) {
   const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
   try {
-    const { basedOn, answer, corrected, meeting } = await streamAboutLead({
+    const { basedOn, answer, corrected, meeting } = await limited(req, () => streamAboutLead({
       enquiryId: req.body?.enquiryId,
       question: req.body?.question,
       history: req.body?.history,
-    }, (piece) => send("token", { t: piece }));
+      // The reader closing the panel stops the generation, and frees its slot for somebody else.
+      signal: cancelOnDisconnect(res),
+    }, (piece) => send("token", { t: piece })));
 
     /*
      * The message asked to book something. The panel shows it for confirmation - this never books.
@@ -174,15 +263,17 @@ async function chatStreamHandler(req, res) {
  */
 async function crmChatHandler(req, res) {
   try {
-    const data = await askAboutCrm({
+    if (!switchedOn(res)) return undefined;
+    const scope = await leadScope(req);
+    const data = await limited(req, () => askAboutCrm({
       question: req.body?.question,
       history: req.body?.history,
       verticals: req.body?.vertical ? [req.body.vertical] : [],
-      scope: await leadScope(req),
+      scope,
       // Who is asking, for the reads that cannot be answered by a `where` alone - the meetings and
       // the project count on the calendar line.
       reader: { userId: Number(req.user.id), permissions: req.permission },
-    });
+    }));
     return res.json({ data });
   } catch (error) {
     return sendAiError(res, error, "Unable to answer that question about the CRM.");
@@ -190,6 +281,12 @@ async function crmChatHandler(req, res) {
 }
 
 async function crmChatStreamHandler(req, res) {
+  try {
+    if (!switchedOn(res)) return;
+  } catch (error) {
+    sendAiError(res, error, "Unable to answer that question about the CRM.");
+    return;
+  }
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
@@ -199,15 +296,16 @@ async function crmChatStreamHandler(req, res) {
   const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
   try {
-    const { basedOn, answer, corrected } = await streamAboutCrm({
+    const scope = await leadScope(req);
+    const { basedOn, answer, corrected } = await limited(req, () => streamAboutCrm({
       question: req.body?.question,
       history: req.body?.history,
       verticals: req.body?.vertical ? [req.body.vertical] : [],
-      scope: await leadScope(req),
+      scope,
       // Who is asking, for the reads that cannot be answered by a `where` alone - the meetings and
       // the project count on the calendar line.
       reader: { userId: Number(req.user.id), permissions: req.permission },
-    }, (piece) => send("token", { t: piece }));
+    }, (piece) => send("token", { t: piece })));
     if (corrected) send("replace", { text: answer });
     send("done", { basedOn, corrected });
   } catch (error) {

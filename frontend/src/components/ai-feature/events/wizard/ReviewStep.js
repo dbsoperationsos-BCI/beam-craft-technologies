@@ -2,7 +2,7 @@
 
 import EventCover from "@/components/ai-feature/shared/EventCover";
 import SettingsGroupForm, { Section } from "@/components/ai-feature/shared/SettingsGroupForm";
-import { formatEventDate, formatEventRange, formatTime } from "@/lib/aiFeature.mjs";
+import { formatEventRange } from "@/lib/aiFeature.mjs";
 import { eventTypeOf } from "./DetailsStep";
 
 function Fact({ label, value }) {
@@ -17,7 +17,7 @@ function Fact({ label, value }) {
  * The last step: everything the wizard is about to send, read back in one place. Nothing here is
  * editable; the rail goes back to the step that owns a value.
  */
-export default function ReviewStep({ details, subEvents, settings, existingCoverUrl }) {
+export default function ReviewStep({ details, settings, existingCoverUrl, watermarkDefaultId }) {
   const cover = details.coverImage === undefined ? existingCoverUrl : details.coverImage;
   return <div className="space-y-6">
     <Section title="Event details">
@@ -33,19 +33,6 @@ export default function ReviewStep({ details, subEvents, settings, existingCover
         </dl>
       </div>
     </Section>
-    <Section title={`Sub-events (${subEvents.length})`}>
-      {subEvents.length === 0
-        ? <p className="text-xs text-slate-500">None - the event is one gallery.</p>
-        : <ol className="divide-y divide-slate-100 rounded-lg border border-slate-200">
-          {subEvents.map((row, index) => <li key={row.id} className="flex gap-3 px-3 py-2">
-            <span className="w-5 shrink-0 text-xs tabular-nums text-slate-400">{index + 1}.</span>
-            <div className="min-w-0">
-              <p className="text-sm text-slate-800">{row.name}</p>
-              <p className="text-[11px] text-slate-500">{[formatEventDate(row.date), [formatTime(row.startTime), formatTime(row.endTime)].filter(Boolean).join(" – "), row.location].filter(Boolean).join(" · ")}</p>
-            </div>
-          </li>)}
-        </ol>}
-    </Section>
-    <SettingsGroupForm values={settings} onChange={() => {}} readOnly />
+    <SettingsGroupForm values={settings} onChange={() => {}} readOnly watermarkDefaultId={watermarkDefaultId} />
   </div>;
 }

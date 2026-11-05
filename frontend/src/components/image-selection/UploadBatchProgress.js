@@ -18,7 +18,12 @@ function statusLabel(session) {
   return (session.batch?.status || "PREPARING").replaceAll("_", " ");
 }
 
-export default function UploadBatchProgress({ session, title = "Event Upload Progress", onPause, onResume, onCancel, onDone, onOpen, onRetryFailed, compact = false, className = "" }) {
+/*
+ * `retryAfterFinish` keeps Retry on the card once the batch is over - for a queue whose failures are
+ * only known when it ends (the Signature Album's, which sends every photo from this browser).
+ * Photo Selection passes none and its card is exactly as it was.
+ */
+export default function UploadBatchProgress({ session, title = "Event Upload Progress", onPause, onResume, onCancel, onDone, onOpen, onRetryFailed, retryAfterFinish = false, compact = false, className = "" }) {
   const batch = session?.batch;
   if (!session || !batch) return null;
   const finished = session.finished;
@@ -26,6 +31,14 @@ export default function UploadBatchProgress({ session, title = "Event Upload Pro
   // has been sent, the server keeps compressing on its own and there is nothing to stop.
   const sending = session.pendingLocalFiles > 0;
   const barColor = finished ? "bg-emerald-500" : session.paused ? "bg-amber-500" : "bg-blue-600";
+  // Only offered once photos have actually given up, so it never competes with the automatic
+  // attempts still in flight.
+  const retry = session.failedLocalFiles > 0 && onRetryFailed
+    ? <button type="button" onClick={onRetryFailed} className="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100">
+      Retry {session.failedLocalFiles} failed
+    </button>
+    : null;
+  const failedAtEnd = finished && retryAfterFinish && session.failedLocalFiles > 0;
 
   // The floating dock only needs to say which project is uploading and how far along it
   // is — the full counters live on the project page where there is room for them.
@@ -126,13 +139,7 @@ export default function UploadBatchProgress({ session, title = "Event Upload Pro
             >
               {session.paused ? "Resume" : "Pause"}
             </button>
-            {/* Only offered once photos have actually given up, so it never competes with the
-                automatic attempts still in flight. */}
-            {session.failedLocalFiles > 0 && onRetryFailed && (
-              <button type="button" onClick={onRetryFailed} className="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100">
-                Retry {session.failedLocalFiles} failed
-              </button>
-            )}
+            {retry}
             <button type="button" onClick={onCancel} className="ml-auto rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50">
               Cancel uploads
             </button>
@@ -143,6 +150,8 @@ export default function UploadBatchProgress({ session, title = "Event Upload Pro
           // dismissing the card stops nothing — compression carries on without the page — and a
           // card that could only be dismissed once the batch reported itself complete left the user
           // with no way out of a batch that never did.
+          <>
+          {failedAtEnd && retry}
           <button
             type="button"
             onClick={onDone}
@@ -151,10 +160,13 @@ export default function UploadBatchProgress({ session, title = "Event Upload Pro
           >
             {finished ? "Done" : "Hide"}
           </button>
+          </>
         )}
       </div>
       <p className="mt-2 text-[10px] text-slate-500">
-        {finished
+        {failedAtEnd
+          ? `${session.failedLocalFiles} photo${session.failedLocalFiles === 1 ? "" : "s"} could not be uploaded. Retry them, or add them again.`
+          : finished
           ? "All photos finished processing."
           : session.paused
             ? `Sending paused — ${session.pendingLocalFiles} photo${session.pendingLocalFiles === 1 ? "" : "s"} left to send. Photos already uploaded keep processing on the server.`

@@ -1,7 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const { protect } = require("../../../middleware/authMiddleware");
-const { list, branches, getOne, duplicates, projects, listTableSettings, saveTableSettings, meetings, scheduleMeeting, removeMeeting, page, ids, columnValues, activity, callLogs, leadTranscripts, transcriptDetail, version, bulkStatus, bulkAssign, importCsv, cancelImportCsv, create, createBulk, update, remove, removeBulk, renameGroup, refresh, uploadRemarkAttachment, remarkAttachment } = require("./controller");
+const { moveVertical, list, branches, getOne, duplicates, projects, listTableSettings, saveTableSettings, meetings, scheduleMeeting, removeMeeting, page, ids, columnValues, activity, callLogs, leadTranscripts, transcriptDetail, version, bulkStatus, bulkAssign, importCsv, cancelImportCsv, create, createBulk, update, remove, removeBulk, renameGroup, refresh, uploadRemarkAttachment, remarkAttachment } = require("./controller");
 const { requireModule, checkPermission } = require("../../../middleware/permissionMiddleware");
 const excluded = require("./excludedNumbersController");
 
@@ -103,6 +103,8 @@ router.post("/:id/meetings", scheduleMeeting);
 router.delete("/:id/meetings/:meetingId", removeMeeting);
 router.get("/:id", getOne);
 router.put("/:id", update);
+// One lead to another vertical, from its popup - on the board's own Read / Write, as an edit is.
+router.post("/:id/vertical", moveVertical);
 router.delete("/:id", canDeleteLeads, remove);
 
 module.exports = router;

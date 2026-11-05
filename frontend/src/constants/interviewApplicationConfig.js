@@ -146,7 +146,7 @@ export const applicationFormSections = [
        * candidate applying for something else should be able to say so rather than being held to
        * what was typed for them.
        */
-      { name: "position", label: "Position Applied For", required: true, props: { placeholder: "e.g. Wedding Photographer" } },
+      { name: "position", label: "Position Applied For", required: true, props: { placeholder: "e.g. Wedding Photographer" }, helperText: "The job you are applying for; change it if it is wrong." },
       /*
        * No Department. It was asked as "where you would be working, if you know", which is a
        * question a candidate cannot answer about a studio they have not joined - so it came back
@@ -154,7 +154,7 @@ export const applicationFormSections = [
        * in is the studio's answer, set on the record and filled by a sheet or a CSV, and the form
        * no longer sends it at all, so a blank one cannot wipe what HR put there.
        */
-      { name: "employmentType", label: "Applying As", type: "select", options: "employmentTypes", placeholder: "Select", props: { sorted: false } },
+      { name: "employmentType", label: "Applying As", type: "select", options: "employmentTypes", placeholder: "Select", props: { sorted: false }, helperText: "The kind of work you are looking for, such as full time." },
       /*
        * No Available From. When somebody can start is a **conversation**, not a date typed into a
        * form before anybody has spoken to them: the honest answers are "immediately", "after my
@@ -171,23 +171,23 @@ export const applicationFormSections = [
     id: "about-you",
     title: "About You",
     fields: [
-      { name: "firstName", label: "First Name", required: true },
-      { name: "lastName", label: "Last Name" },
-      { name: "gender", label: "Gender", type: "select", options: "genders", placeholder: "Select" },
+      { name: "firstName", label: "First Name", required: true, helperText: "Your first name, as the studio should address you." },
+      { name: "lastName", label: "Last Name", helperText: "Your surname or initial, if you want it on your application." },
+      { name: "gender", label: "Gender", type: "select", options: "genders", placeholder: "Select", helperText: "Choose your gender, or leave it blank if you prefer." },
       // Nobody under eighteen can be taken on, so the calendar does not offer those days. `props`
       // is read at render time rather than at import, so a tab left open overnight does not keep
       // yesterday's boundary - the same arrangement the onboarding form's own field uses.
-      { name: "dateOfBirth", label: "Date of Birth", type: "date", props: () => ({ restriction: "future", maxDate: latestDateOfBirth() }) },
+      { name: "dateOfBirth", label: "Date of Birth", type: "date", props: () => ({ restriction: "future", maxDate: latestDateOfBirth() }), helperText: "Your date of birth; you must be at least 18 to apply." },
       /*
        * The application's own phone control, not a text box: a country picker beside a field that
        * takes digits only, on a numeric keypad, held to the national length of the code chosen. It
        * was a plain box here and nowhere else in the application, which is how a candidate typing
        * "9876 500 000 (whatsapp)" got a number the register could not match them by.
        */
-      { name: "contactNumber", label: "Phone", type: "phone", required: true },
-      { name: "whatsappNumber", label: "WhatsApp Number", type: "phone" },
-      { name: "emailId", label: "Email", required: true, type: "text" },
-      { name: "city", label: "City" },
+      { name: "contactNumber", label: "Phone", type: "phone", required: true, helperText: "The number the studio will call you on about this application." },
+      { name: "whatsappNumber", label: "WhatsApp Number", type: "phone", helperText: "Your WhatsApp number, if it differs from the phone number above." },
+      { name: "emailId", label: "Email", required: true, type: "text", helperText: "An email address the studio can write to you at." },
+      { name: "city", label: "City", helperText: "The city you live in at the moment." },
       /*
        * Where they are **from**, and where they are **now**.
        *
@@ -205,8 +205,8 @@ export const applicationFormSections = [
        * schema too, because the submission writes partially and an empty key would wipe whatever a
        * linked sheet or the CSV import put on the record. Both stay on the record for HR to read.
        */
-      { name: "nativePlace", label: "Native Place", props: { placeholder: "Madurai" } },
-      { name: "currentLocation", label: "Current Location", props: { placeholder: "Chennai" } },
+      { name: "nativePlace", label: "Native Place", props: { placeholder: "Madurai" }, helperText: "Your home town or district, where you are originally from." },
+      { name: "currentLocation", label: "Current Location", props: { placeholder: "Chennai" }, helperText: "Where you are staying now, so we know how far the studio is." },
       /*
        * What the candidate studied, asked here rather than in a section of its own.
        *
@@ -239,7 +239,7 @@ export const applicationFormSections = [
        * asks for every qualification with its own marks and year, so it was the same answer typed
        * twice, in a shorter form, with nothing to say which the studio should believe.
        */
-      { name: "experienceLevel", label: "Are you a fresher or experienced?", type: "select", required: true, options: "experienceLevels", placeholder: "Select" },
+      { name: "experienceLevel", label: "Are you a fresher or experienced?", type: "select", required: true, options: "experienceLevels", placeholder: "Select", helperText: "Choose Experienced to list your past jobs; freshers skip that part." },
       /*
        * The work history, asked **immediately under the question that branches on it**.
        *
@@ -278,10 +278,10 @@ export const applicationFormSections = [
        * expectation, and it is one of the few answers that changes whether a conversation is worth
        * having. It is the one field of the five that does not presuppose a job.
        */
-      { name: "currentCompany", label: "Current Company", when: isExperienced },
-      { name: "currentDesignation", label: "Current Designation", when: isExperienced },
-      { name: "currentCtc", label: "Current Salary", when: isExperienced, props: { placeholder: "e.g. 3.5 LPA" } },
-      { name: "noticePeriod", label: "Notice Period", type: "select", when: isExperienced, options: "noticePeriods", placeholder: "Select", props: { sorted: false } },
+      { name: "currentCompany", label: "Current Company", when: isExperienced, helperText: "The company or studio you are working at right now." },
+      { name: "currentDesignation", label: "Current Designation", when: isExperienced, helperText: "Your job title at your current company." },
+      { name: "currentCtc", label: "Current Salary", when: isExperienced, props: { placeholder: "e.g. 3.5 LPA" }, helperText: "What you earn now per year, for example 3.5 LPA." },
+      { name: "noticePeriod", label: "Notice Period", type: "select", when: isExperienced, options: "noticePeriods", placeholder: "Select", props: { sorted: false }, helperText: "How soon you could leave your current job after resigning." },
       /*
        * Two salary answers, and they are not the same question.
        *
@@ -292,8 +292,8 @@ export const applicationFormSections = [
        *
        * The floor is asked first, because it is the one that gets read.
        */
-      { name: "minExpectedCtc", label: "Least Expected Salary", props: { placeholder: "e.g. 3 LPA" } },
-      { name: "expectedCtc", label: "Expected Salary", props: { placeholder: "e.g. 5 LPA" } },
+      { name: "minExpectedCtc", label: "Least Expected Salary", props: { placeholder: "e.g. 3 LPA" }, helperText: "The lowest yearly salary you would accept, for example 3 LPA." },
+      { name: "expectedCtc", label: "Expected Salary", props: { placeholder: "e.g. 5 LPA" }, helperText: "The yearly salary you are hoping for, for example 5 LPA." },
       /*
        * When they can start, asked as the question that actually has an answer.
        *
@@ -320,6 +320,7 @@ export const applicationFormSections = [
       {
         name: "immediateJoiner",
         label: "Are you an immediate joiner?",
+        helperText: "Choose No if you need time before you can start.",
         type: "radio",
         required: true,
         options: "immediateJoinerAnswers",
@@ -340,7 +341,7 @@ export const applicationFormSections = [
           controlClassName: "!mt-1.5 !min-h-9 rounded-lg border border-slate-300 bg-white px-3 py-0",
         },
       },
-      { name: "availableFrom", label: "Expected Joining Date", type: "date", when: isNotImmediate, props: { restriction: "past" } },
+      { name: "availableFrom", label: "Expected Joining Date", type: "date", when: isNotImmediate, props: { restriction: "past" }, helperText: "The earliest day you could start working with the studio." },
       /*
        * Both say **comma separated** in the label rather than only hinting it in the placeholder.
        *
@@ -350,8 +351,8 @@ export const applicationFormSections = [
        * filtered or counted on. The example stays in the placeholder; the rule is in the label,
        * where it is still on screen while the box is being filled in.
        */
-      { name: "skills", label: "Skills (comma separated)", props: { placeholder: "Photography, Lightroom, Premiere Pro" } },
-      { name: "languagesKnown", label: "Languages Known (comma separated)", props: { placeholder: "Tamil, English" } },
+      { name: "skills", label: "Skills (comma separated)", props: { placeholder: "Photography, Lightroom, Premiere Pro" }, helperText: "Separate each skill with a comma so the studio can read them." },
+      { name: "languagesKnown", label: "Languages Known (comma separated)", props: { placeholder: "Tamil, English" }, helperText: "The languages you speak, each separated by a comma." },
       /*
        * A link rather than an upload, and asked of everybody: a photographer's or an editor's work
        * is the application, and a studio reads it before it reads anything else. The résumé below
@@ -375,6 +376,7 @@ export const applicationFormSections = [
       {
         name: "resume",
         label: "Resume",
+        helperText: "Your CV as one PDF, Word file or image.",
         type: "file",
         colSpan: 2,
         props: { maxFiles: 1, accept: ".pdf,.doc,.docx,.png,.jpg,.jpeg,.webp" },
@@ -397,6 +399,7 @@ export const applicationFormSections = [
       {
         name: "attachments",
         label: "Other Attachments",
+        helperText: "Up to five more files, such as certificates or experience letters.",
         type: "file",
         colSpan: 2,
         props: { maxFiles: MAX_ATTACHMENTS, accept: ".pdf,.doc,.docx,.png,.jpg,.jpeg,.webp" },
@@ -407,7 +410,7 @@ export const applicationFormSections = [
     id: "anything-else",
     title: "Anything Else",
     fields: [
-      { name: "referredBy", label: "Referred By", props: { placeholder: "Who told you about us, if anybody" } },
+      { name: "referredBy", label: "Referred By", props: { placeholder: "Who told you about us, if anybody" }, helperText: "The name of whoever referred you, if anyone did." },
       /*
        * Two questions in place of the box that used to end the form.
        *
@@ -429,8 +432,8 @@ export const applicationFormSections = [
        * Neither writes to `remarks`, which stays HR's own note on the record - so a studio's note
        * can no longer be overwritten by a candidate reopening their link and submitting again.
        */
-      { name: "howYouKnowUs", label: "How do you know us?", props: { placeholder: "Instagram, a friend, a job post…" } },
-      { name: "aboutUs", label: "Anything about us?", type: "textarea", colSpan: 2, props: { rows: 5, placeholder: "What you know about the studio, and why you are applying here." } },
+      { name: "howYouKnowUs", label: "How do you know us?", props: { placeholder: "Instagram, a friend, a job post…" }, helperText: "Where you heard about the studio, such as Instagram or a friend." },
+      { name: "aboutUs", label: "Anything about us?", type: "textarea", colSpan: 2, props: { rows: 5, placeholder: "What you know about the studio, and why you are applying here." }, helperText: "What you know about the studio and why you want to work here." },
     ],
   },
 ];

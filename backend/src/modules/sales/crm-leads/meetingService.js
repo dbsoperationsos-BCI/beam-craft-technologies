@@ -1,3 +1,4 @@
+const { z } = require("zod");
 const { google } = require("googleapis");
 const prisma = require("../../../config/db");
 const {
@@ -27,6 +28,17 @@ const DEFAULT_DURATION_MINUTES = 30;
 // its own, and a meeting the salesperson cannot see in their own Google Calendar is worse
 // than useless.
 const CALENDAR_ID = "primary";
+
+// What a meeting is booked with - a lead's, and the Calendar's Add Meet with no lead alike.
+const meetingSchema = z.object({
+  title: z.string().trim().min(1).max(255),
+  description: z.string().trim().max(5000).optional().default(""),
+  startAt: z.string().trim().min(1),
+  endAt: z.string().trim().optional().default(""),
+  durationMinutes: z.number().int().min(5).max(1440).optional(),
+  attendees: z.array(z.string().trim().email()).max(50).optional().default([]),
+  timeZone: z.string().trim().max(60).optional().default(""),
+});
 
 function parseAttendees(value) {
   if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
@@ -144,7 +156,7 @@ async function createMeeting({ enquiryId, userId, title, description, startAt, e
         createRequest: {
           // Unique per attempt, so a retry after a network error creates one conference
           // rather than being silently de-duplicated onto the first.
-          requestId: `dbs-crm-${enquiryId}-${Date.now()}`,
+          requestId: `dbs-crm-${enquiryId || "meet"}-${Date.now()}`,
           conferenceSolutionKey: { type: "hangoutsMeet" },
         },
       },
@@ -158,7 +170,8 @@ async function createMeeting({ enquiryId, userId, title, description, startAt, e
 
   const created = await prisma.salesCrmMeeting.create({
     data: {
-      enquiryId,
+      // Null for a meeting booked from the Calendar's Add Meet, which belongs to no lead.
+      enquiryId: enquiryId || null,
       title: trimmedTitle,
       description: String(description || "").trim() || null,
       startAt: start,
@@ -186,8 +199,13 @@ async function createMeeting({ enquiryId, userId, title, description, startAt, e
  * leaving a meeting shown as scheduled because Google was unreachable is the worse outcome.
  * The event id is kept so the stale event can still be traced.
  */
-async function cancelMeeting({ id, enquiryId, userId }) {
-  const meeting = await prisma.salesCrmMeeting.findFirst({ where: { id, enquiryId } });
+async function cancelMeeting({ id, enquiryId = null, userId }) {
+  // A lead's meeting through that lead; a meeting with no lead only by the person who booked it -
+  // with nobody signed in, there is nobody it can be.
+  const booker = Number(userId);
+  const meeting = enquiryId
+    ? await prisma.salesCrmMeeting.findFirst({ where: { id, enquiryId } })
+    : booker > 0 ? await prisma.salesCrmMeeting.findFirst({ where: { id, enquiryId: null, createdByUserId: booker } }) : null;
   if (!meeting) {
     const error = new Error("Meeting not found.");
     error.status = 404;
@@ -217,4 +235,4 @@ async function cancelMeeting({ id, enquiryId, userId }) {
 
 // `toMeeting` is shared with the crm-meetings module, so a meeting is shaped the same whether
 // it is read through its lead or through the Meetings page.
-module.exports = { cancelMeeting, createMeeting, listMeetings, requireCalendarConnection, toMeeting };
+module.exports = { cancelMeeting, createMeeting, listMeetings, meetingSchema, parseAttendees, requireCalendarConnection, toMeeting };

@@ -46,6 +46,8 @@ export default function Gallery({ projectId, folderId, refreshKey }) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
+  // Photos added to this folder through AI Culling, waiting there to be culled.
+  const [held, setHeld] = useState(0);
   // A page is in flight. State would answer this too late: a second trigger arrives while React is
   // still rendering the last result, and the same page would be asked for twice.
   const inFlight = useRef(false);
@@ -59,7 +61,7 @@ export default function Gallery({ projectId, folderId, refreshKey }) {
   // asking three slightly different questions.
   const readPage = useCallback(async (pageNumber) => {
     const response = await listGalleryImages(projectId, { folderId, search: debouncedSearch, format: "all", selected, sort: "createdAt", order, page: pageNumber, pageSize: PAGE_SIZE });
-    return { items: response.data.items || [], pagination: response.data.pagination };
+    return { items: response.data.items || [], pagination: response.data.pagination, heldForCulling: response.data.heldForCulling || 0 };
   }, [projectId, folderId, debouncedSearch, selected, order]);
 
   /*
@@ -81,7 +83,7 @@ export default function Gallery({ projectId, folderId, refreshKey }) {
   useEffect(() => {
     let live = true;
     readPage(1)
-      .then(({ items, pagination: meta }) => { if (!live) return; setImages(items); setPagination(meta); setError(""); })
+      .then(({ items, pagination: meta, heldForCulling }) => { if (!live) return; setImages(items); setPagination(meta); setHeld(heldForCulling); setError(""); })
       .catch((loadError) => { if (live) setError(loadError.message || "Unable to load gallery."); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
@@ -108,7 +110,7 @@ export default function Gallery({ projectId, folderId, refreshKey }) {
   useEffect(() => {
     const interval = window.setInterval(() => {
       readPage(1)
-        .then(({ items, pagination: meta }) => { setImages((current) => (current.length ? mergeNewest(current, items, order) : items)); setPagination(meta); })
+        .then(({ items, pagination: meta, heldForCulling }) => { setImages((current) => (current.length ? mergeNewest(current, items, order) : items)); setPagination(meta); setHeld(heldForCulling); })
         .catch(() => {});
     }, 10000);
     return () => window.clearInterval(interval);
@@ -125,6 +127,11 @@ export default function Gallery({ projectId, folderId, refreshKey }) {
     </div>
     <GalleryToolbar search={search} selected={selected} order={order} onSearch={setSearch} onSelected={setSelected} onOrder={() => setOrder((value) => value === "asc" ? "desc" : "asc")} />
     {error && <p className="mt-3 rounded bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
+    {held > 0 && (
+      <p role="status" className="mt-3 rounded-md bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
+        {held} photo{held === 1 ? " is" : "s are"} waiting in AI Culling and will appear here once culled or sent on.
+      </p>
+    )}
     <div id="gallery-results" role="tabpanel">
       {loading
         ? <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">{skeletons(8)}</div>

@@ -7,6 +7,11 @@ const { storeDocument, storeDocuments } = require("../../../services/documentSto
 const { SHORT_CODE_PATTERN, generateShortCode } = require("../../../services/shortCode");
 const { genderNames } = require("../../../services/employeeOptionLists");
 const { phonesMatch } = require("../onboarding-invites/controller");
+// Sending on WhatsApp belongs to the WhatsApp module and is reused whole; this file never learns
+// what a session or a socket is. `MAX_MESSAGE_LENGTH` is that module's too, so the cap cannot drift.
+const { sendWhatsAppToPerson } = require("../../sales/whatsapp-chat/directSend");
+const whatsappActivity = require("../../../services/whatsappActivity");
+const { MAX_MESSAGE_LENGTH } = require("../../sales/whatsapp-chat/security");
 const service = require("./service");
 const {
   EMPLOYMENT_TYPES,
@@ -35,6 +40,9 @@ const {
  */
 
 const INVITE_STATUSES = ["Created", "Verified", "Submitted", "Expired", "Cancelled"];
+// The wording as the sender left it in the dialog's box; the link is already inside it. The cap is
+// WhatsApp's own, named once in the module that owns it.
+const sendWhatsAppSchema = z.object({ message: z.string().trim().min(1).max(MAX_MESSAGE_LENGTH) });
 const LIVE_STATUSES = ["Created", "Verified"];
 const RESUME_FOLDER = "hrm/interview/resume";
 const ATTACHMENT_FOLDER = "hrm/interview/attachments";
@@ -78,10 +86,24 @@ const applicationUrlFor = (invite, heldToken = null) => {
   return code ? `${frontendBaseUrl()}/interview/apply/${code}` : null;
 };
 
+/**
+ * The status an invite is reported with. "Expired" is only written when somebody next touches the
+ * link (opening it, sending it, submitting it), so a lapsed form that nobody touched still holds
+ * Created or Verified in the table. It is read here by the same rule those writes use - past its
+ * expiry and neither submitted nor cancelled - so every list says Expired without a GET writing.
+ */
+function reportedInviteStatus(invite, now = new Date()) {
+  const status = invite?.status;
+  if (status === "Submitted" || status === "Cancelled" || status === "Expired") return status;
+  const expiresAt = invite?.expiresAt ? new Date(invite.expiresAt) : null;
+  return expiresAt && expiresAt <= now ? "Expired" : status;
+}
+
 function serializeInvite(invite, candidate = null) {
   const { tokenHash, token, ...safe } = invite;
   return {
     ...safe,
+    status: reportedInviteStatus(invite),
     applicationUrl: invite.shortCode ? applicationUrlFor(invite) : null,
     candidateCode: candidate?.candidateCode || null,
     candidateStatus: candidate?.status || null,
@@ -329,6 +351,51 @@ async function cancelInvite(req, res) {
 
 const sendEmailSchema = z.object({ token: z.string().trim().refine((value) => classifyIdentifier(value) !== null, "A valid application link is required.") });
 
+/**
+ * The same screening form, handed over on WhatsApp instead of by email.
+ *
+ * The wording comes from the dialog's editable box - somebody adds a line, or writes it in the
+ * candidate's language - so what is sent is what they are looking at. The **number** does not: it
+ * is read off the invite, so this can only ever reach the candidate this link is for.
+ *
+ * The invite's state is checked exactly as the email checks it. Nothing is recorded, which is what
+ * the email does too.
+ */
+async function sendInviteWhatsApp(req, res) {
+  const parsedId = inviteIdSchema.safeParse(req.params.id);
+  const parsedBody = sendWhatsAppSchema.safeParse(req.body || {});
+  if (!parsedId.success || !parsedBody.success) return res.status(400).json({ message: "A message is required." });
+  try {
+    const invite = await prisma.hrmInterviewApplicationInvite.findUnique({ where: { id: parsedId.data } });
+    if (!invite) return res.status(404).json({ message: "Application invite not found." });
+    if (invite.status === "Cancelled" || invite.status === "Submitted") return res.status(400).json({ message: "This application link can no longer be sent." });
+    if (invite.expiresAt <= new Date()) {
+      if (invite.status !== "Expired") await prisma.hrmInterviewApplicationInvite.update({ where: { id: invite.id }, data: { status: "Expired" } });
+      return res.status(400).json({ message: "This application link has expired." });
+    }
+
+    // Recorded in Settings → WhatsApp Activity Log, where a failed one can be sent again.
+    await whatsappActivity.track({
+      mode: "MANUAL", provider: "baileys", trigger: "INTERVIEW_APPLICATION_INVITE", eventRef: `interview-invite:${invite.id}`,
+      initiatedByUserId: req.user.id, senderUserId: req.user.id,
+      recipient: { kind: "PERSON", address: invite.candidatePhone, name: invite.candidateName },
+      body: parsedBody.data.message, resendable: true,
+    }, () => sendWhatsAppToPerson({
+      userId: req.user.id,
+      phone: invite.candidatePhone,
+      body: parsedBody.data.message,
+      noNumberMessage: "This application link has no phone number to send to.",
+    }));
+    return res.json({ message: `Screening form sent on WhatsApp to ${invite.candidateName}.` });
+  } catch (error) {
+    // The send's own refusals carry a status and a sentence worth acting on - not linked, switched
+    // off, the number not on WhatsApp - so they are passed through rather than flattened.
+    if (error?.status) return res.status(error.status).json({ message: error.message });
+    console.error(`[interview] Application invite WhatsApp refused for invite ${parsedId.data}:`, error.message);
+    return res.status(502).json({ message: "Unable to send this screening form on WhatsApp." });
+  }
+}
+
 async function sendInviteEmail(req, res) {
   const parsedId = inviteIdSchema.safeParse(req.params.id);
   const parsedBody = sendEmailSchema.safeParse(req.body || {});
@@ -494,7 +561,8 @@ async function getPublicInvite(req, res) {
 function prefillFrom(candidate) {
   if (!candidate) return null;
   const { firstName, lastName } = splitName(candidate.name);
-  // Read once: `toRow` parses both JSON columns, and asking it twice would parse them twice.
+  // Read once: `toRow` parses the JSON columns - the entries, the links, the attachments - which
+  // the raw row holds as strings.
   const row = service.toRow(candidate);
   return {
     firstName,
@@ -524,8 +592,8 @@ function prefillFrom(candidate) {
      * Falls back to the single column for a candidate written before the list existed, which is
      * what makes that row read as exactly one link rather than none.
      */
-    portfolioLinks: candidate.portfolioLinks?.length
-      ? candidate.portfolioLinks
+    portfolioLinks: row.portfolioLinks?.length
+      ? row.portfolioLinks
       : (candidate.portfolioUrl ? [candidate.portfolioUrl] : []),
     portfolioUrl: candidate.portfolioUrl || "",
     referredBy: candidate.referredBy || "",
@@ -537,7 +605,7 @@ function prefillFrom(candidate) {
     resumeUrl: candidate.resumeUrl || "",
     // Sent back so a link opened a second time shows what is already attached rather than an empty
     // control; the files themselves are not re-uploaded, since each already carries its URL.
-    attachments: Array.isArray(candidate.attachments) ? candidate.attachments : [],
+    attachments: Array.isArray(row.attachments) ? row.attachments : [],
   };
 }
 
@@ -768,4 +836,4 @@ async function submitPublicInvite(req, res) {
   }
 }
 
-module.exports = { createInvite, listInvites, updateInvite, cancelInvite, sendInviteEmail, resendSubmittedForm, getPublicInvite, verifyPublicInvite, submitPublicInvite, applicationUrlFor, toStoredPhone, splitName };
+module.exports = { reportedInviteStatus, createInvite, listInvites, updateInvite, cancelInvite, sendInviteEmail, sendInviteWhatsApp, resendSubmittedForm, getPublicInvite, verifyPublicInvite, submitPublicInvite, applicationUrlFor, toStoredPhone, splitName };

@@ -23,6 +23,32 @@ const extensionsByMimeType = {
   "image/webp": "webp",
 };
 
+/*
+ * What a file's **own first bytes** have to say for the declared type to be believed.
+ *
+ * The declared MIME decides the extension and whether the type is stored at all, and a caller can
+ * declare anything: a macro-laden `.docm`, a CSV of formula cells or an HTML page sent as
+ * `application/pdf` was stored as a PDF and handed to whoever opened it. Every type here carries a
+ * fixed signature, so the claim is checkable - and the file people are most likely to be sent one
+ * of is the PDF.
+ *
+ * Only the types that have a signature are listed. A `.docx` is a zip and a `.csv` is text, so
+ * neither can be told from the other by its first bytes; those are bounded by the allow-list a
+ * caller passes instead (`types`), which is how the public forms accept nothing but a PDF or an
+ * image.
+ */
+const SIGNATURES = {
+  "application/pdf": [{ at: 0, bytes: [0x25, 0x50, 0x44, 0x46] }],
+  "image/jpeg": [{ at: 0, bytes: [0xff, 0xd8, 0xff] }],
+  "image/png": [{ at: 0, bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] }],
+  // `RIFF....WEBP`: the four bytes between the two marks are the file's own length.
+  "image/webp": [{ at: 0, bytes: [0x52, 0x49, 0x46, 0x46] }, { at: 8, bytes: [0x57, 0x45, 0x42, 0x50] }],
+};
+
+/** True where the type has no signature to check, or the bytes carry it. */
+const matchesSignature = (buffer, mimeType) => (SIGNATURES[mimeType] || [])
+  .every(({ at, bytes }) => bytes.every((byte, index) => buffer[at + index] === byte));
+
 let warnedOnce = false;
 function warnUnconfigured() {
   if (warnedOnce) return;
@@ -41,6 +67,8 @@ function warnUnconfigured() {
  * @param {{name: string, data?: string, url?: string}} document
  * @param {object} [options]
  * @param {string} [options.folder="assets/documents"] key prefix inside the bucket.
+ * @param {string[]} [options.types] MIME types this caller accepts, narrowing the application's own
+ *   list - what the public forms pass so an unauthenticated upload is a PDF or an image, nothing else.
  * @returns {Promise<{name: string, url?: string, data?: string, key: string|null}|null>}
  */
 async function storeDocument(document, options = {}) {
@@ -84,6 +112,25 @@ async function storeDocument(document, options = {}) {
    */
   const allowedExtension = extensionsByMimeType[mimeType];
   if (!allowedExtension) throw fail(400, `${document.name || "This document"} is not a kind of file this application stores.`);
+  /*
+   * `types` narrows that list for one caller, and the public forms use it.
+   *
+   * The list above is what the *application* stores, which is wider than what any one screen should
+   * accept: a resignation letter is a PDF or a photograph of a signed page, and an unauthenticated
+   * caller has no business putting a spreadsheet or a Word macro document on the studio's bucket
+   * for HR to open. Where a caller names its types, nothing outside them is stored.
+   */
+  if (Array.isArray(options.types) && !options.types.includes(mimeType)) {
+    throw fail(400, `${document.name || "This document"} is not a kind of file this form accepts.`);
+  }
+  /*
+   * And the bytes have to agree with the claim. Without this the type is only an assertion by the
+   * caller: an HTML page or a macro document declared `application/pdf` was stored as a PDF, on a
+   * bucket served whole, for whoever opened it next.
+   */
+  if (!matchesSignature(buffer, mimeType)) {
+    throw fail(400, `${document.name || "This document"} is not really a ${allowedExtension.toUpperCase()} file.`);
+  }
 
   if (!isConfigured) {
     if (process.env.NODE_ENV === "production") throw fail(500, "Document storage is not configured on this server.");
@@ -106,4 +153,4 @@ async function storeDocuments(documents, options = {}) {
   return stored;
 }
 
-module.exports = { storeDocument, storeDocuments, MAX_DOCUMENT_BYTES };
+module.exports = { storeDocument, storeDocuments, MAX_DOCUMENT_BYTES, matchesSignature };

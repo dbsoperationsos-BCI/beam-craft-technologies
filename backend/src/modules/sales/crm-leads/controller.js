@@ -1,11 +1,13 @@
 const crypto = require("node:crypto");
+const { LEAD_SOURCES } = require("./leadSources");
+const { studioDateKey } = require("../../../services/studioTime");
 const { z } = require("zod");
 const { importCsvRows, nextLeadId } = require("./csvImportService");
 const { IDENTIFIER_PATTERN } = require("../../../services/identifiers");
 const { cancelBatch } = require("./importBatchRegistry");
 const { listLeadActivity, recordLeadActivity, recordBulkActivity } = require("./activityService");
 const { notifyLeadAssigned } = require("./leadNotifications");
-const { recordCallLogs, listLeadCallLogs, callLogCounts, knownEmployeeNumbers, linkCallsToLead } = require("./callLogService");
+const { recordCallLogs, listLeadCallLogs, callLogCounts, knownEmployeeNumbers, linkCallsToLead, employeeMatchTable, employeeNameFor } = require("./callLogService");
 const { listCallBoardPage, listCallBoardIds, callBoardTabCounts, callBoardColumnValues, callBoardVersion, callToRecord } = require("./callBoardService");
 const { loadRoutingConfig, verticalForCall, callFilterReason, phoneKey: routingPhoneKey, employeeNumberOf, verticalFromValue } = require("./callRouting");
 const { mergeCallIntoLead } = require("./callMerge");
@@ -18,11 +20,11 @@ const transcripts = require("../call-transcripts/repository");
 const { enqueueTranscription } = require("../call-transcripts/queue");
 const { listCrmLeadsPage, listCrmLeadIds, crmLeadTabCounts, crmLeadColumnValues } = require("./leadQueryService");
 const { FIELD_TYPES, MAX_FIELDS_PER_VERTICAL, listCustomFields, replaceCustomFields } = require("./tableSettingsService");
-const { cancelMeeting, createMeeting, listMeetings } = require("./meetingService");
+const { cancelMeeting, createMeeting, listMeetings, meetingSchema } = require("./meetingService");
 const prisma = require("../../../config/db");
 const dataScope = require("../../../services/dataScope.service");
 const { storeAttachment, readAttachment, storageReady, ROOT: REMARK_ROOT } = require("./remarkAttachments");
-const { CRM_LEAD_SELECT_LIST, phoneMatchKey, toRecord, getCrmLeadById, listLeadsSharingPhone, findVerticalDuplicate, getCrmLeadVersion, listCrmLeads, listCrmLeadProjects, createCrmLead, createCrmLeads, stampCrmLeadCreator, updateCrmLead, deleteCrmLead, deleteCrmLeads, setCrmLeadStatus, assignCrmLeads, renameCrmLeadGroup, refreshCrmLeadsFromSheets } = require("./crmLeadService");
+const { CRM_LEAD_SELECT_LIST, phoneMatchKey, toRecord, getCrmLeadById, listLeadsSharingPhone, findVerticalDuplicate, getCrmLeadVersion, listCrmLeads, listCrmLeadProjects, createCrmLead, createCrmLeads, stampCrmLeadCreator, updateCrmLead, deleteCrmLead, deleteCrmLeads, setCrmLeadStatus, moveCrmLeadsToVertical, assignCrmLeads, renameCrmLeadGroup, refreshCrmLeadsFromSheets } = require("./crmLeadService");
 
 /*
  * An enquiry id, as this application now issues them: `DBS-EID-QQ-ERD-000001`.
@@ -275,7 +277,7 @@ function callyzerRemark(callLog, employee) {
   return parts.filter(Boolean).join(" — ");
 }
 
-function callLogToLead(callLog, index, employee = {}, routing = {}) {
+function callLogToLead(callLog, index, employee = {}, routing = {}, employees = null) {
   const phone = callyzerClientPhone(callLog);
   const name = pickFirst(
     callLog.client_name, callLog.clientName,
@@ -285,9 +287,21 @@ function callLogToLead(callLog, index, employee = {}, routing = {}) {
   const callDate = pickFirst(callLog.call_date, callLog.callDate, callLog.synced_at, callLog.created_at, callLog.date);
   const callTime = pickFirst(callLog.call_time, callLog.callTime);
   const leadStatus = callyzerLeadStatus(callLog);
-  // The employee who took the call is the CRM against the lead; it is the answer to "who has
-  // spoken to this client", which is what that column is for.
-  const crm = pickFirst(employee.emp_name, employee.empName, callLog.crm, callLog.assigned_to, callLog.owner);
+  /*
+   * The employee who took the call is the CRM against the lead; it is the answer to "who has
+   * spoken to this client", which is what that column is for.
+   *
+   * Written as the **repository** spells it, resolved from Callyzer's Employee Code and then the
+   * handset's label - the same ladder the call log itself is matched by. `crm` is a name copy of
+   * `owner_employee_id` (see `nameCopies.js`) and the id is resolved back out of this text, so a
+   * handset named anything but its owner used to resolve to nobody: the lead was owned by no one,
+   * sat on nobody's My Leads, and `dataScope` could not narrow it to the person who made the call.
+   *
+   * Callyzer's own label remains the fallback, for a handset the repository cannot place - it is
+   * the only name such a call has, and it is what the Calls board shows for it.
+   */
+  const crm = (employees && employeeNameFor(employees, employee))
+    || pickFirst(employee.emp_name, employee.empName, callLog.crm, callLog.assigned_to, callLog.owner);
   /*
    * The vertical the call belongs to - the studio's three businesses are three CRM boards, and
    * `vertical` is which one a lead sits on.
@@ -313,7 +327,7 @@ function callLogToLead(callLog, index, employee = {}, routing = {}) {
       addedTime: callTime || "",
       // The day the call happened, not the day it was delivered here - a batch synced late must
       // not read as a lead that arrived today.
-      createdDate: /^\d{4}-\d{2}-\d{2}$/.test(callDate.slice(0, 10)) ? callDate.slice(0, 10) : new Date().toISOString().slice(0, 10),
+      createdDate: /^\d{4}-\d{2}-\d{2}$/.test(callDate.slice(0, 10)) ? callDate.slice(0, 10) : studioDateKey(), // the studio's day, not UTC's - a call at 1 am IST is still today
       crm,
       referredFrom: "Callyzer Call Log",
       // Recorded on the lead, not only in the group details below: those are rebuilt per import
@@ -613,13 +627,21 @@ function secretMatches(provided, expected) {
 
 /**
  * Whose leads this request gets - the resolver's answer for the permission the route was guarded
- * with (`SALES / CRM Leads`, set on `req.permission` by the router's guard), on the lead's own
+ * with (`SALES / CRM Leads`, the router's own guard), on the lead's own
  * reference columns. Resolved once per request and handed to whatever reads: the board's page
  * and counts as SQL, and every record endpoint as a check on the row already fetched, so an id
  * typed into the URL reaches exactly what the board shows.
  */
 const LEAD_SCOPE_COLUMNS = { branch: "branchId", employee: "ownerEmployeeId", user: "createdByUserId" };
-const leadScope = (req) => dataScope.resolve({ userId: Number(req.user.id), module: req.permission.module, feature: req.permission.feature, columns: LEAD_SCOPE_COLUMNS });
+/*
+ * Always the board's own permission, never `req.permission`: the delete, select-all and import
+ * routes stack a finer guard after the router's, which overwrites `req.permission`, and branch reach
+ * belongs to the permission that grants the leads themselves (CLAUDE.md Rule 4). At the level the
+ * request acts at, so a write is held to the branches the reader may change, not merely read.
+ */
+const CRM_LEADS_PERMISSION = { module: "SALES", feature: "CRM Leads" };
+const scopeLevel = (req) => (req.method === "GET" || req.method === "HEAD" ? "READ" : "READ_WRITE");
+const leadScope = (req) => dataScope.resolve({ userId: Number(req.user.id), ...CRM_LEADS_PERMISSION, columns: LEAD_SCOPE_COLUMNS, level: scopeLevel(req) });
 
 /**
  * The ids behind the board's "only mine" toggle, or null when it is off.
@@ -642,7 +664,7 @@ const leadMine = async (req, wanted) => {
   if (!wanted) return null;
   const [self, seesUnassigned] = await Promise.all([
     dataScope.selfIds(Number(req.user.id)),
-    dataScope.seesEverything(Number(req.user.id), { module: req.permission.module, feature: req.permission.feature }),
+    dataScope.seesEverything(Number(req.user.id), CRM_LEADS_PERMISSION),
   ]);
   return { ...self, seesUnassigned };
 };
@@ -670,7 +692,7 @@ async function readerManagesAnyone(req) {
    * no team under them in the org chart sense and were refused the switch entirely, which
    * contradicted the note above it.
    */
-  if (await dataScope.seesEverything(Number(req.user.id), { module: req.permission.module, feature: req.permission.feature })) return true;
+  if (await dataScope.seesEverything(Number(req.user.id), CRM_LEADS_PERMISSION)) return true;
   const { employeeId } = await dataScope.selfIds(Number(req.user.id));
   if (!employeeId) return false;
   return (await dataScope.subtreeEmployeeIds(employeeId)).length > 0;
@@ -751,15 +773,6 @@ async function listTableSettings(req, res) {
   }
 }
 
-const meetingSchema = z.object({
-  title: z.string().trim().min(1).max(255),
-  description: z.string().trim().max(5000).optional().default(""),
-  startAt: z.string().trim().min(1),
-  endAt: z.string().trim().optional().default(""),
-  durationMinutes: z.number().int().min(5).max(1440).optional(),
-  attendees: z.array(z.string().trim().email()).max(50).optional().default([]),
-  timeZone: z.string().trim().max(60).optional().default(""),
-});
 
 // How many times this number has enquired, and which leads those were.
 async function duplicates(req, res) {
@@ -776,6 +789,8 @@ async function duplicates(req, res) {
           name: row.name || "",
           vertical: row.vertical || "",
           status: row.status || "",
+          // Who is working it - the owner's current name, the `crm` copy only where none is linked.
+          assignedTo: row.crm || "",
           enquiryDate: row.createdDate || row.addedTime || "",
           nextFollowUpDate: row.nextFollowUpDate || "",
           lastFollowUpDate: row.lastFollowUpDate || "",
@@ -945,6 +960,8 @@ const columnValuesQuerySchema = z.object({
 
 const pageQuerySchema = z.object({
   board: z.string().trim().default("Dum Dum"),
+  // A board column's first page asks for what its leads are worth (`values` in the answer).
+  values: z.enum(["true", "false"]).default("false"),
   /*
    * "Only mine" - the board's own toggle, off by default so the board opens on everything this
    * reader may see, as it always has.
@@ -1039,15 +1056,15 @@ async function page(req, res) {
     // The counts and the total are skipped entirely while appending, rather than computed and
     // thrown away. The board keeps the ones it already has.
     const [scope, mine] = await Promise.all([leadScope(req), leadMine(req, parsed.data.mine === "true")]);
-    const [{ rows, total }, counts, managesAnyone] = await Promise.all([
-      listCrmLeadsPage({ ...parsed.data, withTotal: !appending, scope, mine }),
+    const [{ rows, total, values }, counts, managesAnyone] = await Promise.all([
+      listCrmLeadsPage({ ...parsed.data, withTotal: !appending, withValues: !appending && parsed.data.values === "true", scope, mine }),
       // The same `mine`, so a tab's count and the rows it opens can never describe different sets.
       appending ? Promise.resolve(null) : crmLeadTabCounts({ ...parsed.data, scope, mine }),
       // Only on a real read. A scroll append is the same board the reader is already looking at, so
       // this cannot have changed and the org-chart walk would be paid again for nothing.
       appending ? Promise.resolve(false) : readerManagesAnyone(req),
     ]);
-    return res.json({ data: rows.map(toRecord), ...(appending ? {} : { total, counts, managesAnyone }) });
+    return res.json({ data: rows.map(toRecord), ...(appending ? {} : { total, counts, managesAnyone, ...(values ? { values } : {}) }) });
   } catch (error) {
     return sendError(res, error, "Unable to load CRM leads.");
   }
@@ -1189,7 +1206,9 @@ async function transcriptDetail(req, res) {
   if (!id) return res.status(400).json({ message: "A transcript id is required." });
   try {
     const row = await transcripts.findById(id);
-    if (!row) return res.status(404).json({ message: "That transcript no longer exists." });
+    // Held to the lead it landed on, like the Transcripts tab that lists it: a transcript on a lead
+    // out of scope - or on no lead, such as an interview call - reads as not found.
+    if (!row || !row.enquiryId || !(await scopedLead(req, row.enquiryId))) return res.status(404).json({ message: "That transcript no longer exists." });
     return res.json({
       data: {
         ...row,
@@ -1334,6 +1353,8 @@ async function create(req, res) {
     // Minted here rather than in the browser: an enquiry id counts within its own vertical and
     // branch, and only the counter knows where that pair has got to.
     record.lead.id = record.lead.id || await nextLeadId({ vertical: record.lead.vertical, branch: record.lead.assignedBranch });
+    // Typed into the app, whatever the body says - see `leadSources.js`.
+    record.lead.source = LEAD_SOURCES.MANUAL;
     const created = await createCrmLead(record);
     // Whoever entered it is one of the names the scope reads, so a lead nobody is assigned yet is
     // still visible to the person who created it.
@@ -1423,7 +1444,7 @@ async function createBulk(req, res) {
     const records = [];
     for (const record of parsed.data.records) {
       const id = record.lead.id || await nextLeadId({ vertical: record.lead.vertical, branch: record.lead.assignedBranch });
-      records.push({ ...record, lead: { ...record.lead, id } });
+      records.push({ ...record, lead: { ...record.lead, id, source: LEAD_SOURCES.MANUAL } });
     }
 
     const created = await createCrmLeads(records);
@@ -1543,8 +1564,10 @@ const bulkStatusSchema = z.object({
    * works.
    */
   today: z.string().trim().max(40).optional(),
-}).refine((value) => value.status || value.lastFollowUpDate || value.nextFollowUpDate, {
-  message: "Send a status, a last follow-up date, a next follow-up date, or any of them together.",
+  // Move the selection to another vertical as well - see `moveCrmLeadsToVertical`.
+  vertical: z.string().trim().max(40).optional(),
+}).refine((value) => value.status || value.lastFollowUpDate || value.nextFollowUpDate || value.vertical, {
+  message: "Send a status, a last follow-up date, a next follow-up date, a vertical, or any of them together.",
 });
 
 // Applies one status and follow-up date across a selection that may cover a whole branch, in
@@ -1554,27 +1577,79 @@ async function bulkStatus(req, res) {
   if (!parsed.success) {
     return res.status(400).json({ message: "Select at least one lead and a status or follow-up date to apply.", errors: parsed.error.flatten() });
   }
-  const { status, lastFollowUpDate, nextFollowUpDate, today } = parsed.data;
+  const { status, lastFollowUpDate, nextFollowUpDate, today, vertical } = parsed.data;
+  const target = vertical ? verticalFromValue(vertical) : "";
+  if (vertical && !["Dum Dum", "Qua Qua", "Corp"].includes(target)) {
+    return res.status(400).json({ message: "Choose Dum Dum, Qua Qua or Corp." });
+  }
+  // Converted & Followup is Qua Qua's own status: it cannot be set on leads going anywhere else.
+  if (target && target !== "Qua Qua" && /^converted\s*(&|and)\s*follow\s*-?\s*up$/i.test(String(status || "").trim())) {
+    return res.status(400).json({ message: `Converted & Followup is a Qua Qua status; choose another for leads moving to ${target}.` });
+  }
   try {
     const ids = await allowedLeadIds(req, parsed.data.ids);
-    const updated = ids.length
+    // The vertical first, so a status chosen alongside it is written onto the leads where they now are.
+    const move = target && ids.length ? await moveCrmLeadsToVertical(ids, target, actorFrom(req)) : null;
+    const changesStatus = Boolean(status || lastFollowUpDate || nextFollowUpDate);
+    const updated = changesStatus && ids.length
       ? await setCrmLeadStatus(ids, { status, lastFollowUpDate, nextFollowUpDate, today }, actorFrom(req))
       : 0;
-    const leads = `${updated.toLocaleString()} lead${updated === 1 ? "" : "s"}`;
-    const message = status
-      ? `${leads} moved to ${status}.`
-      : `${leads} updated successfully.`;
+    const plural = (count) => `${count.toLocaleString()} lead${count === 1 ? "" : "s"}`;
+    const parts = [];
+    if (move) {
+      parts.push(`${plural(move.moved)} moved to ${target}.`);
+      if (move.skipped.length) parts.push(`${plural(move.skipped.length)} left where ${move.skipped.length === 1 ? "it was" : "they were"}: the number is already an enquiry in ${target}.`);
+    }
+    if (changesStatus) parts.push(status ? `${plural(updated)} moved to ${status}.` : `${plural(updated)} updated successfully.`);
     return res.json({
-      message,
+      message: parts.join(" "),
       data: {
         updated,
         status: status || null,
         lastFollowUpDate: lastFollowUpDate || null,
         nextFollowUpDate: nextFollowUpDate || null,
+        vertical: target || null,
+        moved: move?.moved || 0,
+        // The leads left behind, and the number that held them - the first 50 is enough to act on.
+        skipped: (move?.skipped || []).slice(0, 50),
+        skippedCount: move?.skipped.length || 0,
+        unchanged: move?.unchanged || 0,
       },
     });
   } catch (error) {
     return sendError(res, error, "Unable to change the status of the selected CRM leads.");
+  }
+}
+
+/*
+ * One lead moved to another vertical from its popup. The same move Bulk Update makes
+ * (`moveCrmLeadsToVertical`) - the old vertical's own fields and custom fields cleared, Converted &
+ * Followup becoming Converted off Qua Qua - on the board's own Read / Write, since moving one lead
+ * is editing it, and only a lead the caller may read. A number the target vertical already holds is
+ * refused here with the enquiry that holds it, rather than skipped: there is only the one lead.
+ */
+const moveVerticalSchema = z.object({ vertical: z.string().trim().min(1).max(40) }).strict();
+
+async function moveVertical(req, res) {
+  const parsed = moveVerticalSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ message: "Choose the vertical to move this lead to." });
+  const target = verticalFromValue(parsed.data.vertical);
+  if (!["Dum Dum", "Qua Qua", "Corp"].includes(target)) return res.status(400).json({ message: "Choose Dum Dum, Qua Qua or Corp." });
+  try {
+    const record = await scopedLead(req, req.params.id);
+    if (!record) return res.status(404).json({ message: "Lead not found." });
+    if ((verticalFromValue(record.lead.vertical) || "Dum Dum") === target) return res.status(400).json({ message: `This lead is already on ${target}.` });
+    for (const phone of [record.lead.phone, record.lead.contactNumber]) {
+      const clash = phone ? await findVerticalDuplicate({ phone, vertical: target, excludeId: record.lead.id }) : null;
+      if (clash) {
+        return res.status(409).json({ message: `${clash.enquiryId} in ${target} already holds this number. One number is one enquiry within a vertical.`, code: "DUPLICATE_PHONE_IN_VERTICAL", data: { enquiryId: clash.enquiryId } });
+      }
+    }
+    const result = await moveCrmLeadsToVertical([record.lead.id], target, actorFrom(req));
+    if (!result.moved) return res.status(409).json({ message: `This lead could not be moved to ${target}.` });
+    return res.json({ message: `${record.lead.id} moved to ${target}.`, data: await getCrmLeadById(record.lead.id) });
+  } catch (error) {
+    return sendError(res, error, "Unable to move this lead.");
   }
 }
 
@@ -1718,7 +1793,12 @@ async function ingestCallyzerWebhook(req, res) {
   }
 
   const records = [];
-  const prepared = incoming.map(({ callLog, employee }, index) => callLogToLead(callLog || {}, index, employee || {}, routing));
+  /*
+   * The repository, once for the batch, so every lead this delivery touches is credited to the
+   * employee the handset belongs to rather than to whatever the phone is named.
+   */
+  const employees = await employeeMatchTable();
+  const prepared = incoming.map(({ callLog, employee }, index) => callLogToLead(callLog || {}, index, employee || {}, routing, employees));
   const existingByPhone = await leadsForPhones(prepared.map((record) => record.lead.phone));
   // The same key the lookup used, so a client rung twice in one delivery is one lead.
   const phoneKey = phoneMatchKey;
@@ -1955,4 +2035,4 @@ async function remarkAttachment(req, res) {
   }
 }
 
-module.exports = { list, branches, getOne, duplicates, projects, listTableSettings, saveTableSettings, meetings, scheduleMeeting, removeMeeting, page, ids, columnValues, activity, callLogs, leadTranscripts, transcriptDetail, version, bulkStatus, bulkAssign, importCsv, cancelImportCsv, create, createBulk, update, remove, removeBulk, renameGroup, refresh, ingestCallyzerWebhook, uploadRemarkAttachment, remarkAttachment };
+module.exports = { moveVertical, list, branches, getOne, duplicates, projects, listTableSettings, saveTableSettings, meetings, scheduleMeeting, removeMeeting, page, ids, columnValues, activity, callLogs, leadTranscripts, transcriptDetail, version, bulkStatus, bulkAssign, importCsv, cancelImportCsv, create, createBulk, update, remove, removeBulk, renameGroup, refresh, ingestCallyzerWebhook, uploadRemarkAttachment, remarkAttachment };

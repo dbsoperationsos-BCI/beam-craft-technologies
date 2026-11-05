@@ -1,9 +1,14 @@
 # CLAUDE.md — Read This First
 
-Entry point for any AI agent working on DBS-Operations-OS. Read this file, then the README for the
-side you are changing: [frontend/README.md](frontend/README.md) or
-[backend/README.md](backend/README.md). Every change also decides who may use it, so read
-[docs/project-state/IAM.md](docs/project-state/IAM.md) as well — see Rule 4.
+Entry point for any AI agent working on DBS-Operations-OS. Read this file whole. Then read the README
+for the side you are changing — [frontend/README.md](frontend/README.md) or
+[backend/README.md](backend/README.md) — and [docs/project-state/IAM.md](docs/project-state/IAM.md)
+**by section**: list the headings, read only the sections the change touches (see Token
+Optimization below). Every change also decides who may use it — see Rule 4.
+
+Work as the senior Next.js and Node engineer who owns this codebase: every change stays inside the
+layer diagram below on all three sides — frontend, backend, database — and nothing is written
+that the codebase already has.
 
 ## Development Workflow
 
@@ -36,13 +41,13 @@ Per-step expectations:
 
 | Step | What it means here |
 | --- | --- |
-| Reads CLAUDE.md | This file plus the README for the side being changed. Do not start from assumptions about the stack. |
+| Reads CLAUDE.md | This file whole, then the headings of the README for the side being changed and the sections the change touches. Do not start from assumptions about the stack, and do not read a reference file whole. |
 | Understands architecture | Name the exact files the change touches and the layer each belongs to before writing code, and the module and feature its access is decided by. |
-| Implements | Follow the four rules below. Stay inside the layer boundaries in the READMEs, and write the backend and frontend RBAC alongside the feature rather than after it. |
+| Implements | Follow the six rules below. Stay inside the layer boundaries in the READMEs, and write the backend and frontend RBAC alongside the feature rather than after it. |
 | Tests | `npm run lint` + `npm test` in `frontend`, `npm test` in `backend`; plus the responsive check at ~360px, ~768px, ~1280px. |
 | Updates relevant .md files | The README tables that the change makes stale, and `docs/project-state/PROJECT-STATE.md` if product behaviour changed. |
-| Updates changelog | One entry in [docs/CHANGELOG.md](docs/CHANGELOG.md) under `Unreleased`. |
-| Claude reviews | Read the diff against these rules: reuse, responsiveness, access control on both sides, layer boundaries, RBAC guarded, docs updated, no secrets. |
+| Updates changelog | One entry at the top of the matching group under `Unreleased` in [docs/CHANGELOG.md](docs/CHANGELOG.md), placed from the file's first 40 lines — never a read of the whole file. |
+| Claude reviews | Read the diff against these rules: reuse, responsiveness, access control on both sides, layer boundaries, RBAC guarded, docs updated, no secrets, and **only the final fix in the diff** (see Hard Constraints) - with the report of the subagent for each side touched: `frontend-ui-reviewer` and `ux-heuristics-reviewer`, `backend-api-reviewer`, `db-schema-reviewer` for any database change, and `security-reviewer` whenever the change touches auth, a token, a public route, a webhook, raw SQL, an upload, an outbound call, a secret or a dependency. |
 | Git diff / PR | Feature branch → PR to `develop`. Never push to `main`. |
 
 ## Architecture in One Screen
@@ -70,13 +75,18 @@ frontend/src/app/(app)/<module>/<page>/page.js       Next.js 16 App Router page
   `backend/src/modules/image-selection/processing/`.
 - Prisma Migrate owns the database schema. `migrate dev` locally, `migrate deploy` on the VPS only.
 
-## The Four Rules
+## The Six Rules
 
-1. **Reuse a component before building one.** Search `frontend/src/components/` first — `ui/`,
-   `shared/`, `layout/`, `data-table/`, and `schema-form/` already cover dialogs, form fields,
-   buttons, module headers, tables, and full-screen forms. If nothing fits, create a reusable
-   component in the correct folder instead of inlining markup in a page. On the backend, check
-   `backend/src/services/` before writing a new helper.
+1. **Reuse a component before building one — never type raw markup for something that exists.**
+   Before writing any UI, list `frontend/src/components/ui/`, `shared/`, `layout/`, `data-table/`
+   and `schema-form/` and grep the module's own folder for the behaviour. A `<button>`, `<input>`,
+   `<select>`, `<textarea>`, `<table>` or `role="dialog"` typed into a page or module component is
+   a defect when `Button`, `TextField`, `Dropdown`, `TextAreaField`, `DataTable` or `Dialog` does
+   the job. When one nearly fits, add the prop to it. When nothing fits, create one reusable
+   component in the right folder, then use it — a page composes components and holds no markup of
+   its own. On the backend, check `backend/src/services/` and `src/middleware/` before writing a
+   helper. Before and after UI work, run the **frontend-ui-reviewer** subagent in
+   [.claude/agents/](.claude/agents/README.md); the inventory and the checklist live there.
 2. **Everything must be responsive down to mobile.** Every screen, dialog, table, and form must be
    usable at ~360px. Mobile-first classes, no fixed pixel widths, no horizontal page scroll,
    multi-column layouts collapse below `md`, and the app shell never scrolls as a page — its inner
@@ -92,9 +102,9 @@ frontend/src/app/(app)/<module>/<page>/page.js       Next.js 16 App Router page
 
    | Side | What that means |
    | --- | --- |
-   | Backend | Every route mounts `protect` and then `checkPermission(module, feature, level)` or `requireModule(module, feature)` from `src/middleware/permissionMiddleware.js` — `READ` to look, `READ_WRITE` to change. The guard is the **only** thing deciding access: never add a check on `req.user.role` inside a controller, which silently overrules the permission above it and cannot be granted to anyone. Never trust an id from the body or the URL to be one the caller may touch. |
+   | Backend | Every route mounts `protect` and then `checkPermission(module, feature, level)` or `requireModule(module, feature)` from `src/middleware/permissionMiddleware.js` — `READ` to look, `READ_WRITE` to change. The guard is the **only** thing deciding access: never add a check on `req.user.role` inside a controller, which silently overrules the permission above it and cannot be granted to anyone. Never trust an id from the body or the URL to be one the caller may touch. Before and after backend work, run the **backend-api-reviewer** subagent in [.claude/agents/](.claude/agents/README.md); its checklist covers this table, branch reach, `dataScope`, controllers, services and tests. |
    | Frontend | The route gets a row in `frontend/src/constants/modulePermissions.js`; without one the page is open to anyone signed in. `RouteGuard` then closes it, the sidebar stops listing it, and the page asks `useRouteAccess()` what it may do. A control the viewer may not use is **absent**, not disabled and refused. A panel reachable by double-click or a deep link takes `canWrite` as a prop — it cannot rely on the control that opens it having been hidden. |
-   | New module or feature | Add the `{ module, feature }` row to `PERMISSIONS` in `backend/prisma/seeds/permission-catalogue.js` **and write the same row into a migration** (`INSERT … WHERE NOT EXISTS`, see IAM.md step 10) — the seed cannot be run on the VPS, so a catalogue-only permission never reaches production and the guard naming it refuses everybody but a Super Admin. Reseed locally. Say in the changelog entry which roles now reach it, and re-save those roles — neither the seed nor the migration writes grants. |
+   | New module or feature | Add the `{ module, feature }` row to `PERMISSIONS` in `backend/prisma/seeds/permission-catalogue.js` **and write the same row into a migration** (`INSERT … WHERE NOT EXISTS`, see IAM.md step 10) — the seed cannot be run on the VPS, so a catalogue-only permission never reaches production and the guard naming it refuses everybody but a Super Admin. Reseed locally. **The migration grants it to `SUPER_ADMIN` only — never to any other role, and never by default.** Every other role starts at `DISABLED`; do not also grant Branch Admin, an Administrator-tick role, or any role that "seems related" without the user explicitly asking for that role in this change. Say in the changelog entry which roles the studio might now want it granted to, and let the studio grant it themselves in Role Management. |
 
    Two traps worth knowing before you choose a permission, both of which have already shipped bugs:
    a guard may only name a permission that exists in the seed, and a screen may not be given a finer
@@ -115,14 +125,34 @@ frontend/src/app/(app)/<module>/<page>/page.js       Next.js 16 App Router page
    decide, and nothing else does. Somebody narrowed to nothing still sees the work their own name is
    on and their team's, through `dataScope`.
 
-   Branch scoping is still not solved for every column: only `User` and `Asset` carry a `branchId` a
-   filter can use, and everything else stores its branch as free text, matched by name. Do not assume
-   a role's branch list narrows what a new module returns — declare the module's branch column to
-   `dataScope` if it should.
+   Every business table now carries a `branchId` beside its branch text, and `dataScope` narrows on
+   it; a new module still has to declare its branch column to `dataScope`, or it is not narrowed.
+
+5. **Every link is an id with a key; a name is only ever a copy.** A column that names a branch,
+   person, vertical, lead, project or master-data row is an id with `@relation` and an index, never
+   text. The text columns that remain are copies declared in `backend/src/services/nameCopies.js`
+   (a rename rewrites them) and resolved on read by `backend/src/services/resolvedNames.js` (the
+   linked name comes back, the text only where nothing is linked). `""` never means "none". A
+   migration is rehearsed on a copy of the database and must not fail on production data. Before and
+   after touching `schema.prisma`, a migration, a Prisma query or raw SQL, run the
+   **db-schema-reviewer** subagent in [.claude/agents/](.claude/agents/README.md); the full rules
+   live there, not here, so they cost nothing until they are needed.
+
+6. **Every screen follows the usability principles.** A screen says what is happening, lets the
+   user leave and undo, prevents the error before reporting it, speaks the studio's words, shows
+   only what the moment needs and fills what the app already knows — Nielsen's 10 heuristics,
+   Shneiderman's 8 golden rules, Gerhardt-Powals' cognitive engineering principles, the
+   interaction and perception laws (Hick, Fitts, Miller, Jakob, Gestalt) and content, accessibility
+   and experience (WCAG 2.1 AA, content design, Norman, Tognazzini, Peak-End, Fogg, Cialdini)
+   and the house SAGE checklist (first-time user, trust, cognitive load), mapped to this codebase's
+   own components. Before and after adding or reshaping a screen, flow, dialog or
+   form, run the **ux-heuristics-reviewer** subagent in [.claude/agents/](.claude/agents/README.md);
+   the rules live there.
 
 Details and per-file checklists: [frontend/README.md](frontend/README.md) Rules 1–3,
-[backend/README.md](backend/README.md), and [docs/project-state/IAM.md](docs/project-state/IAM.md)
-for Rule 4.
+[backend/README.md](backend/README.md), [docs/project-state/IAM.md](docs/project-state/IAM.md)
+for Rule 4, and [.claude/agents/db-schema-reviewer.md](.claude/agents/db-schema-reviewer.md) for
+Rule 5.
 
 ## RBAC — Every Feature Ships With Its Access Control
 
@@ -150,11 +180,39 @@ same change — an unguarded route or an ungated button is a defect, not a follo
   `backend/prisma/seeds/permission-catalogue.js` **and** to a migration so Role Management can
   actually grant it everywhere, and keep the `module:feature` strings identical on both sides.
 
+## Token Optimization — Read Sections, Not Files
+
+Every file a session reads costs tokens before any work starts, and the reference files here are
+large: a README is 25–35k tokens, IAM.md 21k, PROJECT-STATE.md 57k, the changelog 130k. The rules:
+
+- **CLAUDE.md is the only file read whole.** Everything else — the READMEs, `docs/project-state/`,
+  the changelog — is read by section: `grep -n '^## ' <file>` for the headings, then
+  `sed -n 'a,bp' <file>` for the section the change touches. A question that spans many files goes
+  to an `Explore` subagent, which returns the conclusion, not the files.
+- **The changelog is read by its head.** `head -40 docs/CHANGELOG.md` shows the how-to and the
+  first groups under `Unreleased`; the entry goes at the top of the first group of its name, and a
+  second group of the same name is never opened. The file holds only `Unreleased` and the latest
+  release; older releases live one file per version in `docs/changelog/`.
+- **A rule is written once, and this file points to it.** Here a rule is a short paragraph plus a
+  pointer. A checklist a reviewer applies lives in a `.claude/agents/` file, loaded only when that
+  area is worked on; reference knowledge lives in a README or `docs/project-state/`.
+- **Writing a rule is the moment to optimize.** After any change to this file, a README, an agent
+  file, a `docs/project-state/` file or the changelog's how-to, run `scripts/doc-sizes.sh` to see
+  what each rule file now costs a session, and run the **token-optimizer** subagent in
+  [.claude/agents/](.claude/agents/README.md) when a rule grew: it says which text moves to an
+  agent file or a docs file, and whether a large file is worth splitting by area. Nothing is
+  enforced — the aim is that a session reads only what its change needs.
+
 ## Hard Constraints
 
 - Do not change the approved stack or architecture without explicit approval.
 - Do not touch the separate legacy WhatsApp automation unless a task names it.
-- Never commit `.env` files, credentials, JWT secrets, SMTP details, or password hashes.
+- Never commit `.env` files, credentials, JWT secrets, SMTP details, or password hashes. A change
+  that touches auth, a token, a public route, a webhook, raw SQL, an upload, an outbound call, a
+  secret or a dependency runs the **security-reviewer** subagent in
+  [.claude/agents/](.claude/agents/README.md) before and after; values go through `?` in raw
+  SQL, tokens come from `crypto`, public routes sit behind `rateLimit`, `req.body` is never
+  spread into Prisma.
 - Never run `prisma migrate dev` on the VPS, and never rewrite a migration already committed to git.
 - **Never run the seed on production.** `prisma/seed.js` runs *every* seeder, and most of them write
   rather than only fill gaps — option lists, catalogues, master data, demo rows. On a live database
@@ -176,6 +234,14 @@ same change — an unguarded route or an ungated button is a defect, not a follo
   (IAM.md step 10) — this is for repairing drift, or catching production up with a catalogue that has
   moved ahead of it.
 - Work one scoped feature or bug fix at a time; branch from `develop` and open a PR to `develop`.
+- **A wrong attempt is undone before the right one is finished.** When a change was made on a
+  misreading of the problem and the real cause is understood later, every edit from the abandoned
+  attempts is reverted in the same change — not left beside the fix because it "does no harm".
+  Before finishing, read `git diff` end to end: every hunk must be one the final understanding
+  needs. A hunk that exists only because of an earlier guess is removed, and so is the changelog
+  line, README sentence, migration, test or seed row that described the guess. The diff the user
+  reviews is the fix, not the history of finding it. If an earlier attempt was already committed,
+  say so and revert it in a commit of its own rather than layering the fix on top.
 - Next.js 16 differs from older documentation — check `frontend/node_modules/next/dist/docs/` before
   using an unfamiliar API. See [frontend/AGENTS.md](frontend/AGENTS.md).
 - **Database naming:** All table names and column names in the database must be `snake_case` (e.g., `sales_project`, `created_at`, `project_id`). Use Prisma's `@map()` for columns and `@@map()` for tables when field/model names differ from database names. Code always uses camelCase; Prisma handles the translation automatically.

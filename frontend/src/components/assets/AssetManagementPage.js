@@ -10,8 +10,11 @@ import { ASSET_IMPORT_COLUMNS } from "@/constants/importColumns";
 import { ACTIONS_COLUMN } from "@/components/data-table/tableCells";
 import DataTableShell from "@/components/data-table/DataTableShell";
 import TableFooter from "@/components/data-table/TableFooter";
+import KanbanBoard from "@/components/data-table/KanbanBoard";
+import { columnTotal } from "@/lib/kanbanSummary.mjs";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import Button from "@/components/shared/Button";
-import Dropdown from "@/components/shared/Dropdown";
+import MultiSelectField from "@/components/shared/MultiSelectField";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import useCompactView from "@/components/shared/useCompactView";
@@ -22,6 +25,7 @@ import useBranchRegistry from "@/components/shared/useBranchRegistry";
 import { useModuleAccess } from "@/components/auth/PermissionsProvider";
 import {
   createAssetRequest,
+  getAllAssetRequests,
   getAssetRequests,
   approveAssetRequest,
   rejectAssetRequest,
@@ -30,6 +34,7 @@ import {
   createAssetInspection,
   deleteAsset,
   getAssetCategoryTree,
+  getAllAssets,
   getAssets,
   updateAsset,
   changeAssetStatus,
@@ -44,6 +49,8 @@ import AssetRequestRejectDialog from "./AssetRequestRejectDialog";
 import AssetStatusDialog from "./AssetStatusDialog";
 import AssetInspectionDialog from "./AssetInspectionDialog";
 import { branchLabel } from "@/lib/branchName";
+import { assetCategoryLabel, assetTypeLabel } from "@/lib/assetCategoryLabels.mjs";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 const assetStatusActions = [
   ["ACTIVE", "Active"],
@@ -77,6 +84,11 @@ function displayValue(value) {
 /** How an asset request's decision reads in the table. Anything undecided is still pending. */
 /** Where each kind of request sits in the queue. */
 const requestOrder = { PENDING: 0, APPROVED: 1, REJECTED: 2 };
+// The board's trend counts an asset by its purchase date, or by when it was added where none is set.
+const purchasedOn = (asset) => {
+  const time = new Date(asset.purchaseDate || asset.createdAt || "").getTime();
+  return Number.isNaN(time) ? null : time;
+};
 
 function requestDecision(status) {
   if (status === "APPROVED") return { label: "Approved", className: "bg-emerald-50 text-emerald-700" };
@@ -127,6 +139,14 @@ export default function AssetManagementPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [branches, setBranches] = useState([]);
+  /*
+   * The branches the filter above the table may offer - not the register `branches` holds.
+   *
+   * /api/assets answers it from the roles that grant ASSET / Asset Management, so the picker never
+   * offers a branch whose assets the data scope would have hidden anyway. A branch the viewer may
+   * not reach would have shown an empty table and read as a fault.
+   */
+  const [filterBranches, setFilterBranches] = useState(null);
   // Bumped when Settings → Organization → Branches saves, so the Location picker keeps up.
   const branchRegistryRevision = useBranchRegistry();
   const [employees, setEmployees] = useState([]);
@@ -188,17 +208,45 @@ export default function AssetManagementPage() {
   const [inspectionError, setInspectionError] = useState("");
 
   const allCategories = useMemo(() => flatten(tree), [tree]);
-  // Client Storage is its own module now, so its category never appears as an asset tab.
+  // The top categories an asset may be filed under, for the Asset Request dialog's picker. Client
+  // Storage is its own module now, so its category is not one of them.
   const mainCategories = useMemo(() => tree.filter((item) => item.level === 1 && item.moduleType === "ASSET"), [tree]);
-  const requestedCategoryId = params.get("category");
-  const categoryId = mainCategories.some((item) => item.id === requestedCategoryId) ? requestedCategoryId : "ALL";
-  const requestedStatus = params.get("status");
-  const status = assetStatusValues.includes(requestedStatus) ? requestedStatus : "ALL";
+  /*
+   * The branches the table is narrowed to - any number of them - in the URL beside the status tabs
+   * so a link keeps them: `?branch=3,7`.
+   *
+   * Not checked against `filterBranches` here: that list arrives with the first page of assets, and
+   * judging the filter while it is in flight would drop a good one. The effect further down drops
+   * what the list turns out not to hold. Nothing the query string says can widen what comes back
+   * either - the data scope on /api/assets sits under its own AND.
+   *
+   * `branchKey` is what the effects below depend on. The ids are a fresh array on every render, so a
+   * dependency on the array itself refetches the table forever; the string it joins to does not.
+   */
+  const chosenBranchIds = useMemo(
+    () => [...new Set(String(params.get("branch") || "").split(",").map((part) => part.trim()).filter((part) => /^\d+$/.test(part)))],
+    [params],
+  );
+  const branchKey = chosenBranchIds.join(",");
+  const branchQuery = branchKey || undefined;
+  const chosenBranchNames = chosenBranchIds
+    .map((id) => (filterBranches || []).find((branch) => String(branch.id) === id))
+    .filter(Boolean)
+    .map((branch) => branchLabel(branch.name) || branch.name);
   const requestedInspection = params.get("inspection");
   const inspection = requestedInspection === "MAINTENANCE" ? "MAINTENANCE" : "ALL";
   // The Asset Requests tab shows a different thing entirely, so it replaces the table rather than
   // filtering it. Kept in the URL like the other tabs so the view survives a refresh.
   const showingRequests = params.get("view") === "REQUESTS";
+  /*
+   * The Board: the assets in a column per status. The status tabs are filters, so while it shows
+   * they step aside and the list is read across every status; Maintenance Pending and Asset
+   * Requests stay, being views rather than statuses, and the Requests view keeps its table.
+   */
+  const [layout, setLayout] = useTableBoardLayout("asset-management");
+  const onBoard = layout === "board" && !showingRequests;
+  const requestedStatus = params.get("status");
+  const status = !onBoard && assetStatusValues.includes(requestedStatus) ? requestedStatus : "ALL";
 
   /*
    * Import, offered in the header's ⋮ and in the table's, defined once.
@@ -245,7 +293,6 @@ export default function AssetManagementPage() {
       setLastUpdated(new Date());
     },
   });
-  const selected = mainCategories.find((item) => item.id === categoryId) || null;
   const updatedText = lastUpdated
     ? new Intl.DateTimeFormat("en-GB", {
         dateStyle: "medium",
@@ -291,10 +338,9 @@ export default function AssetManagementPage() {
   useEffect(() => {
     let cancelled = false;
     const request = showingRequests
-      ? getAssetRequests({ limit: 100 })
-      : getAssets({
-        categoryId: selected?.id,
-        includeChildren: selected?.children?.length ? "true" : undefined,
+      ? getAllAssetRequests()
+      : getAllAssets({
+        branchIds: branchQuery,
         status: status === "ALL" ? undefined : status,
         inspection: inspection === "ALL" ? undefined : inspection,
       });
@@ -317,13 +363,13 @@ export default function AssetManagementPage() {
       });
 
     return () => { cancelled = true; };
-  }, [inspection, selected, status, showingRequests, reloadToken, showError]);
+  }, [branchKey, branchQuery, inspection, status, showingRequests, reloadToken, showError]);
 
   useEffect(() => {
     let cancelled = false;
-    const base = { categoryId: selected?.id, includeChildren: selected?.children?.length ? "true" : undefined, limit: 1 };
-    // Requests are counted unfiltered: they name a category that may not exist as an asset yet,
-    // so narrowing them by the selected category would hide most of them.
+    const base = { branchIds: branchQuery, limit: 1 };
+    // Requests are counted unfiltered: they are raised against a branch's assets before those
+    // assets exist, so narrowing them by the chosen branch would hide most of them.
     Promise.all([getAssets(base), ...assetStatusActions.map(([assetStatus]) => getAssets({ ...base, status: assetStatus })), getAssets({ ...base, inspection: "MAINTENANCE" }), getAssetRequests({ status: "PENDING", limit: 1 })])
       .then((results) => {
         if (cancelled) return;
@@ -331,10 +377,44 @@ export default function AssetManagementPage() {
         setMaintenanceCount(results[assetStatusActions.length + 1].pagination?.total ?? 0);
         setRequestCount(results[assetStatusActions.length + 2].pagination?.total ?? 0);
         setCanImport(Boolean(results[0].canImport));
+        // Answered beside the counts rather than by the list, so the picker is filled on the
+        // Asset Requests tab too - where the list reads requests and knows nothing about branches.
+        setFilterBranches(Array.isArray(results[0].branches) ? results[0].branches : []);
       })
       .catch((requestError) => { if (!cancelled) showError(requestError.message || "Unable to load asset status counts."); });
     return () => { cancelled = true; };
-  }, [countsRefresh, selected, showError]);
+  }, [branchQuery, countsRefresh, showError]);
+
+  /*
+   * A branch named in the URL that the viewer does not reach - a link shared from somebody who
+   * does - is dropped rather than left on screen. The table behind it would come back empty,
+   * because the data scope narrows it whatever the query string says, and an empty table under a
+   * branch somebody is apparently looking at reads as a fault rather than as an answer.
+   *
+   * Only once the list has actually been read: `null` means the first page of assets is still in
+   * flight, and judging the filter against a list nobody has answered yet would drop a good one.
+   */
+  useEffect(() => {
+    if (!filterBranches || !chosenBranchIds.length) return;
+    const kept = chosenBranchIds.filter((id) => filterBranches.some((branch) => String(branch.id) === id));
+    if (kept.length === chosenBranchIds.length) return;
+    const lost = chosenBranchIds.length - kept.length;
+    showError(`${lost === 1 ? "One of those branches is not one" : `${lost} of those branches are not ones`} you can see assets in, so ${kept.length ? "they have been left out" : "all branches are shown"}.`);
+    const next = new URLSearchParams(params.toString());
+    if (kept.length) next.set("branch", kept.join(","));
+    else next.delete("branch");
+    const query = next.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname);
+  }, [branchKey, chosenBranchIds, filterBranches, params, pathname, router, showError]);
+
+  /** The branches ticked, as the URL holds them. Empty is every branch, so the key is removed. */
+  function changeBranches(values) {
+    const next = new URLSearchParams(params.toString());
+    if (values.length) next.set("branch", values.join(","));
+    else next.delete("branch");
+    const query = next.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname);
+  }
 
   function changeFilter(key, value) {
     const next = new URLSearchParams(params.toString());
@@ -380,9 +460,8 @@ export default function AssetManagementPage() {
       else await createAsset(payload);
 
       setFormOpen(false);
-      const result = await getAssets({
-        categoryId: selected?.id,
-        includeChildren: selected?.children?.length ? "true" : undefined,
+      const result = await getAllAssets({
+        branchIds: branchQuery,
         status: status === "ALL" ? undefined : status,
         inspection: inspection === "ALL" ? undefined : inspection,
       });
@@ -431,7 +510,7 @@ export default function AssetManagementPage() {
       setInspectionSaving(true);
       setInspectionError("");
       await createAssetInspection(inspectionAsset.id, payload);
-      const result = await getAssets({ categoryId: selected?.id, includeChildren: selected?.children?.length ? "true" : undefined, status: status === "ALL" ? undefined : status, inspection: inspection === "ALL" ? undefined : inspection });
+      const result = await getAllAssets({ branchIds: branchQuery, status: status === "ALL" ? undefined : status, inspection: inspection === "ALL" ? undefined : inspection });
       setRows(result.data || []);
       setTotal(result.pagination?.total ?? 0);
       setLastUpdated(new Date());
@@ -448,7 +527,7 @@ export default function AssetManagementPage() {
   /** Reloads the requests table, but only while requests are the thing on screen. */
   async function refreshRequests() {
     if (!showingRequests) return;
-    const result = await getAssetRequests({ limit: 100 });
+    const result = await getAllAssetRequests();
     setRows(result.data || []);
     setRowsView("requests");
     setTotal(result.pagination?.total ?? 0);
@@ -570,11 +649,19 @@ export default function AssetManagementPage() {
     ];
   }
 
+  /*
+   * A card dropped on a status runs that status's ⋮ entry - only where the asset's own
+   * `allowedTransitions` offers it - which opens the same status dialog the menu opens.
+   */
+  const boardColumns = assetStatusActions.map(([value, label]) => ({ value, label }));
+  const canDropAsset = (asset, to) => (asset.capabilities?.allowedTransitions || []).includes(to);
+  const dropAsset = (asset, to) => setStatusChange({ asset, action: to });
+
   const assetColumns = [
     { accessorKey: "assetCode", header: "Asset ID" },
     { accessorKey: "assetName", header: "Asset Name" },
-    { id: "category", header: "Category", accessorFn: (row) => row.category?.parent?.name || row.category?.name || "—" },
-    { id: "type", header: "Type", accessorFn: (row) => row.category?.name || "—" },
+    { id: "category", header: "Category", accessorFn: (row) => assetCategoryLabel(row) || "—" },
+    { id: "type", header: "Type", accessorFn: (row) => assetTypeLabel(row) || "—" },
     { accessorKey: "company", header: "Brand Name" },
     { accessorKey: "specification", header: "Specification" },
     { accessorKey: "color", header: "Color" },
@@ -607,8 +694,8 @@ export default function AssetManagementPage() {
   ];
   const assetTableColumns = assetColumns.map((column) => {
     if (column.accessorKey) return { ...column, cell: ({ row }) => displayValue(row.original?.[column.accessorKey]) };
-    if (column.id === "category") return { ...column, cell: ({ row }) => displayValue(row.original.category?.parent?.name || row.original.category?.name) };
-    if (column.id === "type") return { ...column, cell: ({ row }) => displayValue(row.original.category?.name) };
+    if (column.id === "category") return { ...column, cell: ({ row }) => displayValue(assetCategoryLabel(row.original)) };
+    if (column.id === "type") return { ...column, cell: ({ row }) => displayValue(assetTypeLabel(row.original)) };
     if (column.id === "branch") return { ...column, cell: ({ row }) => displayValue(branchLabel(row.original.branch?.name)) };
     if (column.id === "assigned") return { ...column, cell: ({ row }) => displayValue(row.original.assignedPerson?.employeeName) };
     if (column.id === "manager") return { ...column, cell: ({ row }) => displayValue(row.original.manager?.employeeName) };
@@ -637,7 +724,7 @@ export default function AssetManagementPage() {
       accessorFn: (row) => row.createdAt ? new Date(row.createdAt).getTime() : undefined,
       sortUndefined: "last",
       cell: ({ row }) => formatDate(row.original.createdAt),
-      filterFn: (row, columnKey, filterValue) => formatDate(row.original.createdAt).toLowerCase().includes(String(filterValue).trim().toLowerCase()),
+      filterFn: (row, columnKey, filterValue) => matchesWordChunks(formatDate(row.original.createdAt), filterValue),
     },
     {
       id: "status",
@@ -656,7 +743,7 @@ export default function AssetManagementPage() {
       accessorFn: (row) => row.decidedAt ? new Date(row.decidedAt).getTime() : undefined,
       sortUndefined: "last",
       cell: ({ row }) => formatDate(row.original.decidedAt),
-      filterFn: (row, columnKey, filterValue) => formatDate(row.original.decidedAt).toLowerCase().includes(String(filterValue).trim().toLowerCase()),
+      filterFn: (row, columnKey, filterValue) => matchesWordChunks(formatDate(row.original.decidedAt), filterValue),
     },
     // Accept and Reject are the admin's only two calls, and a request that has already been decided
     // offers neither, so the menu is dropped entirely rather than shown empty.
@@ -678,19 +765,38 @@ export default function AssetManagementPage() {
     <section className="flex h-full min-h-0 w-full min-w-0 flex-col">
       <ModulePageHeader
         title="Assets"
-        titleAccessory={<div className="min-w-0 border-l border-slate-200 pl-3"><Dropdown mode="menu" ariaLabel="Asset main category" value={categoryId} onChange={(value) => changeFilter("category", value)} options={[{ value: "ALL", label: "All" }, ...mainCategories.map((category) => ({ value: category.id, label: category.name }))]} /></div>}
+        /* Ahead of Nebula and the buttons: it scopes what the page is showing rather than doing
+           anything to it. Several branches at once, the way the Shoot Board's own branch filter
+           reads - a studio comparing two of them should not have to look at each in turn. Nothing
+           ticked is every branch, so the empty control is the way back. Not on the Asset Requests
+           tab, where a branch narrows nothing. */
+        leadingActions={!showingRequests && <MultiSelectField
+          hideLabel
+          // Header-sized, so it stands level with the switch and the buttons beside it.
+          size="sm"
+          label="Branch"
+          className="w-40 sm:w-56"
+          placeholder={filterBranches ? "All branches" : "Loading branches..."}
+          options={(filterBranches || []).map((branch) => ({ value: String(branch.id), label: branchLabel(branch.name) || branch.name }))}
+          values={chosenBranchIds}
+          onChange={changeBranches}
+          // Worth a search box once a studio has more than a handful; noise below that.
+          searchable={(filterBranches || []).length > 8}
+          disabled={!filterBranches}
+        />}
         actions={<>
+          {!showingRequests && <TableBoardSwitch value={layout} onChange={setLayout} />}
           {canWrite && <Button onClick={() => { setRequestError(""); setRequestOpen(true); }}>Asset Request</Button>}
           {canAdminister && <Button variant="primary" onClick={() => { setFormAsset(null); setFormOpen(true); }}>Add Asset</Button>}
-          {/* Last, like every other header's ⋮: the quiet trigger is always in the same place and
-              the primary button keeps the position the eye goes to. */}
-          <ImportMenuButton ariaLabel="More asset actions" importConfig={assetImportConfig} />
         </>}
+        /* The ⋮ ends the row, after Nebula - the header's own slot for it, so every page's ends the
+           same way and the primary button keeps the position the eye goes to. */
+        menu={<ImportMenuButton ariaLabel="More asset actions" importConfig={assetImportConfig} />}
         // Requests and the maintenance check are views of their own rather than statuses, so they
         // sit in the same bar but answer to their own handlers.
         tabs={[
           { id: "ALL", label: "All", count: statusCounts.ALL ?? 0 },
-          ...assetStatusActions.map(([value, label]) => ({ id: value, label, count: statusCounts[value] ?? 0 })),
+          ...(onBoard ? [] : assetStatusActions.map(([value, label]) => ({ id: value, label, count: statusCounts[value] ?? 0 }))),
           { id: "MAINTENANCE", label: "Maintenance Pending", count: maintenanceCount },
           { id: "REQUESTS", label: "Asset Requests", count: requestCount },
         ]}
@@ -700,17 +806,42 @@ export default function AssetManagementPage() {
       />
       <FloatingNotice notice={notice} onClose={clearNotice} />
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <DataTableShell className="min-h-0 flex-1 rounded-none border-x-0 border-y-0 lg:border-r" footer={<TableFooter spread contentClassName="!items-center"><span className="text-xs sm:text-sm">Last updated: {updatedText}</span><span className="shrink-0 text-xs sm:text-sm">Total rows: {total}</span></TableFooter>}>
+        {onBoard ? <KanbanBoard
+          rows={rowsView === "assets" ? rows : []}
+          columns={boardColumns}
+          statusOf={(asset) => asset.status}
+          // What the assets in each status cost to buy.
+          columnAmount={(rows) => columnTotal(rows, (asset) => asset.purchasePrice, "Value")}
+          dateOf={purchasedOn}
+          card={{
+            title: (asset) => asset.assetName,
+            subtitle: (asset) => [asset.assetCode, asset.assignedPerson?.employeeName].filter(Boolean).join(" · "),
+            meta: (asset) => [assetCategoryLabel(asset), asset.nextInspectionDate ? `Inspection ${formatDate(asset.nextInspectionDate)}` : ""].filter(Boolean).join(" · "),
+          }}
+          onOpen={setViewingRow}
+          // The card's ⋮ is the row's ⋮.
+          cardActions={assetActionItems}
+          canDropAt={canDropAsset}
+          onDrop={dropAsset}
+          loading={loading || rowsView !== "assets"}
+          noun="assets"
+          ariaLabel="Assets board"
+        /> : <DataTableShell className="min-h-0 flex-1 rounded-none border-x-0 border-y-0 lg:border-r" footer={<TableFooter spread contentClassName="!items-center"><span className="text-xs sm:text-sm">Last updated: {updatedText}</span><span className="shrink-0 text-xs sm:text-sm">Total rows: {total}</span></TableFooter>}>
           <div className="relative flex min-h-0 flex-1 overflow-hidden">
             {/* Each view has its own panel, because a request and an asset share no fields. The
                 open/collapsed state is shared, so the panel does not close when switching tabs. */}
             <DataTable
-              key={`${selected?.id || "all"}-${status}-${inspection}-${showingRequests ? "requests" : "assets"}`}
+              key={`${branchKey || "all"}-${status}-${inspection}-${showingRequests ? "requests" : "assets"}`}
               columns={showingRequests ? requestColumns : assetTableColumns}
               density={density}
               data={rowsView === (showingRequests ? "requests" : "assets") ? visibleRows : []}
               loading={loading || rowsView !== (showingRequests ? "requests" : "assets")}
-              emptyMessage={showingRequests ? "No asset requests raised yet." : "No assets found for this selection."}
+              emptyMessage={showingRequests
+                ? "No asset requests raised yet."
+                // Named, so an empty table reads as "not in these branches" rather than as a fault.
+                : chosenBranchNames.length === 1 ? `No assets in ${chosenBranchNames[0]} for this selection.`
+                  : chosenBranchNames.length ? `No assets in the ${chosenBranchNames.length} branches chosen for this selection.`
+                    : "No assets found for this selection."}
               noMatchMessage="No matching records found."
               selectedRowId={showingRequests ? selectedRequest?.id : selectedAsset?.id}
               onRowClick={(row) => { if (showingRequests) setSelectedRequest(row); else setSelectedAsset(row); setInfoPanelState("expanded"); }}
@@ -730,9 +861,9 @@ export default function AssetManagementPage() {
                 <AssetCustodyHistory key={selectedAsset?.id || "empty"} assetId={selectedAsset?.id || null} />
               </DataTableInfoPanel>}
           </div>
-        </DataTableShell>
+        </DataTableShell>}
       </div>
-      {formOpen && <AssetFormDialog asset={formAsset} initialTopCategoryId={selected?.id || ""} categories={allCategories} branches={branches} employees={employees} saving={saving} error={error} onClose={() => setFormOpen(false)} onSave={save} />}
+      {formOpen && <AssetFormDialog asset={formAsset} categories={allCategories} branches={branches} employees={employees} saving={saving} error={error} onClose={() => setFormOpen(false)} onSave={save} />}
       {statusChange && <AssetStatusDialog asset={statusChange.asset} action={statusChange.action} employees={employees} saving={saving} onClose={() => setStatusChange(null)} onSubmit={(payload) => changeStatus(statusChange.asset, payload)} />}
       {inspectionAsset && <AssetInspectionDialog asset={inspectionAsset} employees={employees} saving={inspectionSaving} error={inspectionError} onClose={() => { setInspectionAsset(null); setInspectionError(""); }} onSubmit={(payload) => void completeInspection(payload)} />}
       {/* mainCategories, not the raw tree: Client Storage is its own module and is not an asset

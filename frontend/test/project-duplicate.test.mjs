@@ -198,7 +198,7 @@ test("the enquiry a duplicate is booked against is asked for, not locked", () =>
    */
   assert.equal(projectToDuplicatePrefill(project()).enquiryId, "");
   const PANEL_SOURCE = read("components", "sales", "CreateProjectFormPanel.js");
-  assert.match(PANEL_SOURCE, /enquiryLocked=\{Boolean\(project\?\.enquiryId\)\}/);
-  // Which, on a prefill whose enquiry is "", is false - so the picker is a search box.
+  assert.match(PANEL_SOURCE, /const enquiryLocked = Boolean\(project\?\.enquiryId \|\| draft\?\.enquiryLocked\)/);
+  // Which, on a prefill whose enquiry is "" (and no draft), is false - so the picker is a search box.
   assert.equal(Boolean(projectToDuplicatePrefill(project()).enquiryId), false);
 });

@@ -76,6 +76,32 @@ router.put("/candidates/:id", controller.update);
 // router's own guard asks for Read / Write exactly as it does for the full update.
 router.patch("/candidates/:id/status", controller.setStatus);
 /*
+ * A remark on its own, without moving the stage. A POST, so the router's guard asks for Read / Write
+ * - writing on somebody's record is a write however small the words are.
+ */
+router.post("/candidates/:id/remarks", controller.addRemark);
+/*
+ * A WhatsApp message to the candidate. The number is read off the record inside the handler and is
+ * never taken from the body - see `sendCandidateWhatsApp`.
+ */
+router.post("/candidates/:id/whatsapp", controller.sendCandidateWhatsApp);
+/*
+ * The calls on this candidate's number. A GET, so the router's `requireModule` asks for READ - the same
+ * thing looking at the register asks for, which is right: this says whether the candidate has been rung,
+ * and it is deliberately stripped of everything the CRM knows about a client who shares the number.
+ */
+router.get("/candidates/:id/call-logs", controller.candidateCallLogs);
+/*
+ * The transcripts of those same calls, and one of them in full.
+ *
+ * Beside the call logs because they answer the same question one level deeper, and on the router's
+ * own `HRM / Interview` guard - a GET needs Read. The detail route is reached through the candidate
+ * rather than by transcript id alone, so it cannot be used to read a transcript belonging to
+ * somebody else's calls; the controller checks that.
+ */
+router.get("/candidates/:id/transcripts", controller.candidateTranscripts);
+router.get("/candidates/:id/transcripts/:transcriptId", controller.candidateTranscriptDetail);
+/*
  * Resend: reopen the application this candidate already submitted and email them their own link
  * again, so they correct what they typed rather than being asked for all of it a second time. A
  * POST, so the router's guard asks for Read / Write - it moves the candidate's stage and sends

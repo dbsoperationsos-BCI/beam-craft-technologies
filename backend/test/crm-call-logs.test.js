@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { toRow, calledAt, resolveEmployeeId, employeeNameKey, employeeCodeKey } = require("../src/modules/sales/crm-leads/callLogService");
+const { toRow, calledAt, resolveEmployeeId, employeeNameFor, employeeNameKey, employeeCodeKey } = require("../src/modules/sales/crm-leads/callLogService");
 
 /*
  * Turning one Callyzer call into the row the Call Logs tab reads.
@@ -267,4 +267,28 @@ test("the code Callyzer sends is kept, so a handset can be matched later", () =>
   // and without it a handset coded for somebody not yet in the repository could never be caught up.
   assert.equal(toRow(CALL, { enquiryId: "x", employee: { emp_code: "DBS-7" } }).employeeCode, "DBS-7");
   assert.equal(toRow(CALL, { enquiryId: "x", employee: {} }).employeeCode, "");
+});
+
+/*
+ * The name a call is written down under, when the call becomes a lead.
+ *
+ * `crm` on a lead is a name copy of `owner_employee_id` (see nameCopies.js) and the id is resolved
+ * back out of that text, so writing Callyzer's handset label there resolved to nobody whenever a
+ * phone was named anything but its owner: the lead was owned by no one, sat on nobody's My Leads,
+ * and `dataScope` had no id to narrow it by.
+ */
+const NAMED = { byCode: new Map([["DBS-1", 11]]), byName: new Map([["priya s", 22]]), nameById: new Map([[11, "Saranita R"], [22, "Priya S"]]) };
+
+test("a matched handset is written down under the repository's spelling", () => {
+  // The case the Employee Code exists for: the phone is named nothing like its owner.
+  assert.equal(employeeNameFor(NAMED, { emp_code: "DBS-1", emp_name: "saranita" }), "Saranita R");
+  assert.equal(employeeNameFor(NAMED, { emp_name: "  priya   s  " }), "Priya S", "the label still matches past its case and spacing");
+  // Both spellings of the incoming keys, since this is read from a call row as well as a payload.
+  assert.equal(employeeNameFor(NAMED, { employeeCode: "DBS-1" }), "Saranita R");
+});
+
+test("a handset matched to nobody is written down as Callyzer named it", () => {
+  // "" here, and the caller falls back to the label - the only name such a call has.
+  assert.equal(employeeNameFor(NAMED, { emp_code: "NOPE", emp_name: "Reception Desk" }), "");
+  assert.equal(employeeNameFor(NAMED, {}), "");
 });

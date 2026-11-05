@@ -47,13 +47,30 @@ const settingsSchema = z.object({
   // data URI — which is why the ceiling is generous. The controller compresses and uploads it, and
   // only the resulting short public URL reaches the 500-character column.
   galleryLogoUrl: z.string().trim().max(10_000_000).nullish().transform((value) => (value == null || value === "" ? null : value)),
+  // The same mark for the dark themes, travelling the same way. Null means "wear the light one".
+  galleryLogoDarkUrl: z.string().trim().max(10_000_000).nullish().transform((value) => (value == null || value === "" ? null : value)),
   // The tab mark. Same shape as the logo: a data URI on the way in, a stored URL on the way back,
   // and null for "use the bundled pair".
   // A 5 MB file arrives base64-encoded, which is about a third longer again.
   faviconUrl: z.string().trim().max(8_000_000).nullish().transform((value) => (value == null || value === "" ? null : value)),
+  // The tab mark for a dark browser strip, on the same terms.
+  faviconDarkUrl: z.string().trim().max(8_000_000).nullish().transform((value) => (value == null || value === "" ? null : value)),
   // The login page's pictures, in order: each an existing https link or a freshly picked image as
   // a data URI, at most MAX_LOGIN_SLIDES of them. Left out of a request, the stored list stands.
   loginSlides: z.array(z.string().trim().min(1).max(10_000_000)).max(MAX_LOGIN_SLIDES).optional(),
 });
 
-module.exports = { settingsSchema, MAX_LOGIN_SLIDES };
+/*
+ * Settings → Project Management → Client page images: the client sign-in page's pictures, in order,
+ * each an existing https link or a freshly picked image as a data URI. Its own schema and its own
+ * permission, so the Organization form above cannot write them and this one cannot write anything
+ * else - `strict` refuses any other key rather than quietly dropping it.
+ */
+const MAX_CLIENT_PAGE_IMAGES = 8;
+// A 5 MB picture, base64-encoded, is about a third longer again - the most the field picks.
+const MAX_CLIENT_PAGE_IMAGE_LENGTH = 7_000_000;
+const clientPageImagesSchema = z.object({
+  clientLoginSlides: z.array(z.string().trim().min(1).max(MAX_CLIENT_PAGE_IMAGE_LENGTH)).max(MAX_CLIENT_PAGE_IMAGES),
+}).strict();
+
+module.exports = { settingsSchema, MAX_LOGIN_SLIDES, clientPageImagesSchema, MAX_CLIENT_PAGE_IMAGES };

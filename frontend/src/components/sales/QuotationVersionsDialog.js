@@ -2,7 +2,8 @@
 
 import Button from "@/components/shared/Button";
 import Dialog from "@/components/ui/Dialog";
-import { isLinkActive, linkExpiryText, versionLabel } from "./quotationLinkStatus";
+import StatusBadge from "@/components/shared/StatusBadge";
+import { isFinalizedQuotation, isLinkActive, linkExpiryText, quotationVersionStatus, versionLabel } from "./quotationLinkStatus";
 
 /*
  * Every version of one quotation, and the state of each version's link.
@@ -15,14 +16,14 @@ import { isLinkActive, linkExpiryText, versionLabel } from "./quotationLinkStatu
  * Dum Dum package and a Corp one - and each keeps its own history.
  *
  * **It is also where a quotation raised once is opened**, and that is not a special case - it is the
- * same card, drawn once. Download, Copy link and Edit live under each version and nowhere else, so a
+ * same card, drawn once. Download, Open link, Copy link and Edit live under each version and nowhere else, so a
  * chain of one had no way to reach its own link until this was offered for it too. Only the wording
  * changes: a single version is that quotation's link rather than a history of anything.
  *
- * Three actions, and they are the three things somebody opens this to do: save the document, send
- * the client its link, or price it again. **Open** was a fourth and went with them — it opened the
- * same public page the link points at, which is what Copy link hands over and what Download saves,
- * so it was a third way to reach one document. **Duplicate** went too: copying a package onto
+ * Four actions, the things somebody opens this to do: save the document, see the page the client
+ * sees, send the client its link, or price it again. **Open link** opens that public page in a new
+ * tab - the same address Copy link hands over - so the studio can check what the client will get
+ * before sending it, and the dialog stays where it was. **Duplicate** went: copying a package onto
  * another enquiry is starting a new quotation rather than anything about the version being read,
  * and it lives on the register row's own menu where the rest of that kind of work is.
  *
@@ -33,7 +34,7 @@ import { isLinkActive, linkExpiryText, versionLabel } from "./quotationLinkStatu
 const currency = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 });
 const raisedOn = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium" });
 
-export default function QuotationVersionsDialog({ quotation, canWrite, renewingId, onRenew, onCopyLink, onDownloadPdf, onEditVersion, onClose }) {
+export default function QuotationVersionsDialog({ quotation, canWrite, renewingId, downloadingId, onRenew, onOpenLink, onCopyLink, onDownloadPdf, onEditVersion, onClose }) {
   const versions = quotation?.versions?.length ? quotation.versions : [quotation];
   // One version is a quotation, not a history of one. The cards below are identical either way.
   const single = versions.length === 1;
@@ -53,13 +54,27 @@ export default function QuotationVersionsDialog({ quotation, canWrite, renewingI
     <ul className="space-y-3 pb-2">
       {versions.map((version) => {
         const live = isLinkActive(version);
+        // Its status, Finalized or Unfinalized, in a badge, and when it was last finalized underneath.
+        const status = quotationVersionStatus(version);
+        const finalized = isFinalizedQuotation(version);
+        const finalization = version.finalization;
         return <li key={version.id} className="rounded-lg border border-slate-200 bg-white px-3 py-3 sm:px-4">
           <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
             <div className="min-w-0">
               {/* The id is the dialog's own heading when there is one version, so the card does not
                   repeat it back two lines lower. */}
-              {!single && <p className="truncate text-sm font-semibold text-slate-800">{version.quotationId}</p>}
-              <p className="mt-0.5 text-xs text-slate-500">{versionLabel(version)} · raised {raisedOn.format(new Date(version.createdAt))}</p>
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                {!single && <p className="truncate text-sm font-semibold text-slate-800">{version.quotationId}</p>}
+                <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+              </div>
+              <p className="mt-0.5 text-xs text-slate-500">
+                {versionLabel(version)} · raised {raisedOn.format(new Date(version.createdAt))}{version.createdByName ? ` by ${version.createdByName}` : ""}
+              </p>
+              {finalization?.finalizedAt && <p className="text-xs text-slate-500">
+                Finalized {raisedOn.format(new Date(finalization.finalizedAt))}{finalization.finalizedByName ? ` by ${finalization.finalizedByName}` : ""}
+                {finalization.unfinalizedAt && ` · unfinalized ${raisedOn.format(new Date(finalization.unfinalizedAt))}`}
+              </p>}
+
             </div>
             <p className="text-sm font-semibold tabular-nums text-slate-800">{currency.format(Number(version.amount || 0))}</p>
           </div>
@@ -67,16 +82,20 @@ export default function QuotationVersionsDialog({ quotation, canWrite, renewingI
               anyone can read out to a client over the phone. */}
           <p className={`mt-2 text-xs ${live ? "text-emerald-700" : "text-red-700"}`}>{linkExpiryText(version)}</p>
           <div className="mt-3 flex flex-wrap gap-2">
-            {/* Both are the public link — one saved, one handed over — so both go when it lapses.
-                Copying an address that answers "expired" is worse than not offering it. */}
+            {/* All three are the public link — saved, opened, handed over — so all go when it lapses.
+                Opening or copying an address that answers "expired" is worse than not offering it. */}
             {live && <>
-              <Button type="button" size="sm" variant="secondary" onClick={() => onDownloadPdf?.(version)}>Download</Button>
+              {/* The server renders the file, which takes a few seconds: said on the button, and
+                  every Download waits until it is done. */}
+              <Button type="button" size="sm" variant="secondary" busy={downloadingId === version.id} busyLabel="Preparing PDF..." disabled={Boolean(downloadingId)} onClick={() => onDownloadPdf?.(version)}>Download</Button>
+              {onOpenLink && <Button type="button" size="sm" variant="secondary" onClick={() => onOpenLink(version)}>Open link</Button>}
               <Button type="button" size="sm" variant="secondary" onClick={() => onCopyLink?.(version)}>Copy link</Button>
             </>}
             {/* Offered on every version, live or lapsed, because it is not about the link at all:
-                the generator opens on what this version was priced at, and saving raises the next
-                version of the quotation. A write, so absent without READ_WRITE. */}
-            {canWrite && <Button type="button" size="sm" variant="secondary" onClick={() => onEditVersion?.(version)}>Edit</Button>}
+                the generator opens on what this version was priced at. Edit on an unfinalized
+                version, where saving raises the next one; View on the finalized one, which opens
+                read-only. Either way absent without READ_WRITE. */}
+            {canWrite && <Button type="button" size="sm" variant="secondary" onClick={() => onEditVersion?.(version)}>{finalized ? "View" : "Edit"}</Button>}
             {/* Re-enabling changes what a client outside the studio can open, so it is a write.
                 Without READ_WRITE the button is absent rather than present and refused. */}
             {!live && canWrite && <Button

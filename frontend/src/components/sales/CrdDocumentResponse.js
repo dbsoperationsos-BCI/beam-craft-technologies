@@ -1,6 +1,9 @@
 "use client";
 
+import { Children } from "react";
 import Image from "next/image";
+import { clockTime, endsNextDay } from "@/lib/shootBoard.mjs";
+import { ViewableImage } from "@/components/shared/ImageViewer";
 
 /**
  * A submitted CRD document, read back.
@@ -28,15 +31,37 @@ function readableDate(value) {
 
 function Answer({ label, value, type = "text" }) {
   const shown = type === "date" ? readableDate(value) : compact(value);
+  /*
+   * An answer the client gave is shown; a question they left blank is not drawn at all.
+   *
+   * This read-back is what the studio was given, so a row is worth its space only when it holds
+   * something. It used to draw every question whether or not it had been answered, dashing the
+   * empty ones - which filled a submitted document with rows saying nothing and buried the answers
+   * among them. Holding the rule here rather than at each call site means no section can forget it,
+   * and a question added to either document is read back under the same rule by construction.
+   */
+  if (!shown) return null;
   return <div className="min-w-0">
     <dt className="text-[11px] font-semibold text-slate-500 sm:text-xs">{label}</dt>
-    {/* An unanswered optional question reads as a dash rather than as a gap, so it is clear the
-        question was asked and left blank rather than never asked at all. */}
-    <dd className={`mt-1 break-words text-sm ${shown ? "text-slate-900" : "text-slate-400"}`}>{shown || "—"}</dd>
+    <dd className="mt-1 break-words text-sm text-slate-900">{shown}</dd>
   </div>;
 }
 
+/** Whether any {@link Answer} in a group holds something, by the same test `Answer` itself applies. */
+function hasAnswer(children) {
+  return Children.toArray(children).some(({ props }) => (props?.type === "date" ? Boolean(readableDate(props?.value)) : isFilled(props?.value)));
+}
+
 function Group({ title, children }) {
+  /*
+   * A section none of whose questions were answered is not drawn either.
+   *
+   * `Answer` hides a blank row, which on its own would leave a heading standing over nothing - a
+   * Birthdays block reads as missing data when in fact there was none to show. The same rule that
+   * hides the row hides the section once every row in it is hidden, so a heading always has
+   * something under it. `Images`, `Files` and `References` already each return null when empty.
+   */
+  if (!hasAnswer(children)) return null;
   return <section className="border-t border-slate-200 px-4 py-5 first:border-t-0 sm:px-6">
     <h3 className="text-sm font-semibold text-slate-900 sm:text-base">{title}</h3>
     <dl className="mt-4 grid gap-4 sm:grid-cols-2">{children}</dl>
@@ -50,9 +75,9 @@ function Images({ title, values }) {
   return <section className="border-t border-slate-200 px-4 py-5 sm:px-6">
     <h3 className="text-sm font-semibold text-slate-900 sm:text-base">{title}</h3>
     <div className="mt-4 flex flex-wrap gap-3">
-      {list.map((source, index) => <a key={`${index}-${String(source).slice(-24)}`} href={source} target="_blank" rel="noreferrer" className="block">
+      {list.map((source, index) => <ViewableImage key={`${index}-${String(source).slice(-24)}`} images={list} index={index} label={`View ${title} ${index + 1}`} className="rounded-lg">
         <Image src={source} alt={`${title} ${index + 1}`} width={96} height={96} unoptimized className="h-24 w-24 rounded-lg border border-slate-200 object-cover transition hover:border-blue-400" />
-      </a>)}
+      </ViewableImage>)}
     </div>
   </section>;
 }
@@ -109,9 +134,9 @@ function References({ title, value }) {
       </li>)}
     </ul>}
     {images.length > 0 && <div className="mt-4 flex flex-wrap gap-3">
-      {images.map((source, index) => <a key={`${index}-${String(source).slice(-24)}`} href={source} target="_blank" rel="noreferrer">
+      {images.map((source, index) => <ViewableImage key={`${index}-${String(source).slice(-24)}`} images={images} index={index} label={`View ${title} ${index + 1}`} className="rounded-lg">
         <Image src={source} alt={`${title} ${index + 1}`} width={96} height={96} unoptimized className="h-24 w-24 rounded-lg border border-slate-200 object-cover transition hover:border-blue-400" />
-      </a>)}
+      </ViewableImage>)}
     </div>}
     {!links.length && remarks.length > 0 && <p className="mt-3 text-sm text-slate-700">{remarks.join(" · ")}</p>}
   </section>;
@@ -130,6 +155,7 @@ function DumDumSide({ title, side }) {
   return <>
     <Group title={title}>
       <Answer label="First Name" value={values.firstName} />
+      <Answer label="Last Name" value={values.lastName} />
       <Answer label="Nickname" value={values.nickname} />
       <Answer label="Name to be Used In Project" value={values.nameToBeUsedInProject} />
       <Answer label="Insta ID" value={values.instaId} />
@@ -154,9 +180,21 @@ function DumDumSide({ title, side }) {
   </>;
 }
 
+/** Each event the client answered for - one per shoot of the project - as its own group. */
+function EventGroups({ events }) {
+  return (Array.isArray(events) ? events : []).map((event, index) => <Group key={event.shootRef || index} title={`Event ${index + 1}: ${event.shoot || "Event"}`}>
+    <Answer label="Date" value={event.eventDate} type="date" />
+    <Answer label="Start Time" value={clockTime(event.startTime) || ""} />
+    <Answer label="End Time" value={clockTime(event.endTime) ? `${clockTime(event.endTime)}${endsNextDay(event.startTime, event.endTime) ? " (next day)" : ""}` : ""} />
+    <Answer label="Event Address Link" value={event.eventAddressLink} />
+  </Group>);
+}
+
 function DumDumResponse({ document }) {
   const common = document.common || {};
   const helpWith = (Array.isArray(common.helpWith) ? common.helpWith : []).filter(Boolean);
+  // A document from before each shoot was its own event has the one event on its common block.
+  const hasEvents = Array.isArray(common.events) && common.events.length > 0;
   return <>
     {/* The order the client filled it in, which is the order it is read back in. */}
     <Group title="Event Details">
@@ -165,10 +203,11 @@ function DumDumResponse({ document }) {
       <Answer label="Referred By" value={common.referredBy} />
       <Answer label="Point of Contact Phone Number" value={common.pointOfContactPhone} />
       <Answer label="Point Of Contact Name" value={common.pointOfContactName} />
-      <Answer label="Event Start" value={common.eventStartAt} type="date" />
-      <Answer label="Event End" value={common.eventEndAt} type="date" />
-      <Answer label="Event Address Link" value={common.eventAddressLink} />
+      {!hasEvents && <Answer label="Event Start" value={common.eventStartAt} type="date" />}
+      {!hasEvents && <Answer label="Event End" value={common.eventEndAt} type="date" />}
+      {!hasEvents && <Answer label="Event Address Link" value={common.eventAddressLink} />}
     </Group>
+    <EventGroups events={common.events} />
     {helpWith.length > 0 && <section className="border-t border-slate-200 px-4 py-5 sm:px-6">
       <h3 className="text-sm font-semibold text-slate-900 sm:text-base">Also Wants Help With</h3>
       <p className="mt-3 text-sm text-slate-700">{helpWith.join(", ")}</p>
@@ -210,17 +249,23 @@ function QuaQuaResponse({ document }) {
       <Answer label="Branch" value={document.branch} />
       <Answer label="Referred By" value={document.referredBy} />
     </Group>
+    <EventGroups events={document.events} />
     <Group title="Birthdays">
-      {category === "baby" && <>
-        <Answer label="Baby Name" value={document.babyName} />
-        <Answer label="Baby Date of Birth" value={document.babyDateOfBirth} type="date" />
-      </>}
+      {/*
+        * Every dated question the three categories between them ask, each shown only if it was
+        * answered. Reading them back by the Shoot Type's own category instead lost answers twice
+        * over: a blank Shoot Type belongs to no category and showed none of them, and a Shoot Type
+        * changed after the client answered showed the new category's questions rather than the ones
+        * they were actually asked.
+        */}
+      <Answer label="Baby Name" value={document.babyName} />
+      <Answer label="Baby Date of Birth" value={document.babyDateOfBirth} type="date" />
       <Answer label="Mother's Name" value={document.motherName} />
       <Answer label={category === "baby" ? "Mother's Birthday" : "Mother Date of Birth"} value={document.motherDateOfBirth} type="date" />
       <Answer label="Father's Name" value={document.fatherName} />
       <Answer label="Father's Birthday" value={document.fatherBirthday} type="date" />
-      {category === "maternity" && <Answer label="Expected Delivery Date" value={document.expectedDeliveryDate} type="date" />}
-      {category === "combo" && <Answer label="Child Birthday / Expected Delivery Date" value={document.childBirthdayOrExpectedDeliveryDate} type="date" />}
+      <Answer label="Expected Delivery Date" value={document.expectedDeliveryDate} type="date" />
+      <Answer label="Child Birthday / Expected Delivery Date" value={document.childBirthdayOrExpectedDeliveryDate} type="date" />
     </Group>
     <Group title="References">
       <Answer label="Any Special Notes?" value={document.specialNotes} />

@@ -1,33 +1,58 @@
+const { withUserNames, userNamesById } = require("../../../services/userNames");
+const { syncShootLinkedDueDates } = require("../../../services/shootLinkedDueDates");
+const { SHOOT_DATE_ASC } = require("../../../services/shootOrder");
+const { withProjectHandovers } = require("../../../services/handoverNames");
 const { z } = require("zod");
-const { workingEmployeeStatuses, salesEmployees } = require("../../../services/employeeOptionLists");
+const { EXPIRED_LINK_MESSAGE, expiredLink } = require("../../../services/expiredLink");
+const { workingEmployeeStatuses, salesEmployees, listPhotoUrl } = require("../../../services/employeeOptionLists");
+const quotationShares = require("../../../services/quotationShares");
 const { snapshotDocumentBranding, brandingForDocument } = require("../../../services/documentBranding");
 const prisma = require("../../../config/db");
+const { DEFINITION_ORDER } = require("../../../services/definitionOrder");
+const { shootLocationsSchema, shootLocationsIssue, shootLocationColumns } = require("../../../services/shootLocations");
 const { ensureProjectClientStorage, removeProjectClientStorage } = require("../../assets/client-storage.service");
+const clientPush = require("../../../services/clientPush");
 // A project answering "CRD Document: Applicable" raises its document there and then, so the studio
 // can quote its CRD ID before the link goes out.
 const { ensureProjectCrdDocument } = require("../crd-documents/service");
+const { ensureProjectPreProduction } = require("../../project-management/pre-production/service");
+const { ensureProjectProduction } = require("../../project-management/production/service");
+const { projectHoldSources, projectPaymentsDue } = require("../../../services/projectHolds");
+const { boardsForProjects } = require("../../../services/projectBoards");
+const { logProjectActivity } = require("../../../services/projectActivity");
+const { fieldChanges } = require("../../../services/recordChanges");
+const { describeChanges } = require("../../../services/activityLog");
+const { projectSchedule, projectAccountsStatus } = require("../../accounts/scheduled-payments/service");
 const { projectClientNames, clientNameOf } = require("../../../services/projectClientNames");
 const iamService = require("../../../services/iam.service");
+const bcrypt = require("bcryptjs");
+const { loginCredentialFields, CLIENT_ROLE, generatedTemporaryPassword, takenLoginField } = require("../../../services/loginCredentials");
+const { sendWhatsAppToPerson } = require("../whatsapp-chat/directSend");
+const whatsappActivity = require("../../../services/whatsappActivity");
+const { MAX_MESSAGE_LENGTH } = require("../whatsapp-chat/security");
 const { fileUrls } = require("../../../services/uploadMetadata");
 const { markCrmLeadConverted } = require("../crm-leads/crmLeadService");
 /*
  * The Accounts module's own writer, so a booking advance is the same row, validated the same way,
  * as every other cash entry - only the guard on the route differs. See `recordProjectAdvance`.
  */
-const { recordCashEntry, formEntrySchema: cashFormEntrySchema, handleError: handleCashEntryError, toRow: cashEntryRow } = require("../../accounts/cash-entries/controller");
+const { recordCashEntry, formEntrySchema: cashFormEntrySchema, settlesSchema: cashSettlesSchema, handleError: handleCashEntryError, toRow: cashEntryRow } = require("../../accounts/cash-entries/controller");
+// Required when used: the scheduled-payments service requires the cash-entries controller in turn.
+const settleScheduledPayment = (...args) => require("../../accounts/scheduled-payments/service").settleInTx(...args);
 const { nextIdentifier, parseIdentifier } = require("../../../services/identifiers");
 const { buildQuotationName } = require("../../../services/quotationName");
 // The brand a quotation is raised under, and the snapshot of that brand it carries - see the
 // module for why the snapshot is built here rather than read from the brand tables later.
 const quotationBrands = require("../quotation-brands/service");
+const saleExtrasBooking = require("../sale-extras/booking");
+const saleExtrasTotals = require("../sale-extras/totals");
+const { hasPrintPass } = require("../../../services/quotationPrintPass");
 const { importTableRows, templateHeaders } = require("../../../services/tableImport");
 // Deleting a shoot here also removes its Image Selection footprint (folder tree, photo rows,
 // R2 derivatives) — see deleteProjectShoot.
 const imageSelectionFolders = require("../../image-selection/folders/service");
-// Deleting a booking takes its Image Selection project with it. The purge itself belongs to that
-// module and is reused whole from here - this file never learns what a derivative or a selection is.
-const imageSelectionProjects = require("../../image-selection/projects/service");
 const { normalizePhoneNumber } = require("../../../services/phoneNumber");
+const { everyChunk } = require("../../../services/wordChunks");
 const { verticalCode, fillVerticalsFromLeads, VERTICAL_CODES } = require("../../../services/salesVertical");
 const { projectAccessWhere, REGISTER_READERS } = require("../../../services/projectScope");
 const { readableEnquiryIds, leadScopeFor, CRM_LEADS } = require("../../../services/leadScope");
@@ -44,12 +69,19 @@ const { lookups: referenceLookups } = require("../../../services/referenceMatche
 // One rule for every branch picker in the application - the CRM reads the same list. See the
 // note in branchOptions.js for what the CRM was offering instead.
 const { branchOptions } = require("../../../services/branchOptions");
+const { wantsPage, backToPage } = require("../../../services/downloadNavigation");
 // The gift a project owes its client starts on the Client Gifts screen's first tab the moment it is marked
 // Applicable, so the two screens agree on what "not sent yet" is called without either owning it.
 const { GIFT_STATUS_PENDING } = require("../../project-management/client-gifts/service");
+const { receivedIntoOptions } = require("../../../services/branchBankAccounts");
 
 const verticals = VERTICAL_CODES;
 const groupTypes = ["Dum Dum", "Qua Qua", "Corp"];
+// The generator's own Group Type → vertical mapping (see whatsapp-group-names/controller.js). A
+// project made with a *manual* group name has no reserved name to inherit a vertical from, so the
+// form asks for the group type and the vertical is derived here — the same way, so the two paths
+// can never disagree about what "Dum Dum" means.
+const verticalForGroupType = { "Dum Dum": "WED", "Qua Qua": "QQ", Corp: "CORP" };
 const shootSessionTimingOptions = ["Hourly", "Half Session", "Full Session"];
 const shootCareOwnerOptions = ["Studio", "Client"];
 // Who the shoot is for. Required on every shoot - a wedding covers one side or both, and which
@@ -107,7 +139,13 @@ const autoDeliverablesByService = {
   "Comp Drone": ["Raw - File IN", "Final Files Out"],
   "Only Post Production": ["Raw - File IN", "Final Files Out"],
 };
-const projectStatuses = ["Yet to Start", "Work in Progress - Pre & Production", "Work in Progress - Post Production", "Rejected", "Cancelled & Refunded", "Client not Turned", "On Hold", "Delivered", "Duplicated", "Date Elapsed"];
+/*
+ * The statuses a project may be given, by bulk Update, Start Project or an import. Projects saved
+ * before 14 Oct 2026 can still read one of the old ones - "Work in Progress - Pre & Production",
+ * "Work in Progress - Post Production", "Delivered", "Cancelled & Refunded" and the rest - and keep
+ * it; every check that reads a status accepts both (`IN_PROGRESS_STATUSES`, `COMPLETED_STATUSES`).
+ */
+const projectStatuses = ["Yet to Start", "In Progress", "Completed", "On Hold", "Rejected"];
 /*
  * The employment statuses that still count as working here.
  *
@@ -130,6 +168,21 @@ const projectShootServiceInputSchema = z.object({
   sizeOptionValueId: z.string().trim().max(191).nullable().optional(),
   remarks: optionalText,
 });
+/*
+ * The variant of the deliverable a line is added as. `variantId` is looked up against the
+ * deliverable's brands as they stand, and what that variant holds is what is saved; the words beside
+ * it are only for a variant that no longer exists - removed in Settings since, or replaced by a
+ * save from before `saveDeliverableBrands` kept ids - so a quotation raised last month still knows
+ * what it was sold as. See `deliverableVariantSnapshotFor`.
+ */
+const deliverableVariantInputSchema = z.object({
+  variantId: z.string().trim().max(191).nullable().optional(),
+  brandName: z.string().trim().max(191).nullable().optional(),
+  size: z.string().trim().max(100).nullable().optional(),
+  frameInches: z.string().trim().max(60).nullable().optional(),
+  videoLength: z.string().trim().max(100).nullable().optional(),
+}).nullable().optional();
+
 const projectShootDeliverableInputSchema = z.object({
   deliverableDefinitionId: z.string().trim().min(1).max(191),
   quantity: z.coerce.number().int().min(1).nullable().optional(),
@@ -137,6 +190,7 @@ const projectShootDeliverableInputSchema = z.object({
   sizeOptionValueId: z.string().trim().max(191).nullable().optional(),
   size: optionalText,
   remarks: optionalText,
+  variant: deliverableVariantInputSchema,
 });
 
 /*
@@ -146,9 +200,17 @@ const projectShootDeliverableInputSchema = z.object({
  * the date is known before it asks for one. An empty string is what a form sends for a field it
  * never showed, and it means "not scheduled" here rather than an unparseable date.
  */
-const optionalShootDate = z.union([z.coerce.date(), z.literal(""), z.null()])
-  .optional()
-  .transform((value) => (value instanceof Date ? value : null));
+const optionalShootDate = z.preprocess(
+  // Emptied **before** anything is coerced, which is the whole point of the preprocess.
+  //
+  // It was a union with `z.coerce.date()` first, and a union takes its first match: `new Date(null)`
+  // is 1 January 1970, a perfectly valid Date, so a shoot saved with "Shoot Date Known: No" - which
+  // sends exactly `null` - was stored as 1970 rather than as no date at all. That reads as a
+  // scheduled shoot everywhere a date is only tested for being there. `""` escaped it only because
+  // `new Date("")` is an Invalid Date and the branch happened to fail.
+  (value) => (value === null || value === "" ? undefined : value),
+  z.coerce.date().optional(),
+).transform((value) => value ?? null);
 
 /**
  * The main event date, as forgiving as the thing that supplies it.
@@ -176,6 +238,36 @@ const quotationLineSchema = z.object({
   unitPrice: z.union([z.coerce.number().finite().min(0), z.literal(""), z.null()]).optional(),
 }).passthrough();
 
+/**
+ * The most the Discount may take off a quotation: 15% of what it comes off (the services and
+ * deliverables plus the Performance Cost). The Discount only - the extra discounts are not held to
+ * it, only to keeping the total above nothing (the last rule of `quotationPayloadSchema`). The
+ * generator says the same number (`MAX_DISCOUNT_PERCENT` in `frontend/src/lib/quotationDiscount.mjs`)
+ * and refuses first; this is what holds it for a request made any other way. In rupees it is rounded
+ * to the whole rupee exactly as the generator rounds a percentage, so exactly 15% is always within it.
+ *
+ * Checked on every write - a new quotation, the next version, a duplicate, a draft saved or
+ * generated - and on nothing already stored: a quotation raised under the old limit is never
+ * rewritten, only an edit of it is held to this one.
+ */
+const MAX_DISCOUNT_PERCENT = 15;
+
+/** What the Discount comes off, and the rupees it may come to. */
+function discountLimitOf(payload) {
+  const cost = (payload.subtotal || 0) + (payload.performanceCost || 0);
+  return { cost, cap: Math.round(cost * (MAX_DISCOUNT_PERCENT / 100)) };
+}
+
+/** The rupees the Discount box takes off: as typed, or the percentage of the cost, whole rupees. */
+function discountRupeesOf(payload) {
+  const { cost } = discountLimitOf(payload);
+  return payload.discountInputSource === "AMOUNT" ? (payload.discountAmount || 0) : Math.round(cost * ((payload.discount || 0) / 100));
+}
+
+const extraDiscountRupeesOf = (payload) => (Array.isArray(payload.extraDiscounts)
+  ? payload.extraDiscounts.reduce((sum, entry) => sum + entry.amount, 0)
+  : (payload.extraDiscountAmount || 0));
+
 const quotationPayloadSchema = z.object({
   enquiryId: z.string().trim().max(100).nullable().optional(),
   clientName: z.string().trim().max(191).nullable().optional(),
@@ -200,9 +292,44 @@ const quotationPayloadSchema = z.object({
    */
   quotationBrand: z.string().trim().max(20).nullable().optional(),
   vertical: z.string().trim().max(50).nullable().optional(),
+  /*
+   * Who this quotation is shared with, as employee ids: people who may read and change it although
+   * their own scope does not reach it. Sent with the quotation rather than through a route of its
+   * own, because it is answered in the same form; left out entirely, the shares are untouched.
+   */
+  sharedEmployeeIds: z.array(z.coerce.number().int().positive()).max(50).optional(),
   gstPercent: z.union([z.coerce.number().finite().min(0).max(100), z.literal(""), z.null()]).optional(),
   subtotal: z.coerce.number().finite().min(0).default(0),
   discount: z.coerce.number().finite().min(0).max(100).default(0),
+  /*
+   * Which of the Summary's two discount boxes was typed - the percentage, or the rupees - and the
+   * rupees it came to. `discount` above stays the percentage the column holds (for typed rupees,
+   * what they came to), so the register reads every quotation alike; a quotation typed in rupees
+   * reopens on `discountAmount`. An older quotation carries no source and reads as a percentage.
+   */
+  discountInputSource: z.enum(["PERCENTAGE", "AMOUNT"]).optional(),
+  discountAmount: z.coerce.number().finite().min(0).optional(),
+  /*
+   * The Performance Cost added before the discount, and the extra discounts - up to three, each a
+   * reason and a rupee amount, never a percentage - taken off after it. Kept in the payload beside
+   * the discount; an older quotation has none of them, which reads as none. `extraDiscountReason`
+   * and `extraDiscountAmount` are how a quotation raised when there could be only one extra
+   * discount carries it, and are still read. Together the extra discounts never come to more than
+   * the cost, since they cannot take the total below nothing.
+   */
+  performanceCost: z.coerce.number().finite().min(0).optional(),
+  extraDiscounts: z.array(z.object({
+    reason: z.string().trim().max(191).optional().default(""),
+    amount: z.coerce.number().finite().min(0),
+  })).max(3).optional(),
+  extraDiscountReason: z.string().trim().max(191).nullable().optional(),
+  extraDiscountAmount: z.coerce.number().finite().min(0).optional(),
+  /*
+   * The Round Off Discount: rupees only, never a percentage, taken off last to bring the total to a
+   * round number. Already out of `amount`; the client's copy lists no line for it, and
+   * `clientFacingQuotation` does not send it. An older quotation has none, which reads as none.
+   */
+  roundOffDiscount: z.coerce.number().finite().min(0).optional(),
   amount: z.coerce.number().finite().min(0).default(0),
   serviceCount: z.coerce.number().int().min(0).default(0),
   deliverableCount: z.coerce.number().int().min(0).default(0),
@@ -218,7 +345,37 @@ const quotationPayloadSchema = z.object({
   deliverables: z.array(quotationLineSchema).default([]),
   // Which packages were applied to which shoot, recorded for the snapshot; the rows are the truth.
   packages: z.array(z.any()).default([]),
-}).passthrough();
+}).passthrough().refine((payload) => {
+  // Typed rupees are out of the cost they come off, Performance Cost included.
+  if (payload.discountInputSource !== "AMOUNT") return true;
+  return !(payload.discountAmount > payload.subtotal + (payload.performanceCost || 0));
+}, { message: "The discount cannot be more than the quotation's cost.", path: ["discountAmount"] }).refine((payload) => {
+  const cost = payload.subtotal + (payload.performanceCost || 0);
+  const listed = Array.isArray(payload.extraDiscounts) ? payload.extraDiscounts.reduce((sum, entry) => sum + entry.amount, 0) : 0;
+  return !(listed > cost) && !(payload.extraDiscountAmount > cost);
+}, { message: "The extra discounts cannot come to more than the quotation's cost.", path: ["extraDiscounts"] }).refine((payload) => {
+  /*
+   * The percentage the quotation is saved at. Typed as a percentage it is what was typed; typed in
+   * rupees it is what they came to, to two places - so it is held to the cap with the rounding of
+   * the rupees allowed for, and the rupees themselves are held below.
+   */
+  if (payload.discountInputSource !== "AMOUNT") return !(payload.discount > MAX_DISCOUNT_PERCENT);
+  const { cost, cap } = discountLimitOf(payload);
+  return !(payload.discount > Math.max(MAX_DISCOUNT_PERCENT, cost > 0 ? Math.ceil((cap / cost) * 10000) / 100 : 0));
+}, { message: `The discount cannot be more than ${MAX_DISCOUNT_PERCENT}%.`, path: ["discount"] }).refine((payload) => {
+  const { cap } = discountLimitOf(payload);
+  // The rupees stored beside a percentage are what the client's copy prints, so they are held too.
+  return !(discountRupeesOf(payload) > cap) && !(payload.discountAmount > cap);
+}, { message: `The discount cannot be more than ${MAX_DISCOUNT_PERCENT}% of the quotation's cost.`, path: ["discountAmount"] }).refine((payload) => {
+  // The extra discounts are not held to the 15%; together with the Discount they take the total to
+  // nothing and no further, as the generator holds them.
+  const { cost } = discountLimitOf(payload);
+  return !(discountRupeesOf(payload) + extraDiscountRupeesOf(payload) > cost);
+}, { message: "The discount and extra discounts together cannot be more than the quotation's cost.", path: ["extraDiscounts"] }).refine((payload) => {
+  // The Round Off Discount comes off what the others leave, and no further than nothing.
+  const { cost } = discountLimitOf(payload);
+  return !(discountRupeesOf(payload) + extraDiscountRupeesOf(payload) + (payload.roundOffDiscount || 0) > cost);
+}, { message: "The round off discount cannot take the quotation below nothing.", path: ["roundOffDiscount"] });
 
 const projectSchema = z.object({
   enquiryId: requiredText.max(100),
@@ -248,15 +405,21 @@ const projectSchema = z.object({
   groupType: z.enum(groupTypes).nullable().optional(),
   shoots: z.array(z.object({
     dateCreated: optionalShootDate,
-    shoot: requiredText.max(100),
+    shoot: requiredText.max(191),
     shootPlace: requiredText.max(191),
     // The lists are what the dialog sends; the singulars are derived from them and kept only so
     // older readers of a shoot are undisturbed. Either may arrive, and at least one must.
     shootType: z.enum(shootTypeOptions).optional(),
     shootTypes: z.array(z.enum(shootTypeOptions)).min(1).max(shootTypeOptions.length).optional(),
     isMainEvent: z.boolean().default(false),
-    district: requiredText.max(191),
-    state: requiredText.max(191),
+    /*
+     * Both optional: where a shoot happens is often settled long after it is booked - a quotation is
+     * raised with a city in mind at most - so the dialog asks for them and neither holds the save.
+     */
+    district: z.string().trim().max(191).nullable().optional(),
+    state: z.string().trim().max(191).nullable().optional(),
+    // One place per name of a "Haldi + Mehandi" shoot held at several - `services/shootLocations.js`.
+    shootLocations: shootLocationsSchema,
     sessionTiming: z.enum(shootSessionTimingOptions).optional(),
     sessionTimings: z.array(z.enum(shootSessionTimingOptions)).min(1).max(shootSessionTimingOptions.length).optional(),
     sessionDurationHours: z.coerce.number().int().min(0).nullable().optional(),
@@ -268,6 +431,8 @@ const projectSchema = z.object({
     preference: z.enum(shootPreferenceOptions, { message: "Select a Preference: Groom, Bride, or Both." }),
     services: z.array(projectShootServiceInputSchema).optional(),
     deliverables: z.array(projectShootDeliverableInputSchema).optional(),
+    // Laid down by the finalized quotation (Sale Extras' baseline) - see `sale-extras/booking.js`.
+    fromQuotation: z.boolean().optional(),
   })).optional(),
 }).superRefine((data, context) => {
   if (data.deliverables === "Others" && !data.deliverablesDetails?.trim()) {
@@ -280,6 +445,8 @@ const projectSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["whatsappGroupNameId"], message: "Selected WhatsApp group name details are incomplete." });
   }
   (data.shoots || []).forEach((shoot, index) => {
+    const locationIssue = shootLocationsIssue(shoot);
+    if (locationIssue) context.addIssue({ code: z.ZodIssueCode.custom, path: ["shoots", index, "shootLocations"], message: locationIssue });
     if (!shootTypesOf(shoot).length) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["shoots", index, "shootTypes"], message: "Select at least one Shoot Type." });
     }
@@ -307,6 +474,8 @@ const projectIdentificationSchema = z.object({
   creativeManagerEmployeeId: optionalPositiveInt,
   postProductionCoordinator: optionalText,
   postProductionCoordinatorEmployeeId: optionalPositiveInt,
+  productionManager: optionalText,
+  productionManagerEmployeeId: optionalPositiveInt,
   welcomeGift: z.enum(["Applicable", "Not Applicable"]).nullable().optional(),
   welcomeGiftAssignee: optionalText,
   welcomeGiftEmployeeId: optionalPositiveInt,
@@ -315,6 +484,12 @@ const projectIdentificationSchema = z.object({
   shootCompletedGiftEmployeeId: optionalPositiveInt,
   projectValidityMonths: z.coerce.number().int().min(1).nullable().optional(),
   storageNeeded: z.enum(["Yes", "No"]).nullable().optional(),
+  /*
+   * Where the project's hard disk has got to, answered on Pre Production → General. Three answers,
+   * not the eight Client Storage runs on: pre production's part is the disk coming back and being
+   * handed on, and handing it over starts the storage record (`startStorageForHandover`).
+   */
+  hardDiskStatus: z.enum(["NOT_RECEIVED", "RECEIVED", "HANDED_OVER"]).nullable().optional(),
   crdDocumentStatus: z.enum(["Applicable", "Not Yet Received", "Groom Side Received", "Bride side Received", "Both Received", "Not Applicable"]).nullable().optional(),
   salesPreProductionRemarks: optionalText,
   salesProductionRemarks: optionalText,
@@ -323,13 +498,16 @@ const projectIdentificationSchema = z.object({
 
 const projectShootSchema = z.object({
   dateCreated: optionalShootDate,
-  shoot: requiredText.max(100),
+  shoot: requiredText.max(191),
   shootPlace: requiredText.max(191),
   shootType: z.enum(shootTypeOptions).optional(),
   shootTypes: z.array(z.enum(shootTypeOptions)).min(1).max(shootTypeOptions.length).optional(),
   isMainEvent: z.boolean().default(false),
-  district: requiredText.max(191),
-  state: requiredText.max(191),
+  // Optional, for the reason on the booking's own shoots above.
+  // Both optional, as on the shoot dialog they are typed in.
+  district: z.string().trim().max(191).nullable().optional(),
+  state: z.string().trim().max(191).nullable().optional(),
+  shootLocations: shootLocationsSchema,
   sessionTiming: z.enum(shootSessionTimingOptions).optional(),
   sessionTimings: z.array(z.enum(shootSessionTimingOptions)).min(1).max(shootSessionTimingOptions.length).optional(),
   sessionDurationHours: z.coerce.number().int().min(0).nullable().optional(),
@@ -339,6 +517,8 @@ const projectShootSchema = z.object({
   travel: z.enum(shootCareOwnerOptions).default("Studio"),
   preference: z.enum(shootPreferenceOptions, { message: "Select a Preference: Groom, Bride, or Both." }),
 }).superRefine((data, context) => {
+  const locationIssue = shootLocationsIssue(data);
+  if (locationIssue) context.addIssue({ code: z.ZodIssueCode.custom, path: ["shootLocations"], message: locationIssue });
   if (!shootTypesOf(data).length) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["shootTypes"], message: "Select at least one Shoot Type." });
   }
@@ -442,6 +622,7 @@ const deliverableAllocationCreateSchema = z.object({
   sizeOptionValueId: z.string().trim().max(191).nullable().optional(),
   size: optionalText,
   remarks: optionalText,
+  variant: deliverableVariantInputSchema,
 });
 
 const deliverableAllocationUpdateSchema = z.object({
@@ -559,9 +740,17 @@ const serviceDefinitionUpdateSchema = z.object({
    */
   // Whether the service is sold by size - Yes puts a Size on every pricing row below.
   sizeEnabled: z.boolean().optional(),
-  // Whether the service brings deliverables with it - Yes puts a Deliverables list on every
-  // pricing row below. Only TRUE brings any; see the model.
+  // Whether the service brings deliverables with it. Only TRUE brings any; see the model.
   deliverableAdded: z.boolean().optional(),
+  /*
+   * The deliverable variants the service brings whenever it is added to a shoot, each named by its
+   * three ids. Checked against the deliverables that exist in the handler, as a pricing row's are.
+   */
+  deliverables: z.array(z.object({
+    deliverableId: z.string().trim().max(191),
+    brandId: z.string().trim().max(191),
+    variantId: z.string().trim().max(191),
+  })).max(50).optional(),
   // Whether the service is given rather than charged for. Only TRUE is; see the model.
   complimentary: z.boolean().optional(),
   pricing: z.array(z.object({
@@ -638,8 +827,11 @@ const deliverableDefinitionUpdateSchema = z.object({
    * cannot show the variant boxes until it knows which ones to show.
    */
   brands: z.array(z.object({
+    // The row being kept, where the form opened on one - see `saveDeliverableBrands`.
+    id: z.string().trim().max(191).optional(),
     name: z.string().trim().max(191).nullable().optional(),
     variants: z.array(z.object({
+      id: z.string().trim().max(191).optional(),
       size: z.string().trim().max(100).nullable().optional(),
       frameInches: z.string().trim().max(60).nullable().optional(),
       videoLength: z.string().trim().max(100).nullable().optional(),
@@ -712,10 +904,22 @@ const startProjectDraftSchema = projectIdentificationSchema.extend({
    * went uncorrected.
    *
    * Optional, so the autosave that writes this schema on every pause does not have to carry it, and
-   * so Start Project — which never offers the field — cannot blank it by omission. See
+   * so Start or Edit Project with the box left empty cannot blank it by omission. See
    * `saveStartProjectWork`, which ignores `undefined` and writes anything else.
    */
   initialConvertedValue: z.coerce.number().finite().min(0).optional(),
+  /*
+   * The reason for switching Welcome Kit, Shoot Completed Gift, Storage Needed or CRD Document
+   * between applicable and not, keyed by the field. Kept by `recordApplicabilityChanges` beside the
+   * switch itself; Pre Production's General panel asks for it, and a save that switches nothing
+   * writes nothing.
+   */
+  applicabilityRemarks: z.object({
+    welcomeGift: optionalText,
+    shootCompletedGift: optionalText,
+    storageNeeded: optionalText,
+    crdDocumentStatus: optionalText,
+  }).optional(),
 });
 
 /**
@@ -735,6 +939,27 @@ const startProjectDraftSchema = projectIdentificationSchema.extend({
  * are intentionally absent. A project is routinely started before the studio has settled who runs
  * it, and they are not marked required on the form either.
  */
+/*
+ * What Pre Production's General panel may change: the items it shows, and the reason for any it
+ * switches on or off. Nothing else of the project is reachable through it - not the people it is
+ * staffed to, its sale or its plan.
+ *
+ * `productionManagerEmployeeId` was here while General was the screen that assigned that seat. It
+ * is asked for on Edit Project with the other four now, so Pre Production write no longer carries
+ * it: a field dropped from the panel but left in this list stays reachable to anyone who can post
+ * to the route.
+ */
+const preProductionGeneralSchema = startProjectDraftSchema.pick({
+  welcomeGift: true,
+  welcomeGiftEmployeeId: true,
+  shootCompletedGift: true,
+  shootCompletedGiftEmployeeId: true,
+  storageNeeded: true,
+  hardDiskStatus: true,
+  crdDocumentStatus: true,
+  applicabilityRemarks: true,
+}).strict();
+
 const startProjectSchema = startProjectDraftSchema.superRefine((data, context) => {
   const missing = (path, message) => context.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
 
@@ -774,8 +999,22 @@ function normalizeRuleName(value) {
   return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+/** The longest a master-data code may be: every `code` column it is written to is VARCHAR(100). */
+const CODE_MAX_LENGTH = 100;
+
+/*
+ * A master row's code, built from its name. A name may be up to 191 characters and the code column
+ * holds 100, so a long name made a code the database refused ("value too long", P2000) and the add
+ * failed with "Unable to add deliverable." - only for long names, which is why it looked
+ * intermittent. A code that fits is exactly what it always was; one that does not is cut short and
+ * ends in a fingerprint of the whole name, so the same name always gives the same code (the
+ * duplicate check still finds it) and two long names that begin alike still differ.
+ */
 function codeFor(prefix, name) {
-  return `${prefix}_${name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
+  const code = `${prefix}_${name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
+  if (code.length <= CODE_MAX_LENGTH) return code;
+  const fingerprint = require("crypto").createHash("sha256").update(code).digest("hex").slice(0, 8).toUpperCase();
+  return `${code.slice(0, CODE_MAX_LENGTH - fingerprint.length - 1).replace(/_+$/, "")}_${fingerprint}`;
 }
 
 const autoDeliverablesByServiceKey = new Map(Object.entries(autoDeliverablesByService).map(([serviceName, deliverables]) => [normalizeRuleName(serviceName), deliverables]));
@@ -988,9 +1227,12 @@ function deliverableBrandsForSave(brands, mediaType) {
   const text = (value, field) => (asks(field) ? String(value ?? "").trim() || null : null);
   return (brands || [])
     .map((brand) => ({
+      // The id of a row being kept rides along, untouched, for `saveDeliverableBrands` to match.
+      ...(brand?.id ? { id: String(brand.id) } : {}),
       name: String(brand?.name ?? "").trim(),
       variants: (brand?.variants || [])
         .map((variant) => ({
+          ...(variant?.id ? { id: String(variant.id) } : {}),
           size: text(variant?.size, "size"),
           frameInches: text(variant?.frameInches, "frameInches"),
           videoLength: text(variant?.videoLength, "videoLength"),
@@ -999,6 +1241,98 @@ function deliverableBrandsForSave(brands, mediaType) {
         .filter((variant) => variant.size || variant.frameInches || variant.videoLength || variant.price !== null),
     }))
     .filter((brand) => brand.name || brand.variants.length);
+}
+
+/**
+ * Writes a deliverable's brands and variants as the form left them, keeping every row it kept.
+ *
+ * A service maps each of its bookings to the variants it brings by id - deliverable, brand,
+ * variant - and so do quotation lines. This used to delete every brand and write the list again,
+ * which gave every brand and variant a new id on every save: renaming a deliverable, or repricing
+ * one of its sizes, left every service mapped to it reading "This deliverable is no longer
+ * offered", and a quotation could no longer find the variant it was priced on.
+ *
+ * So a row the form opened on comes back with its id, and is updated in place - its id, and every
+ * mapping to it, survive. A row with no id, or with an id that is not this deliverable's own (a
+ * duplicate's copy, a stale page), is created new. A row the form no longer holds is deleted, which
+ * is the only way a variant stops being offered - and then the services mapped to it do say so.
+ */
+async function saveDeliverableBrands(transaction, definitionId, input) {
+  // An id named twice keeps one row: the first to name it. Any later one is a new row.
+  const claim = (seen, id) => (id && !seen.has(id) ? (seen.add(id), id) : undefined);
+  const seenBrands = new Set();
+  const seenVariants = new Set();
+  const brands = input.map((brand) => ({
+    ...brand,
+    id: claim(seenBrands, brand.id),
+    variants: brand.variants.map((variant) => ({ ...variant, id: claim(seenVariants, variant.id) })),
+  }));
+  const held = await transaction.projectDeliverableBrand.findMany({ where: { definitionId }, select: { id: true, variants: { select: { id: true } } } });
+  const heldBrands = new Map(held.map((brand) => [brand.id, new Set(brand.variants.map((variant) => variant.id))]));
+  const keptBrandIds = new Set(brands.map((brand) => brand.id).filter((id) => heldBrands.has(id)));
+  // The variants go with their brands - `ON DELETE CASCADE` - so a removed brand takes its own.
+  const removed = held.map((brand) => brand.id).filter((id) => !keptBrandIds.has(id));
+  if (removed.length) await transaction.projectDeliverableBrand.deleteMany({ where: { id: { in: removed }, definitionId } });
+  const valuesOf = ({ id, ...variant }, sortOrder) => ({ ...variant, sortOrder });
+  for (const [index, brand] of brands.entries()) {
+    if (!keptBrandIds.has(brand.id)) {
+      await transaction.projectDeliverableBrand.create({
+        data: { definitionId, name: brand.name, sortOrder: index, variants: { create: brand.variants.map((variant, inner) => valuesOf(variant, inner)) } },
+      });
+      continue;
+    }
+    const heldVariants = heldBrands.get(brand.id);
+    const keptVariantIds = new Set(brand.variants.map((variant) => variant.id).filter((id) => heldVariants.has(id)));
+    const gone = [...heldVariants].filter((id) => !keptVariantIds.has(id));
+    if (gone.length) await transaction.projectDeliverableVariant.deleteMany({ where: { id: { in: gone }, brandId: brand.id } });
+    await transaction.projectDeliverableBrand.update({ where: { id: brand.id }, data: { name: brand.name, sortOrder: index } });
+    for (const [inner, variant] of brand.variants.entries()) {
+      if (keptVariantIds.has(variant.id)) await transaction.projectDeliverableVariant.update({ where: { id: variant.id }, data: valuesOf(variant, inner) });
+      else await transaction.projectDeliverableVariant.create({ data: { brandId: brand.id, ...valuesOf(variant, inner) } });
+    }
+  }
+}
+
+/**
+ * The variant columns a new deliverable line is saved with: whose it is and what distinguishes it,
+ * as it reads now - or all null for a line added as the deliverable alone.
+ *
+ * The variant the client names is found among the deliverable's own brands, and where it is found
+ * its values are the ones saved, whatever words came with it. Where it is not found - a quotation's
+ * variant since removed, or replaced by a save from before `saveDeliverableBrands` kept ids - the
+ * words the quotation kept are saved instead,
+ * bounded by the schema and held to what the deliverable's type asks for exactly as
+ * `deliverableBrandsForSave` holds a variant. Those words are trusted as far as the quotation line
+ * they came from is - it stamped them itself - and no further: they are a record of what was sold,
+ * and nothing prices, filters or links by them. Written once, on create: an edit to the line's
+ * quantity or remarks never touches what it was sold as.
+ */
+function deliverableVariantSnapshotFor(definition, variant) {
+  const empty = { brandName: null, size: null, frameInches: null, videoLength: null };
+  if (!variant) return empty;
+  let source = null;
+  if (variant.variantId) {
+    for (const brand of definition?.brands || []) {
+      const match = (brand.variants || []).find((item) => item.id === variant.variantId);
+      if (match) { source = { brandName: brand.name, size: match.size, frameInches: match.frameInches, videoLength: match.videoLength }; break; }
+    }
+  }
+  const [kept] = deliverableBrandsForSave([{ name: (source || variant).brandName, variants: [{ ...(source || variant), price: null }] }], definition?.mediaType ?? null);
+  if (!kept) return empty;
+  const values = kept.variants[0] || {};
+  return { brandName: kept.name || null, size: values.size ?? null, frameInches: values.frameInches ?? null, videoLength: values.videoLength ?? null };
+}
+
+/*
+ * What makes two lines on one shoot the same line: the deliverable and the variant it was added
+ * as, ignoring case and spacing. Two brands of one album are two lines; the same variant twice is
+ * one. The frontend holds the same rule in `deliverableIdentityKey`
+ * (`frontend/src/lib/deliverableBrands.mjs`), so what the picker stops offering is what is refused here.
+ */
+function deliverableLineKey(deliverableDefinitionId, snapshot = {}) {
+  const norm = (value) => String(value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  const parts = [snapshot.brandName, snapshot.size, snapshot.frameInches, snapshot.videoLength].map(norm);
+  return [String(deliverableDefinitionId || ""), ...(parts.some(Boolean) ? parts : [])].join("::");
 }
 
 async function deliverableAllocationDataForDefinition(transaction, definition, input = {}) {
@@ -1020,7 +1354,6 @@ async function deliverableAllocationDataForDefinition(transaction, definition, i
     // Update callers spread the existing allocation into input, so omission retains its limit;
     // create callers receive null unless a limit was explicitly provided.
     selectionLimit: input.selectionLimit ?? null,
-    size: null,
     sizeOptionValueId,
     // The line's own remark, always kept - see above.
     remarks: input.remarks || null,
@@ -1190,15 +1523,15 @@ function projectShootData(data) {
   return {
     dateCreated: data.dateCreated,
     shoot: data.shoot,
-    shootPlace: data.shootPlace,
+    // The place, district and state - or, for a shoot at several places, each name's own and the
+    // three columns joined from them, so a shoot saved as one place loses any it held before.
+    ...shootLocationColumns(data),
     shootTypes,
     sessionTimings,
     // Kept in step with the lists, as the first of each, for everything that reads a shoot's type or
     // timing one-at-a-time.
     shootType: shootTypes[0] || "Studio / In-House",
     isMainEvent: Boolean(data.isMainEvent),
-    district: data.district,
-    state: data.state,
     sessionTiming: sessionTimings[0] || null,
     sessionDurationHours,
     sessionDurationMinutes,
@@ -1206,12 +1539,21 @@ function projectShootData(data) {
     accommodation: data.accommodation || "Studio",
     travel: data.travel || "Studio",
     preference: data.preference,
-    eventStartTime: null,
-    eventEndTime: null,
+    // Event Start/End Time are deliberately absent: they belong to the Pre Production board, and
+    // writing null here erased what its coordinator had entered.
   };
 }
 
+/*
+ * After any shoot is added, moved, made the main event or removed: the project's main-event date, and
+ * every scheduled payment whose due date follows a shoot (`shootLinkedDueDates`).
+ */
 async function syncProjectMainEvent(transaction, projectId, shoot) {
+  await syncMainEventDate(transaction, projectId, shoot);
+  await syncShootLinkedDueDates(transaction, projectId);
+}
+
+async function syncMainEventDate(transaction, projectId, shoot) {
   if (shoot?.isMainEvent) {
     await transaction.projectShoot.updateMany({
       where: { projectId, deletedAt: null, id: { not: shoot.id } },
@@ -1364,6 +1706,46 @@ const nextShootId = (transaction, project) => nextIdentifier(
   transaction,
 );
 
+/*
+ * What the register shows of a project: its shoots with their deliverables and services. One shape
+ * for the whole register and for a single project read again after an edit, so a row patched in
+ * place is exactly the row the register would have drawn.
+ *
+ * No attachments: no screen reads them from the register (a project's files have their own route),
+ * and they were sent with every project on every load.
+ */
+const PROJECT_REGISTER_INCLUDE = {
+  shoots: {
+    where: { deletedAt: null },
+    include: {
+      deliverables: { where: { deletedAt: null }, orderBy: { createdAt: "asc" } },
+      postProductionAllocations: { where: { deletedAt: null }, orderBy: { createdAt: "asc" } },
+    },
+    orderBy: [{ dateCreated: SHOOT_DATE_ASC }, { createdAt: "asc" }],
+  },
+};
+/*
+ * `?view=summary`: each shoot's own fields without its deliverables and services - about two thirds
+ * of the register's weight. For the screens that list projects but show no service or deliverable
+ * (Sales Manager, Meetings, Album Proofing); Projects and Post Production show both in columns, so
+ * they read the full shape.
+ */
+const PROJECT_SUMMARY_INCLUDE = {
+  shoots: { where: { deletedAt: null }, orderBy: PROJECT_REGISTER_INCLUDE.shoots.orderBy },
+};
+
+/** The register's rows as read, with their holds, payments due, boards, names and handovers. */
+async function registerRows(data) {
+  // Where each project is being held, by department, for its "On Hold (…)" badge.
+  const ids = data.map((project) => project.id);
+  // `boards` is which of the four boards each project is on, for the row menu's "Jump to"
+  // entries: the jump is offered only where the project is really there.
+  const [holds, paymentsDue, boards] = await Promise.all([projectHoldSources(ids), projectPaymentsDue(ids), boardsForProjects(ids)]);
+  // Who recorded each project, and who last set its statuses, by name (`services/userNames`).
+  // A role handed over at offboarding reads "New (Old)" while the new holder still has it.
+  return withProjectHandovers(await withUserNames((await fillVerticalsFromLeads(data)).map((project) => ({ ...project, holds: holds[project.id] || [], paymentsDue: paymentsDue[project.id] || null, boards: boards.get(project.id) || [] }))));
+}
+
 async function listProjects(req, res) {
   try {
     /*
@@ -1377,26 +1759,41 @@ async function listProjects(req, res) {
     const access = await projectAccessWhere({ userId: Number(req.user.id) });
     const data = await prisma.salesProject.findMany({
       where: { deletedAt: null, ...access },
-      include: {
-        shoots: {
-          where: { deletedAt: null },
-          include: {
-            deliverables: { where: { deletedAt: null }, orderBy: { createdAt: "asc" } },
-            postProductionAllocations: { where: { deletedAt: null }, orderBy: { createdAt: "asc" } },
-          },
-          orderBy: [{ dateCreated: "asc" }, { createdAt: "asc" }],
-        },
-        attachments: {
-          where: { deletedAt: null },
-          orderBy: [{ createdAt: "desc" }],
-        },
-      },
+      include: req.query?.view === "summary" ? PROJECT_SUMMARY_INCLUDE : PROJECT_REGISTER_INCLUDE,
       orderBy: { createdAt: "desc" },
     });
-    return res.json({ data: await fillVerticalsFromLeads(data) });
+    return res.json({ data: await registerRows(data) });
   } catch (error) {
     console.error("Unable to load sales projects:", error);
     return res.status(500).json({ message: "Unable to load sales projects." });
+  }
+}
+
+/**
+ * One project as the register shows it, by its id or its Event ID ("DBS-BK-DD-ERD-000001").
+ *
+ * What a screen reads after editing one project, or to open one, instead of the whole register -
+ * which carries every project with all its shoots and grows with the studio. The same reach as
+ * the register (`projectAccessWhere`): a project this reader could not see there is a 404 here,
+ * not a different answer.
+ */
+async function getProject(req, res) {
+  try {
+    const ref = String(req.params.id || "").trim();
+    // An id or an Event ID is a few dozen characters; anything longer names no project.
+    if (!ref || ref.length > 64) return res.status(400).json({ message: "Choose a project." });
+    const access = await projectAccessWhere({ userId: Number(req.user.id) });
+    // Side by side under AND, so the reach - which may carry an OR of its own - is never overwritten.
+    const project = await prisma.salesProject.findFirst({
+      where: { deletedAt: null, AND: [{ OR: [{ id: ref }, { eventId: ref }] }, access] },
+      include: PROJECT_REGISTER_INCLUDE,
+    });
+    if (!project) return res.status(404).json({ message: "That project could not be found." });
+    const [row] = await registerRows([project]);
+    return res.json({ data: row });
+  } catch (error) {
+    console.error("Unable to load the sales project:", error);
+    return res.status(500).json({ message: "Unable to load the project." });
   }
 }
 
@@ -1411,18 +1808,31 @@ async function listProjects(req, res) {
  *
  * Blank is a valid answer and stores null - a project may convert without a quotation, on a figure
  * typed straight into Initial Converted Value.
+ *
+ * A project is booked only at a version that is **finalized now** (`isFinalizedQuotation`: finalized
+ * and not since unfinalized) and that was raised for the enquiry the project is booked against. The
+ * picker offers nothing else, and this is what holds when a request is sent by hand. The row is
+ * read `FOR UPDATE`, so an Unfinalize pressed at the same moment waits for the booking to commit
+ * rather than slipping in between this check and the insert.
  */
-async function resolveFinalizedQuotation(transaction, quotationId) {
+async function resolveFinalizedQuotation(transaction, quotationId, enquiryId) {
   const id = String(quotationId || "").trim();
   if (!id) return null;
-  const quotation = await transaction.salesQuotation.findFirst({
-    where: { quotationId: id, deletedAt: null },
-    select: { quotationId: true },
-  });
-  if (!quotation) {
-    const error = new Error("The selected quotation could not be found.");
-    error.status = 400;
+  const refuse = (status, message) => {
+    const error = new Error(message);
+    error.status = status;
     throw error;
+  };
+  const [quotation] = await transaction.$queryRaw`SELECT quotation_id AS quotationId, enquiry_id AS enquiryId, status, finalized_at AS finalizedAt, unfinalized_at AS unfinalizedAt FROM sales_quotation WHERE quotation_id = ${id} AND deleted_at IS NULL LIMIT 1 FOR UPDATE`;
+  if (!quotation) refuse(400, "The selected quotation could not be found.");
+  const sameEnquiry = String(quotation.enquiryId || "").trim().toLowerCase() === String(enquiryId || "").trim().toLowerCase();
+  if (!sameEnquiry) refuse(400, `${quotation.quotationId} was raised for a different enquiry. Choose a finalized quotation of this enquiry.`);
+  // A draft has been sent to nobody, so no project can say it converted at one.
+  if (quotation.status === QUOTATION_STATUS.DRAFT) refuse(409, `${quotation.quotationId} is a draft. Finalize the quotation before creating a project.`);
+  if (!isFinalizedQuotation(quotation)) {
+    refuse(409, quotation.finalizedAt
+      ? `${quotation.quotationId} has been unfinalized. Finalize it again, or choose another finalized quotation, before creating a project.`
+      : `${quotation.quotationId} is not finalized. Finalize the quotation before creating a project.`);
   }
   return quotation.quotationId;
 }
@@ -1454,14 +1864,37 @@ async function validateProjectPayload(transaction, data, { existingWhatsappGroup
   return { groupName };
 }
 
-/*
- * The enquiries a project or a group name can be filed under, searched as they are typed.
+/**
+ * The vertical a CRM lead belongs to.
  *
- * Sourced from the CRM's leads rather than from existing projects: an enquiry exists the moment a
- * lead does, which is before any project has been created from it - listing project rows here meant
- * the dropdown offered event/project ids and a brand-new lead's enquiry could not be found at all.
+ * `SalesCrmLead.branch` holds it — "Dum Dum" / "Qua Qua" / "Corp" — which is a different column
+ * from `assignedBranch`, the physical branch the lead is worked from. Spellings vary across leads
+ * imported at different times, so it is normalised the way the CRM screens normalise it.
+ */
+function verticalForLeadBranch(branch) {
+  const value = String(branch || "").trim().toLowerCase();
+  if (value === "dum dum" || value === "dumdum") return { groupType: "Dum Dum", vertical: "WED" };
+  if (value === "qua qua" || value === "quaqua") return { groupType: "Qua Qua", vertical: "QQ" };
+  if (value === "corp" || value === "corporate" || value === "corporation") return { groupType: "Corp", vertical: "CORP" };
+  return { groupType: null, vertical: null };
+}
+
+/**
+ * The enquiries a project or a group name can be filed under, searched as they are typed: CRM leads.
+ *
+ * This used to search `salesProject`, which is circular — an enquiry exists the moment a lead does,
+ * which is before any project has been created from it, so listing project rows meant the dropdown
+ * offered event/project ids and a brand-new lead's enquiry could not be found at all. Leads are the
+ * source of an enquiry, so they are what it lists.
+ *
+ * A lead that already has a project **is** offered, carrying a count of the ones it has. The studio
+ * books the same client again and the enquiry id is how the two are tied together, so hiding those
+ * ids left no way to do it at all - the id cannot be typed past a filter that excludes it. The count
+ * is what makes a second booking deliberate rather than accidental.
+ *
  * The lead also carries what the Create Project form can prefill: the client's name, the number
- * they are messaged on, and the branch they enquired at.
+ * they are messaged on, the branch they enquired at, and its vertical — the answer the studio
+ * already gave when the lead was taken, which the form turns into the project's vertical.
  *
  * ── This list is Leads & Followups, and nothing else ──────────────────────────────────────────
  *
@@ -1518,20 +1951,39 @@ async function listEnquiries(req, res) {
       // An untriaged Callyzer call, which is on the Calls board and is not an enquiry. Indexed, and
       // NULL only for a deleted lead - which `deletedAt` above has already excluded.
       boardKey: { not: BOARD_KEY.Calls },
-      ...(search ? {
+      /*
+       * **An enquiry that already has a project is still offered.** The studio books the same client
+       * again - a second wedding, a second event on the same enquiry - and a picker that hid those
+       * ids left no way to do it: the id is not typeable past a filter that excludes it.
+       *
+       * It used to be excluded here, on a one-project-per-enquiry rule. Nothing in the database said
+       * so - `SalesCrmLead.projects` is one-to-many with a plain index - so the rule lived only in
+       * this clause, which is to say it was never enforced: a stale tab or two people booking at once
+       * already produced a second project. What replaces it is saying how many each enquiry has
+       * (`projectCount` below), so a second booking is a choice somebody makes rather than one they
+       * make by accident.
+       */
+      // Word Chunk Search: every word typed, any order - beside the scope, never replacing it.
+      AND: [scope.where, ...everyChunk(search, (chunk) => ({
         OR: [
-          { enquiryId: { contains: search } },
-          { name: { contains: search } },
-          { phone: { contains: search } },
-          { whatsappNumber: { contains: search } },
+          { enquiryId: { contains: chunk } },
+          { name: { contains: chunk } },
+          { phone: { contains: chunk } },
+          { whatsappNumber: { contains: chunk } },
         ],
-      } : {}),
-      AND: [scope.where],
+      }))],
     };
 
     const leads = await prisma.salesCrmLead.findMany({
       where,
-      select: { enquiryId: true, name: true, phone: true, whatsappNumber: true, assignedBranch: true },
+      select: {
+        enquiryId: true, name: true, phone: true, whatsappNumber: true, branch: true,
+        assignedBranch: true, crm: true, status: true, preferredBudget: true,
+        groomName: true, brideName: true, eventPlannedDate: true,
+        // How many live projects this enquiry already has, so the picker can say so. Counted in the
+        // same query rather than per row: fifty rows would otherwise be fifty more reads.
+        _count: { select: { projects: { where: { deletedAt: null } } } },
+      },
       /*
        * Newest first, by when the lead was actually made.
        *
@@ -1558,17 +2010,39 @@ async function listEnquiries(req, res) {
      */
     const total = leads.length < ENQUIRY_PAGE ? leads.length : await prisma.salesCrmLead.count({ where });
 
-    const data = leads.map((lead) => ({
-      enquiryId: lead.enquiryId,
-      clientName: lead.name || null,
-      clientMainNumber: lead.whatsappNumber || lead.phone || null,
-      // The lead's branch - not its vertical, which is what this used to send and which the quotation
-      // form checks against branch names, so the prefill never matched anything.
-      sourceBranch: lead.assignedBranch || null,
-      // Carried by the old project-sourced rows; a lead has neither, and the form keeps what it has.
-      whatsappGroupName: null,
-      initialConvertedValue: null,
-    }));
+    const data = leads.map((lead) => {
+      const { groupType, vertical } = verticalForLeadBranch(lead.branch);
+      return {
+        enquiryId: lead.enquiryId,
+        clientName: lead.name || null,
+        /*
+         * The live projects this enquiry already has - 0 for nearly all of them.
+         *
+         * Booking a client again is allowed, so this is not a refusal; it is what the picker shows
+         * beside the id so that booking the same enquiry twice is deliberate. Deleted projects are
+         * not counted: a booking somebody undid is not a booking this enquiry has.
+         */
+        projectCount: lead._count?.projects || 0,
+        // The number the client is messaged on when there is one; the enquiry number otherwise.
+        clientMainNumber: lead.whatsappNumber?.trim() || lead.phone || null,
+        // The lead's vertical, which the form turns into the project's vertical.
+        groupType,
+        vertical,
+        leadBranch: lead.branch || null,
+        // The lead's branch - not its vertical, which is what this used to send and which the quotation
+        // form checks against branch names, so the prefill never matched anything.
+        sourceBranch: lead.assignedBranch || null,
+        crmName: lead.crm || null,
+        leadStatus: lead.status || null,
+        groomName: lead.groomName || null,
+        brideName: lead.brideName || null,
+        eventPlannedDate: lead.eventPlannedDate || null,
+        preferredBudget: lead.preferredBudget || null,
+        // Carried by the old project-sourced rows; a lead has neither, and the form keeps what it has.
+        whatsappGroupName: null,
+        initialConvertedValue: null,
+      };
+    });
     return res.json({ data, total, capped: total > data.length });
   } catch (error) {
     console.error("Unable to search enquiries:", error);
@@ -1598,6 +2072,70 @@ async function listEnquiries(req, res) {
 /** How long a quotation link opens for, from the moment it is generated or re-enabled. */
 const QUOTATION_LINK_VALIDITY_DAYS = 5;
 
+/**
+ * Where a version stands, on the `status` column every version already has.
+ *
+ * `Generated` is what every version has always been - raised, linked and sendable. `Draft` is a
+ * quotation saved from the generator before it was generated: it holds a stable number and every
+ * answer typed so far, but no live link, so no client can open it, no PDF is rendered from it, no
+ * project can be booked against it and no later version can be raised on it. A draft becomes
+ * `Generated` in place, under the same number - `generateQuotationDraft` - and is never anything
+ * else. Only a new quotation is drafted; a version raised on a generated chain is generated at once.
+ */
+const QUOTATION_STATUS = Object.freeze({ DRAFT: "Draft", GENERATED: "Generated" });
+
+const isDraftQuotation = (row) => row?.status === QUOTATION_STATUS.DRAFT;
+
+/*
+ * Finalize / Unfinalize, on four columns beside the status (`finalizedAt` / `finalizedByUserId`,
+ * `unfinalizedAt` / `unfinalizedByUserId`). Not the save state: `status` keeps saying Draft or
+ * Generated, which every other path already reads. And not the register's `finalized` either - that
+ * one says which version a *project* was booked at (`finalizedFields`) and is left exactly as it was.
+ *
+ * Every version is one of exactly two things, each version on its own:
+ *
+ * - FINALIZED: `finalizedAt` set, `unfinalizedAt` not. Read-only - never edited, raised from or
+ *   deleted - and its public link never expires. **At most one version of a quotation is finalized
+ *   at a time**: finalizing another is refused until this one is unfinalized by hand
+ *   (`finalizeQuotation`), and the database holds the same rule (`finalized_chain_key`, unique).
+ * - UNFINALIZED: every other version - never finalized, or finalized once and since unfinalized.
+ *   Editable: saving it raises the next version. Its link runs on the five-day clock.
+ *
+ * Neither move raises a version, touches the document or changes any other version: the version's
+ * figures, payload, token and PIN are what they were.
+ */
+const QUOTATION_FINALIZATION = Object.freeze({ FINALIZED: "FINALIZED", UNFINALIZED: "UNFINALIZED" });
+const isFinalizedQuotation = (row) => Boolean(row?.finalizedAt) && !row?.unfinalizedAt;
+const FINALIZED_LOCKED = "This version is finalized. Unfinalize it before editing it or creating a new version from it.";
+const ANOTHER_FINALIZED = "Another quotation version is already finalized. Please unfinalize that version before finalizing this one.";
+
+/** What the generator and the register show about it: the state, and when and by whom it was last finalized. */
+function quotationFinalization(row) {
+  return {
+    state: isFinalizedQuotation(row) ? QUOTATION_FINALIZATION.FINALIZED : QUOTATION_FINALIZATION.UNFINALIZED,
+    finalizedAt: row?.finalizedAt ?? null,
+    finalizedByUserId: row?.finalizedByUserId ?? null,
+    finalizedByName: row?.finalizedByUser?.name ?? null,
+    unfinalizedAt: row?.unfinalizedAt ?? null,
+    unfinalizedByUserId: row?.unfinalizedByUserId ?? null,
+    unfinalizedByName: row?.unfinalizedByUser?.name ?? null,
+  };
+}
+
+/** Whether any live version of a chain is finalized - what refuses deleting the whole chain. */
+async function chainIsFinalized(quotationNumber, db = prisma) {
+  return Boolean(await db.salesQuotation.findFirst({ where: { quotationNumber, deletedAt: null, finalizedAt: { not: null }, unfinalizedAt: null }, select: { id: true } }));
+}
+
+/** A row with the names of who finalized and unfinalized it, for the generator's badge. */
+async function withFinalizationNames(row) {
+  if (!row?.finalizedAt) return row;
+  const ids = [row.finalizedByUserId, row.unfinalizedByUserId].filter(Boolean);
+  const users = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [];
+  const nameOf = (id) => users.find((user) => user.id === id) || null;
+  return { ...row, finalizedByUser: nameOf(row.finalizedByUserId), unfinalizedByUser: nameOf(row.unfinalizedByUserId) };
+}
+
 function quotationLinkExpiry(from = new Date()) {
   return new Date(from.getTime() + QUOTATION_LINK_VALIDITY_DAYS * 24 * 60 * 60 * 1000);
 }
@@ -1610,6 +2148,9 @@ function quotationLinkExpiry(from = new Date()) {
  * forever — re-enabling it is one click and is the honest way back.
  */
 function quotationLinkState(row, now = new Date()) {
+  // A finalized version's link does not expire (and was open when it was finalized - `finalizeQuotation`
+  // refuses a lapsed one, which is re-enabled first). Unfinalized, it is back on its own clock.
+  if (isFinalizedQuotation(row)) return { linkExpiresAt: null, linkActive: true, linkExpired: false, linkNeverExpires: true };
   const expiresAt = row?.linkExpiresAt || null;
   const active = Boolean(expiresAt) && expiresAt.getTime() > now.getTime();
   return { linkExpiresAt: expiresAt, linkActive: active, linkExpired: !active };
@@ -1644,12 +2185,14 @@ function serializeQuotation(row) {
     amount: Number(row.amount || 0),
     publicPath: `/q/${row.publicToken}`,
     ...quotationLinkState(row),
+    finalization: quotationFinalization(row),
   };
 }
 
 /** One version, as the version dropdown and the history list need it. */
 function serializeQuotationVersion(row) {
-  const { linkExpiresAt, linkActive } = quotationLinkState(row);
+  // `linkNeverExpires` too: without it a finalized version's history card read its link as expired.
+  const { linkExpiresAt, linkActive, linkNeverExpires } = quotationLinkState(row);
   return {
     id: row.id,
     quotationId: row.quotationId,
@@ -1681,10 +2224,14 @@ function serializeQuotationVersion(row) {
     discount: Number(row.discount || 0),
     status: row.status,
     createdAt: row.createdAt,
+    // Who raised it, for the version history (named by `listQuotations`).
+    createdByUserId: row.createdByUserId ?? null,
     publicToken: row.publicToken,
     publicPath: `/q/${row.publicToken}`,
     linkExpiresAt,
     linkActive,
+    ...(linkNeverExpires ? { linkNeverExpires } : {}),
+    finalization: quotationFinalization(row),
   };
 }
 
@@ -1751,9 +2298,13 @@ async function readableEnquiries(enquiryIds, req) {
 /** The rows of `quotations` this request may see: its own names, or an enquiry it can reach. */
 async function narrowQuotations(quotations, req) {
   const scope = await quotationScope(req);
-  if (scope.unlimited) return quotations;
-  const reachable = await readableEnquiries(quotations.map((row) => row.enquiryId), req);
-  return quotations.filter((row) => scope.allows(row) || reachable.has(row.enquiryId));
+  // `own` is the narrower question the register also needs an answer to: reached on this person's
+  // own names rather than through a share, which is who may change who it is shared with.
+  if (scope.unlimited) return { rows: quotations, own: () => true };
+  const [reachable, shared] = await Promise.all([readableEnquiries(quotations.map((row) => row.enquiryId), req), quotationShares.sharedChainNumbers(scope)]);
+  const own = (row) => scope.allows(row) || reachable.has(row.enquiryId);
+  // ...or a chain somebody shared with them, which brings every version of it.
+  return { rows: quotations.filter((row) => own(row) || shared.has(row.quotationNumber)), own };
 }
 
 /**
@@ -1776,7 +2327,97 @@ async function scopedQuotation(req, id) {
   if (!quotation) return null;
   if (scope.allows(quotation)) return quotation;
   const reachable = await readableEnquiries([quotation.enquiryId], req);
-  return reachable.has(quotation.enquiryId) ? quotation : null;
+  if (reachable.has(quotation.enquiryId)) return quotation;
+  // Shared with them: they may raise the next version and edit the draft, as the owner may.
+  const shared = await quotationShares.sharedChainNumbers(scope);
+  return shared.has(quotation.quotationNumber) ? quotation : null;
+}
+
+/*
+ * Sharing a quotation (`services/quotationShares.js`, which holds the rules).
+ *
+ * The register is widened by a share, and so is the write gate: somebody a quotation is shared with
+ * raises its next version and edits its draft as its owner does. Who it is shared *with* is the
+ * owner's to set - `maySetShares` - so a sharee cannot drop the colleagues already on it.
+ */
+
+/** Whether this request reaches the chain on its **own** names, rather than through a share. */
+async function maySetShares(req, quotation) {
+  const scope = await quotationScope(req);
+  if (scope.unlimited || scope.allows(quotation)) return true;
+  const reachable = await readableEnquiries([quotation.enquiryId], req);
+  return reachable.has(quotation.enquiryId);
+}
+
+/**
+ * Writes the share list a save carried, where the saver is one who may set it.
+ *
+ * Never turns a saved quotation into a failed request: the version or the draft is already written
+ * by the time this runs, and answering 500 would have the form save it again as another version.
+ * A list that cannot be written is logged, and the form reopens showing what is actually shared.
+ */
+async function applyQuotationShares(req, quotation, people) {
+  if (!people) return;
+  try {
+    if (!(await maySetShares(req, quotation))) return;
+    await quotationShares.writeShares({ quotationNumber: quotation.quotationNumber, people, sharedByUserId: Number(req.user?.id) || null });
+  } catch (error) {
+    console.error("Unable to save who the quotation is shared with:", error);
+  }
+}
+
+/**
+ * Saves who a quotation is shared with, on its own, without raising a version.
+ *
+ * A version means "this replaces what I sent you" - a document the client receives. Who at the
+ * studio can open it is not part of that document at all, so sharing writes the list and nothing
+ * else: the quotation stays on the version it was on, and the people chosen get every version of
+ * it, past and future, because the share is of the chain.
+ */
+async function saveQuotationShares(req, res) {
+  const parsed = z.object({ sharedEmployeeIds: z.array(z.coerce.number().int().positive()).max(50) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Invalid share list." });
+  try {
+    const quotation = await scopedQuotation(req, req.params.id);
+    if (!quotation) return res.status(404).json({ message: "Quotation not found." });
+    if (!(await maySetShares(req, quotation))) {
+      return res.status(403).json({ message: "This quotation was shared with you, so who else it reaches is not yours to change." });
+    }
+    const people = await quotationShares.shareablePeople(parsed.data.sharedEmployeeIds);
+    await quotationShares.writeShares({ quotationNumber: quotation.quotationNumber, people, sharedByUserId: Number(req.user?.id) || null });
+    const shares = await quotationShares.sharesByChain([quotation.quotationNumber]);
+    return res.json({ data: shares.get(quotation.quotationNumber) || [] });
+  } catch (error) {
+    if (error?.status) return res.status(error.status).json({ message: error.message });
+    console.error("Unable to save who the quotation is shared with:", error);
+    return res.status(500).json({ message: "Unable to save who the quotation is shared with." });
+  }
+}
+
+/**
+ * The Share with picker's list: the working employees who can open Quotations, and nobody else.
+ *
+ * A share widens *which* quotations somebody reaches; it cannot put them on the screen, which is
+ * `SALES / Quotation Management` on the route. So sharing with somebody whose roles do not grant it
+ * reaches nobody and tells nobody - the quotation simply never appears for them. The list used to
+ * carry those people marked "no access to Quotations", on the reasoning that the studio often
+ * shares with a colleague about to be given the screen; offering a choice that does nothing is the
+ * worse half of that trade, so they are left out until their role actually grants it.
+ */
+async function listQuotationShareCandidates(req, res) {
+  try {
+    const [people, readers] = await Promise.all([salesEmployeeOptions(), quotationShares.readerEmployeeIds()]);
+    return res.json({ data: people.filter((row) => readers.has(row.id)) });
+  } catch (error) {
+    console.error("Unable to load the quotation share list:", error);
+    return res.status(500).json({ message: "Unable to load the quotation share list." });
+  }
+}
+
+/** Chain ascending, then the newest version of each first - the register's reading order. */
+function byChainThenNewestVersion(a, b) {
+  const chain = String(a.quotationNumber || "").localeCompare(String(b.quotationNumber || ""), "en", { sensitivity: "base" });
+  return chain || (Number(b.version) || 0) - (Number(a.version) || 0);
 }
 
 async function listQuotations(req, res) {
@@ -1800,11 +2441,28 @@ async function listQuotations(req, res) {
      * The picker cannot be used to read the table: it answers for one enquiry at a time, and an
      * enquiry has to be named to be asked about.
      */
-    const rows = await prisma.salesQuotation.findMany({
-      where: { deletedAt: null, ...(enquiryId ? { enquiryId } : {}), ...(brand ? { quotationBrand: brand } : {}) },
-      orderBy: [{ quotationNumber: "asc" }, { version: "desc" }],
-    });
-    const quotations = enquiryId ? rows : await narrowQuotations(rows, req);
+    /*
+     * Read unsorted and put in order here - chain ascending, newest version first, the order the
+     * query used to ask MySQL for. Every row carries its whole `payload`, and an ORDER BY over every
+     * row made MySQL copy those payloads into its sort buffer: once the register grew past what the
+     * buffer holds, the query failed outright ("Out of sort memory", MySQL 1038) and the register
+     * read as empty. The rows are the same; only who sorts them has changed.
+     */
+    /*
+     * The picker never offers a draft: a project is booked against what the client was sent, and a
+     * draft has been sent to nobody. The register lists drafts beside everything else, and the
+     * screen keeps them under a tab of their own.
+     *
+     * `withDrafts=1` lists an enquiry's drafts too, for Create Project's picker, which shows every
+     * version with its status and lets only a finalized one be chosen - a draft is shown there, never
+     * offered. Booking one is still refused on save (`resolveFinalizedQuotation`).
+     */
+    const withDrafts = Boolean(enquiryId) && req.query.withDrafts === "1";
+    const rows = (await prisma.salesQuotation.findMany({
+      where: { deletedAt: null, ...(enquiryId ? { enquiryId, ...(withDrafts ? {} : { status: { not: QUOTATION_STATUS.DRAFT } }) } : {}), ...(brand ? { quotationBrand: brand } : {}) },
+    })).sort(byChainThenNewestVersion);
+    const narrowed = enquiryId ? { rows, own: () => true } : await narrowQuotations(rows, req);
+    const quotations = narrowed.rows;
 
     const chains = new Map();
     for (const row of quotations) {
@@ -1836,21 +2494,37 @@ async function listQuotations(req, res) {
       }
     }
 
+    // Who each chain is shared with, for the form to reopen on (one query for the page).
+    const shares = await quotationShares.sharesByChain([...chains.keys()]);
+
     // Newest chain first, which for a register read top-down is the enquiry quoted for most
     // recently rather than the one with the highest chain number.
+    // Who raised and who finalized each version, for the version history - one read for the page.
+    const versionNames = await userNamesById(quotations.flatMap((row) => [row.createdByUserId, row.finalizedByUserId]));
+    const nameOf = (id) => (id ? versionNames.get(Number(id)) || null : null);
     const data = [...chains.values()]
       .map((versions) => ({
         ...serializeQuotation(versions[0]),
         ...finalizedFields(versions[0], finalizedBy),
+        sharedWith: shares.get(versions[0].quotationNumber) || [],
+        // Whose list it is to change: a sharee reads it and edits the quotation, and the people it
+        // is shared with stay the owner's to set.
+        canShare: narrowed.own(versions[0]),
         versionCount: versions.length,
-        versions: versions.map((version) => ({
-          ...serializeQuotationVersion(version),
-          ...finalizedFields(version, finalizedBy),
-        })),
+        versions: versions.map((version) => {
+          const serialized = serializeQuotationVersion(version);
+          return {
+            ...serialized,
+            ...finalizedFields(version, finalizedBy),
+            createdByName: nameOf(version.createdByUserId),
+            finalization: { ...serialized.finalization, finalizedByName: nameOf(version.finalizedByUserId) },
+          };
+        }),
       }))
       .sort((first, second) => new Date(second.createdAt) - new Date(first.createdAt));
 
-    return res.json({ data });
+    // Who raised each quotation, by name (`services/userNames`).
+    return res.json({ data: await withUserNames(data) });
   } catch (error) {
     console.error("Unable to load quotations:", error);
     return res.status(500).json({ message: "Unable to load quotations." });
@@ -1862,7 +2536,8 @@ async function getQuotation(req, res) {
   try {
     const quotation = await quotationById(req.params.id);
     if (!quotation) return res.status(404).json({ message: "Quotation not found." });
-    return res.json({ data: serializeQuotation(quotation) });
+    const [shares, canShare, named] = await Promise.all([quotationShares.sharesByChain([quotation.quotationNumber]), maySetShares(req, quotation), withFinalizationNames(quotation)]);
+    return res.json({ data: { ...serializeQuotation(named), sharedWith: shares.get(quotation.quotationNumber) || [], canShare } });
   } catch (error) {
     console.error("Unable to load quotation:", error);
     return res.status(500).json({ message: "Unable to load quotation." });
@@ -1914,8 +2589,8 @@ function quotationIdFor(quotationNumber, version) {
  * Deleted versions count: reusing the number of one somebody removed would give two different
  * documents the same reference, and the client holding the first still has it in writing.
  */
-async function nextVersionFor(quotationNumber) {
-  const latest = await prisma.salesQuotation.findFirst({
+async function nextVersionFor(quotationNumber, db = prisma) {
+  const latest = await db.salesQuotation.findFirst({
     where: { quotationNumber },
     orderBy: { version: "desc" },
     select: { version: true },
@@ -1926,7 +2601,10 @@ async function nextVersionFor(quotationNumber) {
 function parseQuotationPayload(req, res) {
   const parsed = quotationPayloadSchema.safeParse(req.body);
   if (parsed.success) return parsed.data;
-  res.status(400).json({ message: "Invalid quotation details.", errors: parsed.error.flatten() });
+  // A rule about the figures (the discount limit, the cost) is said in its own words, so the reason
+  // reaches whoever sent it; a malformed field is still the general refusal.
+  const rule = parsed.error.issues.find((issue) => issue.code === "custom");
+  res.status(400).json({ message: rule?.message || "Invalid quotation details.", errors: parsed.error.flatten() });
   return null;
 }
 
@@ -1962,7 +2640,46 @@ function quotationData(parsed) {
  * "QUT040" as free, and re-resolving is what sends the loser to QUT041 instead of quietly filing
  * its quotation as version two of the winner's enquiry.
  */
-async function insertQuotationVersion(resolveChain, parsed, createdByUserId = null) {
+// `db` is the transaction a caller already holds - Save as New Version's, with the chain locked.
+async function insertQuotationVersion(resolveChain, parsed, createdByUserId = null, { draft = false, db = prisma } = {}) {
+  const data = await quotationVersionColumns(parsed);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const quotationNumber = await resolveChain();
+    const version = await nextVersionFor(quotationNumber, db);
+    try {
+      return await db.salesQuotation.create({
+        data: {
+          ...data,
+          createdByUserId,
+          quotationNumber,
+          version,
+          quotationId: quotationIdFor(quotationNumber, version),
+          publicToken: await uniqueQuotationToken(),
+          /*
+           * A draft has no live link and no clock: nothing has been sent. Its token is minted now
+           * only because the column is required, and every public route refuses a draft by status
+           * (`isDraftQuotation`). The five days start when the draft is generated.
+           */
+          ...(draft ? { status: QUOTATION_STATUS.DRAFT, linkExpiresAt: null } : { linkExpiresAt: quotationLinkExpiry() }),
+        },
+      });
+    } catch (error) {
+      if (error?.code !== "P2002") throw error;
+    }
+  }
+  throw new Error("Unable to allocate a quotation version.");
+}
+
+/**
+ * Everything a version stores that is worked out from its answers: the columns, the brand and its
+ * snapshot, the Global Logo, the name, and the branch and employee references.
+ *
+ * One place for every way a version is written - a new quotation, the next version, a duplicate,
+ * and a draft saved or generated - so they cannot come to disagree about what a version holds.
+ * Whoever created the row is not here: a draft keeps the person who started it however often it is
+ * saved, so only an insert stamps it.
+ */
+async function quotationVersionColumns(parsed) {
   // Every version is a new document, so every version takes the Global Logo current at the moment
   // *it* is raised - and keeps it. Read once, outside the retry loop: a collision on the version
   // number changes nothing about what the studio's logo was.
@@ -1994,29 +2711,8 @@ async function insertQuotationVersion(resolveChain, parsed, createdByUserId = nu
   const refs = await referenceLookups();
   // Whoever raised it is one of the names the scope reads, so a quotation with nobody following it
   // up is still visible to the person who wrote it.
-  const references = { branchId: refs.branchId(columns.sourceBranch), ownerEmployeeId: refs.employeeId(columns.followedBy), createdByUserId };
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const quotationNumber = await resolveChain();
-    const version = await nextVersionFor(quotationNumber);
-    try {
-      return await prisma.salesQuotation.create({
-        data: {
-          ...columns,
-          ...references,
-          ...branding,
-          quotationName,
-          quotationNumber,
-          version,
-          quotationId: quotationIdFor(quotationNumber, version),
-          publicToken: await uniqueQuotationToken(),
-          linkExpiresAt: quotationLinkExpiry(),
-        },
-      });
-    } catch (error) {
-      if (error?.code !== "P2002") throw error;
-    }
-  }
-  throw new Error("Unable to allocate a quotation version.");
+  const references = { branchId: refs.branchId(columns.sourceBranch), ownerEmployeeId: refs.employeeId(columns.followedBy) };
+  return { ...columns, ...references, ...branding, quotationName };
 }
 
 /**
@@ -2041,17 +2737,56 @@ async function createQuotation(req, res) {
     // Every service and deliverable on a new quotation is newly chosen, so every one naming a brand
     // master has to be one that brand still offers.
     await quotationBrands.assertNewSelectionsOffered(parsed, null);
+    // Checked before the quotation is written, so a name that cannot be shared with refuses the
+    // save rather than leaving a version raised and its shares unwritten.
+    const people = parsed.sharedEmployeeIds ? await quotationShares.shareablePeople(parsed.sharedEmployeeIds) : null;
     const quotation = await insertQuotationVersion(
       async () => nextQuotationChainNumber(parsed),
       parsed,
       Number(req.user?.id) || null,
     );
+    await applyQuotationShares(req, quotation, people);
     return res.status(201).json({ data: serializeQuotation(quotation) });
   } catch (error) {
     if (error?.status) return res.status(error.status).json({ message: error.message });
+    const refusal = quotationSaveRefusal(error);
+    if (refusal) {
+      // The code and the constraint, which is what says why; never the payload, which carries the
+      // client's own details.
+      console.error("Unable to create quotation:", error.code, error.meta);
+      return res.status(400).json({ message: refusal });
+    }
     console.error("Unable to create quotation:", error);
     return res.status(500).json({ message: "Unable to create quotation." });
   }
+}
+
+/**
+ * A quotation that MySQL refused, said in words the studio can act on.
+ *
+ * `enquiry_id` is a real foreign key onto the CRM lead (`schema.prisma`, `SalesQuotationLead`,
+ * `onDelete: Restrict`), and the Enquire ID box on the generator is a **suggestion** box rather
+ * than a closed list - a quotation is often raised for an enquiry the CRM has not been given yet,
+ * so an id can be typed straight in. Type one that is not a lead and the insert is refused with
+ * P2003.
+ *
+ * That refusal used to reach the studio as "Unable to save quotation." and nothing else: the retry
+ * loop around the insert rethrows anything that is not a duplicate key, and the catch below turned
+ * every one of those into the same 500. So the one thing the person had to change was the one
+ * thing they were not told - and the field it is about is required, sits at the top of a long form,
+ * and is scrolled well out of view by the time Generate Quotation is pressed.
+ *
+ * Only the constraint is named, never the value or the query: what comes back says which answer to
+ * fix and nothing about what else is in the database. `null` for anything this does not recognise,
+ * which stays a 500 and is logged in full.
+ */
+function quotationSaveRefusal(error) {
+  if (error?.code !== "P2003") return null;
+  const constraint = String(error?.meta?.field_name || error?.meta?.constraint || "");
+  if (/enquiry/i.test(constraint)) {
+    return "That Enquire ID does not belong to any lead in the CRM. Pick one from the list, or add the lead first.";
+  }
+  return "This quotation names a record that no longer exists. Check the Identification details and try again.";
 }
 
 /**
@@ -2061,25 +2796,121 @@ async function createQuotation(req, res) {
  * saving it makes v4, because what the studio just approved is the newest thing said, not a
  * correction to an old one.
  */
+/*
+ * Whether a save would raise a version that says nothing new.
+ *
+ * A version means "this replaces what I sent you", so it is worth raising only when the document
+ * changed: the client's details, the lines, the figures, the notes. Opening a quotation, changing
+ * who at the studio it is shared with and saving used to raise one all the same, which left a chain
+ * of identical documents and a client link pointing at the newest of them.
+ *
+ * `brandSnapshot` is left out of the comparison on purpose - it is this version's frozen copy of the
+ * brand's terms and wording, re-taken every time the form is opened, so comparing it would make
+ * every save look like a change. The keys are sorted, because two readings of the same answers can
+ * come back in a different order.
+ */
+const COMPARED_COLUMNS = ["enquiryId", "clientName", "clientMainNumber", "sourceBranch", "eventVenue", "followedBy", "referredBy", "secondaryContactNumber", "additionalNotes", "quotationBrand"];
+/** The figures, read as numbers: a stored one comes back as a Decimal and a typed one as a number. */
+const COMPARED_FIGURES = ["subtotal", "discount", "amount", "serviceCount", "deliverableCount"];
+function documentAnswers(row) {
+  /*
+   * Empty is empty, however it is spelled. A field the form sends as null, "" or an empty list, and
+   * one the stored payload simply does not have, are the same answer: nothing. Comparing them
+   * literally made a save look like a change whenever the form had learned a field the quotation
+   * was raised without - which is most saves on an older quotation.
+   */
+  /*
+   * What is compared is the quotation as the client reads it - its lines, their quantities and
+   * sizes, the words on them and the money - never the form's own working: the catalogue row each
+   * line was chosen from, and the per-line rates the form fills in from it when the quotation is
+   * reopened. Those arrive on an old quotation simply because the form knows more than it did when
+   * it was raised, and comparing them made every save look like a change. A rate that genuinely
+   * moved shows up in the figures, which are compared, and in the quantity beside it.
+   *
+   * `discountInputSource` is here for the same reason: it says which of the two discount boxes was
+   * typed into, so the form can reopen on it, and a quotation raised before the app asked gains it
+   * the first time it is opened. What the client reads is the discount itself, which is compared.
+   */
+  const ignored = new Set(["brandSnapshot", "deliverableDefinition", "serviceDefinition", "packageDefinition", "definition", "pricing", "discountInputSource", "unitPrice", "price", "rate", "lineTotal", "total", "amount", "subtotal"]);
+  const empty = (value) => value === null || value === undefined || value === ""
+    || (Array.isArray(value) && !value.length)
+    || (value && typeof value === "object" && !Array.isArray(value) && !Object.keys(value).length);
+  const stable = (value) => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.keys(value).sort()
+        .filter((key) => !ignored.has(key) && !empty(value[key]))
+        .map((key) => [key, stable(value[key])]));
+    }
+    return value;
+  };
+  return JSON.stringify(stable({
+    ...Object.fromEntries(COMPARED_COLUMNS.map((column) => [column, row[column] ?? null])),
+    // The figures are compared even when they are zero: a quotation that came down to nothing is a
+    // different document from one that was never priced.
+    figures: COMPARED_FIGURES.map((column) => Number(row[column] || 0)),
+    payload: row.payload || {},
+  }));
+}
+
 async function createQuotationVersion(req, res) {
   const parsed = parseQuotationPayload(req, res);
   if (!parsed) return;
   try {
     const source = await scopedQuotation(req, req.params.id);
     if (!source) return res.status(404).json({ message: "Quotation not found." });
+    // A draft is finished by generating it, not by raising a second version over it.
+    if (isDraftQuotation(source)) return res.status(409).json({ message: DRAFT_NOT_GENERATED });
+    // A finalized version is read-only: it is unfinalized first, then edited. Any unfinalized version
+    // may be saved as the next one - another version being finalized does not stop it.
+    if (isFinalizedQuotation(source)) return res.status(409).json({ message: FINALIZED_LOCKED });
     /*
      * The brand is set at the first version and every later one keeps it - the generator locks the
      * selector, and this is what makes that a rule rather than a convention. The vertical rides
      * along for the same reason; the counter and the name both read it.
      */
     const withBrand = { ...parsed, quotationBrand: source.quotationBrand || quotationBrands.brandCodeOfPayload(source.payload), vertical: source.payload?.vertical || parsed.vertical || null };
+    // The share list is not part of a version: it is written by `PUT /quotations/:id/shares`, which
+    // is why raising one here carries no `sharedEmployeeIds`.
     // Lines the earlier version already held stay, whatever has since happened to their master;
     // only a line added on this version has to be one the brand still offers.
     await quotationBrands.assertNewSelectionsOffered(withBrand, source.payload);
-    const quotation = await insertQuotationVersion(async () => source.quotationNumber, withBrand, Number(req.user?.id) || null);
-    return res.status(201).json({ data: serializeQuotation(quotation) });
+    const columns = await quotationVersionColumns(withBrand);
+    // Nothing in the document changed, so there is nothing to replace: the quotation stays on the
+    // version it is on. Sharing it, which is not part of the document, saves itself elsewhere.
+    if (documentAnswers(columns) === documentAnswers(source)) {
+      return res.json({ data: serializeQuotation(source), unchanged: true });
+    }
+    /*
+     * One transaction, the quotation's versions locked `FOR UPDATE` first, so saves and finalizes of
+     * one quotation take turns. Under the lock the source is asked again whether it is finalized - a
+     * finalize that landed meanwhile wins - and the same document pressed twice (a double click, two
+     * tabs) raises one version: the second press finds it already the newest and gets it back as
+     * unchanged. No other version's status is touched. If anything fails, nothing is written.
+     */
+    const saved = await prisma.$transaction(async (transaction) => {
+      await transaction.$queryRaw`SELECT id FROM sales_quotation WHERE quotation_number = ${source.quotationNumber} FOR UPDATE`;
+      const current = await transaction.salesQuotation.findUnique({ where: { id: source.id } });
+      if (!current || current.deletedAt) throw Object.assign(new Error("Quotation not found."), { status: 404 });
+      if (isFinalizedQuotation(current)) throw Object.assign(new Error(FINALIZED_LOCKED), { status: 409 });
+      const newest = await transaction.salesQuotation.findFirst({ where: { quotationNumber: source.quotationNumber, deletedAt: null }, orderBy: { version: "desc" } });
+      if (newest && newest.id !== source.id && documentAnswers(columns) === documentAnswers(newest)) return { quotation: newest, unchanged: true };
+      return { quotation: await insertQuotationVersion(async () => source.quotationNumber, withBrand, Number(req.user?.id) || null, { db: transaction }) };
+    }, { timeout: 20000 });
+    if (saved.unchanged) return res.json({ data: serializeQuotation(saved.quotation), unchanged: true });
+    return res.status(201).json({ data: serializeQuotation(saved.quotation) });
   } catch (error) {
     if (error?.status) return res.status(error.status).json({ message: error.message });
+    // Lost a race with another save or a finalize of the same quotation (deadlock / write conflict):
+    // nothing was written, so it is safe to say so and let the person reload.
+    if (error?.code === "P2034") return res.status(409).json({ message: "This quotation was changed at the same moment. Reload it and try again." });
+    const refusal = quotationSaveRefusal(error);
+    if (refusal) {
+      // The code and the constraint, which is what says why; never the payload, which carries the
+      // client's own details.
+      console.error("Unable to create the next quotation version:", error.code, error.meta);
+      return res.status(400).json({ message: refusal });
+    }
     console.error("Unable to create the next quotation version:", error);
     return res.status(500).json({ message: "Unable to create the next quotation version." });
   }
@@ -2110,9 +2941,14 @@ async function duplicateQuotation(req, res) {
   try {
     const source = await scopedQuotation(req, req.params.id);
     if (!source) return res.status(404).json({ message: "Quotation not found." });
+    // This raises a generated quotation straight off the saved answers, which a draft's have not
+    // yet been checked as being.
+    if (isDraftQuotation(source)) return res.status(409).json({ message: DRAFT_NOT_GENERATED });
     const parsed = quotationPayloadSchema.safeParse({ ...(source.payload || {}), enquiryId });
     if (!parsed.success) {
-      return res.status(422).json({ message: "This quotation cannot be duplicated - its saved details are incomplete.", errors: parsed.error.flatten() });
+      // A rule about the figures - a quotation saved above today's discount limit - says itself.
+      const rule = parsed.error.issues.find((issue) => issue.code === "custom");
+      return res.status(422).json({ message: rule?.message || "This quotation cannot be duplicated - its saved details are incomplete.", errors: parsed.error.flatten() });
     }
     const quotation = await insertQuotationVersion(
       // Its own chain, counted under the duplicate's own vertical and branch. A copy is a new
@@ -2129,6 +2965,231 @@ async function duplicateQuotation(req, res) {
   }
 }
 
+/*
+ * ── Drafts ─────────────────────────────────────────────────────────────────────────────────────
+ *
+ * Save Draft on the generator keeps a quotation that is not ready to send. The first save numbers
+ * it - version 01 of a new chain, exactly as Generate Quotation would - so the draft has the
+ * reference it will keep; every later save rewrites that same row; and Generate Quotation turns it
+ * into a generated version in place, under the same number, starting its link's five days. Nothing
+ * reaches a client before that: the public page, the PDF and the payment page all refuse a draft.
+ *
+ * A draft is rewritten in place, which no generated version ever is, and that is safe only because
+ * nobody has been sent it. The `status: Draft` in every write's `where` is what keeps it that way: a
+ * save that lands after the draft was generated - a second tab, a slow request - changes nothing
+ * rather than rewriting a quotation already in a client's hands.
+ */
+
+/** What every write refuses a draft with, where only generating it would make sense. */
+const DRAFT_NOT_GENERATED = "This quotation is still a draft. Open it and press Generate Quotation first.";
+const DRAFT_ALREADY_GENERATED = "This quotation has already been generated, so it is no longer a draft. Edit it from the register to raise the next version.";
+const DRAFT_UNOPENED = "Reopen this draft from the Draft tab and save it again.";
+const DRAFT_CHANGED = "This draft was changed or generated somewhere else since you opened it. Close it and open it again from the Draft tab to carry on.";
+
+/**
+ * What a draft must hold before it is saved at all: the Assigned Branch, because the quotation
+ * number is drawn from the brand and the branch on the first save and never changes after. Nothing
+ * else is asked for - a draft is somewhere to stop half-way, and the rest is checked on Generate.
+ */
+function draftRefusal(parsed) {
+  return String(parsed.sourceBranch || parsed.nearestBranch || "").trim()
+    ? null
+    : "Choose the Assigned Branch before saving the draft - the quotation number is drawn from it.";
+}
+
+/**
+ * The answers to save, without the one field that is about the save rather than the quotation.
+ *
+ * `draftUpdatedAt` is the draft's `updatedAt` as the generator opened it, sent back so a save
+ * written over somebody else's newer one is refused rather than silently undoing it. The schema
+ * passes unknown fields through into the payload, so it is taken out here.
+ */
+function draftAnswers(parsed) {
+  const { draftUpdatedAt, ...answers } = parsed;
+  const opened = draftUpdatedAt ? new Date(draftUpdatedAt) : null;
+  return { answers, openedAt: opened && !Number.isNaN(opened.getTime()) ? opened : null };
+}
+
+/** The draft named in the URL, if this caller may change it and it is still a draft. */
+async function draftForWrite(req, res) {
+  const draft = await scopedQuotation(req, req.params.id);
+  if (!draft) {
+    res.status(404).json({ message: "Quotation not found." });
+    return null;
+  }
+  if (!isDraftQuotation(draft)) {
+    res.status(409).json({ message: DRAFT_ALREADY_GENERATED });
+    return null;
+  }
+  return draft;
+}
+
+/**
+ * The brand and vertical the draft was numbered under, whatever the save says.
+ *
+ * Its number reads them (`DBS-QO-DD-…`), so a draft keeps the brand it was first saved with - the
+ * generator locks the selector, and this is what makes that a rule, as it is for a later version.
+ */
+const lockedToDraft = (answers, draft) => ({
+  ...answers,
+  quotationBrand: draft.quotationBrand || quotationBrands.brandCodeOfPayload(draft.payload),
+  vertical: draft.payload?.vertical || answers.vertical || null,
+});
+
+/**
+ * Writes onto the draft only while it is still the draft the caller opened, and answers with the
+ * row as saved - or null when it has since been generated, deleted or saved by somebody else.
+ */
+async function writeDraft(draft, openedAt, data) {
+  const where = { id: draft.id, status: QUOTATION_STATUS.DRAFT, deletedAt: null, updatedAt: openedAt };
+  const { count } = await prisma.salesQuotation.updateMany({ where, data });
+  return count ? prisma.salesQuotation.findUnique({ where: { id: draft.id } }) : null;
+}
+
+/** A failed draft save, in the same words a failed Generate gives for the same refusal. */
+function sendDraftSaveError(res, error, fallback) {
+  if (error?.status) return res.status(error.status).json({ message: error.message });
+  const refusal = quotationSaveRefusal(error);
+  if (refusal) {
+    // The code and the constraint, never the payload, which carries the client's own details.
+    console.error(fallback, error.code, error.meta);
+    return res.status(400).json({ message: refusal });
+  }
+  console.error(fallback, error);
+  return res.status(500).json({ message: fallback });
+}
+
+/**
+ * Preview: the client's copy of a quotation that has not been saved, so the studio can read it
+ * before generating it.
+ *
+ * The generator's form as it stands - unsaved edits included - goes through exactly what a save
+ * does to it (`quotationPayloadSchema`, then `quotationVersionColumns` for the brand snapshot, the
+ * logo, the name) and comes back exactly as the client's page receives a version
+ * (`clientFacingQuotation`, the brand's presentation, whether a payment page exists) - but nothing
+ * is written. No row, no quotation number, no version, no link: the version below lives only in
+ * this response, so opening a preview a hundred times changes nothing in the register.
+ *
+ * Behind the screen's own guard (`SALES / Quotation Management`, READ_WRITE as a POST), the one
+ * that saves the quotation it previews. An incomplete quotation previews as far as it goes, the way
+ * a draft saves: only the figures' own rules refuse.
+ */
+async function previewQuotation(req, res) {
+  const parsed = parseQuotationPayload(req, res);
+  if (!parsed) return;
+  try {
+    const columns = await quotationVersionColumns(parsed);
+    const now = new Date();
+    const row = {
+      ...columns,
+      id: null,
+      quotationNumber: null,
+      version: null,
+      // Not a quotation yet: it is given its number when it is generated.
+      quotationId: "Preview",
+      publicToken: null,
+      status: QUOTATION_STATUS.DRAFT,
+      quotationDate: now,
+      createdAt: now,
+      updatedAt: now,
+      linkExpiresAt: null,
+      deletedAt: null,
+    };
+    const [brandSnapshot, paymentDetails] = await Promise.all([
+      quotationBrands.presentationForQuotation(row),
+      quotationBrands.paymentDetailsForQuotation(row),
+    ]);
+    // A preview is not a link: nothing to download, no expiry, and no public path to reach.
+    const { publicPath: _path, ...shown } = serializeQuotation(row);
+    return res.json({ data: { ...clientFacingQuotation({ ...shown, brandSnapshot, allowClientDownload: false, paymentDetailsAvailable: Boolean(paymentDetails) }), preview: true } });
+  } catch (error) {
+    if (error?.status) return res.status(error.status).json({ message: error.message });
+    console.error("Unable to preview quotation:", error);
+    return res.status(500).json({ message: "Unable to preview the quotation." });
+  }
+}
+
+/** Save Draft on a new quotation: version 01 of a new chain, kept as a draft. */
+async function createQuotationDraft(req, res) {
+  const parsed = parseQuotationPayload(req, res);
+  if (!parsed) return;
+  const { answers } = draftAnswers(parsed);
+  const missing = draftRefusal(answers);
+  if (missing) return res.status(400).json({ message: missing });
+  try {
+    const people = parsed.sharedEmployeeIds ? await quotationShares.shareablePeople(parsed.sharedEmployeeIds) : null;
+    const quotation = await insertQuotationVersion(
+      async () => nextQuotationChainNumber(answers),
+      answers,
+      Number(req.user?.id) || null,
+      { draft: true },
+    );
+    await applyQuotationShares(req, quotation, people);
+    return res.status(201).json({ data: serializeQuotation(quotation) });
+  } catch (error) {
+    return sendDraftSaveError(res, error, "Unable to save the draft.");
+  }
+}
+
+/** Save Draft on a draft: the same row, same number, rewritten with what is on screen now. */
+async function updateQuotationDraft(req, res) {
+  const parsed = parseQuotationPayload(req, res);
+  if (!parsed) return;
+  const { answers, openedAt } = draftAnswers(parsed);
+  // Without the version it was opened at, a save could not tell whether it is overwriting a newer one.
+  if (!openedAt) return res.status(400).json({ message: DRAFT_UNOPENED });
+  const missing = draftRefusal(answers);
+  if (missing) return res.status(400).json({ message: missing });
+  try {
+    const people = parsed.sharedEmployeeIds ? await quotationShares.shareablePeople(parsed.sharedEmployeeIds) : null;
+    const draft = await draftForWrite(req, res);
+    if (!draft) return undefined;
+    const saved = await writeDraft(draft, openedAt, await quotationVersionColumns(lockedToDraft(answers, draft)));
+    if (!saved) return res.status(409).json({ message: DRAFT_CHANGED });
+    await applyQuotationShares(req, saved, people);
+    return res.json({ data: serializeQuotation(saved) });
+  } catch (error) {
+    return sendDraftSaveError(res, error, "Unable to save the draft.");
+  }
+}
+
+/**
+ * Generate Quotation on a draft: the draft becomes a generated version in place.
+ *
+ * Same row, same number, same token - the quotation the studio has been calling by that number
+ * is the one the client now receives. Checked as a new quotation is (every line one the brand
+ * still offers), stamped with today's logo and brand snapshot, dated now, and its link opens for
+ * five days from this moment. From here it is a generated version like any other.
+ */
+async function generateQuotationDraft(req, res) {
+  const parsed = parseQuotationPayload(req, res);
+  if (!parsed) return;
+  const { answers, openedAt } = draftAnswers(parsed);
+  if (!openedAt) return res.status(400).json({ message: DRAFT_UNOPENED });
+  // The branch the number was drawn from cannot be emptied on the way out either.
+  const missing = draftRefusal(answers);
+  if (missing) return res.status(400).json({ message: missing });
+  try {
+    const people = parsed.sharedEmployeeIds ? await quotationShares.shareablePeople(parsed.sharedEmployeeIds) : null;
+    const draft = await draftForWrite(req, res);
+    if (!draft) return undefined;
+    const withBrand = lockedToDraft(answers, draft);
+    await quotationBrands.assertNewSelectionsOffered(withBrand, null);
+    const now = new Date();
+    const saved = await writeDraft(draft, openedAt, {
+      ...(await quotationVersionColumns(withBrand)),
+      status: QUOTATION_STATUS.GENERATED,
+      quotationDate: now,
+      linkExpiresAt: quotationLinkExpiry(now),
+    });
+    if (!saved) return res.status(409).json({ message: DRAFT_CHANGED });
+    await applyQuotationShares(req, saved, people);
+    return res.json({ data: serializeQuotation(saved) });
+  } catch (error) {
+    return sendDraftSaveError(res, error, "Unable to generate the quotation.");
+  }
+}
+
 /**
  * Re-enables a version's public link for another five days.
  *
@@ -2140,6 +3201,8 @@ async function renewQuotationLink(req, res) {
   try {
     const quotation = await scopedQuotation(req, req.params.id);
     if (!quotation) return res.status(404).json({ message: "Quotation not found." });
+    // A draft's link starts its five days when the draft is generated, and not before.
+    if (isDraftQuotation(quotation)) return res.status(409).json({ message: DRAFT_NOT_GENERATED });
     const now = new Date();
     const updated = await prisma.salesQuotation.update({
       where: { id: quotation.id },
@@ -2152,16 +3215,148 @@ async function renewQuotationLink(req, res) {
   }
 }
 
+const FINALIZED_DELETE_REFUSAL = "A finalized quotation cannot be deleted. Unfinalize it first.";
+
 /**
- * Deleting one quotation, as the route and the bulk delete both do it.
+ * Finalize: the version open in the generator becomes the finalized one - locked, its link open for
+ * good. No version is raised and nothing in the document is touched.
  *
- * `scopedQuotation` is what narrows the id to one this caller may touch, so an id arriving in the
- * body of a bulk request is refused exactly as the same id in the URL would be. Throws rather than
- * answering, so the bulk runner counts it.
+ * Refused for a draft (nothing has been sent), for a version that is not its chain's current one
+ * (what the client has is the latest), and for a version whose link has lapsed - a lapsed link is
+ * reopened by Re-enable, the explicit and permissioned way back, never as a side effect of this. When
+ * the generator sends what it has on screen (`payload`) and that differs from the saved version, it
+ * is refused too: what would be finalized is not what the person is looking at, so they save it as a
+ * new version first.
+ *
+ * Idempotent and safe under a double press: one conditional update takes it; a second finds it
+ * already finalized and answers with it unchanged. Run Serializable, re-checking that no later version
+ * was raised meanwhile - with `createQuotationVersion` checking the other way, one of the two wins.
+ */
+async function finalizeQuotation(req, res) {
+  try {
+    const quotation = await scopedQuotation(req, req.params.id);
+    if (!quotation) return res.status(404).json({ message: "Quotation not found." });
+    if (isDraftQuotation(quotation)) return res.status(409).json({ message: DRAFT_NOT_GENERATED });
+    if (isFinalizedQuotation(quotation)) return res.json({ message: "This quotation is already finalized.", data: serializeQuotation(await withFinalizationNames(quotation)), unchanged: true });
+    if (quotationLinkState(quotation).linkExpired) return res.status(409).json({ message: "This version's link has expired. Re-enable the link first, then finalize it." });
+    if (req.body?.payload !== undefined) {
+      const parsed = quotationPayloadSchema.safeParse(req.body.payload);
+      // What is on screen is not a quotation that could be saved: it cannot be what was saved either.
+      if (!parsed.success) return res.status(409).json({ message: FINALIZE_UNSAVED });
+      const onScreen = await quotationVersionColumns({ ...parsed.data, quotationBrand: quotation.quotationBrand || quotationBrands.brandCodeOfPayload(quotation.payload), vertical: quotation.payload?.vertical || parsed.data.vertical || null });
+      if (documentAnswers(onScreen) !== documentAnswers(quotation)) return res.status(409).json({ message: FINALIZE_UNSAVED });
+    }
+    const now = new Date();
+    const userId = Number(req.user?.id) || null;
+    /*
+     * One finalized version per quotation, and never by unfinalizing another: the quotation's
+     * versions are locked `FOR UPDATE`, and if a *different* version is finalized the request is
+     * refused and nothing is written. Two finalizes of two versions at once take turns on the lock,
+     * so only the first succeeds; the unique `finalized_chain_key` refuses a second one even so.
+     * Only this version's row is written.
+     */
+    const taken = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM sales_quotation WHERE quotation_number = ${quotation.quotationNumber} FOR UPDATE`;
+      const other = await tx.salesQuotation.findFirst({ where: { quotationNumber: quotation.quotationNumber, deletedAt: null, id: { not: quotation.id }, finalizedAt: { not: null }, unfinalizedAt: null }, select: { id: true } });
+      if (other) throw Object.assign(new Error(ANOTHER_FINALIZED), { status: 409 });
+      const { count } = await tx.salesQuotation.updateMany({
+        where: { id: quotation.id, deletedAt: null, OR: [{ finalizedAt: null }, { unfinalizedAt: { not: null } }] },
+        data: { finalizedAt: now, finalizedByUserId: userId, unfinalizedAt: null, unfinalizedByUserId: null },
+      });
+      return count;
+    }, { timeout: 20000 });
+    const fresh = await withFinalizationNames(await prisma.salesQuotation.findUnique({ where: { id: quotation.id } }));
+    return res.json({ message: taken ? "Quotation finalized. Its link no longer expires." : "This quotation is already finalized.", data: serializeQuotation(fresh), ...(taken ? {} : { unchanged: true }) });
+  } catch (error) {
+    if (error?.status) return res.status(error.status).json({ message: error.message });
+    // The database's own guard: another version was finalized at the same moment.
+    if (error?.code === "P2002") return res.status(409).json({ message: ANOTHER_FINALIZED });
+    if (error?.code === "P2034") return res.status(409).json({ message: "This quotation was changed at the same moment. Please try again." });
+    console.error("Unable to finalize the quotation:", error);
+    return res.status(500).json({ message: "Unable to finalize the quotation." });
+  }
+}
+
+/**
+ * Unfinalize: the version stays exactly as it was finalized, and is marked previously finalized. Its
+ * link goes back on a five-day clock from now - neither cut off at once nor open for good - and the
+ * chain is open again, so the next edit raises the next version as always. No version is raised.
+ * Idempotent: a version that is not finalized answers with itself unchanged.
+ */
+async function unfinalizeQuotation(req, res) {
+  try {
+    const quotation = await scopedQuotation(req, req.params.id);
+    if (!quotation) return res.status(404).json({ message: "Quotation not found." });
+    /*
+     * A version a project has published Sale Extras onto stays finalized: the revisions are measured
+     * from it and the client's link shows them on it. Drafts alone do not hold it. Checked under a
+     * lock on the version, which publishing takes too.
+     */
+    const now = new Date();
+    // The check and the write are one step under the version's lock, which publishing takes too.
+    const { count, heldByExtras } = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM sales_quotation WHERE id = ${quotation.id} FOR UPDATE`;
+      if (await tx.projectSaleExtraRevision.count({ where: { salesQuotationId: quotation.id } })) return { count: 0, heldByExtras: true };
+      const written = await tx.salesQuotation.updateMany({
+        where: { id: quotation.id, deletedAt: null, finalizedAt: { not: null }, unfinalizedAt: null },
+        data: { unfinalizedAt: now, unfinalizedByUserId: Number(req.user?.id) || null, linkExpiresAt: quotationLinkExpiry(now) },
+      });
+      return { count: written.count, heldByExtras: false };
+    });
+    if (heldByExtras) {
+      return res.status(409).json({ message: "This quotation has published extras on its project. Unfinalizing it would leave the client's quotation inconsistent with what has been published, so it cannot be unfinalized." });
+    }
+    const fresh = await withFinalizationNames(await prisma.salesQuotation.findUnique({ where: { id: quotation.id } }));
+    return res.json({ message: count ? "Version unfinalized. It is kept exactly as it was and can be edited again; saving raises a new version." : "This version is not finalized.", data: serializeQuotation(fresh), ...(count ? {} : { unchanged: true }) });
+  } catch (error) {
+    console.error("Unable to unfinalize the quotation:", error);
+    return res.status(500).json({ message: "Unable to unfinalize the quotation." });
+  }
+}
+
+const FINALIZE_UNSAVED = "You have changes that are not saved. Save them as a new version first, then finalize that version.";
+
+/**
+ * Deleting one version of a quotation, as the row menu's Delete does it. Earlier versions of the
+ * chain are kept; the bulk delete takes the whole chain - see `deleteQuotationChainRecord`.
+ *
+ * `scopedQuotation` is what narrows the id to one this caller may touch.
  */
 async function deleteQuotationRecord(req, id) {
-  if (!(await scopedQuotation(req, id))) throw new Error("Quotation not found.");
+  const quotation = await scopedQuotation(req, id);
+  if (!quotation) throw new Error("Quotation not found.");
+  if (isFinalizedQuotation(quotation)) throw Object.assign(new Error(FINALIZED_DELETE_REFUSAL), { status: 409 });
   await prisma.salesQuotation.update({ where: { id }, data: { deletedAt: new Date() } });
+  return { id };
+}
+
+/**
+ * Deleting a whole quotation - every live version of its chain - as the register's bulk delete does.
+ *
+ * A register row is a chain, and its id is the chain's current version. Deleting only that version,
+ * as the row menu does, brings the chain straight back as its previous version, so a register of
+ * nine ticked and deleted still read nine. The tick boxes mean the rows themselves.
+ *
+ * The id must still be the chain's **current** version: a version raised since the register was
+ * read is one the reader never saw, and is not deleted on their behalf. Every version is put through
+ * `scopedQuotation`, and one the caller may not change refuses the whole chain rather than leaving
+ * half of it. Throws rather than answering, so the bulk runner counts it.
+ */
+async function deleteQuotationChainRecord(req, id) {
+  const current = await scopedQuotation(req, id);
+  if (!current) throw new Error("Quotation not found.");
+  const versions = await prisma.salesQuotation.findMany({
+    where: { quotationNumber: current.quotationNumber, deletedAt: null },
+    select: { id: true, version: true },
+  });
+  if (versions.some((version) => version.version > current.version)) throw new Error("Quotation has a newer version.");
+  if (await chainIsFinalized(current.quotationNumber)) throw new Error(FINALIZED_DELETE_REFUSAL);
+  const reachable = await Promise.all(versions.map((version) => (version.id === current.id ? current : scopedQuotation(req, version.id))));
+  if (reachable.some((version) => !version)) throw new Error("Quotation not found.");
+  await prisma.salesQuotation.updateMany({
+    where: { id: { in: versions.map((version) => version.id) }, deletedAt: null },
+    data: { deletedAt: new Date() },
+  });
   return { id };
 }
 
@@ -2171,6 +3366,7 @@ async function deleteQuotation(req, res) {
     return res.status(204).send();
   } catch (error) {
     if (error?.message === "Quotation not found.") return res.status(404).json({ message: error.message });
+    if (error?.status) return res.status(error.status).json({ message: error.message });
     console.error("Unable to delete quotation:", error);
     return res.status(500).json({ message: "Unable to delete quotation." });
   }
@@ -2182,38 +3378,101 @@ async function deleteQuotation(req, res) {
  * An expired link answers 410 rather than 404: the client is not looking at a wrong address, they
  * are looking at one that has lapsed, and the page tells them so and says who to ask.
  */
+/**
+ * The answer every public quotation endpoint gives a link that has lapsed: the 410 it always was,
+ * and nothing about the quotation (`expiredLink`) - not whose it was, not when it lapsed.
+ */
+function sendQuotationExpired(res) {
+  return res.status(410).json({ message: EXPIRED_LINK_MESSAGE, expiredLink: expiredLink() });
+}
+
+/**
+ * A quotation as the client is sent it: the rupees the discount came to, and no percentage at all.
+ *
+ * The client's page prints the discount as an amount (`quotationDiscountBreakdown`), and the record
+ * behind it must not carry what the page leaves out - a client reading the response would otherwise
+ * find the share of the price the studio took off. So the quotation's own percentage (the `discount`
+ * column, and `discount` in its payload) goes, and so does every default discount rate riding along
+ * in a snapshot (`defaultDiscountPercent`, on the brand and the studio's rates). In its place the
+ * payload always holds `discountAmount`: as saved, or - for a quotation saved before it was - worked
+ * out from the percentage exactly as the page used to, so an old quotation prints the same rupees.
+ */
+// Any field that could say the percentage, by any spelling - `discount` itself, `defaultDiscountPercent`,
+// `discountPercentage`, `discountPct`, `discountRate` - wherever it sits in the record.
+const CLIENT_HIDDEN_DISCOUNT_KEY = /^discount$|discount.*(percent|pct|rate)/i;
+
+function clientFacingQuotation(data) {
+  const payload = data.payload && typeof data.payload === "object" ? data.payload : {};
+  const number = (value) => (value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) ? null : Number(value));
+  const percent = Math.min(100, Math.max(0, number(payload.discount) ?? number(data.discount) ?? 0));
+  const cost = (number(payload.subtotal) ?? number(data.subtotal) ?? 0) + Math.max(0, number(payload.performanceCost) ?? 0);
+  const saved = number(payload.discountAmount);
+  const discountAmount = saved ?? (percent > 0 ? Math.round(cost * (percent / 100)) : 0);
+  const withoutRates = (value) => {
+    if (Array.isArray(value)) return value.map(withoutRates);
+    if (!value || typeof value !== "object" || value instanceof Date) return value;
+    return Object.fromEntries(Object.entries(value).filter(([key]) => !CLIENT_HIDDEN_DISCOUNT_KEY.test(key)).map(([key, entry]) => [key, withoutRates(entry)]));
+  };
+  // The Round Off Discount is folded into the total and never shown to the client, so it is not sent.
+  const { discount: _payloadPercent, roundOffDiscount: _roundOff, ...rest } = payload;
+  // Who finalized or unfinalized it is the studio's business; the client is told only that the link holds.
+  const { discount: _percent, finalization: _finalization, finalizedChainKey: _chainKey, finalizedByUserId: _by, unfinalizedByUserId: _unBy, unfinalizedAt: _unAt, finalizedByUser: _byUser, unfinalizedByUser: _unByUser, ...quotation } = data;
+  return withoutRates({ ...quotation, payload: { ...rest, discountAmount } });
+}
+
 async function publicQuotation(req, res) {
   try {
     const token = String(req.params.token || "").trim();
     if (!/^[A-Za-z0-9_-]{8}$/.test(token)) return res.status(404).json({ message: "Quotation not found." });
     const quotation = await prisma.salesQuotation.findUnique({ where: { publicToken: token } });
-    if (!quotation || quotation.deletedAt) return res.status(404).json({ message: "Quotation not found." });
-    if (quotationLinkState(quotation).linkExpired) {
-      return res.status(410).json({ message: "This quotation link has expired. Please contact your Don't Blink Studioz representative for a fresh link." });
+    // A draft is not there at all to a client - not "expired", which would say it was once sent.
+    if (!quotation || quotation.deletedAt || isDraftQuotation(quotation)) return res.status(404).json({ message: "Quotation not found." });
+    // A lapsed link stays lapsed, except for the PDF renderer printing a client portal download,
+    // which carries a one-time pass for exactly this quotation (`services/quotationPrintPass.js`).
+    if (quotationLinkState(quotation).linkExpired && !hasPrintPass(req, token)) {
+      return sendQuotationExpired(res);
     }
     /*
      * What the page prints beyond the rows - the brand's wording and pictures, the studio's name,
      * the branch's website - resolved once here: the version's own snapshot, with today's answer
      * only where a snapshot older than this shape is silent. See `presentationForQuotation`.
      */
-    const brandSnapshot = await quotationBrands.presentationForQuotation(quotation);
     /*
+     * Three independent reads, together rather than in turn. Beside the presentation:
+     *
      * Whether this client may save the quotation as a file - the brand's own answer, read live.
      * The page hides its download control without it, and `publicQuotationPdf` refuses the request
      * behind it, so the control is a courtesy rather than the protection.
+     *
+     * And whether there is a payment page to link to: the Assigned Branch holds some way to be
+     * paid. The details themselves are served by `GET /:token/payment` and never ride on the
+     * record; this only decides whether the pricing card prints **For Payment**. False on a branch
+     * the register cannot place, so the quotation opens exactly as it always has.
      */
-    const allowClientDownload = await quotationBrands.allowsClientDownload(quotation);
-    return res.json({ data: { ...serializeQuotation(quotation), brandSnapshot, allowClientDownload } });
+    /*
+     * And the project's latest published Sale Extras revision on this exact finalized version
+     * (`sale-extras/totals.js`), added after `clientFacingQuotation` - whose key-stripping is for the
+     * quotation's own fields - and only when there is one, so a quotation without extras answers
+     * exactly as it always has.
+     */
+    const [brandSnapshot, allowClientDownload, paymentDetails, saleExtras] = await Promise.all([
+      quotationBrands.presentationForQuotation(quotation),
+      quotationBrands.allowsClientDownload(quotation),
+      quotationBrands.paymentDetailsForQuotation(quotation),
+      saleExtrasTotals.publicSaleExtrasFor(quotation),
+    ]);
+    const data = clientFacingQuotation({ ...serializeQuotation(quotation), brandSnapshot, allowClientDownload, paymentDetailsAvailable: Boolean(paymentDetails) });
+    return res.json({ data: saleExtras ? { ...data, saleExtras } : data });
   } catch (error) {
     console.error("Unable to load public quotation:", error);
     return res.status(500).json({ message: "Unable to load quotation." });
   }
 }
 
-/** Renders one version and answers with the file. Shared by the client's route and the studio's. */
-async function sendQuotationPdf(res, quotation) {
+/** Renders one version and answers with the file. Shared by the client's routes (the link and the client portal) and the studio's. */
+async function sendQuotationPdf(res, quotation, renderOptions = {}) {
   const { renderQuotationPdf } = require("../../../services/quotationPdfService");
-  const pdf = await renderQuotationPdf(quotation.publicToken);
+  const pdf = await renderQuotationPdf(quotation.publicToken, renderOptions);
 
   // Named for the version rather than the token, so a client who saves several can tell them
   // apart in a downloads folder - and can tell v1 from v2 of the same quotation.
@@ -2239,20 +3498,32 @@ async function sendQuotationPdf(res, quotation) {
 async function publicQuotationPdf(req, res) {
   const token = String(req.params.token || "").trim();
   if (!/^[A-Za-z0-9_-]{8}$/.test(token)) return res.status(404).json({ message: "Quotation not found." });
+  // The page's Download points the browser here as a page load: a refusal sends it back to the
+  // quotation (which then shows its own expired or not-found page where that is the reason)
+  // rather than replacing the quotation with JSON. A fetch keeps the JSON answers below.
+  const page = wantsPage(req);
+  const { frontendOrigin } = require("../../../services/quotationPdfService");
+  // A refusal sent back as a page redirect is still a miss to the link limiter, which would
+  // otherwise read the 303 as success and let guesses through for free.
+  const refuse = (status, body, send = () => res.status(status).json(body)) => {
+    res.locals.linkMiss = true;
+    return page ? backToPage(res, `${frontendOrigin()}/q/${token}`) : send();
+  };
   try {
     const quotation = await prisma.salesQuotation.findUnique({ where: { publicToken: token } });
-    if (!quotation || quotation.deletedAt) return res.status(404).json({ message: "Quotation not found." });
+    if (!quotation || quotation.deletedAt || isDraftQuotation(quotation)) return refuse(404, { message: "Quotation not found." });
     if (quotationLinkState(quotation).linkExpired) {
-      return res.status(410).json({ message: "This quotation link has expired. Please contact your Don't Blink Studioz representative for a fresh link." });
+      return refuse(410, null, () => sendQuotationExpired(res));
     }
     if (!(await quotationBrands.allowsClientDownload(quotation))) {
-      return res.status(403).json({ message: "This quotation is available to read online only. Please contact your Don't Blink Studioz representative for a copy." });
+      return refuse(403, { message: "This quotation is available to read online only. Please contact your Don't Blink Studioz representative for a copy." });
     }
 
     return await sendQuotationPdf(res, quotation);
   } catch (error) {
     console.error("Unable to render quotation PDF:", error);
-    return res.status(500).json({ message: "Unable to build the quotation PDF." });
+    if (res.headersSent) return undefined;
+    return refuse(500, { message: "Unable to build the quotation PDF." });
   }
 }
 
@@ -2271,6 +3542,7 @@ async function quotationPdf(req, res) {
   try {
     const quotation = await scopedQuotation(req, req.params.id);
     if (!quotation) return res.status(404).json({ message: "Quotation not found." });
+    if (isDraftQuotation(quotation)) return res.status(409).json({ message: DRAFT_NOT_GENERATED });
     if (!quotation.publicToken) return res.status(409).json({ message: "This quotation has no link to render from yet." });
     if (quotationLinkState(quotation).linkExpired) {
       return res.status(410).json({ message: "This quotation's link has expired. Re-enable it to download the PDF." });
@@ -2295,25 +3567,34 @@ async function listSourceBranches(req, res) {
 async function listCrmEmployees(req, res) {
   try {
     const data = await salesEmployees({
-      select: { id: true, employeeId: true, employeeName: true, department: true, designation: true, emailId: true, workEmailId: true },
+      select: { id: true, employeeId: true, employeeName: true, department: true, designation: true, emailId: true, workEmailId: true, profilePhotoUrl: true },
     });
-    return res.json({ data });
+    return res.json({ data: data.map((row) => ({ ...row, profilePhotoUrl: listPhotoUrl(row.profilePhotoUrl) })) });
   } catch (error) {
     console.error("Unable to load SALES employees:", error);
     return res.status(500).json({ message: "Unable to load SALES employees." });
   }
 }
 
+/**
+ * The working employees a picker offers, with their photos through `listPhotoUrl`.
+ *
+ * One list for every picker on this router - whoever is invited to a meeting, whoever a quotation
+ * is shared with - so two screens cannot come to disagree about who is still at the studio.
+ * Emails are included so anywhere that invites somebody can do it without a second lookup.
+ */
+async function salesEmployeeOptions() {
+  const rows = await prisma.employee.findMany({
+    where: { archivedAt: null, employmentStatus: { in: await workingEmployeeStatuses() } },
+    select: { id: true, employeeId: true, employeeName: true, department: true, designation: true, employmentStatus: true, emailId: true, workEmailId: true, profilePhotoUrl: true },
+    orderBy: { employeeName: "asc" },
+  });
+  return rows.map((row) => ({ ...row, profilePhotoUrl: listPhotoUrl(row.profilePhotoUrl) }));
+}
+
 async function listActiveEmployees(req, res) {
   try {
-    const data = await prisma.employee.findMany({
-      where: { archivedAt: null, employmentStatus: { in: await workingEmployeeStatuses() } },
-      // Emails are included so anywhere that invites an employee - the CRM's meeting guest
-      // picker, for one - can do it from this list rather than needing its own lookup.
-      select: { id: true, employeeId: true, employeeName: true, department: true, designation: true, employmentStatus: true, emailId: true, workEmailId: true },
-      orderBy: { employeeName: "asc" },
-    });
-    return res.json({ data });
+    return res.json({ data: await salesEmployeeOptions() });
   } catch (error) {
     console.error("Unable to load active employee options:", error);
     return res.status(500).json({ message: "Unable to load active employee options." });
@@ -2458,13 +3739,19 @@ async function projectAdvanceOptions(req, res) {
       prisma.employee.findMany({
         where: { archivedAt: null, employmentStatus: { in: await workingEmployeeStatuses() } },
         orderBy: { employeeName: "asc" },
-        select: { id: true, employeeId: true, employeeName: true },
+        select: { id: true, employeeId: true, employeeName: true, profilePhotoUrl: true },
       }),
-      prisma.bankAccount.findMany({ where: { isActive: true }, orderBy: { name: "asc" }, select: { name: true } }),
+      /*
+       * The studio's accounts, from the branch register - the one place they are kept since the
+       * Accounts module's own bank-account list was retired. The label is the value stored on the
+       * record, so it is built in `services/branchBankAccounts.js` and nowhere else.
+       */
+      receivedIntoOptions(),
     ]);
     // The same shape the advance form already reads off the Accounts options, so the panel needs no
     // second way of understanding an answer.
-    return res.json({ data: { employees, accounts: accounts.map((account) => account.name) } });
+    // Already the labels the form offers and the record keeps - see `receivedIntoOptions`.
+    return res.json({ data: { employees: employees.map((row) => ({ ...row, profilePhotoUrl: listPhotoUrl(row.profilePhotoUrl) })), accounts } });
   } catch (error) {
     console.error("Unable to load the advance options:", error);
     return res.status(500).json({ message: "Unable to load the advance options." });
@@ -2496,19 +3783,24 @@ async function recordProjectAdvance(req, res) {
     if (!project) return res.status(404).json({ message: "That project could not be found." });
 
     const actorId = Number(req.user.id) || null;
-    const created = await prisma.$transaction((tx) => recordCashEntry(
-      {
-        ...req.body,
-        // From the URL, never the body: the advance belongs to the project that was just created.
-        projectId: project.id,
-        // Money in. A booking advance is a receipt, and forcing it here is what stops this route
-        // being a way to record an expense without `ACCOUNTS / Cash Management`.
-        entryType: "Received",
-      },
-      actorId,
-      tx,
-      { enforceBranchReach: true, schema: cashFormEntrySchema },
-    ));
+    const { settles: settlesBody, ...body } = req.body || {};
+    const settles = settlesBody ? cashSettlesSchema.safeParse(settlesBody) : null;
+    if (settles && !settles.success) return res.status(400).json({ message: settles.error.issues[0]?.message || "Check which payment this settles." });
+    const entry = {
+      ...body,
+      // From the URL, never the body: the advance belongs to the project that was just created.
+      projectId: project.id,
+      // Money in. A booking advance is a receipt, and forcing it here is what stops this route
+      // being a way to record an expense without `ACCOUNTS / Cash Management`.
+      entryType: "Received",
+    };
+    // Tied to the schedule saved with the booking, through Accounts' own rule: full clears that
+    // payment, partial splits the rest off with its due date. The payment must be this project's.
+    const created = await prisma.$transaction((tx) => (settles
+      ? settleScheduledPayment(tx, settles.data.paymentScheduleId, { ...settles.data, projectId: project.id }, entry, actorId, { schema: cashFormEntrySchema })
+      : recordCashEntry(entry, actorId, tx, { enforceBranchReach: true, schema: cashFormEntrySchema })));
+    clientPush.notifyPaymentReceived(created);
+    await logProjectActivity({ projectId: project.id, area: "PROJECT", action: "ADVANCE_RECORDED", detail: `Advance of ₹${created.amount} recorded (${created.entryId})`, userId: Number(req.user.id) });
     return res.status(201).json({ data: cashEntryRow(created) });
   } catch (error) {
     /*
@@ -2523,14 +3815,239 @@ async function recordProjectAdvance(req, res) {
   }
 }
 
+/*
+ * Create Project → Client Credentials: the client's own sign-in, made with the project.
+ *
+ * Read on its own rather than as a field of `projectSchema`, which the edit and import paths share -
+ * a client login is made once, here, and never by an update or a sheet row. Only the generated
+ * password is taken from the browser: the **username is the client's mobile number** - the project's
+ * Client Main Number, its ten digits without the country code (`clientUsernameFor`) - so it is never
+ * typed, and a username sent anyway is ignored. No email: a client signs in by username, and their
+ * account holds no login email (NULL). What the account is: `role` CLIENT, no IAM roles, linked to
+ * this project, and refused by `protect` everywhere but its own account.
+ */
+const clientLoginSchema = z.object({ temporaryPassword: generatedTemporaryPassword });
+
+/**
+ * A client's username: the ten digits of their mobile number, without the country code - what they
+ * would type to sign in - or null for a number that is not a valid one. Held to the username rule
+ * every login shares (`loginCredentials`), which ten digits always meet.
+ */
+function clientUsernameFor(clientMainNumber) {
+  const normalized = normalizeClientMainNumber(clientMainNumber);
+  if (!normalized) return null;
+  const username = normalized.replace(/\D/g, "").slice(-10);
+  return loginCredentialFields.username.safeParse(username).success && username.length === 10 ? username : null;
+}
+
+/**
+ * The client login asked for, checked and with its password hashed, or `null` when none was.
+ *
+ * **On the booking's own permission.** It used to ask for `ADMIN / User Management` as well, on the
+ * reading that making an account is User Management's act wherever it happens. That is true of a
+ * *staff* account, which reaches the studio's own screens; a client login reaches one project's
+ * portal and nothing else, and it is part of booking that project rather than an errand belonging
+ * to somebody else. Asking for the admin permission meant the person booking could not finish the
+ * booking: they filled the Client Credentials section in, pressed save, and the whole project was
+ * refused with a 403 about a permission the Sales screen never mentions.
+ *
+ * So the guard on the route is the whole of it - `SALES / Sales Manager` here, and the project's
+ * own editor on `POST /projects/:id/client-login`. Thrown errors carry their status for the route
+ * to answer with.
+ */
+/**
+ * The client login a mobile number already has, or null. One person, one login: a client who comes
+ * back for another event keeps the login made with their first project, and reaches the new one
+ * through the number (the client portal reads every project saved with it). Only a CLIENT account
+ * counts - a staff username that happens to be the same ten digits is not this client's login.
+ */
+async function existingClientLoginFor(clientMainNumber) {
+  const username = clientUsernameFor(clientMainNumber);
+  if (!username) return null;
+  const user = await prisma.user.findUnique({ where: { username }, select: { username: true, role: true, status: true, mustChangePassword: true } });
+  return user && user.role === CLIENT_ROLE ? { username: user.username, active: user.status === "ACTIVE", passwordChanged: !user.mustChangePassword } : null;
+}
+
+async function clientLoginFor(req, { clientMainNumber } = {}) {
+  const input = req.body?.clientLogin;
+  if (input === undefined || input === null) return null;
+  const parsed = clientLoginSchema.safeParse(input);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const field = { temporaryPassword: "Temporary Password" }[issue?.path?.[0]] || "Client Credentials";
+    throw Object.assign(new Error(`Client Credentials - ${field}: ${issue?.message || "is not valid"}`), { status: 400 });
+  }
+  const username = clientUsernameFor(clientMainNumber);
+  if (!username) throw Object.assign(new Error("Client Credentials - Username: Add the client's 10-digit mobile number as the Client Main Number first."), { status: 400 });
+  // A returning client: their login already exists, so none is made - the project is saved without
+  // its own, and the client sees it in the app through the number.
+  if (await existingClientLoginFor(clientMainNumber)) return null;
+  const taken = await takenLoginField({ username });
+  // Only a staff username can hold the number here (a client's own login was taken care of above).
+  if (taken === "username") throw Object.assign(new Error(`Client Credentials: The mobile number ${username} is already used as a login username.`), { status: 409 });
+  return { username, passwordHash: await bcrypt.hash(parsed.data.temporaryPassword, 12) };
+}
+
+/**
+ * The client's account itself, made for `project` - on Create Project inside the project's own
+ * transaction, and from Edit Sale Details for a project booked without one. `role` is set here,
+ * always: the column's default is SUPER_ADMIN. Made with `mustChangePassword`: the Beam Craft app asks
+ * the client, on their first sign-in, to set their own in place of the one the studio sent
+ * (`POST /api/user/change-password`, which clears it); Client Credentials shows which it is.
+ */
+function createClientLoginUser(client, project, clientLogin) {
+  return client.user.create({
+    data: {
+      // The project's name, cut to fit `user.name` (191) - the group name may run to 500, and a
+      // name too long for the column would otherwise refuse the save.
+      name: String(project.whatsappGroupName || "Client").slice(0, 191),
+      // No login email: a client signs in by username (`user.email` is nullable for this).
+      email: null,
+      username: clientLogin.username,
+      password: clientLogin.passwordHash,
+      role: CLIENT_ROLE,
+      status: "ACTIVE",
+      clientProjectId: project.id,
+      branchId: project.branchId,
+      mustChangePassword: true,
+      whatsappRequired: false,
+    },
+    select: { id: true },
+  });
+}
+
+/**
+ * Edit Sale Details → Client Credentials: the login a project already has, if any - its username
+ * and whether it is live. Never the password, which is held only as a hash.
+ *
+ * Read by whoever may read the project, which is what the route already asks for: the username is
+ * the client's own mobile number, written on the booking a line above. It asked for
+ * `ADMIN / User Management` until the booking's permission was made the whole of this.
+ */
+/**
+ * Create Project → Client Credentials, asked as the number is typed: whether that mobile number
+ * already has a client login (a returning client). The form then shows it instead of making a new one.
+ */
+async function getClientLoginByNumber(req, res) {
+  try {
+    return res.json({ data: await existingClientLoginFor(String(req.query.number || "")) });
+  } catch (error) {
+    console.error("Unable to look up the client login:", error);
+    return res.status(500).json({ message: "Unable to look up the client login." });
+  }
+}
+
+async function getClientLogin(req, res) {
+  try {
+    const project = await prisma.salesProject.findFirst({
+      where: { id: String(req.params.id), deletedAt: null, AND: [await projectAccessWhere({ userId: Number(req.user.id) })] },
+      select: { clientMainNumber: true, clientLogin: { select: { username: true, status: true, mustChangePassword: true } } },
+    });
+    if (!project) return res.status(404).json({ message: "Project not found." });
+    const login = project.clientLogin;
+    // `passwordChanged`: the client has set their own password in the app, in place of the studio's.
+    if (login) return res.json({ data: { username: login.username, active: login.status === "ACTIVE", passwordChanged: !login.mustChangePassword, shared: false } });
+    // No login of its own: the client may already have one from an earlier event, which reaches this
+    // project too (`shared`).
+    const existing = await existingClientLoginFor(project.clientMainNumber);
+    return res.json({ data: existing ? { ...existing, shared: true } : null });
+  } catch (error) {
+    console.error("Unable to read the client login:", error);
+    return res.status(500).json({ message: "Unable to read the client login." });
+  }
+}
+
+/**
+ * Edit Sale Details → Client Credentials → Create Client Login: a login for a project booked
+ * without one. The same checks as Create Project's (`clientLoginFor`: the username rule, the
+ * generated password), on a project this caller may change; one login per project.
+ *
+ * Whoever may change the booking may give its client a login - the route's own guard
+ * (`answersForAProject` plus `requireProjectEditor`) is the whole of it.
+ */
+async function createClientLogin(req, res) {
+  try {
+    const project = await prisma.salesProject.findFirst({
+      where: { id: String(req.params.id), deletedAt: null, AND: [await projectAccessWhere({ userId: Number(req.user.id), forWrite: true })] },
+      select: { id: true, whatsappGroupName: true, branchId: true, clientMainNumber: true, clientLogin: { select: { id: true } } },
+    });
+    if (!project) return res.status(404).json({ message: "Project not found." });
+    if (project.clientLogin) return res.status(409).json({ message: "Client Credentials: This project already has a client login." });
+    // The project's own number as it is saved - a number changed on the form and not yet saved is not it.
+    // A returning client already signs in with this number, and that login reaches this project too.
+    const existing = await existingClientLoginFor(project.clientMainNumber);
+    if (existing) return res.status(409).json({ message: `Client Credentials: This client already signs in with ${existing.username} - this project shows in their app.` });
+    const clientLogin = await clientLoginFor(req, { clientMainNumber: project.clientMainNumber });
+    if (!clientLogin) return res.status(400).json({ message: "Client Credentials: Generate the client's temporary password." });
+    await createClientLoginUser(prisma, project, clientLogin);
+    return res.status(201).json({ data: { username: clientLogin.username, projectName: project.whatsappGroupName } });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    // Taken between the check and the save - the username, or this project's one login.
+    if (error.code === "P2002") return res.status(409).json({ message: "Client Credentials: That username was just taken, or the project was just given a login. Reload and try again." });
+    console.error("Unable to create the client login:", error);
+    return res.status(500).json({ message: "Unable to create the client login." });
+  }
+}
+
+const clientLoginWhatsAppSchema = z.object({ message: z.string().trim().min(1).max(MAX_MESSAGE_LENGTH) });
+
+/**
+ * Sends a client their login on WhatsApp, from the sender's own WhatsApp - the "Client Login Ready"
+ * dialog's Send WhatsApp, the way an employee's new login is sent (`sendCredentialsWhatsApp`).
+ *
+ * The message comes from the dialog, because the temporary password is readable only there - the
+ * server never sends one back. The **number** is not sent: it is read off the project, so this can
+ * only reach that project's client, and only while the project has a live client login.
+ *
+ * On the booking's permission, like making the login itself: handing a client the credentials for
+ * their own project is the last step of booking it, and the route is already narrowed to projects
+ * this caller may reach (`projectAccessWhere` with `SALES / Sales Manager` below).
+ */
+async function sendClientLoginWhatsApp(req, res) {
+  const parsed = clientLoginWhatsAppSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ message: "Write the message to send.", errors: parsed.error.flatten() });
+  try {
+    const project = await prisma.salesProject.findFirst({
+      where: { id: String(req.params.id), deletedAt: null, AND: [await projectAccessWhere({ userId: Number(req.user.id), permissions: { module: "SALES", feature: "Sales Manager" } })] },
+      select: { clientMainNumber: true, whatsappGroupName: true, clientLogin: { select: { status: true } } },
+    });
+    if (!project) return res.status(404).json({ message: "Project not found." });
+    if (project.clientLogin?.status !== "ACTIVE") return res.status(404).json({ message: "This project has no client login to send." });
+    // Recorded in Settings → WhatsApp Activity Log as a redacted preview: the message holds a
+    // password, so it is never kept and never resent from there - only from this dialog.
+    await whatsappActivity.track({
+      mode: "MANUAL", provider: "baileys", trigger: "CLIENT_LOGIN_CREDENTIALS", eventRef: `client-login:${req.params.id}`,
+      initiatedByUserId: req.user.id, senderUserId: req.user.id, links: { salesProjectId: String(req.params.id) },
+      recipient: { kind: "PERSON", address: project.clientMainNumber, name: project.whatsappGroupName },
+      body: parsed.data.message, preview: "Client login credentials (password withheld)", resendable: false,
+    }, () => sendWhatsAppToPerson({
+      userId: req.user.id,
+      phone: project.clientMainNumber,
+      body: parsed.data.message,
+      noNumberMessage: "This project has no client number. Add one before sending on WhatsApp.",
+    }));
+    return res.json({ message: `Client login sent on WhatsApp to ${project.whatsappGroupName}.` });
+  } catch (error) {
+    if (error?.status) return res.status(error.status).json({ message: error.message });
+    console.error(`[sales] Client login WhatsApp refused for project ${req.params.id}:`, error.message);
+    return res.status(502).json({ message: "Unable to send the client login on WhatsApp." });
+  }
+}
+
 async function createProject(req, res) {
   const parsed = projectSchema.safeParse(cleanData(req.body));
   if (!parsed.success) return res.status(400).json({ message: "Validation failed", errors: parsed.error.flatten() });
+  if (parsed.data.groupType && !parsed.data.vertical) parsed.data.vertical = verticalForGroupType[parsed.data.groupType] || null;
 
   const normalizedClientNumber = normalizeClientMainNumber(parsed.data.clientMainNumber);
   if (!normalizedClientNumber) return res.status(400).json({ message: "Client Main Number must include an editable country code and exactly 10 digits." });
 
   try {
+    // Checked before anything is written, so a refused login leaves no project behind it. The
+    // username is the client's mobile number, the Client Main Number this project is saved with.
+    const clientLogin = await clientLoginFor(req, { clientMainNumber: normalizedClientNumber });
+    const createdShootIds = [];
     const data = await prisma.$transaction(async (transaction) => {
       // `crmLeadStatus` is about the *lead* being converted, not about the project, so it is taken
       // off here with the other two that are not columns - left in, Prisma refuses the create with
@@ -2540,7 +4057,10 @@ async function createProject(req, res) {
       // see the same vertical, which is what stops the booking's code disagreeing with its lead's.
       const projectData = withInferredVertical(raw);
       const { groupName } = await validateProjectPayload(transaction, projectData, { userId: req.user.id });
-      const finalizedQuotationId = await resolveFinalizedQuotation(transaction, quotationId);
+      const finalizedQuotationId = await resolveFinalizedQuotation(transaction, quotationId, projectData.enquiryId);
+      // Sale Extras: the shoots the quotation laid down, and the lines it lists under them, are the baseline.
+      const quotedShoots = await saleExtrasBooking.quotedPlan(transaction, finalizedQuotationId);
+      let quotedShootIndex = 0;
       const creator = await resolveAuthenticatedCreator(transaction, req);
 
       const eventId = await nextEventId(transaction, projectData);
@@ -2572,6 +4092,13 @@ async function createProject(req, res) {
         },
       });
 
+      if (clientLogin) {
+        // The client's sign-in, in the project's own transaction: a project that fails to save takes
+        // the login with it, and a login that clashes with one made a moment ago (the unique
+        // username) takes the project.
+        await createClientLoginUser(transaction, project, clientLogin);
+      }
+
       if (groupName) {
         /*
          * Claimed by deleting it: the row's job - holding a name until a project takes it - is
@@ -2596,15 +4123,21 @@ async function createProject(req, res) {
 
       if (Array.isArray(shoots) && shoots.length) {
         for (const shoot of shoots) {
-          const { services = [], deliverables = [], ...shootData } = shoot;
+          const { services = [], deliverables = [], fromQuotation = false, ...shootData } = shoot;
+          const quotedLines = fromQuotation === true ? quotedShoots[quotedShootIndex] : null;
+          if (quotedLines) quotedShootIndex += 1;
+          const quoted = Boolean(quotedLines);
           const savedShoot = await transaction.projectShoot.create({
-            data: { ...projectShootData(shootData), projectId: project.id, shootId: await nextShootId(transaction, projectData) },
+            // `sortOrder` only when the form's Shoot List was dragged into an order of its own; a whole
+            // number or nothing, so a project created without dragging keeps its shoots in date order.
+            data: { ...projectShootData(shootData), ...(Number.isInteger(shootData.sortOrder) && shootData.sortOrder >= 0 && shootData.sortOrder < 1000 ? { sortOrder: shootData.sortOrder } : {}), projectId: project.id, shootId: await nextShootId(transaction, projectData), ...saleExtrasBooking.baselineFor(quoted, "SHOOT") },
             select: { id: true, projectId: true, dateCreated: true, isMainEvent: true },
           });
+          createdShootIds.push(savedShoot.id);
           await syncProjectMainEvent(transaction, project.id, savedShoot);
 
           const seenServices = new Set();
-          for (const service of services) {
+          for (const [serviceIndex, service] of services.entries()) {
             if (seenServices.has(service.serviceDefinitionId)) {
               const error = new Error("Duplicate services are not allowed for the same shoot.");
               error.status = 409;
@@ -2627,24 +4160,30 @@ async function createProject(req, res) {
                 serviceDetails: null,
                 quantitySessionTiming: null,
                 ...allocationData,
+                // The order the lines were arranged in on Create Project, kept as sent.
+                sortOrder: serviceIndex,
+                ...saleExtrasBooking.baselineFor(quoted && saleExtrasBooking.takeQuoted(quotedLines.services, definition.id), "SERVICE", { quantitySessionTiming: null, ...allocationData }),
               },
             });
           }
 
           const seenDeliverables = new Set();
-          for (const deliverable of deliverables) {
-            if (seenDeliverables.has(deliverable.deliverableDefinitionId)) {
-              const error = new Error("Duplicate deliverables are not allowed for the same shoot.");
-              error.status = 409;
-              throw error;
-            }
-            seenDeliverables.add(deliverable.deliverableDefinitionId);
+          for (const [deliverableIndex, deliverable] of deliverables.entries()) {
             const definition = await transaction.projectDeliverableDefinition.findFirst({ where: { id: deliverable.deliverableDefinitionId, isActive: true }, include: deliverableDefinitionInclude });
             if (!definition) {
               const error = new Error("Select a valid active deliverable.");
               error.status = 400;
               throw error;
             }
+            // One line per variant of a deliverable, not per deliverable - see `deliverableLineKey`.
+            const variantData = deliverableVariantSnapshotFor(definition, deliverable.variant);
+            const lineKey = deliverableLineKey(definition.id, variantData);
+            if (seenDeliverables.has(lineKey)) {
+              const error = new Error("Duplicate deliverables are not allowed for the same shoot.");
+              error.status = 409;
+              throw error;
+            }
+            seenDeliverables.add(lineKey);
             const allocationData = await deliverableAllocationDataForDefinition(transaction, definition, deliverable);
             await transaction.projectShootDeliverable.create({
               data: {
@@ -2653,16 +4192,22 @@ async function createProject(req, res) {
                 deliverableDefinitionId: definition.id,
                 deliverableName: definition.name,
                 ...allocationData,
+                ...variantData,
+                sortOrder: deliverableIndex,
+                ...saleExtrasBooking.baselineFor(quoted && saleExtrasBooking.takeQuoted(quotedLines.deliverables, definition.id), "DELIVERABLE", { ...allocationData, ...variantData }),
               },
             });
           }
         }
       }
 
-      return transaction.salesProject.findUnique({
+      const created = await transaction.salesProject.findUnique({
         where: { id: project.id },
-        include: { shoots: { where: { deletedAt: null }, orderBy: [{ dateCreated: "asc" }, { createdAt: "asc" }] } },
+        include: { shoots: { where: { deletedAt: null }, orderBy: [{ dateCreated: SHOOT_DATE_ASC }, { createdAt: "asc" }] } },
       });
+      // The new shoots' ids in the order they were sent, for the Schedule Payment rows the form saves
+      // next to name the shoot they follow - `shoots` above is in date order, not the form's.
+      return { ...created, createdShootIds };
     });
 
     /*
@@ -2682,26 +4227,96 @@ async function createProject(req, res) {
       }
     }
 
+    await logProjectActivity({ projectId: data?.id, area: "PROJECT", action: "PROJECT_CREATED", detail: `Project ${data?.eventId || ""} created`, userId: Number(req.user.id) });
     return res.status(201).json({ data });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
+    // A client login whose username was taken between the check and the save.
+    if (error.code === "P2002" && /username/.test(String(error.meta?.target || ""))) {
+      return res.status(409).json({ message: "Client Credentials: That mobile number was just given a login by another save. Reload and try again." });
+    }
     console.error("Unable to save sales project:", error);
     return res.status(500).json({ message: "Unable to save sales project." });
   }
 }
 
+/** Whether this login plans projects - PROJECT / Projects, or Show All Projects, at Read / Write. */
+/**
+ * Whether this caller edits a project whether or not it has been sent back: by any way into
+ * `mayEditProject` other than SALES / Booking Edit, or by planning projects. Only the CRM side - the
+ * booking editor and nothing more - waits for Send Back.
+ */
+async function mayEditOutsideSendBack(project, user) {
+  if (staffedOn(project, PROJECT_STAFF_FIELDS, Number(user?.linkedEmployeeId) || null)) return true;
+  if (await iamService.hasPermission(user.id, "ADMIN", "Branch Administration", "READ")) return true;
+  if (await worksEveryProject(user)) return true;
+  return mayPlanProjects(user.id);
+}
+
+async function mayPlanProjects(userId) {
+  for (const { module, feature, level } of [{ module: "PROJECT", feature: "Projects", level: "READ_WRITE" }, SHOW_ALL_PROJECTS_WRITE]) {
+    if (await iamService.hasPermission(Number(userId), module, feature, level)) return true;
+  }
+  return false;
+}
+
+/*
+ * What returning a sent-back project to Projects writes - Edit Sale Details' Update to Project, by
+ * `updateProject` or, with nothing on the form changed, `returnToProjects`. It is no longer sent back,
+ * and it goes to Projects → Yet to Start to be started again whatever status it left with (the
+ * studio's rule): its shoots, payments and history stay as they are.
+ */
+const RETURNED_TO_PROJECTS = { sentBackAt: null, sentBackByUserId: null, projectStatus: "Yet to Start" };
+const RETURNED_TO_PROJECTS_DETAIL = "Updated to Project from Bookings & Converted - back on Projects under Yet to Start";
+
 async function updateProject(req, res) {
   const parsed = projectSchema.safeParse(cleanData(req.body));
   if (!parsed.success) return res.status(400).json({ message: "Validation failed", errors: parsed.error.flatten() });
+  if (parsed.data.groupType && !parsed.data.vertical) parsed.data.vertical = verticalForGroupType[parsed.data.groupType] || null;
   const normalizedClientNumber = normalizeClientMainNumber(parsed.data.clientMainNumber);
   if (!normalizedClientNumber) return res.status(400).json({ message: "Client Main Number must include an editable country code and exactly 10 digits." });
 
+  /*
+   * `?draft=true` is Edit Sale Details' Save Draft on a sent-back project: the sale details are saved
+   * and the project stays under Sent Back, still the CRM side's to edit. Without it the save is
+   * Update to Project, which returns it to Projects in the same write. Only a sent-back project has
+   * a draft to keep.
+   */
+  const savesDraft = req.query.draft === "true";
   try {
+    // Whether this save returns a sent-back project to Projects - said in its Activity afterwards.
+    let returnedFromSendBack = false;
+    /*
+     * The record as it stood, kept from the read the save already makes rather than fetched again -
+     * so the activity line can say which fields moved and to what. Inside the transaction, so the
+     * before it reports is the before it actually wrote over.
+     */
+    let saleBefore = null;
     const data = await prisma.$transaction(async (transaction) => {
       const existing = await transaction.salesProject.findFirst({ where: { id: req.params.id, deletedAt: null, AND: [await projectAccessWhere({ userId: Number(req.user.id), forWrite: true })] } });
+      saleBefore = existing;
       if (!existing) {
         const error = new Error("Project not found.");
         error.status = 404;
+        throw error;
+      }
+      if (savesDraft && !existing.sentBackAt) {
+        const error = new Error("Only a project sent back to Bookings & Converted can be saved as a draft.");
+        error.status = 409;
+        throw error;
+      }
+      returnedFromSendBack = Boolean(existing.sentBackAt) && !savesDraft;
+      /*
+       * The CRM side - somebody who may change this booking only through SALES / Booking Edit - changes
+       * it only while Projects has sent it back, and that one save takes it out of Sent Back, after
+       * which it is locked to them again until it is sent back once more (the studio's rule). Everybody
+       * else who may edit a project edits it as they always could, sent back or not: the people it is
+       * staffed to, a branch administrator, whoever works every project, and whoever plans projects
+       * (`mayEditOutsideSendBack`). Held here and not only by the hidden button.
+       */
+      if (!existing.sentBackAt && !(await mayEditOutsideSendBack(existing, req.user))) {
+        const error = new Error("This booking can be edited only after Projects sends it back to Bookings & Converted.");
+        error.status = 403;
         throw error;
       }
       const { shoots, quotationId, ...projectData } = parsed.data;
@@ -2713,10 +4328,26 @@ async function updateProject(req, res) {
        * with an empty string and the selection is dropped as they asked. A caller that omits the
        * key entirely - a partial save from somewhere else - keeps whatever the project already
        * had, rather than silently unfinalizing a quotation it never mentioned.
+       *
+       * The version the project already holds is kept as it is, without asking again whether it is
+       * finalized: unfinalizing a quotation later must never take it off a project booked at it, nor
+       * stop that project's other details being saved. Only a different version is checked.
        */
-      const finalizedQuotationId = quotationId === undefined
+      const keepsItsQuotation = quotationId === undefined || (Boolean(existing.quotationId) && String(quotationId || "").trim() === existing.quotationId);
+      // Published Sale Extras are measured from the quotation the project is booked on; moving it to
+      // another would leave the client's link showing extras against a figure they no longer follow.
+      // Under the project lock Sale Extras publishes under, so a publish cannot land between the check and the move.
+      if (!keepsItsQuotation) await transaction.$queryRaw`SELECT id FROM sales_project WHERE id = ${existing.id} FOR UPDATE`;
+      if (!keepsItsQuotation && await transaction.projectSaleExtraRevision.count({ where: { projectId: existing.id } })) {
+        const error = new Error("This project has published extras on its quotation, so it cannot be moved to a different quotation.");
+        error.status = 409;
+        throw error;
+      }
+      const finalizedQuotationId = keepsItsQuotation
         ? existing.quotationId
-        : await resolveFinalizedQuotation(transaction, quotationId);
+        : await resolveFinalizedQuotation(transaction, quotationId, projectData.enquiryId);
+      // Sale Extras: a newly linked quotation describes the plan as it stands now - its baseline.
+      if (!keepsItsQuotation && finalizedQuotationId) await saleExtrasBooking.rebaselineProject(transaction, existing.id);
       const groupNameUsedAt = groupName && groupName.id !== existing.whatsappGroupNameId ? new Date() : null;
       const vertical = projectData.vertical || await verticalFromLead(transaction, projectData.enquiryId);
       const refs = await referenceLookups();
@@ -2724,6 +4355,10 @@ async function updateProject(req, res) {
         where: { id: existing.id },
         data: {
           ...projectData,
+          // A project sent back to Bookings & Converted goes back to Projects, as Yet to Start, once it
+          // is updated to Project - in the same write as the save, so the two cannot disagree (the
+          // studio's rule). Save Draft leaves it under Sent Back.
+          ...(returnedFromSendBack ? RETURNED_TO_PROJECTS : {}),
           vertical,
           branchId: refs.branchId(projectData.sourceBranch),
           verticalId: refs.verticalId(vertical),
@@ -2761,6 +4396,19 @@ async function updateProject(req, res) {
       await ensureProjectCrdDocument(transaction, project.id, { userId: Number(req.user.id) });
       return project;
     });
+    const saleChanges = fieldChanges(saleBefore, parsed.data);
+    describeChanges(req, saleChanges);
+    await logProjectActivity({
+      projectId: req.params.id,
+      area: "PROJECT",
+      action: "SALE_EDITED",
+      detail: [
+        savesDraft ? "Saved as a draft - still under Sent Back" : null,
+        ...(saleChanges.length ? saleChanges : ["Sale details saved"]),
+      ].filter(Boolean).join(" · "),
+      userId: Number(req.user.id),
+    });
+    if (returnedFromSendBack) await logProjectActivity({ projectId: req.params.id, area: "PROJECT", action: "SEND_BACK_RESOLVED", detail: RETURNED_TO_PROJECTS_DETAIL, userId: Number(req.user.id) });
     return res.json({ data });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
@@ -2770,58 +4418,61 @@ async function updateProject(req, res) {
 }
 
 /**
- * Deletes a project, and with it the two things it raised elsewhere: the Image Selection presence
- * and the client storage.
+ * Everything that goes with a project once it has been stamped deleted, inside the caller's
+ * transaction: the client's sign-in, its galleries and its client storage - and who deleted it.
+ * Written once so the Delete button, the tick boxes' bulk delete and Pre Production → Import's
+ * replace all delete a project the same way.
+ *
+ * A delete only moves the project to Resource Management → Recycling Bin, so everything here is
+ * recorded the way Restore (`assets/recycling-bin.service.js`) reads it back: the galleries carry the
+ * project's own `deletedAt`, the storage records the project's reason and time, and a login this
+ * delete switched off carries the same time in `deactivatedWithProjectAt`. Nothing
+ * is erased - the photos included; Delete permanently in the bin is what purges them.
+ */
+async function retireProjectWithin(transaction, id, { userId, deletedAt }) {
+  const deletedByUserId = Number.isInteger(Number(userId)) && Number(userId) > 0 ? Number(userId) : null;
+  // The client's sign-in goes with its project: refused at login from now on, and by `protect` on
+  // the next request of a session already open. A login this delete switches off is stamped with the
+  // project's deletion time, so Restore turns back on exactly that login - never one somebody had
+  // already switched off on their own, which is left as it was and carries no stamp.
+  await transaction.user.updateMany({ where: { clientProjectId: id, role: CLIENT_ROLE, status: "ACTIVE" }, data: { status: "INACTIVE", deactivatedWithProjectAt: deletedAt } });
+  await transaction.user.updateMany({ where: { clientProjectId: id, role: CLIENT_ROLE, status: { not: "INACTIVE" } }, data: { status: "INACTIVE" } });
+  await transaction.salesProject.update({ where: { id }, data: { deletedByUserId } });
+  // Both sections go - the Projects page and Album Proofing file their projects in one table under a
+  // flag - stamped with the project's own time, which is how Restore finds exactly these.
+  const gallery = await transaction.imageSelectionProject.updateMany({ where: { salesProjectId: id, deletedAt: null }, data: { deletedAt } });
+  return { gallery: gallery.count, storage: await removeProjectClientStorage(transaction, id, { userId, deletedAt }) };
+}
+
+/**
+ * Deletes a project - that is, moves it to Resource Management → Recycling Bin - and with it the two
+ * things it raised elsewhere: the Image Selection presence and the client storage.
  *
  * ── Image Selection ──
  *
  * An Image Selection project raised from a production project is not a thing of its own: the list
  * sync puts it there the moment the project goes in progress, it is named by the project's WhatsApp
- * group name, and it reads its client from the project. Image Selection knows this and refuses to
- * rename, delete or re-address such a project, saying to change it in Project Management instead.
+ * group name, and it reads its client from the project. So it is hidden with the project, or it
+ * would stay in the sidebar refusing every instruction because the project it points at is gone.
+ * The published gallery answers 404 by itself once the row is hidden.
  *
- * So a project deleted here and left behind in Image Selection was a project nothing could reach:
- * still in the sidebar, still showing the client's name on the dashboard, and refusing every one of
- * those instructions because the project they point at is gone. Archiving was the only way out of
- * it. It goes with the project instead.
- *
- * Both sections go - the Projects page and Album Proofing file their projects in one table under a
- * flag, and this matches on the project alone, so neither is left holding a project the other has
- * lost. The published gallery answers 404 by itself once the row is deleted, so a client's link
- * stops working without anything here having to know about publishing.
+ * **Its photos are not purged here.** A project in the bin can be restored, and a restore that came
+ * back without its photographs would not be one. Recycling Bin → Delete permanently runs Image
+ * Selection's own purge (`purgeData`).
  *
  * ── Client storage ──
  *
- * The same fault, on a different screen. A project is *soft*-deleted, so its row never actually
- * goes and the foreign key's `onDelete: SetNull` never fires; the storage register filters on its
- * own `isDeleted` and never looked at the project's. A deleted project's hard disc therefore went
- * on being listed in Client Storage, filed against a project that had disappeared from Bookings &
- * Converted and everywhere else - which is exactly what a studio finds when the Client Storage tab
- * holds projects no other tab does.
+ * A project is *soft*-deleted, so its row never goes and the foreign key's `onDelete: SetNull` never
+ * fires; the storage register filters on its own `isDeleted`. Its records are marked removed with
+ * the project's reason, so the disc stops being listed against a project nothing else shows.
  *
- * ── Soft, and all in one transaction ──
+ * ── All in one transaction ──
  *
- * Soft, exactly as the project's own delete is: the photographs, the folders and the client's
- * selections are all still on disk and in their rows afterwards. Image Selection's own delete
- * purges those, but it does that behind a warning that makes somebody confirm the client's
- * submitted selections by hand, and a delete over here is not that confirmation. Nothing here
- * reclaims storage; what it does is stop showing a project that no longer exists.
- *
- * One transaction, and the project first: `updateMany` with the access rule in its `where` is what
- * decides whether this caller may delete this project at all, so nothing else is touched until it
- * has answered.
- */
-/**
- * Deleting one project, as the route and the bulk delete both do it.
+ * The project first: `updateMany` with the access rule in its `where` is what decides whether this
+ * caller may delete this project at all, so nothing else is touched until it has answered.
  *
  * Returns what went with it - the gallery, the client storage records - or `null` for a project
  * that was not this caller's to delete or was already gone.
- *
- * **The photo purge is here rather than in the route handler**, which is the one place both ways in
- * pass through. `DELETE /:id` is not the only way a project is deleted any more - the Projects
- * screen's tick boxes hand forty ids to the bulk route, which reaches `deleteProjectRecord` and
- * then this - so a purge written beside the single route would have left every bulk-deleted
- * booking's photos in the bucket, which is the state this cascade exists to stop.
  */
 async function removeProject(req, id) {
   const userId = Number(req.user.id);
@@ -2830,44 +4481,17 @@ async function removeProject(req, id) {
   // through the plain client, and an unrelated query awaited inside an interactive transaction
   // holds that transaction open across it for no reason.
   const where = { id, deletedAt: null, AND: [await projectAccessWhere({ userId, forWrite: true })] };
-  const removed = await prisma.$transaction(async (transaction) => {
+  return prisma.$transaction(async (transaction) => {
     const result = await transaction.salesProject.updateMany({ where, data: { deletedAt } });
     // Not this caller's project, or already deleted: nothing is touched, the gallery included.
     if (result.count !== 1) return null;
-    // Read before the update, because `updateMany` answers with a count and the purge below
-    // needs the ids. Only the Projects page's own rows are collected: an Album Proofing project
-    // is hidden by the same stamp but never purged, because its proof pages carry upload ids
-    // that no foreign key protects and emptying the photos out from under them would leave the
-    // proofs standing and broken.
-    const galleries = await transaction.imageSelectionProject.findMany({ where: { salesProjectId: id, deletedAt: null, albumProofing: false }, select: { id: true } });
-    const gallery = await transaction.imageSelectionProject.updateMany({ where: { salesProjectId: id, deletedAt: null }, data: { deletedAt } });
-    return { gallery: gallery.count, galleryIds: galleries.map((row) => row.id), storage: await removeProjectClientStorage(transaction, id, { userId }) };
+    return retireProjectWithin(transaction, id, { userId, deletedAt });
   });
-  if (removed === null) return null;
-
-  /*
-   * The photos, after the transaction rather than inside it.
-   *
-   * R2 cannot take part in a MySQL transaction, so one of the two has to go second and the choice
-   * is which failure the studio is left holding. This way round the worst case is a project already
-   * invisible everywhere whose files are still in the bucket - the state every booking deleted
-   * before this cascade existed is already in, and one the cleanup script finishes off. The other
-   * way round, a bucket failure after the photos were gone would roll the delete back and leave a
-   * live project whose gallery had been emptied, which is not recoverable. So a failure here is
-   * logged and the delete still succeeded: the caller asked for the project to go, and it has gone.
-   */
-  for (const galleryId of removed.galleryIds) {
-    try {
-      await imageSelectionProjects.purgeData(galleryId);
-    } catch (error) {
-      console.error(`Sales project ${id} was deleted, but its Image Selection project ${galleryId} could not be purged:`, error?.message || error);
-    }
-  }
-  return removed;
 }
 
 /**
- * One ticked project, deleted.
+ * One ticked project, moved to the Recycling Bin - the bulk delete on Projects and Bookings &
+ * Converted.
  *
  * **This carries `requireProjectDeleter`'s rule itself, and that is the whole point of it.** That
  * guard is middleware reading `req.params.id`, so a bulk route cannot mount it - the ids are in the
@@ -2891,6 +4515,47 @@ async function deleteProjectRecord(req, id) {
   return { id, ...removed };
 }
 
+/*
+ * ── Projects → Update status, over the ticked projects ─────────────────────────────────────────
+ *
+ * Sets one Project Status on every project ticked, under the same rule as changing one project: the
+ * route asks for `PROJECT / Projects` (or Show All Projects) at Read / Write, and each project must be
+ * in the caller's own reach and - once started - theirs to change (`mayEditStartedProject`). A project
+ * that fails either is left alone and counted, never an error for the rest.
+ *
+ * Only the project's own status is written - never a shoot, and never a department's status: Pre
+ * Production, Production and Accounts each read their own from their shoots and payments.
+ */
+const bulkStatusSchema = z.object({
+  ids: z.array(z.string().trim().min(1).max(191)).min(1, "Select at least one project.").max(500),
+  status: z.enum(projectStatuses, { message: "Choose a project status." }),
+}).strict();
+
+async function bulkUpdateProjectStatus(req, res) {
+  const parsed = bulkStatusSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ message: parsed.error.issues[0]?.message || "Choose a project status." });
+  const { status } = parsed.data;
+  const ids = [...new Set(parsed.data.ids)];
+  try {
+    const userId = Number(req.user.id);
+    const found = await prisma.salesProject.findMany({
+      where: { id: { in: ids }, deletedAt: null, AND: [await projectAccessWhere({ userId, forWrite: true })] },
+      select: { id: true, projectStatus: true, projectManagerEmployeeId: true },
+    });
+    const allowed = [];
+    for (const project of found) if (await mayEditStartedProject(project, req.user)) allowed.push(project.id);
+    if (allowed.length) await prisma.salesProject.updateMany({ where: { id: { in: allowed } }, data: { projectStatus: status } });
+
+    const refused = found.length - allowed.length;
+    const missing = ids.length - found.length;
+    for (const projectId of allowed) await logProjectActivity({ projectId, area: "PROJECT", action: "STATUS_CHANGED", detail: `Project status set to ${status} (Update over ticked projects)`, userId: Number(req.user.id) });
+    return res.json({ data: { updated: allowed.length, refused, missing } });
+  } catch (error) {
+    console.error("Unable to update the selected projects' status:", error);
+    return res.status(500).json({ message: "Unable to update the selected projects' status." });
+  }
+}
+
 async function deleteProject(req, res) {
   try {
     const removed = await removeProject(req, req.params.id);
@@ -2904,8 +4569,8 @@ async function deleteProject(req, res) {
      */
     return res.json({
       message: removed.storage
-        ? `Project deleted successfully. ${removed.storage} client storage record${removed.storage === 1 ? "" : "s"} removed with it.`
-        : "Project deleted successfully.",
+        ? `Project moved to the Project Vault. ${removed.storage} client storage record${removed.storage === 1 ? "" : "s"} removed with it.`
+        : "Project moved to the Project Vault.",
     });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
@@ -2931,6 +4596,7 @@ async function resolveAssignmentEmployees(transaction, identification) {
     ["preProductionCoordinatorEmployeeId", "preProductionCoordinator"],
     ["creativeManagerEmployeeId", "creativeManager"],
     ["postProductionCoordinatorEmployeeId", "postProductionCoordinator"],
+    ["productionManagerEmployeeId", "productionManager"],
     // The two client gifts are assignments like any other: whoever is named has to be an active
     // employee, and the name stored beside the id is theirs at the time it was assigned.
     ["welcomeGiftEmployeeId", "welcomeGiftAssignee"],
@@ -3006,7 +4672,7 @@ function applyGiftTracking(identification, project) {
  * the route, silently overrules it, and cannot be granted to anybody - the permission above is the
  * only thing that decides access (CLAUDE.md, Rule 4).
  */
-const STARTED_PROJECT_EDIT_REFUSAL = "This project has started, so only its Project Manager or a branch administrator can change it.";
+const STARTED_PROJECT_EDIT_REFUSAL = "This project has started, so only its Project Manager, a branch administrator or somebody who plans projects can change it.";
 
 async function mayEditStartedProject(project, user) {
   // Before it starts, planning it is the whole job and the route's own permission is the answer.
@@ -3014,6 +4680,9 @@ async function mayEditStartedProject(project, user) {
   const linkedEmployeeId = Number(user?.linkedEmployeeId) || null;
   if (linkedEmployeeId && project.projectManagerEmployeeId === linkedEmployeeId) return true;
   if (await iamService.hasPermission(user.id, "ADMIN", "Branch Administration", "READ")) return true;
+  // Whoever plans projects (PROJECT / Projects Read / Write) changes a started one too - the studio's
+  // rule: that permission is enough to edit a project's plan and its sale from the Projects screen.
+  if (await mayPlanProjects(user.id)) return true;
   // And whoever may work every project, which is what lets somebody who is not a branch
   // administrator start and run a project nobody is staffed to yet.
   return worksEveryProject(user);
@@ -3077,7 +4746,22 @@ const SHOW_ALL_PROJECTS_WRITE = { module: "PROJECT", feature: "Show All Projects
 const worksEveryProject = (user) =>
   iamService.hasPermission(user.id, SHOW_ALL_PROJECTS_WRITE.module, SHOW_ALL_PROJECTS_WRITE.feature, SHOW_ALL_PROJECTS_WRITE.level);
 
-const PROJECT_EDIT_REFUSAL = "Only the people this project is staffed to, a branch administrator, or somebody who may work every project, can change it.";
+/*
+ * Editing a **booking** - this project's sale record and its client login - as its own grant.
+ *
+ * Changing one answered only to the record: staffed on it, a branch administrator, or Show All
+ * Projects. So the one grantable way to let a CRM edit a booking they are not staffed on also handed
+ * them every project on three other boards. This is that act alone, and it **adds**: everybody who
+ * may edit a booking today still may. It widens no reading - `requireProjectRole` looks the project
+ * up through `projectAccessWhere`, so this reaches the bookings the caller can already see. Deleting one is still its Project Manager's (`mayDeleteProject`),
+ * and the plan is still `mayEditStartedProject`'s.
+ */
+const BOOKING_EDIT_WRITE = { module: "SALES", feature: "Booking Edit", level: "READ_WRITE" };
+
+const mayEditBookings = (user) =>
+  iamService.hasPermission(user.id, BOOKING_EDIT_WRITE.module, BOOKING_EDIT_WRITE.feature, BOOKING_EDIT_WRITE.level);
+
+const PROJECT_EDIT_REFUSAL = "Only the people this project is staffed to, somebody who plans projects or may edit bookings, a branch administrator, or somebody who may work every project, can change it.";
 const PROJECT_DELETE_REFUSAL = "Only this project's Project Manager, a branch administrator, or somebody who may work every project, can delete it.";
 
 /**
@@ -3104,10 +4788,13 @@ const PROJECT_STAFF_FIELDS = [
 const staffedOn = (project, fields, linkedEmployeeId) =>
   Boolean(linkedEmployeeId) && fields.some((field) => project?.[field] === linkedEmployeeId);
 
-/** Changing the project: anybody it is staffed to, whoever runs the branch, or whoever works every project. */
+/** Changing the project: anybody it is staffed to, whoever may edit bookings, whoever runs the branch, or whoever works every project. */
 async function mayEditProject(project, user) {
   if (staffedOn(project, PROJECT_STAFF_FIELDS, Number(user?.linkedEmployeeId) || null)) return true;
+  if (await mayEditBookings(user)) return true;
   if (await iamService.hasPermission(user.id, "ADMIN", "Branch Administration", "READ")) return true;
+  // Whoever plans projects edits a project's sale details too, from the Projects screen beside its plan.
+  if (await mayPlanProjects(user.id)) return true;
   return worksEveryProject(user);
 }
 
@@ -3181,8 +4868,35 @@ async function requireStartedProjectEditor(req, res, next) {
   }
 }
 
-async function saveStartProjectWork(transaction, projectId, data, { start, userId }) {
-  const project = await transaction.salesProject.findFirst({ where: { id: projectId, deletedAt: null, AND: [await projectAccessWhere({ userId, forWrite: true })] }, select: { id: true, projectStatus: true, welcomeGiftStatus: true, shootCompletedGiftStatus: true } });
+/*
+ * Whether each of the four "does it apply" answers counts as applying. CRD Document carries more
+ * than yes and no — which sides have been received — so anything but "Not Applicable" applies.
+ */
+const APPLICABILITY_ITEMS = {
+  welcomeGift: (value) => value === "Applicable",
+  shootCompletedGift: (value) => value === "Applicable",
+  storageNeeded: (value) => value === "Yes",
+  crdDocumentStatus: (value) => Boolean(value) && value !== "Not Applicable",
+};
+
+/**
+ * One history row for each of the four answers this save switched between applicable and not, with
+ * the reason given. A change within "applicable" — CRD moving from Applicable to Groom Side Received
+ * — is not a switch and records nothing; neither does a field the save did not send.
+ */
+function applicabilityChanges(before, after, remarks = {}) {
+  return Object.entries(APPLICABILITY_ITEMS)
+    .filter(([item, applies]) => after[item] !== undefined && applies(before[item]) !== applies(after[item]))
+    .map(([item]) => ({ item, fromValue: before[item] || null, toValue: after[item] || null, remarks: remarks[item] || null }));
+}
+
+/*
+ * `permissions` is the permission the calling route was guarded with, which is what the project is
+ * scoped by - the project register's own list when left out. Pre Production's General panel passes
+ * `PROJECT / Pre Production`, so it reaches the projects that screen reaches and no others.
+ */
+async function saveStartProjectWork(transaction, projectId, data, { start, userId, permissions }) {
+  const project = await transaction.salesProject.findFirst({ where: { id: projectId, deletedAt: null, AND: [await projectAccessWhere({ userId, forWrite: true, permissions })] }, select: { id: true, projectStatus: true, welcomeGiftStatus: true, shootCompletedGiftStatus: true, welcomeGift: true, shootCompletedGift: true, storageNeeded: true, crdDocumentStatus: true } });
   if (!project) {
     const error = new Error("Project not found.");
     error.status = 404;
@@ -3193,13 +4907,19 @@ async function saveStartProjectWork(transaction, projectId, data, { start, userI
     error.status = 409;
     throw error;
   }
-  const { productionServices, postProductionDeliverables, ...identification } = data;
+  const { productionServices, postProductionDeliverables, applicabilityRemarks, ...identification } = data;
   const resolvedIdentification = applyGiftTracking(await resolveAssignmentEmployees(transaction, identification), project);
-  await transaction.salesProject.update({ where: { id: project.id }, data: { ...resolvedIdentification, ...(start ? { projectStatus: "Work in Progress - Pre & Production" } : {}) } });
+  await transaction.salesProject.update({ where: { id: project.id }, data: { ...resolvedIdentification, ...(start ? { projectStatus: "In Progress" } : {}) } });
+  const switched = applicabilityChanges(project, identification, applicabilityRemarks);
+  if (switched.length) {
+    await transaction.projectApplicabilityChange.createMany({
+      data: switched.map((change) => ({ ...change, projectId: project.id, changedByUserId: Number(userId) || null })),
+    });
+  }
   if (productionServices !== undefined) {
     await verifyProjectShoots(transaction, project.id, productionServices);
     await transaction.projectPostProductionAllocation.updateMany({ where: { projectId: project.id, deletedAt: null }, data: { deletedAt: new Date() } });
-    if (productionServices.length) await transaction.projectPostProductionAllocation.createMany({ data: productionServices.map((item) => ({ ...item, projectId: project.id })) });
+    if (productionServices.length) await transaction.projectPostProductionAllocation.createMany({ data: productionServices.map((item, index) => ({ ...item, projectId: project.id, sortOrder: index })) });
   }
   if (postProductionDeliverables !== undefined) {
     await verifyProjectShoots(transaction, project.id, postProductionDeliverables);
@@ -3222,6 +4942,14 @@ async function saveStartProjectWork(transaction, projectId, data, { start, userI
    * a booking that has answered Applicable, and it listed it with a blank identifier.
    */
   await ensureProjectCrdDocument(transaction, project.id, { userId });
+
+  // And the pre production board, on the same terms: raised after the update so it reads the
+  // coordinator just named. This covers starting a project with a Pre Production Coordinator and
+  // naming one later on an already started project; a draft on a Yet to Start project raises none.
+  await ensureProjectPreProduction(transaction, project.id, { userId });
+  // And the production board, on the same terms: raised once the project has a Production Manager,
+  // named on Edit Project beside the other four seats, so naming one later raises the rows then.
+  await ensureProjectProduction(transaction, project.id);
   return transaction.salesProject.findUnique({ where: { id: project.id } });
 }
 
@@ -3244,7 +4972,24 @@ async function startProject(req, res) {
   // pressing Start can act on, so the reason is what it answers with.
   if (!parsed.success) return res.status(400).json({ message: validationMessage(parsed.error, "Validation failed"), errors: parsed.error.flatten() });
   try {
+    /*
+     * Read before the save, so the activity line can say **what** changed rather than that something
+     * did. One query, and only on a save that is about to happen - "he says he updated it and it is
+     * not reflecting" is otherwise unanswerable from the log, which until now recorded that a request
+     * succeeded and nothing about its contents.
+     */
+    const before = await prisma.salesProject.findUnique({ where: { id: req.params.id } });
     const data = await prisma.$transaction((transaction) => saveStartProjectWork(transaction, req.params.id, parsed.data, { start: true, userId: req.user.id }));
+    const changes = fieldChanges(before, parsed.data);
+    describeChanges(req, changes);
+    await logProjectActivity({
+      projectId: req.params.id,
+      area: "PROJECT",
+      action: "PROJECT_SAVED",
+      // The fields where there are some, so the project's own tab reads as the admin log does.
+      detail: changes.length ? changes.join(" · ") : "Project details saved (Start / Edit Project)",
+      userId: Number(req.user.id),
+    });
     return res.json({ data });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
@@ -3259,7 +5004,7 @@ async function listProjectShoots(req, res) {
     if (!project) return res.status(404).json({ message: "Project not found." });
     const data = await prisma.projectShoot.findMany({
       where: { projectId: project.id, deletedAt: null },
-      orderBy: [{ dateCreated: "asc" }, { createdAt: "asc" }],
+      orderBy: [{ dateCreated: SHOOT_DATE_ASC }, { createdAt: "asc" }],
     });
     return res.json({ data });
   } catch (error) {
@@ -3286,6 +5031,67 @@ async function listProjectShoots(req, res) {
  * filled in, and the form's picker holds only the most recent projects — so the one being read is
  * handed over rather than looked for in a list it may have aged out of.
  */
+/** A project's Accounts status, from its scheduled payments. */
+async function accountsOf(projectId) {
+  const schedule = await projectSchedule(projectId);
+  return { accountsStatus: projectAccountsStatus(schedule.map((payment) => payment.status)) };
+}
+
+/**
+ * Send Back: the project returned from Projects to Bookings & Converted to be corrected.
+ *
+ * The project itself, not a copy: its id, shoots, quotation, payments and history stay as they are.
+ * It is marked sent back - when and by whom - which lists it under Bookings & Converted's Sent Back
+ * tab and leaves it off the Projects page until its sale details are next edited and saved there
+ * (`updateProject` clears it). One conditional write, so a second Send Back - two people, or one
+ * double-click - finds it already sent back and is told so rather than writing twice. Only a project
+ * in the sender's reach (`projectAccessWhere`, for a write) can be sent back.
+ */
+async function sendBackProject(req, res) {
+  try {
+    const project = await prisma.salesProject.findFirst({
+      where: { id: req.params.id, deletedAt: null, AND: [await projectAccessWhere({ userId: Number(req.user.id), forWrite: true })] },
+      select: { id: true, sentBackAt: true },
+    });
+    if (!project) return res.status(404).json({ message: "Project not found." });
+    const { count } = await prisma.salesProject.updateMany({
+      where: { id: project.id, deletedAt: null, sentBackAt: null },
+      data: { sentBackAt: new Date(), sentBackByUserId: Number(req.user.id) || null },
+    });
+    if (!count) return res.status(409).json({ message: "This project has already been sent back to Bookings & Converted." });
+    await logProjectActivity({ projectId: project.id, area: "PROJECT", action: "SENT_BACK", detail: "Sent back to Bookings & Converted", userId: Number(req.user.id) });
+    const data = await prisma.salesProject.findUnique({ where: { id: project.id }, select: { id: true, sentBackAt: true, sentBackByUserId: true } });
+    return res.json({ data });
+  } catch (error) {
+    console.error("Unable to send the project back:", error);
+    return res.status(500).json({ message: "Unable to send the project back." });
+  }
+}
+
+/**
+ * Update to Project on a sent-back project whose form was not changed: nothing to save, only the
+ * return - `RETURNED_TO_PROJECTS`, as `updateProject` writes it when there is. Guarded as the edit is
+ * (the route), for a project in the caller's reach, in one conditional write, so a second click - or
+ * somebody else returning it first - is told so rather than written twice.
+ */
+async function returnToProjects(req, res) {
+  try {
+    const project = await prisma.salesProject.findFirst({
+      where: { id: req.params.id, deletedAt: null, AND: [await projectAccessWhere({ userId: Number(req.user.id), forWrite: true })] },
+      select: { id: true },
+    });
+    if (!project) return res.status(404).json({ message: "Project not found." });
+    const { count } = await prisma.salesProject.updateMany({ where: { id: project.id, deletedAt: null, sentBackAt: { not: null } }, data: RETURNED_TO_PROJECTS });
+    if (!count) return res.status(409).json({ message: "This project is no longer sent back - it is already on Projects." });
+    await logProjectActivity({ projectId: project.id, area: "PROJECT", action: "SEND_BACK_RESOLVED", detail: RETURNED_TO_PROJECTS_DETAIL, userId: Number(req.user.id) });
+    const data = await prisma.salesProject.findUnique({ where: { id: project.id }, select: { id: true, sentBackAt: true, projectStatus: true } });
+    return res.json({ data });
+  } catch (error) {
+    console.error("Unable to return the project to Projects:", error);
+    return res.status(500).json({ message: "Unable to return the project to Projects." });
+  }
+}
+
 async function listProjectPayments(req, res) {
   try {
     const project = await prisma.salesProject.findFirst({
@@ -3395,13 +5201,15 @@ async function listProjectPayments(req, res) {
      */
     const totalQuotation = Number(project.initialConvertedValue || 0);
     const totalExtra = extras.reduce((sum, extra) => sum + extra.amount, 0);
+    // The published Sale Extras (Edit Sale Details' Extra section), beside the approved extras.
+    const totalSaleExtras = await saleExtrasTotals.publishedSaleExtrasTotal(project.id);
     /*
      * What the project is now signed for: the figure it was sold at plus every extra its manager
      * has approved. Added here rather than left to the screen to add up, so the one figure the
      * studio quotes back to a client has a single definition — and so it can never disagree with
      * the two rows it is made of. Extras still waiting are not in it: nobody has agreed them yet.
      */
-    const totalSigned = totalQuotation + totalExtra;
+    const totalSigned = totalQuotation + totalExtra + totalSaleExtras;
     return res.json({ data: {
       project: {
         id: project.id,
@@ -3420,7 +5228,9 @@ async function listProjectPayments(req, res) {
       spent,
       // The two totals and no figure derived from them: the tab shows what moved, and what the
       // project made is a question for Accounts, who know what else it cost.
-      summary: { totalQuotation, totalExtra, totalSigned, totalReceived, totalSpent },
+      // The project's Accounts status, from its scheduled payments - shown above the signed quotation.
+      ...(await accountsOf(project.id)),
+      summary: { totalQuotation, totalExtra, totalSaleExtras, totalSigned, totalReceived, totalSpent },
     } });
   } catch (error) {
     console.error("Unable to load project payments:", error);
@@ -3455,8 +5265,13 @@ async function createProjectShoots(req, res) {
       // A started project that wants storage but had no shoots yet gets its record now, or has
       // its existing record pointed at the shoot that just appeared.
       await ensureProjectClientStorage(transaction, project.id, { userId: req.user.id });
+      // Each new shoot is a new row on the pre production board, so a shoot added months later
+      // reaches its coordinator the same way the first ones did.
+      await ensureProjectPreProduction(transaction, project.id, { userId: req.user.id });
+      await ensureProjectProduction(transaction, project.id);
       return createdShoots;
     });
+    await logProjectActivity({ projectId: req.params.id, area: "PROJECT", action: "SHOOTS_ADDED", detail: `Shoots added: ${(Array.isArray(data) ? data : []).map((shoot) => [shoot.shootId, shoot.shoot].filter(Boolean).join(" ")).join(", ") || "-"}`, userId: Number(req.user.id) });
     return res.status(201).json({ data });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
@@ -3489,6 +5304,7 @@ async function updateProjectShoot(req, res) {
       await syncProjectMainEvent(transaction, req.params.id, updatedShoot);
       return updatedShoot;
     });
+    await logProjectActivity({ projectId: req.params.id, shootId: req.params.shootId, area: "PROJECT", action: "SHOOT_EDITED", detail: "Shoot details saved", userId: Number(req.user.id) });
     return res.json({ data });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
@@ -3525,6 +5341,7 @@ async function deleteProjectShoot(req, res) {
       await syncProjectMainEvent(transaction, req.params.id, null);
       return { message: "Shoot deleted successfully." };
     });
+    await logProjectActivity({ projectId: req.params.id, shootId: req.params.shootId, area: "PROJECT", action: "SHOOT_REMOVED", detail: "Shoot removed", userId: Number(req.user.id) });
     return res.json(data);
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message, ...(error.details ? { details: error.details } : {}) });
@@ -3533,6 +5350,12 @@ async function deleteProjectShoot(req, res) {
   }
 }
 
+/*
+ * A project's lines, shoot by shoot, in the order they were dragged to - and, for lines nobody has
+ * dragged (`sortOrder` NULL), the order they were added in, after the ones that were.
+ */
+const PROJECT_LINE_ORDER = [{ shoot: { dateCreated: SHOOT_DATE_ASC } }, { sortOrder: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }];
+
 async function listProductionDeliverables(req, res) {
   try {
     const project = await prisma.salesProject.findFirst({ where: { id: req.params.id, deletedAt: null, AND: [await projectAccessWhere({ userId: Number(req.user.id) })] }, select: { id: true } });
@@ -3540,7 +5363,7 @@ async function listProductionDeliverables(req, res) {
     const data = await prisma.projectShootDeliverable.findMany({
       where: { projectId: project.id, deletedAt: null },
       include: { shoot: { select: { id: true, shootId: true, shoot: true, dateCreated: true, shootPlace: true, shootType: true, shootTypes: true, isMainEvent: true, district: true, state: true, sessionTiming: true, sessionTimings: true, sessionDurationHours: true, sessionDurationMinutes: true } } },
-      orderBy: [{ shoot: { dateCreated: "asc" } }, { createdAt: "asc" }],
+      orderBy: PROJECT_LINE_ORDER,
     });
     return res.json({ data });
   } catch (error) {
@@ -3574,9 +5397,10 @@ async function replaceProductionDeliverables(req, res) {
       return transaction.projectShootDeliverable.findMany({
         where: { projectId: project.id, deletedAt: null },
         include: { shoot: { select: { id: true, shootId: true, shoot: true, dateCreated: true, shootPlace: true, shootType: true, shootTypes: true, isMainEvent: true, district: true, state: true, sessionTiming: true, sessionTimings: true, sessionDurationHours: true, sessionDurationMinutes: true } } },
-        orderBy: [{ shoot: { dateCreated: "asc" } }, { createdAt: "asc" }],
+        orderBy: PROJECT_LINE_ORDER,
       });
     });
+    await logProjectActivity({ projectId: req.params.id, area: "PROJECT", action: "DELIVERABLES_UPDATED", detail: "Production deliverables saved", userId: Number(req.user.id) });
     return res.json({ data });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
@@ -3585,12 +5409,14 @@ async function replaceProductionDeliverables(req, res) {
   }
 }
 
+// `DEFINITION_ORDER` (services/definitionOrder.js): the order Settings drags the rows into. A new
+// or restored row is given the next number, so it lands at the end.
 async function listServiceDefinitions(req, res) {
   try {
     const data = await prisma.projectServiceDefinition.findMany({
       where: { isActive: true },
       include: serviceDefinitionInclude,
-      orderBy: [{ name: "asc" }],
+      orderBy: DEFINITION_ORDER,
     });
     return res.json({ data: await withPricedSizeOptions(data) });
   } catch (error) {
@@ -3598,6 +5424,43 @@ async function listServiceDefinitions(req, res) {
     return res.status(500).json({ message: "Unable to load service definitions." });
   }
 }
+
+/*
+ * `{ ids }`: the active services, or deliverables, in their new order - what Settings sends after a
+ * row is dragged. Only the order is written; nothing else about a row changes.
+ *
+ * Ids that are not active rows are ignored, and active rows the list left out keep their place
+ * after the ones it named, so a list read before somebody else added a row cannot lose it or push
+ * it out of order. Written in one transaction, so the order is never half saved.
+ */
+const definitionOrderSchema = z.object({ ids: z.array(z.string().trim().min(1).max(191)).max(1000) });
+
+/** The full order to write: the ids sent that are active rows, then every active row left out, as it was. */
+function orderedDefinitionIds(activeIds, sentIds) {
+  const known = new Set(activeIds);
+  const named = [...new Set(sentIds)].filter((id) => known.has(id));
+  const sent = new Set(named);
+  return [...named, ...activeIds.filter((id) => !sent.has(id))];
+}
+
+function definitionReorder(model, label) {
+  return async function reorderDefinitions(req, res) {
+    const parsed = definitionOrderSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ message: "Send the ids in their new order." });
+    try {
+      const rows = await model().findMany({ where: { isActive: true }, select: { id: true }, orderBy: DEFINITION_ORDER });
+      const ordered = orderedDefinitionIds(rows.map((row) => row.id), parsed.data.ids);
+      await prisma.$transaction(ordered.map((id, index) => model().update({ where: { id }, data: { sortOrder: index } })));
+      return res.json({ message: "Order saved." });
+    } catch (error) {
+      console.error(`Unable to reorder ${label}:`, error);
+      return res.status(500).json({ message: `Unable to save the order of the ${label}.` });
+    }
+  };
+}
+
+const reorderServiceDefinitions = definitionReorder(() => prisma.projectServiceDefinition, "services");
+const reorderDeliverableDefinitions = definitionReorder(() => prisma.projectDeliverableDefinition, "deliverables");
 
 async function listProjectOptionSets(req, res) {
   try {
@@ -3710,9 +5573,11 @@ async function createServiceDefinition(req, res) {
     });
     if (existing) {
       if (!existing.isActive) {
+        // Back at the end of the list, as a new row would be, rather than wherever it once stood.
+        const max = await prisma.projectServiceDefinition.aggregate({ _max: { sortOrder: true } });
         const data = await prisma.projectServiceDefinition.update({
           where: { id: existing.id },
-          data: { name, code, isActive: true },
+          data: { name, code, isActive: true, sortOrder: (max._max.sortOrder || 0) + 1 },
           include: serviceDefinitionInclude,
         });
         return res.status(200).json({ data, message: "Service restored successfully." });
@@ -3733,6 +5598,9 @@ async function createServiceDefinition(req, res) {
     });
     return res.status(201).json({ data, message: "Service added successfully." });
   } catch (error) {
+    // Two adds of one name at once both pass the check above; the unique name and code columns
+    // refuse the second, and it is said as the same refusal rather than as a failure.
+    if (error?.code === "P2002") return res.status(409).json({ message: "This service already exists." });
     console.error("Unable to add service definition:", error);
     return res.status(500).json({ message: "Unable to add service." });
   }
@@ -3846,6 +5714,42 @@ async function updateServiceDefinition(req, res) {
     const timings = Array.isArray(data.timingModes) ? data.timingModes : [data.timingMode ?? existing.timingMode];
     if (!timings.some((mode) => SESSION_TIMING_MODES.includes(mode))) data.timingOptionSetId = null;
     /*
+     * Every brand-and-variant a mapping may name, read once for the save and only when something
+     * is being mapped. There is no foreign key behind a mapping - it rides in JSON - so an id naming
+     * nothing, or a variant named under a brand that does not hold it, is dropped here rather than
+     * stored, and a variant deleted in Settings cannot leave a service quoting what is not sold.
+     */
+    const bringsDeliverables = input.deliverableAdded !== undefined ? input.deliverableAdded === true : existing.deliverableAdded === true;
+    const offeredVariants = new Set();
+    if (bringsDeliverables && (Array.isArray(input.pricing) || Array.isArray(input.deliverables))) {
+      const definitions = await prisma.projectDeliverableDefinition.findMany({
+        where: { isActive: true },
+        select: { id: true, brands: { select: { id: true, variants: { select: { id: true } } } } },
+      });
+      for (const definition of definitions) {
+        for (const brand of definition.brands) {
+          for (const variant of brand.variants) offeredVariants.add(`${definition.id}::${brand.id}::${variant.id}`);
+        }
+      }
+    }
+    // A service or a booking brings a variant once; asking for it twice is one line, not two.
+    const offeredOnce = (entries) => {
+      const seenVariants = new Set();
+      return (entries || []).filter((entry) => {
+        const key = `${entry.deliverableId}::${entry.brandId}::${entry.variantId}`;
+        if (seenVariants.has(key) || !offeredVariants.has(key)) return false;
+        seenVariants.add(key);
+        return true;
+      });
+    };
+    /*
+     * The service's own list. A service answered No stores none, so turning the question off is
+     * what takes the list out rather than leaving it stored and invisible.
+     */
+    if (!bringsDeliverables && (input.deliverableAdded === false || Array.isArray(input.deliverables))) data.deliverables = [];
+    else if (Array.isArray(input.deliverables)) data.deliverables = offeredOnce(input.deliverables);
+
+    /*
      * The pricing lines are the studio's own list and are not tied to the service's shoot type or
      * timings above - a studio service may carry an outdoor price. Three rules hold whatever the
      * form sent: Hours / Minutes is a studio timing, so an outdoor hourly row is dropped; an hourly
@@ -3862,40 +5766,10 @@ async function updateServiceDefinition(req, res) {
      */
     if (Array.isArray(input.pricing)) {
       const sized = input.sizeEnabled !== undefined ? input.sizeEnabled : existing.sizeEnabled === true;
-      /*
-       * The deliverable variants each booking brings with it, kept only where the service says it
-       * brings any - a service answered No stores none, so turning the question off is what takes
-       * the mapping out rather than leaving it stored and invisible.
-       *
-       * Every mapping is checked against the deliverables that actually exist, brand and variant
-       * together: an id naming nothing, or a variant named under a brand that does not hold it, is
-       * dropped rather than stored. There is no foreign key to do this - the mapping rides in the
-       * `pricing` JSON, so that it stays attached to its line when the line is edited - so it is
-       * done here, once per save, rather than trusted from the form.
-       */
-      const bringsDeliverables = input.deliverableAdded !== undefined ? input.deliverableAdded === true : existing.deliverableAdded === true;
-      const offeredVariants = new Set();
-      if (bringsDeliverables) {
-        const definitions = await prisma.projectDeliverableDefinition.findMany({
-          where: { isActive: true },
-          select: { id: true, brands: { select: { id: true, variants: { select: { id: true } } } } },
-        });
-        for (const definition of definitions) {
-          for (const brand of definition.brands) {
-            for (const variant of brand.variants) offeredVariants.add(`${definition.id}::${brand.id}::${variant.id}`);
-          }
-        }
-      }
+      // The variants a booking carried, kept only where the service says it brings any.
       const mappedDeliverables = (row) => {
         if (!bringsDeliverables) return {};
-        const seenVariants = new Set();
-        const kept = (row.deliverables || []).filter((entry) => {
-          const key = `${entry.deliverableId}::${entry.brandId}::${entry.variantId}`;
-          // A booking brings a variant once; asking for it twice is one line, not two.
-          if (seenVariants.has(key) || !offeredVariants.has(key)) return false;
-          seenVariants.add(key);
-          return true;
-        });
+        const kept = offeredOnce(row.deliverables);
         return kept.length ? { deliverables: kept } : {};
       };
       const sizeValues = sized
@@ -3953,7 +5827,7 @@ async function listDeliverableDefinitions(req, res) {
     const data = await prisma.projectDeliverableDefinition.findMany({
       where: { isActive: true },
       include: deliverableDefinitionInclude,
-      orderBy: [{ name: "asc" }],
+      orderBy: DEFINITION_ORDER,
     });
     return res.json({ data: await withPricedSizeOptions(data) });
   } catch (error) {
@@ -3974,9 +5848,11 @@ async function createDeliverableDefinition(req, res) {
     });
     if (existing) {
       if (!existing.isActive) {
+        // Back at the end of the list, as a new row would be.
+        const max = await prisma.projectDeliverableDefinition.aggregate({ _max: { sortOrder: true } });
         const data = await prisma.projectDeliverableDefinition.update({
           where: { id: existing.id },
-          data: { name, code, isActive: true },
+          data: { name, code, isActive: true, sortOrder: (max._max.sortOrder || 0) + 1 },
           include: deliverableDefinitionInclude,
         });
         return res.status(200).json({ data, message: "Deliverable restored successfully." });
@@ -3996,6 +5872,9 @@ async function createDeliverableDefinition(req, res) {
     });
     return res.status(201).json({ data, message: "Deliverable added successfully." });
   } catch (error) {
+    // Two adds of one name at once both pass the check above; the unique name and code columns
+    // refuse the second, and it is said as the same refusal rather than as a failure.
+    if (error?.code === "P2002") return res.status(409).json({ message: "This deliverable already exists." });
     console.error("Unable to add deliverable definition:", error);
     return res.status(500).json({ message: "Unable to add deliverable." });
   }
@@ -4119,20 +5998,7 @@ async function updateDeliverableDefinition(req, res) {
     // One transaction, so a deliverable can never be left holding half a list: the brands go, the
     // new ones are written, and the deliverable's own columns are saved together or not at all.
     const updated = await prisma.$transaction(async (transaction) => {
-      if (brands !== undefined) {
-        // The variants go with their brands - `ON DELETE CASCADE` - so only the brands are deleted.
-        await transaction.projectDeliverableBrand.deleteMany({ where: { definitionId: existing.id } });
-        for (const [index, brand] of brands.entries()) {
-          await transaction.projectDeliverableBrand.create({
-            data: {
-              definitionId: existing.id,
-              name: brand.name,
-              sortOrder: index,
-              variants: { create: brand.variants.map((variant, inner) => ({ ...variant, sortOrder: inner })) },
-            },
-          });
-        }
-      }
+      if (brands !== undefined) await saveDeliverableBrands(transaction, existing.id, brands);
       return transaction.projectDeliverableDefinition.update({
         where: { id: existing.id },
         data,
@@ -4161,6 +6027,57 @@ async function findProjectShoot(transaction, projectId, shootId) {
   return shoot;
 }
 
+/**
+ * Puts one shoot's service - or deliverable - lines in the order sent, by the rule the Settings
+ * lists reorder by (`orderedDefinitionIds`): the ids sent that are this shoot's live lines, then any
+ * line left out, where it stood. Only `sortOrder` is written; nothing is repriced.
+ */
+function lineReorder(model, label, action) {
+  return async function reorderLines(req, res) {
+    const parsed = definitionOrderSchema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ message: "Send the ids in their new order." });
+    try {
+      const shoot = await findProjectShoot(prisma, req.params.id, req.params.shootId);
+      const rows = await model().findMany({ where: { projectId: shoot.projectId, shootId: shoot.id, deletedAt: null }, select: { id: true }, orderBy: [{ sortOrder: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }] });
+      const ordered = orderedDefinitionIds(rows.map((row) => row.id), parsed.data.ids);
+      await prisma.$transaction(ordered.map((id, index) => model().update({ where: { id }, data: { sortOrder: index } })));
+      await logProjectActivity({ projectId: shoot.projectId, shootId: shoot.id, area: "PROJECT", action, detail: `${label} reordered`, userId: Number(req.user.id) });
+      return res.json({ message: "Order saved." });
+    } catch (error) {
+      if (error.status) return res.status(error.status).json({ message: error.message });
+      console.error(`Unable to reorder ${label.toLowerCase()}:`, error);
+      return res.status(500).json({ message: `Unable to save the order of the ${label.toLowerCase()}.` });
+    }
+  };
+}
+
+const reorderServiceAllocations = lineReorder(() => prisma.projectPostProductionAllocation, "Services", "SERVICES_REORDERED");
+
+/**
+ * Puts a project's shoots in the order dragged in its Shoot List, by the same rule the service and
+ * deliverable lines reorder by (`orderedDefinitionIds`): the ids sent that are this project's live
+ * shoots, then any shoot left out, where it stood. Only `sortOrder` is written - no date, Shoot ID or
+ * anything else changes - and nothing but the Shoot List forms reads it.
+ */
+async function reorderProjectShoots(req, res) {
+  const parsed = definitionOrderSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ message: "Send the shoot ids in their new order." });
+  try {
+    const project = await prisma.salesProject.findFirst({ where: { id: req.params.id, deletedAt: null, AND: [await projectAccessWhere({ userId: Number(req.user.id), forWrite: true })] }, select: { id: true } });
+    if (!project) return res.status(404).json({ message: "Project not found." });
+    const rows = await prisma.projectShoot.findMany({ where: { projectId: project.id, deletedAt: null }, select: { id: true }, orderBy: [{ sortOrder: { sort: "asc", nulls: "last" } }, { dateCreated: "asc" }, { createdAt: "asc" }] });
+    const ordered = orderedDefinitionIds(rows.map((row) => row.id), parsed.data.ids);
+    await prisma.$transaction(ordered.map((id, index) => prisma.projectShoot.update({ where: { id }, data: { sortOrder: index } })));
+    await logProjectActivity({ projectId: project.id, area: "PROJECT", action: "SHOOTS_REORDERED", detail: "Shoots reordered", userId: Number(req.user.id) });
+    return res.json({ message: "Order saved." });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("Unable to reorder shoots:", error);
+    return res.status(500).json({ message: "Unable to save the order of the shoots." });
+  }
+}
+const reorderDeliverableAllocations = lineReorder(() => prisma.projectShootDeliverable, "Deliverables", "DELIVERABLES_REORDERED");
+
 async function listServiceAllocations(req, res) {
   try {
     const project = await prisma.salesProject.findFirst({ where: { id: req.params.id, deletedAt: null, AND: [await projectAccessWhere({ userId: Number(req.user.id) })] }, select: { id: true } });
@@ -4171,7 +6088,7 @@ async function listServiceAllocations(req, res) {
         ...serviceAllocationInclude,
         shoot: { select: { id: true, shootId: true, shoot: true, dateCreated: true, shootPlace: true, shootType: true, shootTypes: true, isMainEvent: true, district: true, state: true, sessionTiming: true, sessionTimings: true, sessionDurationHours: true, sessionDurationMinutes: true } },
       },
-      orderBy: [{ shoot: { dateCreated: "asc" } }, { createdAt: "asc" }],
+      orderBy: PROJECT_LINE_ORDER,
     });
     return res.json({ data });
   } catch (error) {
@@ -4217,6 +6134,7 @@ async function createServiceAllocation(req, res) {
       await syncAutoDeliverablesForShoot(transaction, shoot.projectId, shoot.id);
       return allocation;
     });
+    await logProjectActivity({ projectId: req.params.id, shootId: req.params.shootId, area: "PROJECT", action: "SERVICE_ADDED", detail: `Service added: ${data?.serviceName || "-"}`, userId: Number(req.user.id) });
     return res.status(201).json({ data });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
@@ -4236,6 +6154,7 @@ async function updateServiceAllocation(req, res) {
     if (!existing) return res.status(404).json({ message: "Service allocation not found for this project." });
     const allocationData = await serviceAllocationDataForDefinition(prisma, existing.serviceDefinition, { ...existing, ...parsed.data });
     const data = await prisma.projectPostProductionAllocation.update({ where: { id: existing.id }, data: { serviceDetails: null, quantitySessionTiming: null, ...allocationData }, include: serviceAllocationInclude });
+    await logProjectActivity({ projectId: req.params.id, shootId: data?.shootId || null, area: "PROJECT", action: "SERVICE_EDITED", detail: `Service edited: ${data?.serviceName || "-"}`, userId: Number(req.user.id) });
     return res.json({ data });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
@@ -4244,29 +6163,46 @@ async function updateServiceAllocation(req, res) {
   }
 }
 
+/**
+ * A service taken off its shoot, inside the caller's transaction: the line, the post-production work
+ * rows it opened (closed at the same moment, so putting it back can reopen exactly those), and the
+ * deliverables it brought with it (`syncAutoDeliverablesForShoot`). Resolves to `{ count }`, 0 where it
+ * was not on the project. Service Creation's delete and Sale Extras' Remove both take a service off here.
+ */
+async function removeServiceAllocationInTx(transaction, projectId, allocationId) {
+  const now = new Date();
+  const existing = await transaction.projectPostProductionAllocation.findFirst({
+    where: { id: allocationId, projectId, deletedAt: null },
+    select: { id: true, projectId: true, shootId: true },
+  });
+  if (!existing) return { count: 0 };
+  const updateResult = await transaction.projectPostProductionAllocation.updateMany({
+    where: { id: existing.id, projectId, deletedAt: null },
+    data: { deletedAt: now },
+  });
+  if (updateResult.count === 1) {
+    await transaction.projectPostProductionWorkflowAllocation.updateMany({
+      where: { serviceAllocationId: existing.id, projectId, deletedAt: null },
+      data: { deletedAt: now },
+    });
+    await syncAutoDeliverablesForShoot(transaction, existing.projectId, existing.shootId);
+  }
+  return updateResult;
+}
+
+/** A deliverable taken off its shoot, inside the caller's transaction. Resolves to `{ count }`. */
+function removeDeliverableAllocationInTx(transaction, projectId, allocationId) {
+  return transaction.projectShootDeliverable.updateMany({
+    where: { id: allocationId, projectId, deletedAt: null },
+    data: { deletedAt: new Date() },
+  });
+}
+
 async function deleteServiceAllocation(req, res) {
   try {
-    const result = await prisma.$transaction(async (transaction) => {
-      const now = new Date();
-      const existing = await transaction.projectPostProductionAllocation.findFirst({
-        where: { id: req.params.allocationId, projectId: req.params.id, deletedAt: null },
-        select: { id: true, projectId: true, shootId: true },
-      });
-      if (!existing) return { count: 0 };
-      const updateResult = await transaction.projectPostProductionAllocation.updateMany({
-        where: { id: existing.id, projectId: req.params.id, deletedAt: null },
-        data: { deletedAt: now },
-      });
-      if (updateResult.count === 1) {
-        await transaction.projectPostProductionWorkflowAllocation.updateMany({
-          where: { serviceAllocationId: existing.id, projectId: req.params.id, deletedAt: null },
-          data: { deletedAt: now },
-        });
-        await syncAutoDeliverablesForShoot(transaction, existing.projectId, existing.shootId);
-      }
-      return updateResult;
-    });
+    const result = await prisma.$transaction((transaction) => removeServiceAllocationInTx(transaction, req.params.id, req.params.allocationId));
     if (result.count !== 1) return res.status(404).json({ message: "Service allocation not found for this project." });
+    await logProjectActivity({ projectId: req.params.id, area: "PROJECT", action: "SERVICE_REMOVED", detail: "Service removed", userId: Number(req.user.id) });
     return res.json({ message: "Service allocation removed successfully." });
   } catch (error) {
     console.error("Unable to delete service allocation:", error);
@@ -4284,7 +6220,7 @@ async function listDeliverableAllocations(req, res) {
         ...deliverableAllocationInclude,
         shoot: { select: { id: true, shootId: true, shoot: true, dateCreated: true, shootPlace: true, shootType: true, shootTypes: true, isMainEvent: true, district: true, state: true, sessionTiming: true, sessionTimings: true, sessionDurationHours: true, sessionDurationMinutes: true } },
       },
-      orderBy: [{ shoot: { dateCreated: "asc" } }, { createdAt: "asc" }],
+      orderBy: PROJECT_LINE_ORDER,
     });
     return res.json({ data });
   } catch (error) {
@@ -4305,11 +6241,14 @@ async function createDeliverableAllocation(req, res) {
         error.status = 400;
         throw error;
       }
-      const duplicate = await transaction.projectShootDeliverable.findFirst({
+      // The same variant twice is refused; another variant of the same deliverable is its own line.
+      const variantData = deliverableVariantSnapshotFor(definition, parsed.data.variant);
+      const lineKey = deliverableLineKey(definition.id, variantData);
+      const held = await transaction.projectShootDeliverable.findMany({
         where: { projectId: shoot.projectId, shootId: shoot.id, deliverableDefinitionId: definition.id, deletedAt: null },
-        select: { id: true },
+        select: { brandName: true, size: true, frameInches: true, videoLength: true },
       });
-      if (duplicate) {
+      if (held.some((row) => deliverableLineKey(definition.id, row) === lineKey)) {
         const error = new Error("This deliverable is already added to the selected shoot.");
         error.status = 409;
         throw error;
@@ -4322,16 +6261,151 @@ async function createDeliverableAllocation(req, res) {
           deliverableDefinitionId: definition.id,
           deliverableName: definition.name,
           ...allocationData,
+          ...variantData,
         },
         include: deliverableAllocationInclude,
       });
     });
+    await logProjectActivity({ projectId: req.params.id, shootId: req.params.shootId, area: "PROJECT", action: "DELIVERABLE_ADDED", detail: `Deliverable added: ${data?.deliverableName || data?.name || "-"}`, userId: Number(req.user.id) });
     return res.status(201).json({ data });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });
     console.error("Unable to add deliverable allocation:", error);
     return res.status(500).json({ message: "Unable to add deliverable allocation." });
   }
+}
+
+/**
+ * A client's request approved (Client Management -> Client Requests: paid and approved, or given free):
+ * the service or deliverable added to its shoot exactly as Edit Project adds one - the same defaults,
+ * the same refusal of one already there (then nothing is added), the automatic deliverables a service
+ * brings, and a line in the project's activity. `itemType` is "service" or "deliverable";
+ * `definitionId` the Settings entry. Resolves to `{ name, added }`, or null for an entry no longer offered.
+ */
+async function addApprovedLine({ projectId, shootId, itemType, definitionId, quantity = 1, remarks = null, userId = null }) {
+  const result = await prisma.$transaction(async (transaction) => {
+    const shoot = await findProjectShoot(transaction, projectId, shootId);
+    if (itemType === "service") {
+      const definition = await transaction.projectServiceDefinition.findFirst({ where: { id: definitionId, isActive: true }, include: serviceDefinitionInclude });
+      if (!definition) return null;
+      const held = await transaction.projectPostProductionAllocation.findFirst({ where: { projectId: shoot.projectId, shootId: shoot.id, serviceDefinitionId: definition.id, deletedAt: null }, select: { id: true } });
+      if (held) return { name: definition.name, added: false };
+      const allocationData = await serviceAllocationDataForDefinition(transaction, definition, { serviceDefinitionId: definition.id, quantity, remarks });
+      await transaction.projectPostProductionAllocation.create({
+        data: { projectId: shoot.projectId, shootId: shoot.id, serviceDefinitionId: definition.id, serviceName: definition.name, serviceDetails: null, quantitySessionTiming: null, ...allocationData },
+      });
+      await syncAutoDeliverablesForShoot(transaction, shoot.projectId, shoot.id);
+      return { name: definition.name, added: true };
+    }
+    const definition = await transaction.projectDeliverableDefinition.findFirst({ where: { id: definitionId, isActive: true }, include: deliverableDefinitionInclude });
+    if (!definition) return null;
+    const variantData = deliverableVariantSnapshotFor(definition, null);
+    const lineKey = deliverableLineKey(definition.id, variantData);
+    const held = await transaction.projectShootDeliverable.findMany({ where: { projectId: shoot.projectId, shootId: shoot.id, deliverableDefinitionId: definition.id, deletedAt: null }, select: { brandName: true, size: true, frameInches: true, videoLength: true } });
+    if (held.some((row) => deliverableLineKey(definition.id, row) === lineKey)) return { name: definition.name, added: false };
+    const allocationData = await deliverableAllocationDataForDefinition(transaction, definition, { deliverableDefinitionId: definition.id, quantity, remarks });
+    await transaction.projectShootDeliverable.create({ data: { projectId: shoot.projectId, shootId: shoot.id, deliverableDefinitionId: definition.id, deliverableName: definition.name, ...allocationData, ...variantData } });
+    return { name: definition.name, added: true };
+  });
+  if (result?.added) {
+    await logProjectActivity({ projectId, shootId, area: "PROJECT", action: itemType === "service" ? "SERVICE_ADDED" : "DELIVERABLE_ADDED", detail: `${itemType === "service" ? "Service" : "Deliverable"} added from the client's request: ${result.name}`, userId });
+  }
+  return result;
+}
+
+/**
+ * A raised request decided (Client Management -> Client Requests -> Raised Requests): its approved
+ * shoot, services and deliverables written into the project inside the caller's transaction, by the
+ * same helpers Create Project and Edit Project write them with - each line's configuration as it was
+ * asked for, one deliverable line per variant.
+ *
+ * `shoot` is a new shoot's fields (`projectShootSchema`), or null to add to the existing `shootId`.
+ * A new shoot is laid down the way Create Project lays one down: its deliverables are the ones the
+ * request listed (each decided on its own), so nothing more is added. Lines added to a shoot the
+ * project already has follow Edit Project: a service brings its automatic deliverables with it.
+ *
+ * A line already on the shoot is never added twice - it is reported `{ id: null, note }` instead.
+ *
+ * Every row written carries a Sale Extras baseline: its price travels on the request's own extra
+ * quotation, so Sale Extras must not offer it to be priced and published a second time.
+ *
+ * `services` / `deliverables` are `[{ key, line }]`, the line as `projectShootServiceInputSchema` /
+ * `projectShootDeliverableInputSchema` take it. Resolves to `{ shootId, shootCode, created, applied }`,
+ * `applied` a Map of each key to `{ id, note }`.
+ */
+async function applyRequestedPlan(transaction, { projectId, shoot = null, shootId = null, services = [], deliverables = [], userId = null }) {
+  const fail = (status, message) => Object.assign(new Error(message), { status });
+  const project = await transaction.salesProject.findFirst({ where: { id: String(projectId), deletedAt: null }, select: { id: true, vertical: true, sourceBranch: true } });
+  if (!project) throw fail(404, "Project not found.");
+
+  let target;
+  if (shoot) {
+    const parsed = projectShootSchema.safeParse(shoot);
+    if (!parsed.success) throw fail(400, `The requested shoot cannot be added: ${parsed.error.issues?.[0]?.message || "its details are incomplete"}.`);
+    target = await transaction.projectShoot.create({
+      data: { ...projectShootData(parsed.data), projectId: project.id, shootId: await nextShootId(transaction, project) },
+      select: { id: true, shootId: true, projectId: true, dateCreated: true, isMainEvent: true },
+    });
+    await syncProjectMainEvent(transaction, project.id, target);
+  } else {
+    const found = await findProjectShoot(transaction, project.id, shootId);
+    target = await transaction.projectShoot.findUnique({ where: { id: found.id }, select: { id: true, shootId: true, projectId: true } });
+  }
+
+  const lineWhere = { projectId: project.id, shootId: target.id, deletedAt: null };
+  const before = {
+    services: new Set((await transaction.projectPostProductionAllocation.findMany({ where: lineWhere, select: { id: true } })).map((row) => row.id)),
+    deliverables: new Set((await transaction.projectShootDeliverable.findMany({ where: lineWhere, select: { id: true } })).map((row) => row.id)),
+  };
+  const applied = new Map();
+  let serviceAdded = false;
+
+  for (const { key, line } of services) {
+    const definition = await transaction.projectServiceDefinition.findFirst({ where: { id: line.serviceDefinitionId, isActive: true }, include: serviceDefinitionInclude });
+    if (!definition) { applied.set(key, { id: null, note: "No longer offered in Settings" }); continue; }
+    const held = await transaction.projectPostProductionAllocation.findFirst({ where: { ...lineWhere, serviceDefinitionId: definition.id }, select: { id: true } });
+    if (held) { applied.set(key, { id: null, note: "Already on the shoot" }); continue; }
+    const allocationData = await serviceAllocationDataForDefinition(transaction, definition, { ...line, serviceDefinitionId: definition.id });
+    const row = await transaction.projectPostProductionAllocation.create({
+      data: { projectId: project.id, shootId: target.id, serviceDefinitionId: definition.id, serviceName: definition.name, serviceDetails: null, quantitySessionTiming: null, ...allocationData },
+      select: { id: true },
+    });
+    applied.set(key, { id: row.id, note: null });
+    serviceAdded = true;
+  }
+  if (serviceAdded && !shoot) await syncAutoDeliverablesForShoot(transaction, project.id, target.id);
+
+  for (const { key, line } of deliverables) {
+    const definition = await transaction.projectDeliverableDefinition.findFirst({ where: { id: line.deliverableDefinitionId, isActive: true }, include: deliverableDefinitionInclude });
+    if (!definition) { applied.set(key, { id: null, note: "No longer offered in Settings" }); continue; }
+    const variantData = deliverableVariantSnapshotFor(definition, line.variant);
+    const lineKey = deliverableLineKey(definition.id, variantData);
+    const held = await transaction.projectShootDeliverable.findMany({ where: { ...lineWhere, deliverableDefinitionId: definition.id }, select: { brandName: true, size: true, frameInches: true, videoLength: true } });
+    if (held.some((row) => deliverableLineKey(definition.id, row) === lineKey)) { applied.set(key, { id: null, note: "Already on the shoot" }); continue; }
+    const allocationData = await deliverableAllocationDataForDefinition(transaction, definition, { ...line, deliverableDefinitionId: definition.id });
+    const row = await transaction.projectShootDeliverable.create({
+      data: { projectId: project.id, shootId: target.id, deliverableDefinitionId: definition.id, deliverableName: definition.name, ...allocationData, ...variantData },
+      select: { id: true },
+    });
+    applied.set(key, { id: row.id, note: null });
+  }
+
+  // The rows this wrote - the lines asked for and any automatic deliverable they brought - become
+  // baseline, so the extra quotation is the one place their price is counted.
+  const writtenServices = await transaction.projectPostProductionAllocation.findMany({ where: { ...lineWhere, id: { notIn: [...before.services] } } });
+  for (const row of writtenServices) await transaction.projectPostProductionAllocation.update({ where: { id: row.id }, data: saleExtrasBooking.baselineFor(true, "SERVICE", row) });
+  const writtenDeliverables = await transaction.projectShootDeliverable.findMany({ where: { ...lineWhere, id: { notIn: [...before.deliverables] } } });
+  for (const row of writtenDeliverables) await transaction.projectShootDeliverable.update({ where: { id: row.id }, data: saleExtrasBooking.baselineFor(true, "DELIVERABLE", row) });
+
+  if (shoot) {
+    await transaction.projectShoot.update({ where: { id: target.id }, data: saleExtrasBooking.baselineFor(true, "SHOOT") });
+    // A new shoot reaches its client storage, pre production and production boards as one added on
+    // Edit Project does (`createProjectShoots`).
+    await ensureProjectClientStorage(transaction, project.id, { userId });
+    await ensureProjectPreProduction(transaction, project.id, { userId });
+    await ensureProjectProduction(transaction, project.id);
+  }
+  return { shootId: target.id, shootCode: target.shootId, created: Boolean(shoot), applied };
 }
 
 async function updateDeliverableAllocation(req, res) {
@@ -4345,8 +6419,10 @@ async function updateDeliverableAllocation(req, res) {
     if (!existing) return res.status(404).json({ message: "Deliverable allocation not found for this project." });
     const allocationData = await deliverableAllocationDataForDefinition(prisma, existing.deliverableDefinition, { ...existing, ...parsed.data });
     const data = await prisma.projectShootDeliverable.update({ where: { id: existing.id }, data: allocationData, include: deliverableAllocationInclude });
+    await logProjectActivity({ projectId: req.params.id, shootId: data?.shootId || null, area: "PROJECT", action: "DELIVERABLE_EDITED", detail: `Deliverable edited: ${data?.deliverableName || data?.name || "-"}`, userId: Number(req.user.id) });
     return res.json({ data });
   } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
     console.error("Unable to update deliverable allocation:", error);
     return res.status(500).json({ message: "Unable to update deliverable allocation." });
   }
@@ -4354,11 +6430,9 @@ async function updateDeliverableAllocation(req, res) {
 
 async function deleteDeliverableAllocation(req, res) {
   try {
-    const result = await prisma.projectShootDeliverable.updateMany({
-      where: { id: req.params.allocationId, projectId: req.params.id, deletedAt: null },
-      data: { deletedAt: new Date() },
-    });
+    const result = await removeDeliverableAllocationInTx(prisma, req.params.id, req.params.allocationId);
     if (result.count !== 1) return res.status(404).json({ message: "Deliverable allocation not found for this project." });
+    await logProjectActivity({ projectId: req.params.id, area: "PROJECT", action: "DELIVERABLE_REMOVED", detail: "Deliverable removed", userId: Number(req.user.id) });
     return res.json({ message: "Deliverable allocation removed successfully." });
   } catch (error) {
     console.error("Unable to delete deliverable allocation:", error);
@@ -4366,4 +6440,4 @@ async function deleteDeliverableAllocation(req, res) {
   }
 }
 
-module.exports = { codeFor, deliverableBrandsForSave, recordProjectAdvance, projectAdvanceOptions, syncProjectShootDeliverables, requireStartedProjectEditor, mayEditStartedProject, STARTED_PROJECT_EDIT_REFUSAL, SHOW_ALL_PROJECTS_WRITE, requireProjectEditor, requireProjectDeleter, mayEditProject, mayDeleteProject, PROJECT_STAFF_FIELDS, PROJECT_EDIT_REFUSAL, PROJECT_DELETE_REFUSAL, finalizedFields, quotationPayloadSchema, quotationData, startProjectSchema, startProjectDraftSchema, listProjects, listEnquiries, listQuotations, getQuotation, createQuotation, createQuotationVersion, duplicateQuotation, renewQuotationLink, deleteQuotation, deleteQuotationRecord, publicQuotation, quotationLinkState, quotationLinkExpiry, quotationIdFor, QUOTATION_LINK_VALIDITY_DAYS, publicQuotationPdf, quotationPdf, listSourceBranches, listCrmEmployees, listActiveEmployees, createProject, projectImportTemplate, importProjects, updateProject, deleteProject, deleteProjectRecord, startProject, saveStartProjectDraft, listProjectShoots, listProjectPayments, createProjectShoots, updateProjectShoot, deleteProjectShoot, listProductionDeliverables, replaceProductionDeliverables, listProjectOptionSets, createProjectOptionSetValue, updateProjectOptionSetValue, listServiceDefinitions, createServiceDefinition, updateServiceDefinition, listDeliverableDefinitions, createDeliverableDefinition, updateDeliverableDefinition, listServiceAllocations, createServiceAllocation, updateServiceAllocation, deleteServiceAllocation, listDeliverableAllocations, createDeliverableAllocation, updateDeliverableAllocation, deleteDeliverableAllocation, deleteDeliverableDefinition, deleteProjectOptionSetValue, deleteServiceDefinition };
+module.exports = { getProject, BOOKING_EDIT_WRITE, resolveFinalizedQuotation, ANOTHER_FINALIZED, FINALIZED_LOCKED, narrowQuotations, listQuotationShareCandidates, saveQuotationShares, mayEditBookings, bulkStatusSchema, bulkUpdateProjectStatus, applyGiftTracking, retireProjectWithin, saveDeliverableBrands, deliverableVariantSnapshotFor, deliverableLineKey, projectShootServiceInputSchema, projectShootDeliverableInputSchema, validateSourceBranch, nextEventId, nextShootId, projectShootData, syncProjectMainEvent, projectShootSchema, normalizeClientMainNumber, projectStatuses, saveStartProjectWork, preProductionGeneralSchema, sendQuotationExpired, applicabilityChanges, codeFor, deliverableBrandsForSave, recordProjectAdvance, projectAdvanceOptions, syncProjectShootDeliverables, requireStartedProjectEditor, mayEditStartedProject, STARTED_PROJECT_EDIT_REFUSAL, SHOW_ALL_PROJECTS_WRITE, requireProjectEditor, requireProjectDeleter, mayEditProject, mayDeleteProject, PROJECT_STAFF_FIELDS, PROJECT_EDIT_REFUSAL, PROJECT_DELETE_REFUSAL, finalizedFields, quotationPayloadSchema, quotationData, startProjectSchema, startProjectDraftSchema, listProjects, listEnquiries, listQuotations, getQuotation, createQuotation, createQuotationVersion, duplicateQuotation, createQuotationDraft, previewQuotation, updateQuotationDraft, generateQuotationDraft, clientFacingQuotation, MAX_DISCOUNT_PERCENT, QUOTATION_STATUS, isDraftQuotation, draftRefusal, draftAnswers, renewQuotationLink, finalizeQuotation, unfinalizeQuotation, QUOTATION_FINALIZATION, isFinalizedQuotation, quotationFinalization, deleteQuotation, deleteQuotationRecord, deleteQuotationChainRecord, publicQuotation, quotationLinkState, quotationLinkExpiry, quotationIdFor, QUOTATION_LINK_VALIDITY_DAYS, publicQuotationPdf, quotationPdf, listSourceBranches, listCrmEmployees, listActiveEmployees, createProject, projectImportTemplate, importProjects, updateProject, deleteProject, deleteProjectRecord, startProject, saveStartProjectDraft, listProjectShoots, listProjectPayments, sendBackProject, returnToProjects, createProjectShoots, updateProjectShoot, deleteProjectShoot, listProductionDeliverables, replaceProductionDeliverables, listProjectOptionSets, createProjectOptionSetValue, updateProjectOptionSetValue, listServiceDefinitions, createServiceDefinition, updateServiceDefinition, reorderServiceDefinitions, listDeliverableDefinitions, createDeliverableDefinition, updateDeliverableDefinition, reorderDeliverableDefinitions, DEFINITION_ORDER, orderedDefinitionIds, definitionOrderSchema, listServiceAllocations, createServiceAllocation, updateServiceAllocation, deleteServiceAllocation, reorderServiceAllocations, listDeliverableAllocations, createDeliverableAllocation, updateDeliverableAllocation, deleteDeliverableAllocation, reorderDeliverableAllocations, addApprovedLine, applyRequestedPlan, syncAutoDeliverablesForShoot, removeServiceAllocationInTx, removeDeliverableAllocationInTx, deleteDeliverableDefinition, deleteProjectOptionSetValue, deleteServiceDefinition, APPLICABILITY_ITEMS, clientLoginFor, sendClientLoginWhatsApp, getClientLogin, createClientLogin, getClientLoginByNumber, existingClientLoginFor, sendQuotationPdf, reorderProjectShoots };

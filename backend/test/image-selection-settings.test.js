@@ -81,6 +81,24 @@ test("reads login slides as a list and keeps them when a save leaves them out", 
 // could resolve outside one — a relative path, a `..` step — is refused before it can be stored.
 // There is deliberately no browser download path here: that is a folder handle held by the browser
 // itself, and a string on this row could never grant permission to write one.
+test("the client page's pictures are their own list: read as one, written only by their own schema", async () => {
+  const { settingsSchema, clientPageImagesSchema, MAX_CLIENT_PAGE_IMAGES } = require("../src/modules/image-selection/settings/validation");
+  assert.deepEqual(DEFAULTS.clientLoginSlides, []);
+  const repo = fakeRepository({ clientLoginSlides: ["https://cdn/c.jpg", 3, ""] });
+  assert.deepEqual((await createSettingsService(repo).read()).clientLoginSlides, ["https://cdn/c.jpg"]);
+  assert.equal(clientPageImagesSchema.safeParse({ clientLoginSlides: ["https://cdn/c.jpg", "data:image/png;base64,AAAA"] }).success, true);
+  assert.equal(clientPageImagesSchema.safeParse({ clientLoginSlides: Array(MAX_CLIENT_PAGE_IMAGES + 1).fill("https://cdn/c.jpg") }).success, false);
+  assert.equal(clientPageImagesSchema.safeParse({ clientLoginSlides: [""] }).success, false);
+  assert.equal(clientPageImagesSchema.safeParse({ clientLoginSlides: ["x".repeat(7_000_001)] }).success, false, "no bigger than a 5 MB picture");
+  // Only a picked picture or one already saved: never a link to another site, which every client
+  // signing in would load.
+  const controller = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "src", "modules", "image-selection", "settings", "controller.js"), "utf8");
+  assert.ok(controller.includes('if (result.data.clientLoginSlides.some((slide) => !slide.startsWith("data:image/") && !current.includes(slide))) {'));
+  assert.equal(clientPageImagesSchema.safeParse({ clientLoginSlides: [], studioName: "x" }).success, false, "no other key rides along");
+  // The Organization form cannot write them.
+  assert.equal("clientLoginSlides" in (settingsSchema.safeParse({ clientLoginSlides: ["https://cdn/c.jpg"] }).data || {}), false);
+});
+
 test("accepts a real server storage path and refuses one that could escape it", () => {
   const base = { galleryValidityMonths: 6, defaultSelectionLimit: 50, studioName: "Beam Craft", galleryLogoUrl: null };
   const parse = (originalStoragePath) => settingsSchema.safeParse({ ...base, originalStoragePath });
@@ -115,4 +133,28 @@ test("treats a blank logo as no logo rather than as an empty string", () => {
   assert.equal(settingsSchema.parse({ ...base, galleryLogoUrl: null }).galleryLogoUrl, null);
   assert.equal(settingsSchema.parse({ ...base }).galleryLogoUrl, null);
   assert.equal(settingsSchema.parse({ ...base, galleryLogoUrl: "https://cdn.example/logo.png" }).galleryLogoUrl, "https://cdn.example/logo.png");
+});
+
+/*
+ * The dark-mode pair: a Global Logo and a tab mark for the application's dark themes and the
+ * browser's dark strip, uploaded beside the light ones. Each is its own field, so a save carrying
+ * one of them leaves the other three exactly as they were - and an install that has never uploaded
+ * a dark mark answers null, which every reader takes as "wear the light one".
+ */
+test("the dark-mode logo and favicon are their own fields, unset by default", async () => {
+  assert.equal(DEFAULTS.galleryLogoDarkUrl, null);
+  assert.equal(DEFAULTS.faviconDarkUrl, null);
+  const base = { galleryValidityMonths: 6, defaultSelectionLimit: 50, studioName: "Beam Craft" };
+  for (const key of ["galleryLogoDarkUrl", "faviconDarkUrl"]) {
+    assert.equal(settingsSchema.parse({ ...base, [key]: "" })[key], null, `${key}: blank is cleared`);
+    assert.equal(settingsSchema.parse({ ...base })[key], null, `${key}: absent is null`);
+    assert.equal(settingsSchema.parse({ ...base, [key]: "https://cdn.example/dark.png" })[key], "https://cdn.example/dark.png");
+  }
+  // Saving one of the pair leaves the other three marks untouched.
+  const repo = fakeRepository({ galleryLogoUrl: "https://cdn.example/light.png", faviconUrl: "https://cdn.example/tab.svg" });
+  const saved = await createSettingsService(repo).save({ galleryLogoDarkUrl: "https://cdn.example/dark.png" }, 7);
+  assert.equal(saved.galleryLogoUrl, "https://cdn.example/light.png");
+  assert.equal(saved.galleryLogoDarkUrl, "https://cdn.example/dark.png");
+  assert.equal(saved.faviconUrl, "https://cdn.example/tab.svg");
+  assert.equal(saved.faviconDarkUrl, null);
 });

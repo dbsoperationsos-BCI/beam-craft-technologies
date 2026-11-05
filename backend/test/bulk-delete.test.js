@@ -219,6 +219,7 @@ test("every bulk delete is mounted above the id route it would otherwise be swal
     [["modules", "accounts", "cash-entries", "routes.js"], 'router.delete("/:id"'],
     [["modules", "hrm", "master-data", "routes.js"], 'router.delete("/employees/:id"'],
     [["modules", "admin", "routes.js"], 'router.delete("/users/:userId"'],
+    [["modules", "hrm", "payroll-register", "routes.js"], 'router.delete("/:id"'],
   ];
 
   for (const [parts, idRoute] of routers) {
@@ -248,6 +249,7 @@ test("no bulk route deletes with a query of its own", () => {
     ["modules", "hrm", "master-data", "routes.js"],
     ["modules", "sales", "projects", "routes.js"],
     ["modules", "admin", "routes.js"],
+    ["modules", "hrm", "payroll-register", "routes.js"],
   ]) {
     const source = read(...parts);
     for (const mount of source.matchAll(/mountBulkDelete\(router, \{[\s\S]*?\n\}\);|mountBulkDelete\(router, \{[^\n]*\}\);/g)) {

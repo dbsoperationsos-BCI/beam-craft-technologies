@@ -8,7 +8,6 @@ import Button from "@/components/shared/Button";
 import TextField from "@/components/shared/TextField";
 import TextAreaField from "@/components/shared/TextAreaField";
 import Dropdown from "@/components/shared/Dropdown";
-import Checkbox from "@/components/shared/Checkbox";
 import EmptyState from "@/components/ai-feature/shared/EmptyState";
 import { formatCount } from "@/lib/aiFeature.mjs";
 import { createAiGuest, createAiGuestGroup, deleteAiGuestGroup, importAiGuests, updateAiGuest, updateAiGuestGroup } from "@/services/ai-feature/ai-feature.service";
@@ -56,11 +55,11 @@ export function GuestFormDialog({ eventId, guest = null, groups = [], onClose, o
     </>}
   >
     <div className="grid gap-3 sm:grid-cols-2">
-      <TextField label="Name" required value={form.name} onChange={(event) => set("name")(event.target.value)} error={errors.name} autoFocus maxLength={191} className="sm:col-span-2" />
-      <TextField label="Phone" type="tel" value={form.phone} onChange={(event) => set("phone")(event.target.value)} error={errors.phone} placeholder="+91 98765 43210" maxLength={30} />
-      <TextField label="Email" type="email" value={form.email} onChange={(event) => set("email")(event.target.value)} error={errors.email} maxLength={191} />
-      <Dropdown label="Group" clearable clearLabel="No group" placeholder="No group" options={groupOptions(groups)} value={form.groupId} onChange={(value) => set("groupId")(value || "")} />
-      <Dropdown label="RSVP" options={RSVP_OPTIONS} value={form.rsvp} onChange={set("rsvp")} sorted={false} />
+      <TextField label="Name" helperText="The guest's name as the studio wants it listed." required value={form.name} onChange={(event) => set("name")(event.target.value)} error={errors.name} autoFocus maxLength={191} className="sm:col-span-2" />
+      <TextField label="Phone" helperText="The guest's mobile number, with country code if outside India." type="tel" value={form.phone} onChange={(event) => set("phone")(event.target.value)} error={errors.phone} placeholder="+91 98765 43210" maxLength={30} />
+      <TextField label="Email" helperText="The guest's email address, if you have it." type="email" value={form.email} onChange={(event) => set("email")(event.target.value)} error={errors.email} maxLength={191} />
+      <Dropdown label="Group" helperText="The guest group they belong to, which sorts the guest list." clearable clearLabel="No group" placeholder="No group" options={groupOptions(groups)} value={form.groupId} onChange={(value) => set("groupId")(value || "")} />
+      <Dropdown label="RSVP" helperText="Whether the guest has said they are coming." options={RSVP_OPTIONS} value={form.rsvp} onChange={set("rsvp")} sorted={false} />
     </div>
     {errors.form && <p role="alert" className="mt-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{errors.form}</p>}
   </Dialog>;
@@ -117,8 +116,8 @@ export function ImportGuestsDialog({ eventId, groups = [], onClose, onImported }
     </>}
   >
     <div className="space-y-3">
-      <TextAreaField label="Guests" value={text} onChange={(event) => { setText(event.target.value); setError(""); }} rows={10} placeholder={"Arun Kumar, +91 98765 43210, arun@example.com\nPriya, 9876501234"} inputClassName="font-mono text-xs" />
-      <Dropdown label="Put them in a group" clearable clearLabel="No group" placeholder="No group" options={groupOptions(groups)} value={groupId} onChange={(value) => setGroupId(value || "")} />
+      <TextAreaField label="Guests" helperText="One guest per line: name, then phone and email, separated by commas." value={text} onChange={(event) => { setText(event.target.value); setError(""); }} rows={10} placeholder={"Arun Kumar, +91 98765 43210, arun@example.com\nPriya, 9876501234"} inputClassName="font-mono text-xs" />
+      <Dropdown label="Put them in a group" helperText="The group every imported guest is added to." clearable clearLabel="No group" placeholder="No group" options={groupOptions(groups)} value={groupId} onChange={(value) => setGroupId(value || "")} />
       <p className="text-xs text-slate-500">{formatCount(parsed.rows.length)} {parsed.rows.length === 1 ? "guest" : "guests"} ready{parsed.problems.length ? `, ${formatCount(parsed.problems.length)} ${parsed.problems.length === 1 ? "line" : "lines"} skipped` : ""}.</p>
       {parsed.problems.length > 0 && <ul className="max-h-28 overflow-y-auto rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">{parsed.problems.slice(0, 20).map((problem) => <li key={problem}>{problem}</li>)}{parsed.problems.length > 20 && <li>…and {parsed.problems.length - 20} more.</li>}</ul>}
       {error && <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
@@ -126,8 +125,8 @@ export function ImportGuestsDialog({ eventId, groups = [], onClose, onImported }
   </Dialog>;
 }
 
-/** The event's guest groups: a name, and which sub-events its members may see. */
-export function GuestGroupsDialog({ eventId, groups, subEvents = [], onClose, onChanged }) {
+/** The event's guest groups: a name that sorts the guest list. */
+export function GuestGroupsDialog({ eventId, groups, onClose, onChanged }) {
   const [editing, setEditing] = useState(null);
   const [confirm, setConfirm] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -143,7 +142,7 @@ export function GuestGroupsDialog({ eventId, groups, subEvents = [], onClose, on
   return <>
     <Dialog
       title="Guest groups"
-      description="Groups decide which sub events a guest may open from the event link - the bride's side, the office, the family."
+      description="Groups sort the guest list - the bride's side, the office, the family."
       size="md"
       height="mid"
       onClose={onClose}
@@ -151,21 +150,18 @@ export function GuestGroupsDialog({ eventId, groups, subEvents = [], onClose, on
     >
       {error && <p role="alert" className="mb-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
       {groups.length === 0
-        ? <EmptyState title="No groups yet." message="Guests without a group see whatever the event's privacy setting allows." action={<Button type="button" size="sm" variant="primary" onClick={() => setEditing({})}>Create a group</Button>} />
+        ? <EmptyState title="No groups yet." message="Create a group to sort the guest list." action={<Button type="button" size="sm" variant="primary" onClick={() => setEditing({})}>Create a group</Button>} />
         : <ul className="divide-y divide-slate-100">
-          {groups.map((group) => {
-            const names = (group.subEventIds || []).map((id) => subEvents.find((subEvent) => subEvent.id === id)?.name).filter(Boolean);
-            return <li key={group.id} className="flex items-center justify-between gap-3 py-2">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-slate-800">{group.name}</p>
-                <p className="truncate text-[11px] text-slate-500">{group.guestCount != null ? `${formatCount(group.guestCount)} guests • ` : ""}{names.length ? names.join(", ") : "Every sub event"}</p>
-              </div>
-              <OptionsMenu ariaLabel={`Options for ${group.name}`} zIndex={135} items={[{ label: "Edit", onSelect: () => setEditing(group) }, { label: "Remove", tone: "danger", onSelect: () => setConfirm(group) }]} />
-            </li>;
-          })}
+          {groups.map((group) => <li key={group.id} className="flex items-center justify-between gap-3 py-2">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-slate-800">{group.name}</p>
+              {group.guestCount != null && <p className="truncate text-[11px] text-slate-500">{formatCount(group.guestCount)} {group.guestCount === 1 ? "guest" : "guests"}</p>}
+            </div>
+            <OptionsMenu ariaLabel={`Options for ${group.name}`} zIndex={135} items={[{ label: "Edit", onSelect: () => setEditing(group) }, { label: "Remove", tone: "danger", onSelect: () => setConfirm(group) }]} />
+          </li>)}
         </ul>}
     </Dialog>
-    {editing && <GroupFormDialog key={editing.id || "new"} eventId={eventId} group={editing.id ? editing : null} subEvents={subEvents} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); onChanged(); }} />}
+    {editing && <GroupFormDialog key={editing.id || "new"} eventId={eventId} group={editing.id ? editing : null} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); onChanged(); }} />}
     <ConfirmDialog
       open={Boolean(confirm)}
       layer="confirmOverDialog"
@@ -179,9 +175,8 @@ export function GuestGroupsDialog({ eventId, groups, subEvents = [], onClose, on
   </>;
 }
 
-function GroupFormDialog({ eventId, group, subEvents, onClose, onSaved }) {
+function GroupFormDialog({ eventId, group, onClose, onSaved }) {
   const [name, setName] = useState(group?.name || "");
-  const [subEventIds, setSubEventIds] = useState(() => new Set(group?.subEventIds || []));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -190,7 +185,7 @@ function GroupFormDialog({ eventId, group, subEvents, onClose, onSaved }) {
     if (!name.trim()) { setError("Give the group a name."); return; }
     setBusy(true);
     try {
-      const payload = { name: name.trim(), subEventIds: Array.from(subEventIds) };
+      const payload = { name: name.trim() };
       if (group) await updateAiGuestGroup(eventId, group.id, payload); else await createAiGuestGroup(eventId, payload);
       onSaved();
     } catch (cause) {
@@ -198,7 +193,6 @@ function GroupFormDialog({ eventId, group, subEvents, onClose, onSaved }) {
       setBusy(false);
     }
   }
-  const toggle = (id) => setSubEventIds((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
 
   return <Dialog
     title={group ? "Edit group" : "New group"}
@@ -211,19 +205,6 @@ function GroupFormDialog({ eventId, group, subEvents, onClose, onSaved }) {
       <Button type="submit" variant="primary" className="max-sm:flex-1" disabled={busy}>{busy ? "Saving..." : group ? "Save" : "Create group"}</Button>
     </>}
   >
-    <div className="space-y-3">
-      <TextField label="Group name" required value={name} onChange={(event) => { setName(event.target.value); setError(""); }} error={error} autoFocus maxLength={120} />
-      <fieldset>
-        <legend className="text-[11px] font-semibold text-slate-600 sm:text-xs">Sub events this group may open</legend>
-        {subEvents.length === 0
-          ? <p className="mt-1.5 text-xs text-slate-500">No sub events yet - the group sees the whole event.</p>
-          : <ul className="mt-1.5 space-y-1.5">
-            {subEvents.map((subEvent) => <li key={subEvent.id}>
-              <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700"><Checkbox checked={subEventIds.has(subEvent.id)} onChange={() => toggle(subEvent.id)} ariaLabel={subEvent.name} />{subEvent.name}</label>
-            </li>)}
-          </ul>}
-        {subEvents.length > 0 && <p className="mt-1.5 text-[11px] text-slate-500">Tick none to allow every sub event.</p>}
-      </fieldset>
-    </div>
+    <TextField label="Group name" helperText="A name for this set of guests, such as Bride's family." required value={name} onChange={(event) => { setName(event.target.value); setError(""); }} error={error} autoFocus maxLength={120} />
   </Dialog>;
 }

@@ -6,8 +6,8 @@ import useInfiniteScroll from "@/components/shared/useInfiniteScroll";
 import GallerySidebarShell, { SidebarToggle } from "./GallerySidebarShell";
 import { GalleryLogo } from "./GalleryBrand";
 import SelectionPhotoGrid, { selectionFor } from "./SelectionPhotoGrid";
-import PeopleFilterRow from "./PeopleFilterRow";
 import { foldersToShow } from "./FolderCards";
+import SelectionFooter from "./SelectionFooter";
 import { selectionProgressStatus } from "@/lib/selectionProgressStatus.mjs";
 
 function DeliverableSidebar({ activeDeliverable, selectionCounts, folders, activeFolderGroupId, activeFolderId, onOpenFolder, studioName, galleryLogoUrl }) {
@@ -34,17 +34,19 @@ export default function FolderGrid({
   // The studio's own branding, for the sidebar. Both come from studio-wide settings by way of the
   // gallery meta; without them the sidebar falls back to the bundled logo.
   studioName, galleryLogoUrl,
-  // The People filter: who was found in this folder, which of them the grid is narrowed to (any
-  // of them), and the press that changes it. Empty means the row is not drawn and the grid is the
-  // whole folder.
-  people = [], activePersonIds = [], onSelectPerson,
+  // The People filter this folder was opened with, named - "Person 1, Person 3" - or empty when it
+  // was opened from All Photos. The listing arrives already narrowed; this only says so.
+  personLabel = "",
+  // The card list's footer actions, so a client inside a card sends from where they are rather
+  // than walking back: Review & Submit opens the same review, Submit All the same popup.
+  onReviewAndSend, onSubmitAll,
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // The photo area is the only thing on this page that scrolls, so it is what the sentinel below
   // is measured against — the window would have the next page arrive late, once the client had
   // already reached the last photo.
   const scrollRef = useRef(null);
-  const sentinelRef = useInfiniteScroll({ onLoadMore, hasMore, loading, count: items.length, rootRef: scrollRef, resetKey: `${activeFolderId || ""}|${tab}|${activePersonIds.join(",")}` });
+  const sentinelRef = useInfiniteScroll({ onLoadMore, hasMore, loading, count: items.length, rootRef: scrollRef, resetKey: `${activeFolderId || ""}|${tab}|${personLabel}` });
   const activeDeliverable = deliverables.find((item) => item.id === activeDeliverableId);
   // "Add to" only offers the selection items filed under the shoot heading this folder sits in —
   // a photo inside Wedding cannot be added to a Reception deliverable. Shoots are matched to the
@@ -68,16 +70,13 @@ export default function FolderGrid({
         <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-200 bg-white px-3 py-2 sm:gap-x-4 sm:px-7">
           <SidebarToggle onClick={() => setSidebarOpen(true)} />
           <button type="button" onClick={onBack} aria-label="Back to folders" className="grid h-9 w-9 shrink-0 place-items-center rounded-md text-slate-600 hover:bg-slate-100"><ArrowBack style={{ fontSize: 18 }} /></button>
-          <h1 className="min-w-0 flex-1 truncate text-sm font-normal text-slate-800 sm:text-base lg:text-xl">{projectName}{folderName ? ` | ${folderName}` : ""}</h1>
+          <h1 className="min-w-0 flex-1 truncate text-sm font-normal text-slate-800 sm:text-base lg:text-xl">{projectName}{folderName ? ` | ${folderName}` : ""}{personLabel ? ` · ${personLabel}` : ""}</h1>
           <div className="ml-auto flex shrink-0 items-center gap-2 text-xs text-slate-700 sm:gap-4">
             {selectionLimit > 0 && <div className="hidden w-44 lg:block"><div className="flex justify-between"><span><strong>{percentage}%</strong> Completed</span></div><div className="mt-1 h-1 rounded-full bg-slate-100"><div className="h-1 rounded-full bg-blue-600" style={{ width: `${percentage}%` }} /></div></div>}
             <span className="font-medium">{selectedTotal}/{selectionLimit || counts.all}</span>
             <span className="rounded-full px-2 py-1 text-[10px] font-semibold text-white sm:px-3" style={{ backgroundColor: topBarStatus.color }}>{topBarStatus.label}</span>
           </div>
         </header>
-
-        {/* Above the tabs and pinned with them: the People filter, drawn only when somebody was found. */}
-        <PeopleFilterRow people={people} activePersonIds={activePersonIds} onSelect={onSelectPerson} sessionToken={sessionToken} totalCount={counts.all} />
 
         {/* The tab row is pinned between the header and the scrolling grid — part of the frame,
             not the scroll content, so photos can never slide through behind it. */}
@@ -96,13 +95,18 @@ export default function FolderGrid({
             onToggleSelect={onToggleSelect}
             onOpenImage={onOpenImage}
             loading={loading}
-            emptyMessage={activePersonIds.length ? (tab === "selected" ? `No photos of ${activePersonIds.length > 1 ? "these people" : "this person"} selected yet in this folder.` : `No photos of ${activePersonIds.length > 1 ? "these people" : "this person"} in this folder.`) : tab === "selected" ? "No photos selected yet in this folder." : "No photos in this folder."}
+            emptyMessage={personLabel ? (tab === "selected" ? `No photos of ${personLabel} selected yet in this folder.` : `No photos of ${personLabel}${personLabel.includes(",") ? " together" : ""} in this folder.`) : tab === "selected" ? "No photos selected yet in this folder." : "No photos in this folder."}
           />
           {/* Where the next page is asked for. The grid above already draws its own waiting tiles
               while one is on the way, so scrolling is the whole gesture and there is nothing to
               press. Rendered only while a page is left, so a finished folder observes nothing. */}
           {hasMore && <div ref={sentinelRef} aria-hidden="true" className="h-px" />}
         </section>
+        {/* The card list's own footer, under the grid rather than over it: part of the frame, so the
+            photos scroll above it and none hides behind it. */}
+        {onReviewAndSend && (
+          <SelectionFooter deliverables={deliverables} selectionCounts={selectionCounts} active={activeDeliverable} onReviewAndSend={onReviewAndSend} onSubmitAll={onSubmitAll} className="shrink-0" />
+        )}
       </div>
     </main>
   );

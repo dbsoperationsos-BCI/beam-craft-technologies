@@ -1,5 +1,7 @@
 const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const prisma = require("../src/config/db");
 const service = require("../src/modules/hrm/referrals/service");
 
@@ -127,14 +129,77 @@ test("a branch administrator sees the branch, and not the branch they do not rea
     "a referral from a branch the role does not name stays out, even one filed beside the reader");
 });
 
-test("an instalment on a referral out of scope is not found", async () => {
-  const theirs = await prisma.employeeReferral.findFirst({ where: { referralId: tag("by-colleague") }, include: { payouts: true } });
-  const instalment = theirs.payouts[0];
-  if (!instalment) return; // No schedule on a directly-created referral; the list assertions carry the rule.
+test("an instalment is settled by hand only inside the reader's reach, once, and payroll then leaves it out", async () => {
+  /*
+   * Employee Referral → ⋮ → Mark 3rd month paid, for money handed over outside payroll. Hiding a row
+   * from the register is no protection while its id can still be sent to the write, so the write asks
+   * the same question the list does - and answers 404, as the list does, for one out of reach.
+   */
+  const payoutOf = async (code) => {
+    const referral = await prisma.employeeReferral.findFirst({ where: { referralId: tag(code) } });
+    return prisma.employeeReferralPayout.create({ data: { referralId: referral.id, monthOffset: 3, dueOn: new Date(Date.UTC(2031, 0, 15)), amount: 3000 } });
+  };
+  const mine = await payoutOf("by-report");
+  const theirs = await payoutOf("by-stranger");
 
-  await assert.rejects(
-    () => service.updatePayout(instalment.id, { status: "Paid" }, F.reportUser.id),
-    (error) => error.status === 404,
-    "hiding a row from the register is not protection while its id can still be sent to the write",
-  );
+  await assert.rejects(service.updatePayout(theirs.id, {}, F.reportUser.id), { status: 404 }, "a referral out of reach cannot be paid by its id");
+  assert.equal((await prisma.employeeReferralPayout.findUnique({ where: { id: theirs.id } })).status, "Pending");
+
+  const paid = await service.updatePayout(mine.id, { paidOn: "2031-01-10", remarks: "Paid by cash" }, F.reportUser.id);
+  assert.equal(paid.status, "Paid");
+  assert.equal(paid.payrollEntryId, null, "settled by hand, not by a payroll row");
+  assert.equal(paid.paidByUserId, F.reportUser.id);
+  assert.equal(paid.remarks, "Paid by cash");
+  await assert.rejects(service.updatePayout(mine.id, {}, F.reportUser.id), { status: 409 }, "paid once, never twice");
+
+  // Payroll carries only what is still Pending, so the month it falls due in pays nothing for it.
+  const referrals = await prisma.employeeReferral.findMany({ where: { referralId: tag("by-report") }, ...service.REFERRAL_BONUS_SELECT });
+  const due = service.referralBonusDueIn(2031, 1, referrals, { referrer: { employmentStatus: "Active", archivedAt: null }, working: ["Active"] });
+  assert.equal(due.amount, 0);
+  assert.deepEqual(due.payoutIds, []);
+});
+
+test("a stopped instalment - the hire has left - cannot be settled by hand", async () => {
+  const referral = await prisma.employeeReferral.findFirst({ where: { referralId: tag("by-manager") } });
+  const payout = await prisma.employeeReferralPayout.create({ data: { referralId: referral.id, monthOffset: 3, dueOn: new Date(Date.UTC(2031, 0, 15)), amount: 3000 } });
+  await prisma.employee.update({ where: { id: referral.referredEmployeeId }, data: { employmentStatus: "Relieved" } });
+  try {
+    await assert.rejects(service.updatePayout(payout.id, {}, F.managerUser.id), { status: 409 });
+    assert.equal((await prisma.employeeReferralPayout.findUnique({ where: { id: payout.id } })).status, "Pending");
+  } finally {
+    await prisma.employee.update({ where: { id: referral.referredEmployeeId }, data: { employmentStatus: "Active" } });
+  }
+});
+
+test("the route is guarded by the router's Employee Referral guard - READ_WRITE for a PATCH", () => {
+  const routes = fs.readFileSync(path.join(__dirname, "../src/modules/hrm/referrals/routes.js"), "utf8");
+  assert.ok(routes.indexOf('router.use(requireModule("HRM", "Employee Referral"));') < routes.indexOf('router.patch("/payouts/:payoutId", updatePayout);'));
+  assert.match(routes, /router\.get\("\/", listReferrals\);/);
+});
+
+test("a referral is deleted only inside the reader's reach, never once anything on it was paid", async () => {
+  const idOf = async (code) => (await prisma.employeeReferral.findFirst({ where: { referralId: tag(code) } })).id;
+  await assert.rejects(service.deleteReferral(await idOf("by-stranger"), F.reportUser.id), { status: 404 }, "out of reach answers as missing");
+  // Its own paid instalment, so this does not lean on the settle test having run first.
+  await prisma.employeeReferralPayout.upsert({
+    where: { referralId_monthOffset: { referralId: await idOf("by-report"), monthOffset: 9 } },
+    update: { status: "Paid" },
+    create: { referralId: await idOf("by-report"), monthOffset: 9, dueOn: new Date(Date.UTC(2031, 6, 15)), amount: 3000, status: "Paid", paidOn: new Date() },
+  });
+  await assert.rejects(service.deleteReferral(await idOf("by-report"), F.reportUser.id), { status: 409 }, "money that left the studio stays on record");
+  await assert.rejects(service.deleteReferral("abc", F.reportUser.id), { status: 404 }, "a bulk Delete counts a bad id as missed");
+
+  const id = await idOf("by-manager");
+  await service.deleteReferral(id, F.managerUser.id);
+  assert.equal(await prisma.employeeReferral.findUnique({ where: { id } }), null);
+  assert.equal(await prisma.employeeReferralPayout.count({ where: { referralId: id } }), 0, "its instalments go with it");
+  assert.ok(!(await idsFor(F.managerUser.id)).includes(tag("by-manager")));
+});
+
+test("Delete is under the register's guard, the bulk one also behind Table Select All, /bulk before /:id", () => {
+  const routes = fs.readFileSync(path.join(__dirname, "../src/modules/hrm/referrals/routes.js"), "utf8");
+  const guard = routes.indexOf('router.use(requireModule("HRM", "Employee Referral"));');
+  const bulk = routes.indexOf('mountBulkDelete(router, { deleteOne: (id, req) => deleteReferralRecord(id, req.user.id), noun: "referral" });');
+  const one = routes.indexOf('router.delete("/:id", deleteReferral);');
+  assert.ok(guard > 0 && guard < bulk && bulk < one);
 });

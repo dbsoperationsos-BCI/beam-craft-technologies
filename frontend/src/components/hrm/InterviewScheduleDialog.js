@@ -1,5 +1,6 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useEffect, useMemo, useState } from "react";
 import Button from "@/components/shared/Button";
 import EmailChipsField from "@/components/shared/EmailChipsField";
@@ -87,7 +88,13 @@ function uniqueEmails(values) {
   return list;
 }
 
-export default function InterviewScheduleDialog({ candidate, mode = SCHEDULE_MODES.first, options = {}, canWrite = true, onClose, onSaved }) {
+/*
+ * `layer` because this is opened from two places at two depths: a row's ⋮, with nothing over the
+ * table, and the candidate popup, which covers the page at z-120. On the ordinary dialog layer the
+ * second case draws *under* the popup's backdrop - dimmed and unreachable - so the caller says where
+ * it stacks. See `constants/layers`.
+ */
+export default function InterviewScheduleDialog({ candidate, mode = SCHEDULE_MODES.first, options = {}, canWrite = true, layer = "dialog", onClose, onSaved }) {
   const rounds = useMemo(() => roundsOf(candidate), [candidate]);
   const editing = mode === SCHEDULE_MODES.edit;
   const nextRound = editing ? Math.max(rounds.length, 1) : rounds.length + 1;
@@ -155,6 +162,7 @@ export default function InterviewScheduleDialog({ candidate, mode = SCHEDULE_MOD
     const interviewers = guestBook.map((person) => ({
       value: person.id,
       label: [person.name, person.designation].filter(Boolean).join(" · "),
+      avatar: avatarOf(person),
     }));
     const held = candidate?.interviewerEmployeeId;
     if (held && !interviewers.some((person) => person.value === held)) {
@@ -173,11 +181,12 @@ export default function InterviewScheduleDialog({ candidate, mode = SCHEDULE_MOD
        * somebody's personal address is typed straight in.
        */
       renderers: {
-        attendees: ({ values: current, onChange }) => <EmailChipsField
+        attendees: ({ values: current, onChange, field }) => <EmailChipsField
           label="Guests"
+          helperText={field?.helperText || "Pick employees or type email addresses to invite to the Google Meet."}
           values={Array.isArray(current.attendees) ? current.attendees : []}
           onChange={(next) => onChange(uniqueEmails(next))}
-          options={guestBook.map((person) => ({ value: person.email, label: [person.name, person.designation].filter(Boolean).join(" · ") }))}
+          options={guestBook.map((person) => ({ value: person.email, label: [person.name, person.designation].filter(Boolean).join(" · "), avatar: avatarOf(person) }))}
           optionsLabel="Employees"
         />,
       },
@@ -289,6 +298,7 @@ export default function InterviewScheduleDialog({ candidate, mode = SCHEDULE_MOD
     // Whose interview, and which round of it - the one thing the title cannot say twice over.
     description={[candidate?.name || candidate?.candidateCode, `Round ${nextRound}`].filter(Boolean).join(" · ")}
     size="lg"
+    layer={layer}
     onClose={onClose}
     onSubmit={submit}
     busy={saving}

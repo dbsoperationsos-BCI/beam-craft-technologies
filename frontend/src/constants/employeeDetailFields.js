@@ -25,9 +25,9 @@ const digits = (max) => (value) => String(value ?? "").replace(/\D/g, "").slice(
 /* ── Children ──────────────────────────────────────────────────────────────────────────────── */
 
 const childFields = [
-  { name: "name", label: "Name", required: true, props: { placeholder: "Full name" } },
+  { name: "name", label: "Name", required: true, props: { placeholder: "Full name" }, helperText: "The child's full name, kept on the employee's family record." },
   // A child cannot be born tomorrow, and the calendar says so by not offering it.
-  { name: "dateOfBirth", label: "Date of Birth", type: "date", required: true, props: () => ({ restriction: "future", maxDate: todayKey() }) },
+  { name: "dateOfBirth", label: "Date of Birth", type: "date", required: true, props: () => ({ restriction: "future", maxDate: todayKey() }), helperText: "The child's date of birth; future dates are not allowed." },
 ];
 
 /* ── Qualifications ────────────────────────────────────────────────────────────────────────── */
@@ -38,10 +38,10 @@ const childFields = [
  * under the pair, a college name being the longest thing on the row by some way.
  */
 const qualificationFields = [
-  { name: "degree", label: "Degree", required: true, props: { placeholder: "B.Sc, B.E, Diploma, HSC…" } },
-  { name: "branch", label: "Branch / Specialisation", props: { placeholder: "Visual Communication" } },
-  { name: "college", label: "College / School", colSpan: 2, props: { placeholder: "Institution name" } },
-  { name: "passedOutYear", label: "Passed Out Year", normalize: digits(4), props: { inputMode: "numeric", maxLength: 4, placeholder: "2019" } },
+  { name: "degree", label: "Degree", required: true, props: { placeholder: "B.Sc, B.E, Diploma, HSC…" }, helperText: "The qualification earned, such as B.Sc, Diploma or HSC." },
+  { name: "branch", label: "Branch / Specialisation", props: { placeholder: "Visual Communication" }, helperText: "The subject or specialisation studied, if the course had one." },
+  { name: "college", label: "College / School", colSpan: 2, props: { placeholder: "Institution name" }, helperText: "The school, college or university where it was studied." },
+  { name: "passedOutYear", label: "Passed Out Year", normalize: digits(4), props: { inputMode: "numeric", maxLength: 4, placeholder: "2019" }, helperText: "The four-digit year the course was completed, such as 2019." },
 ];
 
 /* ── Experience ────────────────────────────────────────────────────────────────────────────── */
@@ -52,13 +52,14 @@ const qualificationFields = [
  * file — the letter for *this* company, not a pile of documents for the whole career.
  */
 const experienceFields = [
-  { name: "companyName", label: "Company Name", required: true, props: { placeholder: "Where you worked" } },
-  { name: "companyLocation", label: "Company Location", props: { placeholder: "City and state" } },
-  { name: "role", label: "Role", props: { placeholder: "The designation you held" } },
-  { name: "years", label: "Years of Experience", normalize: (value) => String(value ?? "").replace(/[^\d.]/g, "").slice(0, 5), props: { inputMode: "decimal", placeholder: "2.5" } },
+  { name: "companyName", label: "Company Name", required: true, props: { placeholder: "Where you worked" }, helperText: "The company or studio where this job was held." },
+  { name: "companyLocation", label: "Company Location", props: { placeholder: "City and state" }, helperText: "The city and state where that company is based." },
+  { name: "role", label: "Role", props: { placeholder: "The designation you held" }, helperText: "The job title or designation held at that company." },
+  { name: "years", label: "Years of Experience", normalize: (value) => String(value ?? "").replace(/[^\d.]/g, "").slice(0, 5), props: { inputMode: "decimal", placeholder: "2.5" }, helperText: "Time spent there in years; decimals are fine, such as 2.5." },
   {
     name: "attachment",
     label: "Attachment (experience or relieving letter)",
+    helperText: "One experience or relieving letter from this company, as PDF, Word or image.",
     type: "file",
     colSpan: 2,
     props: { maxFiles: 1, accept: ".pdf,.doc,.docx,.png,.jpg,.jpeg,.webp" },

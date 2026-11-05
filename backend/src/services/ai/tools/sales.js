@@ -1,3 +1,4 @@
+const { likeLiteral } = require("../../wordChunks");
 const prisma = require("../../../config/db");
 const dataScope = require("../../dataScope.service");
 
@@ -9,12 +10,24 @@ const leadScopeFor = (session) => dataScope.resolve({
   feature: "CRM Leads",
   columns: { branch: "branchId", employee: "ownerEmployeeId", user: "createdByUserId" },
 });
-const { getCrmLeadById, updateCrmLead } = require("../../../modules/sales/crm-leads/crmLeadService");
+const { getCrmLeadById } = require("../../../modules/sales/crm-leads/crmLeadService");
 const { listLeadActivity } = require("../../../modules/sales/crm-leads/activityService");
 const { listLeadCallLogs } = require("../../../modules/sales/crm-leads/callLogService");
 const transcripts = require("../../../modules/sales/call-transcripts/repository");
 const { buildCrmContext, renderCrmContext } = require("../crmContext");
 const { redactSecrets } = require("../leadContext");
+
+/**
+ * A lead this session may read, or null - the CRM board's own rule: the grant's branch and owner
+ * scope (`leadScopeFor`), then the vertical on screen. Out of scope reads as not found, as the
+ * board's record endpoints do, so a tool can never confirm that a lead it may not show exists.
+ */
+async function visibleLead(id, session) {
+  const [scope, record] = await Promise.all([leadScopeFor(session), getCrmLeadById(id)]);
+  if (!record || !scope.allows(record.lead || {})) return null;
+  if (session?.vertical && String(record.lead?.vertical || "").trim() !== session.vertical) return null;
+  return record;
+}
 
 /**
  * Read-only tools for SALES / CRM Leads.
@@ -150,7 +163,9 @@ const TOOLS = [
       if (search) {
         // Parameterised, always. The model supplies the value and never any part of the statement.
         where.push("(`name` LIKE ? OR `phone` LIKE ? OR `enquiry_id` LIKE ?)");
-        values.push(`%${search}%`, `%${search}%`, `%${search}%`);
+        // `%`, `_` and `\` in the phrase are matched as themselves, never as wildcards.
+        const like = `%${likeLiteral(search)}%`;
+        values.push(like, like, like);
       }
       for (const [column, value] of [["status", args.status], ["crm", args.owner]]) {
         const wanted = String(value || "").trim();
@@ -166,6 +181,14 @@ const TOOLS = [
        */
       const vertical = session?.vertical || String(args.vertical || "").trim();
       if (vertical) { where.push("`vertical` = ?"); values.push(vertical); }
+
+      /*
+       * Only the leads this person may see on the board: the grant's branch and owner scope, as SQL
+       * on the lead's own reference columns - the same limbs the board's page query carries.
+       */
+      const scope = (await leadScopeFor(session)).sql({ branch: "`branch_id`", employee: "`owner_employee_id`", user: "`created_by_user_id`" });
+      where.push(scope.clause);
+      values.push(...scope.params);
 
       const limit = boundedLimit(args.limit);
       const rows = await prisma.$queryRawUnsafe(
@@ -202,19 +225,11 @@ const TOOLS = [
       const id = String(args.enquiryId || "").trim();
       if (!id) throw new Error("An enquiry id is required.");
 
-      const record = await getCrmLeadById(id);
+      // Out of this person's scope, or another vertical: not found, rather than returned.
+      const record = await visibleLead(id, session);
       if (!record) return { found: false };
 
       const lead = record.lead || {};
-      /*
-       * A lead from another vertical is not found, rather than returned.
-       *
-       * Otherwise the filter on search is cosmetic: anyone with an enquiry id could read across the
-       * boundary the rest of this file maintains.
-       */
-      if (session?.vertical && String(lead.vertical || "").trim() !== session.vertical) {
-        return { found: false, outsideVertical: true };
-      }
       const details = record.details || {};
       return {
         found: true,
@@ -268,9 +283,10 @@ const TOOLS = [
       },
       required: ["enquiryId"],
     },
-    execute: async (args) => {
+    execute: async (args, session) => {
       const id = String(args.enquiryId || "").trim();
       if (!id) throw new Error("An enquiry id is required.");
+      if (!await visibleLead(id, session)) return { found: false };
       const limit = boundedLimit(args.limit);
       // The module's own service, so the assistant sees exactly what the Activity Logs tab shows.
       const rows = await listLeadActivity(id, limit);
@@ -301,9 +317,10 @@ const TOOLS = [
       },
       required: ["enquiryId"],
     },
-    execute: async (args) => {
+    execute: async (args, session) => {
       const id = String(args.enquiryId || "").trim();
       if (!id) throw new Error("An enquiry id is required.");
+      if (!await visibleLead(id, session)) return { found: false };
       const limit = boundedLimit(args.limit);
       const rows = await listLeadCallLogs(id, limit);
       return {
@@ -335,9 +352,10 @@ const TOOLS = [
       },
       required: ["enquiryId"],
     },
-    execute: async (args) => {
+    execute: async (args, session) => {
       const id = String(args.enquiryId || "").trim();
       if (!id) throw new Error("An enquiry id is required.");
+      if (!await visibleLead(id, session)) return { found: false };
       const limit = boundedLimit(args.limit, 10);
       const rows = await transcripts.listForLead(id, limit);
       return {
@@ -356,60 +374,6 @@ const TOOLS = [
       };
     },
   },
-  /*
-   * The only thing the assistant can change, and the smallest useful one.
-   *
-   * A remark is additive, attributed and visible in the Activity Log, so a wrong one is a line
-   * somebody can read and correct. Deliberately not here: reassigning leads, changing a status,
-   * deleting anything. Bulk reassignment is the example in the specification, and it is exactly the
-   * action not to hand a model that cannot reliably decide when to call a tool - "reassign all
-   * uncontacted leads" is 423 rows and no undo.
-   *
-   * Even this runs only after a person presses the button - see `actions.js`.
-   */
-  {
-    name: "sales.addRemark",
-    module: "SALES",
-    risk: "LOW_RISK_WRITE",
-    description: "Add a note to a lead's remarks. Requires confirmation before it is saved.",
-    schema: {
-      type: "object",
-      properties: {
-        enquiryId: { type: "string", description: "The lead's enquiry id." },
-        text: { type: "string", description: "The note to add." },
-      },
-      required: ["enquiryId", "text"],
-    },
-    execute: async (args, context) => {
-      const id = String(args.enquiryId || "").trim();
-      const text = String(args.text || "").trim();
-      if (!id) throw new Error("An enquiry id is required.");
-      if (!text) throw new Error("The remark cannot be empty.");
-      if (text.length > 2000) throw new Error("That remark is too long.");
-
-      const record = await getCrmLeadById(id);
-      if (!record) throw new Error("That lead no longer exists.");
-
-      const details = record.details || {};
-      const existing = Array.isArray(details.remarkEntries) ? details.remarkEntries : [];
-      const entry = {
-        text: redactSecrets(text),
-        createdAt: new Date().toISOString(),
-        // Attributed to the person, not to the assistant. They confirmed it; it is theirs.
-        author: context.userName || "",
-      };
-
-      // Through the module's own service, so the change is recorded in the Activity Log exactly as
-      // a change made on the screen would be.
-      await updateCrmLead(
-        id,
-        { ...record, details: { ...details, remarkEntries: [...existing, entry] } },
-        { id: context.userId, name: context.userName },
-      );
-
-      return { added: true, enquiryId: id, text: entry.text };
-    },
-  },
 ];
 
-module.exports = { TOOLS, MAX_ROWS, DEFAULT_ROWS, boundedLimit, summariseLead };
+module.exports = { TOOLS, MAX_ROWS, DEFAULT_ROWS, boundedLimit, summariseLead, visibleLead };

@@ -6,6 +6,8 @@
  * it from here instead, so the lists are the same wherever they appear.
  */
 
+import { avatarOf } from "./employeeAvatar.mjs";
+
 // The three verticals the CRM is split into. Not places - these name the line of business.
 // No "All" and no counts: a vertical switch picks one vertical, the same on every page.
 export const verticalOptions = [
@@ -16,32 +18,6 @@ export const verticalOptions = [
 
 // The vertical a page opens on when it has no reason to prefer another.
 export const DEFAULT_VERTICAL = "Dum Dum";
-
-/**
- * The branches a lead can be assigned to, **only while the real list is being fetched**.
- *
- * The studio maintains its branches in Settings → Organization → Branches, so this cannot be the
- * list: use `useBranchOptions()`, which reads them and is already narrowed to the ones the signed-in
- * person's roles reach. This is the placeholder for the first paint and for a request that fails,
- * because a picker with no options at all cannot be used.
- *
- * It named six branches that do not exist until September 2026 — `Erode`, `Tiruppur`, `Coimbatore`,
- * `Bangalore`, `Hyderabad`, `Vizag` — while the studio's are the six below. Assigned Branch on a
- * lead therefore offered six values that matched no branch, and one added or renamed by the studio
- * never appeared in the CRM at all. Spelled the way the `branch` table spells them now, so the
- * placeholder and the answer that replaces it describe the same studio.
- *
- * Stored in `assignedBranch`, which is a separate column from the vertical, with `branchId` beside
- * it holding the reference the server resolves.
- */
-export const FALLBACK_BRANCH_OPTIONS = [
-  { value: "Erode TN", label: "Erode TN" },
-  { value: "Tiruppur TN", label: "Tiruppur TN" },
-  { value: "Coimbatore TN", label: "Coimbatore TN" },
-  { value: "Bangalore KA", label: "Bangalore KA" },
-  { value: "Hyderabad TL", label: "Hyderabad TL" },
-  { value: "Visakhapatnam AP", label: "Visakhapatnam AP" },
-];
 
 /*
  * There is no list of CRMs here any more.
@@ -74,14 +50,18 @@ export function crmNamesFromRows(rows = [], key = "crm") {
  */
 export function crmOptionsFrom(employees = [], usedNames = []) {
   const byKey = new Map();
-  for (const name of [...employees.map((row) => row?.employeeName ?? row?.name ?? row), ...usedNames]) {
+  const entries = [
+    ...employees.map((row) => ({ name: row?.employeeName ?? row?.name ?? row, avatar: avatarOf(typeof row === "object" ? row : { name: row }) })),
+    ...usedNames.map((name) => ({ name, avatar: avatarOf({ name }) })),
+  ];
+  for (const { name, avatar } of entries) {
     const label = String(name ?? "").trim();
     if (!label) continue;
     const key = label.toLowerCase();
     // The roster's spelling wins, since it is the one being maintained.
-    if (!byKey.has(key)) byKey.set(key, label);
+    if (!byKey.has(key)) byKey.set(key, { value: label, label, avatar });
   }
-  return [...byKey.values()].sort((a, b) => a.localeCompare(b)).map((label) => ({ value: label, label }));
+  return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
 // A column filter takes plain strings, not {value,label} pairs.

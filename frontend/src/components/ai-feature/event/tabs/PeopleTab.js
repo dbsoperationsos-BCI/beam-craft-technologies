@@ -4,7 +4,7 @@ import { useCallback, useState } from "react";
 import Loader from "@/components/shared/Loader";
 import ToggleSwitch from "@/components/shared/ToggleSwitch";
 import useInfiniteScroll from "@/components/shared/useInfiniteScroll";
-import AuthImage from "@/components/ai-feature/shared/AuthImage";
+import AuthImage from "@/components/shared/AuthImage";
 import EmptyState from "@/components/ai-feature/shared/EmptyState";
 import { formatCount } from "@/lib/aiFeature.mjs";
 import { aiFaceThumbnailPath, listAiPeople } from "@/services/ai-feature/ai-feature.service";
@@ -29,11 +29,11 @@ export default function PeopleTab({ eventId, event, faceAccess, mediaRevision, s
   return <div>
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
       <p className="text-xs text-slate-500">{formatCount(list.total)} {list.total === 1 ? "person" : "people"} found across {formatCount(event?.faceCount || 0)} faces</p>
-      <ToggleSwitch label="Show hidden" size="sm" checked={showHidden} onCheckedChange={setShowHidden} />
+      <ToggleSwitch label="Show hidden" helperText="Also lists the people that have been hidden." size="sm" checked={showHidden} onCheckedChange={setShowHidden} />
     </div>
     {list.error && <p role="alert" className="mb-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700">{list.error}</p>}
     {!list.loading && list.items.length === 0
-      ? <EmptyState title="No people yet." message="People appear here once the photos have been processed and faces grouped. Check the AI processing card on the Overview tab." />
+      ? <EmptyState title="No people yet." message="People appear here once the photos have been processed and faces grouped. Check the AI processing card on the Project Dashboard tab." />
       : <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
         {list.items.map((person, index) => <li key={person.id}>
           <button type="button" onClick={() => setOpenPerson({ person, index })} className={`block w-full overflow-hidden rounded-lg border bg-white text-left shadow-sm transition hover:border-blue-300 focus-visible:outline-2 focus-visible:outline-blue-500 ${person.hidden ? "border-dashed border-slate-300 opacity-70" : "border-slate-200"}`}>

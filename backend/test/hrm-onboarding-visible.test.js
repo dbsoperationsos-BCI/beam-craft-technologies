@@ -40,7 +40,7 @@ before(async () => {
 });
 
 after(async () => {
-  await prisma.userRole.deleteMany({ where: { userId: F.user?.id } });
+  await prisma.userRole.deleteMany({ where: { userId: { in: [F.user?.id].filter(Boolean) } } });
   if (F.user) await prisma.user.delete({ where: { id: F.user.id } });
   if (F.role) await prisma.role.delete({ where: { id: F.role.id } });
   await prisma.employee.deleteMany({ where: { employeeId: { startsWith: `TES-${STAMP}` } } });
@@ -86,8 +86,12 @@ test("a Super Admin is not narrowed by the widening", async () => {
    */
   const visible = await employeeVisibility(req(F.superAdmin.id));
   assert.equal(visible.scope.unlimited, true);
-  const everybody = await prisma.employee.count({ where: { archivedAt: null } });
-  const seen = await prisma.employee.count({ where: { archivedAt: null, AND: [visible.where] } });
+  // Both counts read one snapshot: the suite runs files side by side, and an employee another file
+  // creates between two separate counts would read as the Super Admin missing somebody.
+  const [everybody, seen] = await prisma.$transaction(async (tx) => [
+    await tx.employee.count({ where: { archivedAt: null } }),
+    await tx.employee.count({ where: { archivedAt: null, AND: [visible.where] } }),
+  ], { isolationLevel: "RepeatableRead" });
   assert.equal(seen, everybody, "a Super Admin counts every employee");
   assert.equal(visible.allows({ employmentStatus: "Active", branchId: null }), true);
 });

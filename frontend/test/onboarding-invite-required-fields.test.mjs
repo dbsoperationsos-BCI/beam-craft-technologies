@@ -41,12 +41,13 @@ test("there is no option whose job is to leave the designation empty", () => {
   assert.equal(options[1].trim(), "designations", "the list is the designations alone, with no unanswering entry in front of it");
 });
 
-test("the form refuses before it posts, and names what is outstanding", () => {
+test("the form refuses before it posts, and marks each outstanding box", () => {
   // The two that matter are a Dropdown and a DateField, neither of which is a native input the
-  // browser will refuse for us.
-  assert.match(DIALOG, /const missing = missingFields\(\);\s*if \(missing\.length\) \{\s*setError\(`Fill in \$\{missing\.join\(", "\)\}\.`\);\s*return;/);
+  // browser will refuse for us. Each problem is said under its own box (useFormErrors).
+  assert.match(DIALOG, /if \(!fields\.check\(inviteProblems\(\)\)\) return;/);
   for (const field of ["candidateName", "candidateEmail", "candidatePhone", "intendedDesignation", "expiresAt"]) {
-    assert.match(DIALOG, new RegExp(`\\["${field}", "`), `${field} is not among the fields the form checks`);
+    assert.match(DIALOG, new RegExp(`${field}: [^\\n]+`), `${field} is not among the fields the form checks`);
+    assert.match(DIALOG, new RegExp(`error=\\{fields\\.errors\\.${field}\\}`), `${field} does not show its own error`);
   }
 });
 

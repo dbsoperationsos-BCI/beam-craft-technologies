@@ -155,6 +155,9 @@ test("the same is true of a search, which takes the other path through the query
   const offered = mine(await ask(F.admin, `TEP-${STAMP}`));
   assert.ok(offered.includes(tag("live")));
   assert.ok(!offered.includes(tag("gone")), "a deleted enquiry is offered as soon as it is searched for");
+  // Word Chunk Search: the words typed in the other order still find it, and a word it lacks does not.
+  assert.ok(mine(await ask(F.admin, `live TEP-${STAMP}`)).includes(tag("live")), "two words in reverse order miss the enquiry");
+  assert.ok(!mine(await ask(F.admin, `live TEP-${STAMP} xyzzy`)).includes(tag("live")), "a word the enquiry lacks still finds it");
 });
 
 test("the picker offers only the leads this reader's own board would show", async () => {
@@ -216,7 +219,8 @@ test("no vertical is dropped off the end of the list", async () => {
    * reader may see is offered - so Corp cannot be missing because of where it sorts.
    *
    * "Live lead" excludes the Calls board, which is not a vertical and is not an enquiry; the test
-   * below is what holds that end.
+   * below is what holds that end. It does **not** exclude a lead that already has a project: the
+   * studio books the same client again, so those ids are offered with a count of what they have.
    */
   const body = await ask(F.admin);
   if (body.capped) return; // A studio past the page size answers this by typing; see below.
@@ -224,6 +228,33 @@ test("no vertical is dropped off the end of the list", async () => {
   const live = await prisma.salesCrmLead.count({ where: { deletedAt: null, boardKey: { not: "calls" } } });
   assert.equal(body.data.length, live, "the picker is showing fewer enquiries than the board has");
   assert.equal(body.total, live);
+});
+
+test("an enquiry that already has a project is offered, and says how many", async () => {
+  /*
+   * The studio books the same client again - a second wedding, another event on the same enquiry -
+   * and the picker used to hide every id that had been booked, which left no way to do it: an id
+   * cannot be typed past a filter that excludes it.
+   *
+   * Nothing in the database ever held the one-project-per-enquiry rule either (`SalesCrmLead.projects`
+   * is one-to-many with a plain index), so it was never enforced - a stale tab or two people booking
+   * at once already produced a second project, silently. What replaces it is the count, so a second
+   * booking is a choice somebody makes rather than one they make by accident.
+   */
+  const booked = await prisma.salesProject.findFirst({
+    where: { deletedAt: null, enquiryId: { not: null } },
+    select: { enquiryId: true },
+  });
+  if (!booked) return; // Nothing booked on this database; the rule below has nothing to show.
+
+  const body = await ask(F.admin, booked.enquiryId);
+  const row = (body.data || []).find((entry) => entry.enquiryId === booked.enquiryId);
+  assert.ok(row, "an enquiry with a project should still be offered");
+  assert.ok(row.projectCount >= 1, "and it should say how many it already has");
+
+  // Deleted projects are not counted: a booking somebody undid is not one this enquiry has.
+  const counted = await prisma.salesProject.count({ where: { enquiryId: booked.enquiryId, deletedAt: null } });
+  assert.equal(row.projectCount, counted);
 });
 
 test("a Callyzer call is not offered as an enquiry to book a project against", async () => {

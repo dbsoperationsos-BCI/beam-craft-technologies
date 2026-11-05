@@ -41,8 +41,8 @@ export const credentialSections = [
     id: "credentials",
     title: "Credentials",
     fields: [
-      { name: "username", label: "Username", required: true, placeholder: "name.dbs001" },
-      { name: "email", label: "Login Email", required: true, props: { type: "email" }, placeholder: "name@company.com" },
+      { name: "username", label: "Username", required: true, placeholder: "name.dbs001", helperText: "The sign-in name this person types to log in, like name.dbs001." },
+      { name: "email", label: "Login Email", required: true, props: { type: "email" }, placeholder: "name@company.com", helperText: "The email address saved on this login account." },
       { name: "temporaryPassword", label: "Temporary Password", type: "custom", colSpan: 2 },
     ],
   },
@@ -66,6 +66,38 @@ export const credentialSections = [
     columns: 1,
     fields: [{ name: "whatsappAllowed", label: "WhatsApp", type: "custom" }],
   },
+  /*
+   * Exclude: whether this person is kept out of the Attendance module altogether - not listed, not
+   * counted, their days and details not shown there. The employee's, not the account's, so it is
+   * saved on the employee with the cover and approvers below.
+   */
+  {
+    id: "exclude",
+    title: "Exclude",
+    columns: 1,
+    fields: [{ name: "excludeFromAttendance", label: "Exclude", type: "custom" }],
+  },
+  /*
+   * Flexible Shift: whether this person may log in at any time on the Flexible Shift work mode - the
+   * day judged on its hours alone, never Late or Early exit. The employee's, saved with Exclude above.
+   */
+  {
+    id: "flexibleShift",
+    title: "Flexible Shift",
+    columns: 1,
+    fields: [{ name: "allowFlexibleShift", label: "Flexible Shift", type: "custom" }],
+  },
+  /*
+   * WhatsApp Groups: the studio's groups (Settings -> Employee -> WhatsApp Groups) this person is in,
+   * and an Add that puts their mobile number into more of them at once. Not saved with the form - the
+   * add happens on its own (`employees/EmployeeWhatsAppGroups`).
+   */
+  {
+    id: "whatsappGroups",
+    title: "WhatsApp Groups",
+    columns: 1,
+    fields: [{ name: "whatsappGroups", label: "WhatsApp Groups", type: "custom" }],
+  },
   {
     id: "alternative",
     title: "Alternative",
@@ -76,6 +108,7 @@ export const credentialSections = [
       {
         name: "alternative1EmployeeId",
         label: "Alternative 1",
+        helperText: "The colleague who covers this person's work while they are away.",
         type: "select",
         options: "alternative1Options",
         placeholder: "Select an employee",
@@ -84,6 +117,7 @@ export const credentialSections = [
       {
         name: "alternative2EmployeeId",
         label: "Alternative 2",
+        helperText: "A second colleague who can also cover this person's work.",
         type: "select",
         options: "alternative2Options",
         placeholder: "Select an employee",
@@ -106,16 +140,18 @@ export const credentialSections = [
     /*
      * One person, and so one dropdown rather than the ticked list above.
      *
-     * A permission is an hour or two out of a single day and is settled the same morning it is
+      * A permission is an hour or two out of a single day and is settled the same morning it is
      * asked for, so there is nobody to escalate to and no order to ask in - the two things the
-     * leave list exists to express. A named slot says that on the screen: a reader who sees one
-     * box knows one person decides, without counting the ticks.
+     * leave list exists to express. This person - and nobody else - decides a permission; with nobody
+     * chosen one cannot be raised. They also stand in for an attendance regularization when no
+     * Attendance Regularization Approver is chosen below. A named slot says that on the screen: a
+     * reader who sees one box knows one person decides, without counting the ticks.
      *
      * Its own section rather than a second field under Leave Approval, because the rail names what
      * each section decides and this decides a different request.
      *
-     * **The placeholder is the answer for leaving it empty**, rather than a "The leave approvers
-     * decide" row at the top of the menu. Empty is not a choice among the colleagues - it is what
+     * **The placeholder is the answer for leaving it empty**, rather than a "Not set" row at the
+     * top of the menu. Empty is not a choice among the colleagues - it is what
      * the field says before anybody is chosen - and a menu that opens on a non-person above the
      * names reads as one of them. So the box states what happens while nothing is in it, and the
      * list holds people and nothing else.
@@ -123,9 +159,32 @@ export const credentialSections = [
     fields: [{
       name: "permissionApproverEmployeeId",
       label: "Permission Approver",
+      helperText: "The one person who decides this employee's permission requests.",
       type: "select",
       options: "permissionApproverOptions",
-      placeholder: "The leave approvers decide",
+      placeholder: "Not set - permissions cannot be raised",
+      props: { searchable: true },
+    }],
+  },
+  {
+    id: "regularization-approval",
+    title: "Attendance Regularization Approval",
+    columns: 1,
+    /*
+     * One person, like the Permission Approver above and for the same reason: a regularization is one
+     * day's status put right, settled by one person with nobody to escalate to. They - and nobody
+     * else - decide this employee's Attendance Regularization requests, and Raise Request names them.
+     *
+     * Empty is not a dead end: the placeholder says what happens then - the regularization goes to
+     * the Permission Approver, who decided every one before this slot existed.
+     */
+    fields: [{
+      name: "regularizationApproverEmployeeId",
+      label: "Attendance Regularization Approver",
+      helperText: "Decides their attendance regularizations; if empty, the Permission Approver does.",
+      type: "select",
+      options: "regularizationApproverOptions",
+      placeholder: "Not set - regularizations go to the Permission Approver",
       props: { searchable: true },
     }],
   },

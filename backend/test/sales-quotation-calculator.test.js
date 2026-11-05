@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { dayRange, shapeCatalogue, shapeBookings, lineDeliverables, quoteSchema } = require("../src/modules/sales/quotation-calculator/controller");
+const { dayRange, shapeCatalogue, shapeBookings, serviceDeliverables, quoteSchema } = require("../src/modules/sales/quotation-calculator/controller");
 
 test("a day is bounded from its first millisecond to its last", () => {
   const range = dayRange("2026-08-17");
@@ -34,32 +34,21 @@ test("a date that does not exist is refused rather than rolled forward", () => {
   assert.ok(dayRange("2028-02-29"), "a real leap day is still a day");
 });
 
-test("a service is quoted line by line, at the price Settings gave each booking", () => {
+test("a service is quoted as one line at its one price, whatever pricing lines it still stores", () => {
   const { services } = shapeCatalogue([
-    { id: "s1", name: "Booth", sizeEnabled: true, pricing: [
-      { shootType: "STUDIO", timingMode: "FULL_SESSION", duration: "10-12 Hours (Full)", size: "55 inch", price: 9000 },
-      { shootType: "STUDIO", timingMode: "HOURS_MINUTES", hours: 3, size: "55 inch", price: 2800 },
-      { shootType: "OUTDOOR", timingMode: "HALF_SESSION", duration: "4-5 Hours (Half)", price: null },
+    { id: "s1", name: "Booth", price: "9000.00", sizeEnabled: true, pricing: [
+      { shootType: "STUDIO", timingMode: "FULL_SESSION", duration: "8-10 Hours (Full)", size: "55 inch", price: 1 },
+      { shootType: "STUDIO", timingMode: "HOURS_MINUTES", hours: 3, size: "55 inch", price: 2 },
     ] },
     { id: "s2", name: "Drone", price: "5000", pricing: [] },
-    { id: "s3", name: "Unpriced", price: null, pricing: null },
+    // Priced only per session until now: listed, unpriced, until its single Price is entered.
+    { id: "s3", name: "Unpriced", price: null, pricing: [{ shootType: "STUDIO", timingMode: "HALF_SESSION", price: 4000 }] },
   ]);
-  assert.deepEqual(services.map((service) => service.lines.map((line) => [line.shootType, line.timing, line.duration, line.size, line.price])), [
-    [
-      ["Studio / In-House", "Full Session", "10-12 Hours (Full)", "55 inch", 9000],
-      ["Studio / In-House", "Hours / Minutes", "3 hours", "55 inch", 2800],
-    ],
-    [["", "", "", "", 5000]],
-    [["", "", "", "", null]],
+  assert.deepEqual(services.map((service) => service.lines.map((line) => [line.id, line.shootType, line.timing, line.duration, line.size, line.price])), [
+    [["s1:flat", "", "", "", "", 9000]],
+    [["s2:flat", "", "", "", "", 5000]],
+    [["s3:flat", "", "", "", "", null]],
   ]);
-  // Every line is keyed by something stable, so a quantity cannot move between lines.
-  const ids = services.flatMap((service) => service.lines.map((line) => line.id));
-  assert.equal(new Set(ids).size, ids.length);
-});
-
-test("a service not sold by size shows no size on its lines, whatever the row holds", () => {
-  const { services } = shapeCatalogue([{ id: "s1", name: "Booth", sizeEnabled: false, pricing: [{ shootType: "STUDIO", timingMode: "HALF_SESSION", size: "left over", price: 1 }] }]);
-  assert.equal(services[0].lines[0].size, "");
 });
 
 test("deliverables are the studio's own, as Settings describes and prices them", () => {
@@ -98,23 +87,25 @@ test("a deliverable carries its brands and variants, each at its own price", () 
 });
 
 /*
- * What a booking brings with it rides on the pricing line, and only where the service answered
- * Deliverable Added - the rule the Quotation Generator's `serviceMappedDeliverableRows` applies.
+ * What a service brings with it is the service's own list, and only where it answered Deliverable
+ * Added - the rule the Quotation Generator's `serviceMappedDeliverableRows` applies.
  */
-test("a pricing line carries its mapped deliverables only where the service says it brings any", () => {
-  const pricing = [{ shootType: "STUDIO", timingMode: "FULL_SESSION", price: 9000, deliverables: [
+test("a service carries its deliverables only where it says it brings any", () => {
+  const list = [
     { deliverableId: "d1", brandId: "b1", variantId: "v1" },
     // Half-written, as the settings form would have dropped it: not a mapping.
     { deliverableId: "d2", brandId: "", variantId: "v2" },
-  ] }];
-  const [brings] = shapeCatalogue([{ id: "s1", name: "Booth", deliverableAdded: true, pricing }]).services;
+  ];
+  const [brings] = shapeCatalogue([{ id: "s1", name: "Booth", deliverableAdded: true, deliverables: list, pricing: [] }]).services;
   assert.deepEqual(brings.lines[0].deliverables, [{ deliverableId: "d1", brandId: "b1", variantId: "v1" }]);
-  const [keeps] = shapeCatalogue([{ id: "s1", name: "Booth", deliverableAdded: null, pricing }]).services;
+  const [keeps] = shapeCatalogue([{ id: "s1", name: "Booth", deliverableAdded: null, deliverables: list }]).services;
   assert.deepEqual(keeps.lines[0].deliverables, []);
-  assert.deepEqual(lineDeliverables({ deliverableAdded: true }, { deliverables: null }), []);
-  // A flat-priced service has no booking to map anything onto.
-  const [flat] = shapeCatalogue([{ id: "s2", name: "Drone", price: "5000", deliverableAdded: true, pricing: [] }]).services;
-  assert.deepEqual(flat.lines[0].deliverables, []);
+  assert.deepEqual(serviceDeliverables({ deliverableAdded: true, deliverables: null }), []);
+  // Saved while the mapping rode on its pricing lines: every variant they named, each once.
+  const legacy = { deliverableAdded: true, pricing: [{ deliverables: [list[0]] }, { deliverables: [list[0], { deliverableId: "d3", brandId: "b3", variantId: "v3" }] }] };
+  assert.deepEqual(serviceDeliverables(legacy).map((entry) => entry.variantId), ["v1", "v3"]);
+  // Its own list, once saved, wins over whatever the lines still carry.
+  assert.deepEqual(serviceDeliverables({ ...legacy, deliverables: [] }), []);
 });
 
 /*

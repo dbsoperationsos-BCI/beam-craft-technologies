@@ -12,6 +12,7 @@ import {
 import Dialog from "@/components/ui/Dialog";
 import { getUploadStoreServerSnapshot, getUploadStoreSnapshot, subscribeUploadCompletion, subscribeUploadStore, uploadSessionKey } from "@/lib/imageSelectionUploadStore";
 import TextAreaField from "@/components/shared/TextAreaField";
+import useFormErrors from "@/components/shared/useFormErrors";
 import VersionSpreads from "./VersionSpreads";
 import PublicationCard from "./PublicationCard";
 import AlbumPagesPane from "./AlbumPagesPane";
@@ -41,6 +42,7 @@ export default function AlbumProofWorkspace({ albumId, canWrite, qcCanWrite, onB
   const [publishedCredentials, setPublishedCredentials] = useState(null);
   const [reopening, setReopening] = useState(false);
   const [reopenReason, setReopenReason] = useState("");
+  const reopenFields = useFormErrors();
   const [downloadResult, setDownloadResult] = useState(null);
   const [qcOpen, setQcOpen] = useState(false);
   // A frozen version opened from the Versions tab, to look at and nothing more.
@@ -247,7 +249,7 @@ export default function AlbumProofWorkspace({ albumId, canWrite, qcCanWrite, onB
     if (album.status === "CLIENT_APPROVED") actions.push({ label: "Complete Album", primary: true, onClick: () => runAction(() => completeAlbumProof(album.id)) });
     if (["CLIENT_APPROVED", "COMPLETED"].includes(album.status)) {
       actions.push({ label: "Download Final Album", primary: album.status === "COMPLETED", onClick: () => runAction(async () => { const response = await downloadFinalAlbum(album.id); setDownloadResult(response.data); }) });
-      actions.push({ label: "Reopen Album", onClick: () => { setReopenReason(""); setReopening(true); } });
+      actions.push({ label: "Reopen Album", onClick: () => { setReopenReason(""); reopenFields.clearAll(); setReopening(true); } });
     }
   }
   /*
@@ -343,13 +345,19 @@ export default function AlbumProofWorkspace({ albumId, canWrite, qcCanWrite, onB
       description="Reopening never edits an approved version silently: the album goes back into revision, the approval stays in history, and your reason is recorded."
       busy={busy}
       onClose={() => setReopening(false)}
-      onSubmit={(event) => { event.preventDefault(); setReopening(false); runAction(() => reopenAlbumProof(album.id, reopenReason.trim())); }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        const reason = reopenReason.trim();
+        if (!reopenFields.check({ reason: !reason ? "Enter the reason for reopening." : reason.length < 3 ? "Write at least 3 characters." : "" })) return;
+        setReopening(false);
+        runAction(() => reopenAlbumProof(album.id, reason));
+      }}
       footer={<>
         <Button type="button" className="max-sm:flex-1" onClick={() => setReopening(false)} disabled={busy}>Cancel</Button>
-        <Button type="submit" variant="danger" className="max-sm:flex-1" disabled={busy || reopenReason.trim().length < 3}>Reopen Album</Button>
+        <Button type="submit" variant="danger" className="max-sm:flex-1" disabled={busy}>Reopen Album</Button>
       </>}
     >
-      <TextAreaField label="Reason for reopening" required autoFocus placeholder='e.g. "Client called: one name is misspelled on spread 12."' value={reopenReason} maxLength={1000} onChange={(event) => setReopenReason(event.target.value)} />
+      <TextAreaField label="Reason for reopening" helperText="Why the approved album is being opened for changes again." required autoFocus placeholder='e.g. "Client called: one name is misspelled on spread 12."' value={reopenReason} maxLength={1000} onChange={(event) => { setReopenReason(event.target.value); reopenFields.clear("reason"); }} error={reopenFields.errors.reason} />
     </Dialog>}
     {downloadResult && <Dialog
       title="✓ Final Originals Copied"

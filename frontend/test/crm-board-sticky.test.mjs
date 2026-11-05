@@ -125,7 +125,7 @@ test("a CRM is an active Sales employee, everywhere the board names one", () => 
   assert.match(PAGE_SRC, /get: columnFilterValues,/, "the column filter no longer offers what the column holds");
   assert.match(read("components", "data-table", "DataTable.js"), /options=\{filterValues \? \(filterValues\.get\(column\.id\) \|\| \[\]\) : filterChoices\[column\.id\]\}/, "the table has grown a fallback again");
   assert.match(PAGE_SRC, /crmOptions=\{crmChoices\}/, "Import Leads assigns from something else");
-  assert.match(PAGE_SRC, /options=\{crmChoices\}\n\s+values=\{bulkUpdateCrms\}/, "Update Details assigns from something else");
+  assert.match(PAGE_SRC, /<MultiSelectField\n\s+label="CRM"\n\s+(?:helperText="[^"]*"\n\s+)?searchable\n\s+placeholder="Select CRMs"\n\s+options=\{crmChoices\}\n\s+values=\{bulkUpdateCrms\}/, "Update Details assigns from something else");
   assert.match(PAGE_SRC, /value=\{addLeadForm\.crm\}.*?options=\{crmChoices\}/, "Add Lead assigns from something else");
 
   // Assigned Branch reads the same way: the values the column holds on this tab, and no register
@@ -133,10 +133,17 @@ test("a CRM is an active Sales employee, everywhere the board names one", () => 
   assert.match(PAGE_SRC, /columnId === "assignedBranch"/, "the branch column is no longer a choice filter");
 });
 
-test("the Sales roster is fetched once per mount", () => {
-  // Two identical copies of the effect had accumulated, so the board asked for the roster twice
-  // every time it opened.
+test("the Sales roster is fetched once per mount, in each of the two places that need it", () => {
+  /*
+   * Two identical copies of the effect had accumulated in the page itself, so the board asked for
+   * the roster twice every time it opened. What this holds to is one fetch per component, not one
+   * in the file: the lead popup reads the roster of its own while it is open, because the popup is
+   * mounted whether or not the board behind it ever fetched. The two are told apart by what they
+   * depend on - the popup's runs on `open`, the page's once on mount.
+   */
   const PAGE_SRC = read("components", "sales", "CRMPage.js");
-  const fetches = PAGE_SRC.match(/void getCrmEmployees\(\)/g) || [];
-  assert.equal(fetches.length, 1, `the roster is fetched ${fetches.length} times per mount`);
+  const fetches = PAGE_SRC.match(/void getCrmEmployees\(\)[\s\S]{0,260}?\}, \[(open)?\]\);/g) || [];
+  assert.equal(fetches.length, 2, `the roster is fetched ${fetches.length} times`);
+  assert.equal(fetches.filter((effect) => effect.endsWith("}, [open]);")).length, 1, "the popup's, while it is open");
+  assert.equal(fetches.filter((effect) => effect.endsWith("}, []);")).length, 1, "the page's, once on mount");
 });

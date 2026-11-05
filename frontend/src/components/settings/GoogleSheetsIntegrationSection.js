@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Button from "@/components/shared/Button";
 import Dropdown from "@/components/shared/Dropdown";
+import HelpTip from "@/components/shared/HelpTip";
 import TextField from "@/components/shared/TextField";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import CloseButton from "@/components/shared/CloseButton";
@@ -61,6 +62,20 @@ function syncStatusTone(status) {
 
 // What the run actually did. Counts that are zero are left out, so a quiet sync reads as
 // "No changes" rather than a row of noughts.
+/**
+ * What a successful save or sync says: how many records it added, and nothing else.
+ *
+ * The full summary (`describeSyncSummary`) counts skipped rows too, and most of a sheet is skipped
+ * on every pass simply because it is already here - read as the notice of a save that worked, that
+ * looked like a failure. So the notice is the one number the person acted for, "0" included; the
+ * rest stays on the link's own row in the list, under Last sync.
+ */
+function addedNotice(summary, config) {
+  const added = Number(summary?.created) || 0;
+  const noun = added === 1 ? config?.noun || "record" : config?.nounPlural || "records";
+  return `${added.toLocaleString()} ${noun} ${added === 1 ? "was" : "were"} added.`;
+}
+
 function describeSyncSummary(summary) {
   if (!summary || typeof summary !== "object") return "No details recorded.";
   if (summary.error) return String(summary.error);
@@ -80,11 +95,24 @@ function describeSyncSummary(summary) {
       const already = `${Number(summary.skippedExisting).toLocaleString()} already here`;
       reasons.push(sameContact ? `${already}, ${sameContact.toLocaleString()} on a number or email you already have` : already);
     }
+    // `skippedInvalid` is only ever 0 now - a row is no longer refused for what one cell holds -
+    // but an older sync's stored summary may still carry one, so it is still read.
     if (summary.skippedInvalid) reasons.push(`${Number(summary.skippedInvalid).toLocaleString()} invalid`);
     if (summary.skippedDuplicate) reasons.push(`${Number(summary.skippedDuplicate).toLocaleString()} duplicate`);
     if (summary.skippedDeleted) reasons.push(`${Number(summary.skippedDeleted).toLocaleString()} deleted here`);
     const why = reasons.length ? ` (${reasons.join(", ")})` : "";
     parts.push(`${Number(summary.skipped).toLocaleString()} skipped${why}`);
+  }
+  /*
+   * The cells the importer could not read and left empty - **not** rows it refused.
+   *
+   * Its own line rather than folded into "skipped", because nothing was skipped: the lead is in the
+   * register with one column blank, and this is the studio's cue to go and correct that column in
+   * the sheet. Named row by row underneath, where the row problems are already listed.
+   */
+  if (summary.clearedFields) {
+    const count = Number(summary.clearedFields);
+    parts.push(`${count.toLocaleString()} field${count === 1 ? "" : "s"} left blank`);
   }
   if (summary.failed) parts.push(`${Number(summary.failed).toLocaleString()} failed`);
   // How the link's assignment rules did, and only where it has some.
@@ -171,8 +199,7 @@ function IntegrationDetailHeader({ onBack, title, description, icon, action }) {
         </IconButton>
         {icon}
         <div className="min-w-0">
-          <h3 className="truncate text-base font-medium text-slate-800 sm:text-lg">{title}</h3>
-          <p className="mt-0.5 text-xs text-slate-500">{description}</p>
+          <h3 className="flex min-w-0 items-center text-base font-medium text-slate-800 sm:text-lg"><span className="truncate">{title}</span><HelpTip text={description} /></h3>
         </div>
       </div>
       {action}
@@ -557,6 +584,8 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
   const handleSaveSheetLink = async (overrides = null) => {
     setSavingLink(true);
     setLinkError("");
+    // Cleared at the start, so the answer always shows - see `handleSyncSheetLink`.
+    onNotice?.("");
     try {
       // `overrides` carries a draft restored after the Google consent redirect, when
       // component state has not been re-populated yet.
@@ -634,8 +663,10 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
       const verb = editingId ? "Sheet updated" : "Sheet linked";
       if (response?.warning) {
         setLinkError(`${verb}, but the import failed: ${response.warning}`);
-      } else if (summary) {
-        setLinkError(`${verb}: ${describeSyncSummary(summary)}`);
+      } else {
+        // A save that worked is said as one, in the green notice - not on the error line.
+        setLinkError("");
+        onNotice?.(`${verb}. ${addedNotice(summary, config)}`);
       }
       if (typeof window !== "undefined") {
         window.dispatchEvent(new Event(config.refreshEvent));
@@ -707,13 +738,24 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
   const handleSyncSheetLink = async (linkId) => {
     setSyncingLinkId(linkId);
     setLinkError("");
+    /*
+     * Cleared at the start, not only replaced at the end.
+     *
+     * The panel remembers a dismissed notice by its text (`SchemaFormPanel`), and forgets it only
+     * when the notice goes empty. A second sync answering the same "0 leads were added." set the
+     * identical string, so nothing changed and the notice stayed dismissed - the toast showed on
+     * the first sync and on none after, until the page was left and reopened. Emptied here, it
+     * renders empty while the request runs, and the answer arrives as new.
+     */
+    onNotice?.("");
     try {
       const response = await api.sync(linkId);
       const summary = response?.data?.summary || {};
       if (typeof window !== "undefined") {
         window.dispatchEvent(new Event(config.refreshEvent));
       }
-      setLinkError(`Sync complete: ${describeSyncSummary(summary)}`);
+      setLinkError("");
+      onNotice?.(`Sync complete. ${addedNotice(summary, config)}`);
       await loadLinkedSheets();
     } catch (error) {
       console.error("Unable to sync Google Sheet link:", error);
@@ -840,6 +882,7 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
                   label={config.tableSelectLabel}
                   ariaLabel={config.tableSelectLabel}
                   placeholder="Select a table"
+                  helperText={`Where the ${config.nounPlural} from this sheet are added.`}
                   value={systemTableId}
                   onChange={(nextId) => {
                     setSystemTableId(nextId);
@@ -852,13 +895,15 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
                   value={targetedTab}
                   onChange={(event) => setTargetedTab(event.target.value)}
                   placeholder="New Tab1"
+                  helperText="Type the tab's name exactly as it reads at the bottom of the sheet."
                 />
               </div>
               <TextField
                 label="Google Sheet Name URL"
                 value={sheetUrl}
                 onChange={(event) => setSheetUrl(event.target.value)}
-                placeholder="https://lorem ipsum//.."
+                placeholder="https://docs.google.com/spreadsheets/d/..."
+                helperText="Paste the spreadsheet's link from your browser's address bar."
               />
               {selectedSpreadsheet && (
                 <div className="rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2 text-xs text-slate-600 sm:text-sm">
@@ -996,12 +1041,10 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
           >
             <header className="flex items-center justify-between gap-4 border-b border-slate-200 px-5 py-4 sm:px-6">
               <div>
-                <h2 id={`${config.id}-import-preview-title`} className="text-[18px] font-medium tracking-[-0.02em] text-slate-800 sm:text-[20px]">
+                <h2 id={`${config.id}-import-preview-title`} className="flex items-center text-[18px] font-medium tracking-[-0.02em] text-slate-800 sm:text-[20px]">
                   Google Sheet Import Preview
+                  <HelpTip text="Review the mapping and row classifications before any import is enabled." />
                 </h2>
-                <p className="mt-0.5 text-[12px] text-slate-500">
-                  Review the mapping and row classifications before any import is enabled.
-                </p>
               </div>
               <CloseButton
                 ariaLabel="Close import preview"
@@ -1036,7 +1079,7 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
                     </div>
                     <div className="rounded-[16px] border border-slate-200 bg-white p-4 lg:col-span-3">
                       <div className="flex flex-wrap items-baseline justify-between gap-2">
-                        <p className="text-[12px] font-semibold uppercase tracking-wide text-slate-500">Last Sync</p>
+                        <p className="flex items-center text-[12px] font-semibold uppercase tracking-wide text-slate-500">Last Sync<HelpTip text="Syncs automatically every 2 minutes." /></p>
                         {(liveSync?.lastSyncStatus || previewData.link?.lastSyncStatus) && (
                           <span className={`rounded-full px-2.5 py-1 text-[12px] font-medium ${syncStatusTone(liveSync?.lastSyncStatus || previewData.link?.lastSyncStatus)}`}>
                             {liveSync?.lastSyncStatus || previewData.link?.lastSyncStatus}
@@ -1045,7 +1088,6 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
                       </div>
                       <p className="mt-1 text-[15px] font-medium text-slate-700">{formatSyncTime(liveSync?.lastSyncedAt ?? previewData.link?.lastSyncedAt)}</p>
                       <p className="mt-0.5 text-[12px] text-slate-500">{describeSyncSummary(liveSync?.lastSyncSummary ?? previewData.link?.lastSyncSummary)}</p>
-                      <p className="mt-1.5 text-[11px] text-slate-400">Syncs automatically every 2 minutes.</p>
                     </div>
                   </div>
 
@@ -1078,7 +1120,9 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
                         // row already here is never rewritten from the sheet.
                         [`Existing ${config.nounTitle}s (skipped)`, previewData.summary?.existingRows ?? 0],
                         ["Duplicates in Sheet", previewData.summary?.duplicateRows ?? 0],
-                        ["Invalid Rows", previewData.summary?.invalidRows ?? 0],
+                        // Not rows refused - a row is never refused now - but cells the importer
+                        // could not read and will store empty.
+                        ["Fields Left Blank", previewData.summary?.clearedFields ?? 0],
                         // What the rules did. "Unassigned" is the figure worth reading: a rule
                         // written against a column since renamed leaves every row ownerless.
                         ["Assigned by Rule", previewData.summary?.assignedByRule ?? 0],
@@ -1217,7 +1261,6 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
           drill-down does not move the reader out of Settings' rail. */}
       {!activeIntegration && (
         <>
-          <p className="text-xs text-slate-500 sm:text-sm">Integrate external tools as your wish.</p>
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {cards.map((card) => (
               <button
@@ -1248,8 +1291,10 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
               connected before Meet scheduling existed will not carry, so this panel exists to
               report that and to fix it. */}
           <div className="rounded-xl border border-slate-200 bg-white p-4">
-            <h4 className="text-sm font-semibold text-slate-700">Google Account</h4>
-            <p className="mt-0.5 text-xs text-slate-500">Meetings are created on this account&apos;s calendar, and it hosts the Meet.</p>
+            <h4 className="flex items-center text-sm font-semibold text-slate-700">
+              Google Account
+              <HelpTip text={`Meetings are created on this account's calendar, and it hosts the Meet.${googleConnection ? " Disconnecting it also stops Google Sheets syncing; linked sheets are kept." : ""}`} />
+            </h4>
             {loadingGoogleConnection ? (
               <p className="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-xs text-slate-500 sm:text-sm">Checking your Google account...</p>
             ) : (
@@ -1279,12 +1324,9 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
                   </Button>
                 )}
                 {googleConnection && (
-                  <>
-                    <Button type="button" variant="secondary" disabled={disconnectingGoogle} onClick={() => void handleDisconnectGoogle()}>
-                      {disconnectingGoogle ? "Disconnecting..." : "Disconnect account"}
-                    </Button>
-                    <p className="text-xs text-slate-500">Disconnecting also stops Google Sheets syncing. Linked sheets are kept.</p>
-                  </>
+                  <Button type="button" variant="secondary" disabled={disconnectingGoogle} onClick={() => void handleDisconnectGoogle()}>
+                    {disconnectingGoogle ? "Disconnecting..." : "Disconnect account"}
+                  </Button>
                 )}
               </div>
             )}
@@ -1322,10 +1364,10 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
             }
           />
           <div className="rounded-xl border border-slate-200 bg-white p-4">
-            <div>
-              <h4 className="text-sm font-semibold text-slate-700">Linked Sheets</h4>
-              <p className="mt-0.5 text-xs text-slate-500">Multiple Google Sheets can be linked and stored in MySQL.</p>
-            </div>
+            <h4 className="flex items-center text-sm font-semibold text-slate-700">
+              Linked Sheets
+              <HelpTip text="Multiple Google Sheets can be linked and stored in MySQL." />
+            </h4>
 
             <div className="mt-4 space-y-2">
               {loadingLinks ? (
@@ -1450,7 +1492,9 @@ export default function GoogleSheetsIntegrationSection({ config, initialIntegrat
                           ))}
                         </ul>
                         {(() => {
-                          const total = Number(link.lastSyncSummary.skippedInvalid || 0) + Number(link.lastSyncSummary.failed || 0);
+                          const total = Number(link.lastSyncSummary.clearedFields || 0)
+                            + Number(link.lastSyncSummary.skippedInvalid || 0)
+                            + Number(link.lastSyncSummary.failed || 0);
                           const shown = link.lastSyncSummary.rowProblems.length;
                           return total > shown ? (
                             <p className="mt-1 text-slate-500">

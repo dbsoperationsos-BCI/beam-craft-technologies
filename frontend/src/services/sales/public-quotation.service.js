@@ -15,12 +15,35 @@ export function publicQuotationPdfUrl(token) {
  * to the client: the quotation exists and their link has simply run out. The flag rides on the
  * error so the page can say that rather than "not found".
  */
-export async function getPublicQuotation(token) {
-  const response = await fetch(`${API_URL}/api/public/quotations/${encodeURIComponent(token)}`, { cache: "no-store" });
+// `pass`: from the client's app, which may show its client their own signed quotation though its
+// link has lapsed (`getClientQuotationView` on the API).
+export async function getPublicQuotation(token, pass = null) {
+  const response = await fetch(`${API_URL}/api/public/quotations/${encodeURIComponent(token)}`, { cache: "no-store", headers: pass ? { "x-quotation-print-pass": pass } : undefined });
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     const error = new Error(data?.message || "Unable to load quotation.");
     error.expired = response.status === 410;
+    // What the shared expired page names: a quotation, for whom, lapsing when.
+    error.expiredLink = data?.expiredLink || null;
+    throw error;
+  }
+  return data;
+}
+
+/**
+ * Where to pay this quotation: the Assigned Branch's account, UPI ID and QR, read live off the
+ * branch register by the same token. `data` is null where the branch holds no way to be paid, and
+ * the same 410 rides on the error as above, so the payment page says "expired" the way the
+ * quotation does.
+ */
+export async function getPublicQuotationPayment(token) {
+  const response = await fetch(`${API_URL}/api/public/quotations/${encodeURIComponent(token)}/payment`, { cache: "no-store" });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error(data?.message || "Unable to load payment details.");
+    error.expired = response.status === 410;
+    // What the shared expired page names: a quotation, for whom, lapsing when.
+    error.expiredLink = data?.expiredLink || null;
     throw error;
   }
   return data;

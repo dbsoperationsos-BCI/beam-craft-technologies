@@ -71,6 +71,22 @@ async function getPrivateObject(key) {
   }
 }
 
+/**
+ * Reads an object from the public bucket back into memory, or null when it is not there. For the
+ * server's own use of a file it published - turning the studio's favicon into app icons - never for
+ * proxying an arbitrary key to a caller.
+ */
+async function getPublicObjectBuffer(key) {
+  if (!isConfigured || typeof key !== "string" || !key) return null;
+  try {
+    const result = await r2Client().send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    return Buffer.from(await result.Body.transformToByteArray());
+  } catch (error) {
+    if (error?.name === "NoSuchKey" || error?.$metadata?.httpStatusCode === 404) return null;
+    throw error;
+  }
+}
+
 /** {@link deleteObject} for the private bucket. Best-effort in the same way, and by key only. */
 async function deletePrivateObject(key) {
   if (!isConfigured || typeof key !== "string" || !key) return false;
@@ -99,4 +115,4 @@ async function deleteObject(keyOrUrl) {
   }
 }
 
-module.exports = { uploadObject, uploadPrivateObject, getPrivateObject, deleteObject, deletePrivateObject, buildKey, publicUrl, keyFromUrl };
+module.exports = { uploadObject, uploadPrivateObject, getPrivateObject, getPublicObjectBuffer, deleteObject, deletePrivateObject, buildKey, publicUrl, keyFromUrl };

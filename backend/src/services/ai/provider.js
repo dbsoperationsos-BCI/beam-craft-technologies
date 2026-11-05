@@ -10,6 +10,14 @@ function providerName() {
   return "ollama";
 }
 
+/**
+ * Whether Nebula is switched on (`AI_ENABLED`). Off means the application runs exactly as before,
+ * minus the assistant - both of them: the module assistant and the lead assistant read this.
+ */
+function enabled() {
+  return String(process.env.AI_ENABLED ?? "true").trim().toLowerCase() !== "false";
+}
+
 /** A JSON answer from whichever engine is configured. */
 function completeJson(options) {
   return ollama.completeJson(options);
@@ -63,4 +71,4 @@ function isConfigured() {
   return true;
 }
 
-module.exports = { complete, completeJson, completeStream, streamConversation, completeWithTools, health, providerName, isConfigured, AiError: ollama.AiError };
+module.exports = { enabled, complete, completeJson, completeStream, streamConversation, completeWithTools, health, providerName, isConfigured, AiError: ollama.AiError };

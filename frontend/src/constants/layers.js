@@ -52,6 +52,8 @@ export const layers = {
    * from.
    */
   popover: "z-[140]",
+  /** The full-screen image viewer: over every form, dialog and popover it can be opened from. */
+  imageViewer: "z-[150]",
   /** The snackbar, above everything, since it reports on what any of the others just did. */
   snackbar: "z-[200]",
 };

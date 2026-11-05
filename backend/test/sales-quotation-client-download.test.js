@@ -59,7 +59,7 @@ test("the answer is read live off the brand, never off the version's snapshot", 
 test("the client's PDF route refuses the file itself, not only the button", () => {
   const handler = CONTROLLER.match(/async function publicQuotationPdf\(req, res\) \{[\s\S]*?\n\}/)[0];
   assert.match(handler, /allowsClientDownload\(quotation\)/);
-  assert.match(handler, /res\.status\(403\)/);
+  assert.match(handler, /refuse\(403, \{ message:/, "a fetch is refused with 403; a page load goes back to the quotation");
   // And the page is told, so it can hide a control that would only lead to that refusal.
   const page = CONTROLLER.match(/async function publicQuotation\(req, res\) \{[\s\S]*?\n\}/)[0];
   assert.match(page, /allowClientDownload/);

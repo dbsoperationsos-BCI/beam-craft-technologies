@@ -1,5 +1,6 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useState } from "react";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
 import RecordDetails from "@/components/data-table/RecordDetails";
@@ -7,7 +8,8 @@ import Button from "@/components/shared/Button";
 import TextAreaField from "@/components/shared/TextAreaField";
 import Dialog from "@/components/ui/Dialog";
 import Dropdown from "@/components/shared/Dropdown";
-import { cancelTask, completeTask, reassignTask, startTask, uploadTaskAttachment } from "@/services/hrm/tasks.service";
+import useFormErrors from "@/components/shared/useFormErrors";
+import { approveTask, cancelTask, completeTask, reassignTask, revokeTask, resolveFeedbackTask, startTask, uploadTaskAttachment } from "@/services/hrm/tasks.service";
 import TaskAttachments from "@/components/hrm/TaskAttachments";
 import { activityLabel, activityStyles, taskInfoSections, taskStatusStyles } from "@/constants/taskConfig";
 
@@ -55,8 +57,13 @@ export default function TaskDetailPanel({ task, canWrite = false, assignableUser
   // whether an empty one is allowed through. Reassigning asks for a person as well.
   const [reassigning, setReassigning] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  // Whoever assigned the task taking it back, with an optional person to reassign it to.
+  const [revoking, setRevoking] = useState(false);
+  // A feedback issue being answered: "Issues sorted" or "Rejected" while its dialog is open.
+  const [answering, setAnswering] = useState(null);
   const [reason, setReason] = useState("");
   const [nextAssignee, setNextAssignee] = useState("");
+  const fields = useFormErrors();
 
   async function run(action, message) {
     setBusy(true);
@@ -64,6 +71,8 @@ export default function TaskDetailPanel({ task, canWrite = false, assignableUser
       const response = await action();
       setReassigning(false);
       setCancelling(false);
+      setRevoking(false);
+      setAnswering(null);
       setReason("");
       setNextAssignee("");
       onChanged?.(response?.data, message);
@@ -133,7 +142,7 @@ export default function TaskDetailPanel({ task, canWrite = false, assignableUser
    */
   const reassignOptions = (assignableUsers || [])
     .filter((user) => Number(user.id) !== Number(task.assignedToUserId))
-    .map((user) => ({ value: String(user.id), label: user.name || user.username || user.email || `User ${user.id}` }));
+    .map((user) => ({ value: String(user.id), label: user.name || user.username || user.email || `User ${user.id}`, avatar: avatarOf(user) }));
 
   /*
    * The five verbs, each offered only where the server says this reader may use it *and* the
@@ -145,7 +154,8 @@ export default function TaskDetailPanel({ task, canWrite = false, assignableUser
     task.canStart && { label: "Start", variant: "primary", run: () => run(() => startTask(task.id), `${task.taskCode} is now in progress.`) },
     /* Not `danger`: handing work to the right person is the system working, not a failure. Rolling
        back was red because it stopped the task; this keeps it moving. */
-    task.canReassign && { label: "Reassign", variant: undefined, run: () => { setReason(""); setNextAssignee(""); setReassigning(true); } },
+    task.canReassign && { label: "Reassign", variant: undefined, run: () => { setReason(""); setNextAssignee(""); fields.clearAll(); setReassigning(true); } },
+    task.canRevoke && { label: "Revoke Task", variant: undefined, run: () => { setReason(""); setNextAssignee(""); setRevoking(true); } },
     task.canCancel && { label: "Cancel Task", variant: "danger", run: () => { setReason(""); setCancelling(true); } },
     /*
      * Delete is handed back to the page rather than run here.
@@ -157,13 +167,25 @@ export default function TaskDetailPanel({ task, canWrite = false, assignableUser
      * raised.
      */
     task.canDelete && onDelete && { label: "Delete Task", variant: "danger", run: () => onDelete(task) },
-    task.canComplete && { label: "Mark Complete", variant: "primary", run: () => run(() => completeTask(task.id), `${task.taskCode} marked complete.`) },
+    // The holder finishes and sends it back to whoever assigned it.
+    task.canComplete && { label: task.completeSendsBack ? "Finish & Send Back" : "Mark as Completed", variant: "primary", run: () => run(() => completeTask(task.id), task.completeSendsBack ? `${task.taskCode} finished and sent back to ${task.assignedByName}.` : `${task.taskCode} marked as completed.`) },
+    // Whoever assigned it, once it has been sent back.
+    task.canApprove && { label: "Mark as Completed", variant: "primary", run: () => run(() => approveTask(task.id), `${task.taskCode} marked as completed.`) },
+    /*
+     * A feedback issue - a client's Average or Poor review given to this person - is answered rather
+     * than completed: Issues sorted, or Rejected with the reason. Either one finishes the task and is
+     * what moves the feedback out of Issues once every issue on it is answered.
+     */
+    task.canResolveFeedback && { label: "Issues sorted", variant: "primary", run: () => { setReason(""); fields.clearAll(); setAnswering("Issues sorted"); } },
+    task.canResolveFeedback && { label: "Rejected", variant: "danger", run: () => { setReason(""); fields.clearAll(); setAnswering("Rejected"); } },
   ].filter(Boolean) : [];
 
   return <>
     <SchemaFormPanel
       title={`${task.taskCode} · ${task.title}`}
       description={[
+        // What this task is, when it is a client's review: which review, how they rated it, and where.
+        task.feedbackIssue && `Feedback issue: ${task.feedbackIssue.reviewLabel} rated ${task.feedbackIssue.review} in ${task.feedbackIssue.feedbackCode}${task.feedbackIssue.shootCode ? ` (shoot ${task.feedbackIssue.shootCode})` : ""}`,
         `Assigned to ${task.assignedToName}`,
         `by ${task.assignedByName}`,
         dateTime(task.createdAt),
@@ -226,13 +248,16 @@ export default function TaskDetailPanel({ task, canWrite = false, assignableUser
       onClose={() => setReassigning(false)}
       onSubmit={(event) => {
         event.preventDefault();
-        if (!nextAssignee || !reason.trim()) return;
+        if (!fields.check({
+          nextAssignee: nextAssignee ? "" : "Choose who takes it over.",
+          reason: reason.trim() ? "" : "Enter why it is being reassigned.",
+        })) return;
         const to = reassignOptions.find((option) => option.value === nextAssignee);
         void run(() => reassignTask(task.id, Number(nextAssignee), reason.trim()), `${task.taskCode} reassigned${to ? ` to ${to.label}` : ""}.`);
       }}
       footer={<>
         <Button className="max-sm:flex-1" type="button" onClick={() => setReassigning(false)} disabled={busy}>Cancel</Button>
-        <Button className="max-sm:flex-1" variant="primary" disabled={busy || !nextAssignee || !reason.trim()}>{busy ? "Reassigning..." : "Reassign"}</Button>
+        <Button className="max-sm:flex-1" variant="primary" disabled={busy}>{busy ? "Reassigning..." : "Reassign"}</Button>
       </>}
     >
       <div className="space-y-4">
@@ -241,25 +266,102 @@ export default function TaskDetailPanel({ task, canWrite = false, assignableUser
         <Dropdown
           mode="input"
           label="Reassign to"
+          helperText="The person who takes over this task; they are notified."
           required
           searchable
           placeholder={reassignOptions.length ? "Choose who should do this" : "No one else can be given this task"}
           menuZIndexClassName="z-[200]"
           value={nextAssignee}
-          onChange={setNextAssignee}
+          onChange={(value) => { setNextAssignee(value); fields.clear("nextAssignee"); }}
+          error={fields.errors.nextAssignee}
           options={reassignOptions}
         />
         <TextAreaField
           required
           label="Why is it being reassigned?"
+          helperText="Sent to the new assignee and kept in the task's activity."
           value={reason}
-          onChange={(event) => setReason(event.target.value)}
+          onChange={(event) => { setReason(event.target.value); fields.clear("reason"); }}
+          error={fields.errors.reason}
           rows={4}
           placeholder="e.g. I am on the Erode shoot all week — Priya has the client's files"
         />
       </div>
     </Dialog>}
 
+    {/* Revoking: taken back from whoever has it, and - if someone is chosen - reassigned to them, who
+        then follow the same flow from the start. */}
+    {revoking && <Dialog
+      title={`Revoke ${task.taskCode}?`}
+      description={`It is taken back from ${task.assignedToName}, who is told. Choose someone to reassign it to, or leave it empty to keep it with you.`}
+      layer="dialogOverPanel"
+      busy={busy}
+      onClose={() => setRevoking(false)}
+      onSubmit={(event) => {
+        event.preventDefault();
+        const to = reassignOptions.find((option) => option.value === nextAssignee);
+        void run(() => revokeTask(task.id, reason.trim() || null, nextAssignee ? Number(nextAssignee) : null), to ? `${task.taskCode} revoked and reassigned to ${to.label}.` : `${task.taskCode} revoked from ${task.assignedToName}.`);
+      }}
+      footer={<>
+        <Button className="max-sm:flex-1" type="button" onClick={() => setRevoking(false)} disabled={busy}>Cancel</Button>
+        <Button className="max-sm:flex-1" variant="primary" disabled={busy}>{busy ? "Saving..." : nextAssignee ? "Revoke & Reassign" : "Revoke Task"}</Button>
+      </>}
+    >
+      <div className="space-y-4">
+        <Dropdown
+          mode="input"
+          label="Reassign to (optional)"
+          helperText="Hands the task to this person; leave empty to keep it yourself."
+          searchable
+          placeholder="Leave empty to keep it with you"
+          menuZIndexClassName="z-[200]"
+          value={nextAssignee}
+          onChange={(value) => setNextAssignee(value || "")}
+          options={reassignOptions}
+        />
+        <TextAreaField
+          label="Reason (optional)"
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+          rows={3}
+          maxLength={1000}
+          helperText="Told to whoever had the task and kept in its activity."
+          placeholder="e.g. Priya has the client's files, so she will take this over"
+        />
+      </div>
+    </Dialog>}
+
+    {/* Answering a feedback issue: sorted, or rejected with the reason the feedback keeps. */}
+    {answering && <Dialog
+      title={answering === "Rejected" ? `Reject this issue (${task.taskCode})?` : `Mark this issue as sorted (${task.taskCode})?`}
+      description={answering === "Rejected"
+        ? "The client's issue is closed as rejected. Say why - the reason is kept on the feedback."
+        : "The client's issue is closed as sorted out. Add a remark if it helps whoever reads the feedback."}
+      layer="dialogOverPanel"
+      busy={busy}
+      onClose={() => setAnswering(null)}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!fields.check({ reason: answering === "Rejected" && !reason.trim() ? "Enter a reason." : "" })) return;
+        void run(() => resolveFeedbackTask(task.id, answering, reason.trim()), `${task.taskCode} answered: ${answering}.`);
+      }}
+      footer={<>
+        <Button className="max-sm:flex-1" type="button" onClick={() => setAnswering(null)} disabled={busy}>Back</Button>
+        <Button className="max-sm:flex-1" variant={answering === "Rejected" ? "danger" : "primary"} disabled={busy}>{busy ? "Saving..." : answering}</Button>
+      </>}
+    >
+      <TextAreaField
+        label={answering === "Rejected" ? "Reason" : "Remarks (optional)"}
+        helperText="Kept on the client's feedback alongside the answer."
+        required={answering === "Rejected"}
+        value={reason}
+        onChange={(event) => { setReason(event.target.value); fields.clear("reason"); }}
+        error={fields.errors.reason}
+        rows={3}
+        maxLength={1000}
+        placeholder={answering === "Rejected" ? "Why is this issue being rejected?" : "How was it sorted out?"}
+      />
+    </Dialog>}
     {/* Calling a task off. A reason is welcome here but not demanded — the person who set it is the
         one cancelling, so there is nobody who is owed an explanation. */}
     {cancelling && <Dialog
@@ -283,6 +385,7 @@ export default function TaskDetailPanel({ task, canWrite = false, assignableUser
         value={reason}
         onChange={(event) => setReason(event.target.value)}
         rows={3}
+        helperText="Told to the assignee and kept in the task's activity."
         placeholder="e.g. The client moved the date, so this is no longer needed"
       />
     </Dialog>}

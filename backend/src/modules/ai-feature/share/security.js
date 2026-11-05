@@ -24,7 +24,28 @@ const comparePin = (pin, hash) => bcrypt.compare(String(pin), hash);
 
 const SESSION_SCOPE = "ai-event-guest";
 function sessionSecret() { const secret = process.env.JWT_SECRET; if (!secret) throw httpError(500, "Guest session signing is not configured."); return secret; }
-function signGuestSession({ eventId, guestId, shareId }) { return jwt.sign({ scope: SESSION_SCOPE, eventId, guestId, shareId }, sessionSecret(), { expiresIn: "90d" }); }
+/**
+ * `version` is the guest's `sessionVersion` when the session is issued, carried as `v`; the guest
+ * context refuses a session whose `v` no longer matches (public/service.context). A session issued
+ * before versions existed has no `v` and reads as 0.
+ */
+function signGuestSession({ eventId, guestId, shareId, version = 0 }) { return jwt.sign({ scope: SESSION_SCOPE, eventId, guestId, shareId, v: version }, sessionSecret(), { expiresIn: "90d" }); }
+
+/**
+ * The join's code step (public/service.join): names the guest found at join, so the code is checked
+ * against that guest and sent to the number stored on them - never a number from a later request.
+ * Short-lived, its own scope (a session cannot stand in for it, nor it for a session), and bound to
+ * the link it was issued on.
+ */
+const CHALLENGE_SCOPE = "ai-event-guest-verify";
+const CHALLENGE_TTL = "15m";
+function signJoinChallenge({ eventId, guestId, shareId }) { return jwt.sign({ scope: CHALLENGE_SCOPE, eventId, guestId, shareId }, sessionSecret(), { expiresIn: CHALLENGE_TTL }); }
+function verifyJoinChallenge(token, { eventId, shareId }) {
+  let payload;
+  try { payload = jwt.verify(String(token || ""), sessionSecret()); } catch { throw httpError(400, "That code has expired. Please join again."); }
+  if (payload.scope !== CHALLENGE_SCOPE || payload.eventId !== eventId || payload.shareId !== shareId) throw httpError(400, "That code has expired. Please join again.");
+  return payload;
+}
 function verifyGuestSession(authHeader, { eventId, shareId }) {
   if (!authHeader || !authHeader.startsWith("Bearer ")) throw httpError(401, "Join the event to continue.");
   let payload;
@@ -45,4 +66,4 @@ function registerPinAttempt(tokenHash, address) {
 }
 const clearPinAttempts = (tokenHash, address) => attempts.delete(`link:${tokenHash}:${address}`);
 
-module.exports = { hashValue, encryptValue, decryptValue, generateToken, TOKEN_PATTERN, PIN_LENGTH, generatePin, hashPin, comparePin, signGuestSession, verifyGuestSession, registerPinAttempt, clearPinAttempts, SESSION_SCOPE };
+module.exports = { hashValue, encryptValue, decryptValue, generateToken, TOKEN_PATTERN, PIN_LENGTH, generatePin, hashPin, comparePin, signGuestSession, verifyGuestSession, signJoinChallenge, verifyJoinChallenge, registerPinAttempt, clearPinAttempts, SESSION_SCOPE };

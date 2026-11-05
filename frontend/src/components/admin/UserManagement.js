@@ -1,11 +1,13 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import { useCallback, useEffect, useState } from "react";
 import DataTable from "@/components/data-table/DataTable";
 import useTableSelection from "@/components/data-table/useTableSelection";
 import DataTableInfoPanel from "@/components/data-table/DataTableInfoPanel";
 import DataTableShell from "@/components/data-table/DataTableShell";
 import TableFooter from "@/components/data-table/TableFooter";
+import KanbanBoard, { columnsFromRows, groupValue } from "@/components/data-table/KanbanBoard";
 import RecordViewPanel from "@/components/data-table/RecordViewPanel";
 import { ACTIONS_COLUMN } from "@/components/data-table/tableCells";
 import RolePicker from "@/components/shared/RolePicker";
@@ -17,6 +19,7 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import Dialog from "@/components/ui/Dialog";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import { branchLabel } from "@/lib/branchName";
+import { columnCount } from "@/lib/kanbanSummary.mjs";
 import {
   assignRoleToUser,
   deleteUser,
@@ -26,6 +29,7 @@ import {
   getUsers,
   removeRoleFromUser,
   setUserEmployeeLink,
+  updateUser,
 } from "@/services/admin/admin.service";
 
 // What the info panel shows about the row that is selected. Same shape every other module's panel
@@ -64,10 +68,12 @@ function userForInfo(user, roles) {
 // `limit` is the server's own maximum. This screen shows one page, and the population it lists is
 // the studio's staff with a login, not everyone who ever had one.
 const LISTED_USERS = { status: "ACTIVE", limit: 200 };
+// A login tied to no employee record yet: the board's tag, and what each branch column counts.
+const userFlag = (user) => (user.linkedEmployeeId ? "" : "No employee linked");
 
 // No create here: an account belongs to a person, and a person is added in the Employee Repository.
 // This screen is about what an existing account may do.
-export default function UserManagement() {
+export default function UserManagement({ layout = "table" }) {
   const { hasPermission } = usePermissions();
   const { notice, showSuccess, showError, showUndo, clearNotice } = useNotice();
   const canWrite = hasPermission("ADMIN", "User Management", "READ_WRITE");
@@ -87,6 +93,7 @@ export default function UserManagement() {
   // this screen are about roles, and the repository is the larger list of the two.
   const [employees, setEmployees] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null);
+  const [moving, setMoving] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const [reloadToken, setReloadToken] = useState(0);
@@ -207,8 +214,42 @@ export default function UserManagement() {
 
   const selected = users.find((user) => user.id === selectedId) || null;
 
+  /*
+   * The Board, switched from AdminPage's header: every listed account is Active, so there is no
+   * status to stand them in - they are grouped by home branch instead, the accounts tied to no
+   * branch under "All branches". A card opens the account as a double click does;
+   * dropped on another branch it moves the home branch, after a confirmation.
+   */
+  const homeBranch = (user) => branchLabel(user.branch?.name) || "All branches";
+  // A column is a home branch somebody already has, so its id is read off them; "All branches" is none.
+  const branchIdOf = (label) => (label === "All branches" ? null : users.find((user) => homeBranch(user) === label)?.branch?.id ?? null);
+
   return <>
-    <DataTableShell className="min-h-0 flex-1 rounded-none border-0" footer={<TableFooter spread><span className="text-xs sm:text-sm">Last updated: {updatedText}</span><span className="shrink-0 text-xs sm:text-sm">Total rows: {users.length}</span></TableFooter>}>
+    {layout === "board" ? <KanbanBoard
+      rows={users}
+      columns={columnsFromRows(users, homeBranch)}
+      statusOf={(user) => groupValue(homeBranch(user))}
+      // Under each branch, how many of its logins are tied to no employee record yet.
+      columnAmount={(rows) => columnCount(rows, (user) => Boolean(userFlag(user)), "Not linked")}
+      cardFlag={userFlag}
+      card={{
+        title: (user) => user.name,
+        subtitle: (user) => [user.email, employeeLabel(user.linkedEmployee)].filter(Boolean).join(" · "),
+        meta: (user) => rolesOf(user).map((role) => role.name).sort().join(", "),
+      }}
+      getRowId={(user) => String(user.id)}
+      onOpen={setViewing}
+      // The card's ⋮ is the row's ⋮.
+      cardActions={menuFor}
+      // Dropping on another branch moves the login's home branch, after a confirmation - the same
+      // write the account's own branch field makes (PATCH /admin/users/:id), behind the same Read / Write.
+      canDropAt={() => canWrite}
+      onDrop={(user, to) => setMoving({ user, to })}
+      viewOnly="Moving a login to another branch needs User Management at Read / Write."
+      loading={loading}
+      noun="users"
+      ariaLabel="Users board"
+    /> : <DataTableShell className="min-h-0 flex-1 rounded-none border-0" footer={<TableFooter spread><span className="text-xs sm:text-sm">Last updated: {updatedText}</span><span className="shrink-0 text-xs sm:text-sm">Total rows: {users.length}</span></TableFooter>}>
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         <DataTable
           columns={columns}
@@ -233,7 +274,7 @@ export default function UserManagement() {
           onToggle={() => setInfoPanelState((current) => current === "expanded" ? "collapsed" : "expanded")}
         />
       </div>
-    </DataTableShell>
+    </DataTableShell>}
 
     {viewing && <RecordViewPanel title={viewing.name || "User"} entity={userForInfo(viewing, rolesOf(viewing))} sections={userInfoSections} sidebarAriaLabel="User sections" onClose={() => setViewing(null)} />}
 
@@ -258,6 +299,16 @@ export default function UserManagement() {
         employeeId ? "Employee linked." : "Employee link cleared.",
       ).then(() => setLinking(null))}
       onClose={() => setLinking(null)}
+    />}
+
+    {moving && <ConfirmDialog
+      title="Move to another branch"
+      message={`Move ${moving.user.name} from ${homeBranch(moving.user)} to ${moving.to}? This changes their home branch. What they can reach still comes from their roles.`}
+      confirmLabel="Move"
+      busyLabel="Moving..."
+      loading={busy}
+      onConfirm={() => run(() => updateUser(moving.user.id, { branchId: branchIdOf(moving.to) }), `${moving.user.name} moved to ${moving.to}.`).then(() => setMoving(null))}
+      onCancel={() => setMoving(null)}
     />}
 
     {pendingDelete && <ConfirmDialog
@@ -324,6 +375,7 @@ function EmployeeLinkDialog({ user, employees, busy, onSave, onClose }) {
         employee.linkedToUserId && employee.linkedToUserId !== user.id ? "already linked" : null,
       ].filter(Boolean).join(" · "),
       disabled: Boolean(employee.linkedToUserId) && employee.linkedToUserId !== user.id,
+      avatar: avatarOf(employee),
     })),
   ];
 
@@ -348,6 +400,7 @@ function EmployeeLinkDialog({ user, employees, busy, onSave, onClose }) {
       <Dropdown
         searchable
         label="Employee"
+        helperText="The employee record this login belongs to; attendance and requests need it."
         placeholder={loading ? "Loading the repository..." : "Search by name or employee code"}
         disabled={loading || busy}
         // The list names its own "Not linked" row first and is otherwise the repository in the
@@ -357,7 +410,7 @@ function EmployeeLinkDialog({ user, employees, busy, onSave, onClose }) {
         value={choice}
         onChange={setChoice}
       />
-      {!loading && !employees.length && <p className="text-sm text-slate-500">No employees on the repository yet. Add one in HRM &rarr; Employee Repository first.</p>}
+      {!loading && !employees.length && <p className="text-sm text-slate-500">No employees on the register yet. Add one in HRM &rarr; User Management first.</p>}
     </div>
   </Dialog>;
 }

@@ -11,11 +11,13 @@ const { randomUUID } = require("crypto");
  *   ai-feature/event-<id>/videos/           uploaded video files (public)
  *   ai-feature/event-<id>/guest-selfies/    a guest's selfie (private bucket)
  *   ai-feature/event-<id>/face-thumbs/      one crop per detected face (private bucket)
+ *   ai-feature/event-<id>/watermark/        the event's own copy of its watermark logo (public)
+ *   ai-feature/event-<id>/watermarked/      previews and thumbnails drawn with the watermark (public)
  *
  * Names are UUIDs rather than file names, so a key never reveals a guest or a client.
  */
 const ROOT = "ai-feature";
-const FOLDERS = Object.freeze({ cover: "cover", originals: "originals", previews: "previews", thumbnails: "thumbnails", videos: "videos", guestSelfies: "guest-selfies", faceThumbs: "face-thumbs" });
+const FOLDERS = Object.freeze({ cover: "cover", originals: "originals", previews: "previews", thumbnails: "thumbnails", videos: "videos", guestSelfies: "guest-selfies", faceThumbs: "face-thumbs", watermark: "watermark", watermarked: "watermarked" });
 
 const eventRoot = (eventId) => `${ROOT}/event-${String(eventId)}`;
 const folderFor = (eventId, folder) => `${eventRoot(eventId)}/${FOLDERS[folder] || folder}`;

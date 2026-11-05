@@ -1,12 +1,23 @@
+const attendanceService = require("../attendance/service");
+const { pendingWork } = require("../separations/handover");
 const { z } = require("zod");
-const { workingEmployeeStatuses } = require("../../../services/employeeOptionLists");
-const { lookups: referenceLookups } = require("../../../services/referenceMatchers");
+const { loginCredentialFields, newTemporaryPassword } = require("../../../services/loginCredentials");
+const { ONBOARDING_STATUSES, workingEmployeeStatuses, listPhotoUrl } = require("../../../services/employeeOptionLists");
+const { renamePersonCopies } = require("../../../services/nameCopies");
+const { everyChunk } = require("../../../services/wordChunks");
+const employeeReferences = require("../../../services/employeeReferences");
 const { syncEmployeeReferral } = require("../referrals/service");
 const { reopenLogin } = require("../separations/controller");
+const { shiftDirectReportsUp } = require("../../../services/reportingLine");
 const { isValidPhoneNumber } = require("../../../services/phoneNumber");
 const bcrypt = require("bcryptjs");
 const { Prisma } = require("@prisma/client");
 const prisma = require("../../../config/db");
+const { sendWhatsAppToPerson } = require("../../sales/whatsapp-chat/directSend");
+const whatsappActivity = require("../../../services/whatsappActivity");
+// WhatsApp's own cap, named once in the module that owns it - `directSend` enforces the same
+// constant, and a literal here would drift from it the day WhatsApp changes.
+const { MAX_MESSAGE_LENGTH } = require("../../sales/whatsapp-chat/security");
 const iamService = require("../../../services/iam.service");
 const dataScope = require("../../../services/dataScope.service");
 const { nextIdentifier, peekIdentifier } = require("../../../services/identifiers");
@@ -16,8 +27,10 @@ const { storeImage, discardUploads } = require("../../../services/imageStorage")
 const { storeDocument } = require("../../../services/documentStorage");
 // Shared with the onboarding send-back, which refuses the same way for the same reasons.
 const { describeMailFailure } = require("../../../services/mailFailure");
+const { studioDateKey } = require("../../../services/studioTime");
 // The one spelling of a candidate's onboarding link, shared with the module that issues it.
 const { onboardingUrlFor } = require("../onboarding-invites/controller");
+const whatsappGroups = require("../whatsapp-groups/service");
 
 // The same place the public onboarding form puts the proofs a candidate uploads.
 const IDENTITY_PROOF_FOLDER = "hrm/onboarding/proof";
@@ -87,6 +100,10 @@ const nullableAadhar = z.string().trim().regex(/^[2-9]\d{11}$/, "Aadhar Card Num
 const nullablePan = z.string().trim().regex(/^[A-Z]{5}[0-9]{4}[A-Z]$/, "PAN must be five letters, four digits, then a letter, for example ABCDE1234F").nullable().optional();
 const nullableIfsc = z.string().trim().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "IFSC must be four letters, then 0, then six characters, for example SBIN0001234").nullable().optional();
 const nullableBankAccountStatus = z.enum(["Active", "Inactive"]).nullable().optional();
+// Payslip Details → PF Details: the same shapes the form checks (`fieldValidation.js`).
+const nullablePfNumber = z.string().trim().toUpperCase().regex(/^[A-Z0-9/]{5,30}$/, "PF and EPS numbers take letters, digits and / only, for example TN/MAS/0012345/000/0000123").nullable().optional();
+const nullableUan = z.string().trim().regex(/^\d{12}$/, "UAN must be 12 digits").nullable().optional();
+const nullableEsi = z.string().trim().regex(/^\d{10}(\d{7})?$/, "ESI No. must be 10 or 17 digits").nullable().optional();
 // A pointer at another employee row. Sent as "" by a cleared dropdown, which `cleanData` turns into
 // null before this ever sees it.
 const nullableEmployeeRef = z.coerce.number().int().positive().nullable().optional();
@@ -100,9 +117,14 @@ const nullableProofImage = z.string().trim().max(12_000_000)
 /** How a review went. Fixed here as well as in the browser, so the column holds one of these or nothing. */
 const REVIEW_OUTCOMES = ["Shine", "Shadow"];
 
+/** A review on the employee's schedule, or a spot one between them (outcome and remarks only). */
+const REVIEW_TYPES = ["CYCLIC", "SPOT"];
+const isCyclicReview = (review) => (review.reviewType || "CYCLIC") !== "SPOT";
+
 // One salary review. The employee's totals are worked out from the whole list, never sent up.
 const reviewSchema = z.object({
   reviewDate: z.coerce.date(),
+  reviewType: z.enum(REVIEW_TYPES).default("CYCLIC"),
   /*
    * What was awarded, where anything was.
    *
@@ -121,7 +143,8 @@ const reviewSchema = z.object({
   ).optional(),
   nextReviewDate: z.coerce.date().nullable().optional(),
   remarks: z.string().trim().max(5000).nullable().optional(),
-});
+// A spot review awards nothing and schedules nothing - whatever else was sent with it.
+}).transform((review) => (review.reviewType === "SPOT" ? { ...review, incrementAmount: null, nextReviewDate: null } : review));
 
 /*
  * One child of an employee. A name is what makes the row worth keeping, so it is required — the
@@ -186,6 +209,17 @@ const experienceSchema = z.object({
  * without a department. Making the API agree would mean either moving the field back to the first
  * page or splitting create from update here - both real options, neither one to take quietly.
  */
+/*
+ * Edit Employee → Payslip Details → Personal Details: typed by HR, printed on the payslip as typed.
+ * Always sent whole from that form; each answer null where left empty.
+ */
+const payslipText = z.string().trim().max(100, "Keep it to 100 characters.").transform((value) => value || null).nullable().optional();
+const payslipDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Choose a date.").nullable().optional();
+const payslipPersonalDetailsSchema = z.object({
+  empCode: payslipText, empName: payslipText, department: payslipText, designation: payslipText, location: payslipText,
+  dateOfBirth: payslipDay, dateOfJoining: payslipDay, pan: nullablePan, bankAccount: nullableAccountNumber,
+}).strict().optional();
+
 const employeeSchema = z.object({
   reviews: z.array(reviewSchema).max(100).optional(),
   /*
@@ -207,15 +241,18 @@ const employeeSchema = z.object({
    */
   referredByEmployeeId: nullableEmployeeRef,
   employeeId: employeeIdSchema, employeeName: requiredText.max(150), employmentStatus: z.enum(["Active", "in Training", "PIP", "Relieved", "Absconded", "Long Leave", "Fired", "HR Onboarding Pending", "Employee Submission Pending"]).default("HR Onboarding Pending"),
-  contactNumber: nullablePhone, emailId: nullableEmail, workEmailId: nullableEmail, dateOfJoining: nullableDate, designation: nullableText, department: nullableText, skills: nullableText, vertical: nullableText, workBaseLocation: nullableText, currentWorkLocation: nullableText, photoShooter: z.boolean().nullable().optional(), workType: nullableText, languagesKnown: nullableText, bloodGroup: nullableText, gender: nullableText,
+  contactNumber: nullablePhone, companyGivenNumber: nullablePhone, emailId: nullableEmail, workEmailId: nullableEmail, dateOfJoining: nullableDate, designation: nullableText, department: nullableText, skills: nullableText, vertical: nullableText, workBaseLocation: nullableText, currentWorkLocation: nullableText, photoShooter: z.boolean().nullable().optional(), workType: nullableText, residentialStatus: z.enum(["Resident", "Non-Resident"]).nullable().optional(), payslipValues: z.record(z.string().regex(/^\d+$/, "That payslip detail could not be found."), z.string().max(500).nullable()).optional(), payslipPersonalDetails: payslipPersonalDetailsSchema, pfNumber: nullablePfNumber, uanNumber: nullableUan, epsNumber: nullablePfNumber, esiNumber: nullableEsi, languagesKnown: nullableText, bloodGroup: nullableText, gender: nullableText,
   emergencyContactName: nullableText, emergencyContactNumber: nullablePhone, emergencyContactRelationship: nullableText, aadharCardNumber: nullableAadhar, panCardNumber: nullablePan, aadharCardImageUrl: nullableProofImage, panCardImageUrl: nullableProofImage, profilePhotoUrl: nullableProofImage, fatherName: nullableText, fatherOccupation: nullableText, motherName: nullableText, motherOccupation: nullableText, spouseName: nullableText, dateOfBirth: nullableDateOfBirth, maritalStatus: nullableText, weddingAnniversary: nullableDate, currentAddress: nullableText, permanentAddress: nullableText,
-  reference1PersonName: nullableText, reference1PersonPhone: nullablePhone, reference1PersonAddress: nullableText, reference2PersonName: nullableText, reference2PersonPhone: nullablePhone, reference2PersonAddress: nullableText, nominee1PersonName: nullableText, nominee1PersonPhone: nullablePhone, nominee2PersonName: nullableText, nominee2PersonPhone: nullablePhone, alternative1EmployeeId: nullableEmployeeRef, alternative2EmployeeId: nullableEmployeeRef, leaveApprover1EmployeeId: nullableEmployeeRef, leaveApprover2EmployeeId: nullableEmployeeRef, leaveApprover3EmployeeId: nullableEmployeeRef, permissionApproverEmployeeId: nullableEmployeeRef, reportsToEmployeeId: nullableEmployeeRef,
+  reference1PersonName: nullableText, reference1PersonPhone: nullablePhone, reference1PersonAddress: nullableText, reference2PersonName: nullableText, reference2PersonPhone: nullablePhone, reference2PersonAddress: nullableText, nominee1PersonName: nullableText, nominee1PersonPhone: nullablePhone, nominee2PersonName: nullableText, nominee2PersonPhone: nullablePhone, alternative1EmployeeId: nullableEmployeeRef, alternative2EmployeeId: nullableEmployeeRef, leaveApprover1EmployeeId: nullableEmployeeRef, leaveApprover2EmployeeId: nullableEmployeeRef, leaveApprover3EmployeeId: nullableEmployeeRef, permissionApproverEmployeeId: nullableEmployeeRef,
+  // The one colleague who approves this person's Attendance Regularization requests.
+  regularizationApproverEmployeeId: nullableEmployeeRef, reportsToEmployeeId: nullableEmployeeRef,
   bankName: nullableText, bankLocation: nullableText, accountNumber: nullableAccountNumber, ifscCode: nullableIfsc, bankAccountStatus: nullableBankAccountStatus, addedAccounts: nullableText, companyMentionedName: nullableText, dateOfRelieving: nullableDate, relievingRemarks: nullableText, totalSalary: nullableDecimal, joiningSalary: nullableDecimal, lastReviewDate: nullableDate, nextReviewDate: nullableDate, totalIncrement: nullableDecimal,
   remarksDetails: nullableText, appreciationDetails: nullableText,
 });
 // Employee IDs are generated inside the create transaction. Keep them out of the
 // create payload schema so a UI preview can never become the source of truth.
-const createEmployeeSchema = employeeSchema.omit({ employeeId: true });
+// The added payslip details are answered in Edit Employee → Payslip Details, on a record that exists.
+const createEmployeeSchema = employeeSchema.omit({ employeeId: true, payslipValues: true, payslipPersonalDetails: true });
 
 // One definition of "working here", shared with the read service the assistant uses.
 const { WORKING_STATUSES } = require("./read.service");
@@ -234,20 +271,8 @@ const querySchema = z.object({
 });
 const idSchema = z.coerce.number().int().positive();
 const credentialSchema = z.object({
-  email: z.string().trim().email().max(191),
-  username: z.string().trim().min(3).max(50).regex(/^[a-zA-Z0-9._-]+$/, "Username may contain letters, numbers, dots, underscores, and hyphens only"),
-  /*
-   * The password the account starts on, which every account now starts on the same one of.
-   *
-   * The mixed-case-and-symbol rule that used to be here was relaxed because the studio's chosen
-   * starting password does not meet it. Worth knowing what that leans on: the create paths below
-   * set `mustChangePassword: true`, but nothing reads that flag yet — no screen forces the change —
-   * so this value stays a working password until its owner changes it by choice.
-   *
-   * A length is still required, because whatever arrives here is bcrypt-hashed and becomes a real
-   * password until it is changed.
-   */
-  temporaryPassword: z.string().min(8).max(128),
+  // Email, username and the starting password: the rules every new sign-in shares (`loginCredentials`).
+  ...loginCredentialFields,
   // The branch the account belongs to, as a `location` id. IAM scopes what a person reaches by it,
   // so it is stored on the user rather than re-read from the employee's free-text work location.
   branchId: z.coerce.number().int().positive().nullable().optional(),
@@ -262,6 +287,10 @@ const credentialSchema = z.object({
    * it. An administrator is never held whatever this says.
    */
   whatsappRequired: z.coerce.boolean().optional().default(false),
+  // Employee Preference → Exclude: kept out of the Attendance module. Off unless ticked.
+  excludeFromAttendance: z.coerce.boolean().optional().default(false),
+  // Employee Preference → Attendance: offered the Flexible Shift work mode at login. Off unless ticked.
+  allowFlexibleShift: z.coerce.boolean().optional().default(false),
   // The two colleagues who cover this person's work. Recorded against the employee rather than the
   // account, because cover is a fact about the person and outlives any login they are given.
   alternative1EmployeeId: nullableEmployeeRef,
@@ -274,6 +303,8 @@ const credentialSchema = z.object({
   // The one colleague who approves this person's permissions. One rather than three: a permission
   // is an hour out of a day and is settled the same morning it is asked for.
   permissionApproverEmployeeId: nullableEmployeeRef,
+  // The one colleague who approves this person's Attendance Regularization requests.
+  regularizationApproverEmployeeId: nullableEmployeeRef,
 });
 
 /**
@@ -308,6 +339,12 @@ function leaveApproversProblem(employeeId, approverIds) {
  */
 function permissionApproverProblem(employeeId, approverId) {
   if (approverId && approverId === employeeId) return "An employee cannot approve their own permission requests.";
+  return null;
+}
+
+/** The same for the one Attendance Regularization Approver: nobody approves their own regularization. */
+function regularizationApproverProblem(employeeId, approverId) {
+  if (approverId && approverId === employeeId) return "An employee cannot approve their own attendance regularization requests.";
   return null;
 }
 
@@ -383,9 +420,12 @@ async function storeIdentityProofs(data) {
  * could disagree with the reviews under it.
  */
 function reviewTotals(reviews, joiningSalary, scheduledNextReviewDate = null) {
-  if (!reviews.length) {
+  // Spot reviews are neither the schedule nor the salary: only cyclic ones count here.
+  const cycle = reviews.filter(isCyclicReview);
+  if (!cycle.length) {
     return { totalIncrement: null, totalSalary: joiningSalary ?? null, lastReviewDate: null, nextReviewDate: scheduledNextReviewDate ?? null };
   }
+  reviews = cycle;
   const totalIncrement = reviews.reduce((sum, review) => sum + Number(review.incrementAmount || 0), 0);
   const latest = reviews.reduce((newest, review) => new Date(review.reviewDate) > new Date(newest.reviewDate) ? review : newest);
   return {
@@ -454,6 +494,7 @@ async function storeExperienceAttachments(experiences) {
 const reviewRow = (review, employeeId, actorId) => ({
   employeeId,
   reviewDate: review.reviewDate,
+  reviewType: review.reviewType || "CYCLIC",
   incrementAmount: review.incrementAmount ?? null,
   outcome: review.outcome ?? null,
   nextReviewDate: review.nextReviewDate ?? null,
@@ -472,32 +513,19 @@ const reviewRow = (review, employeeId, actorId) => ({
  * hand-added one drawing the same number.
  */
 /**
- * The reference columns that belong beside an employee's free-text ones.
- *
- * `vertical`, `workBaseLocation` and `currentWorkLocation` are text a person typed; `verticalId` and
- * `branchId` are what every branch and vertical filter in the application actually reads. Sales
- * projects, CRD documents and WhatsApp group names all resolve theirs on write — this module never
- * did, so every employee created or edited since the columns were added was left at NULL.
- *
- * That is not a cosmetic drift. `Employee.branchId` is one of only three columns branch scoping can
- * filter on, and the attendance geofence finds a person's office through it: with it NULL every
- * capture reads "no branch on their record", so nobody can ever be inside their own office however
- * many office locations the studio records.
- *
- * The branch is the work base, falling back to where they are currently working — the same rule the
- * backfill applied and the one `data-scope-backfill.test.js` holds this table to.
+ * The reference columns that belong beside an employee's free-text ones - `verticalId`, `branchId`,
+ * and since 20260924120000 the designation, work type, gender, blood group, marital status,
+ * relationship and work-location references too. `Employee.branchId` is one of only three columns
+ * branch scoping can filter on and the attendance geofence finds a person's office through it, which
+ * is why this module resolves on every write rather than leaving the references at NULL.
  *
  * Only resolves what the save actually carries: a patch that does not mention the vertical must not
  * blank the reference beside it, so a key absent from `data` stays absent from the answer.
  */
 async function referenceColumnsFor(data) {
-  const refs = await referenceLookups();
-  const columns = {};
-  if (data.vertical !== undefined) columns.verticalId = refs.verticalId(data.vertical);
-  if (data.workBaseLocation !== undefined || data.currentWorkLocation !== undefined) {
-    columns.branchId = refs.branchId(data.workBaseLocation) ?? refs.branchId(data.currentWorkLocation);
-  }
-  return columns;
+  // One rule for every list the form offers, in `services/employeeReferences.js`; the vertical and
+  // the branch, which this function used to resolve on its own, are two of its cases.
+  return employeeReferences.referenceColumns(data);
 }
 
 const nextEmployeeId = (transaction) => nextIdentifier("EMPLOYEE", {}, transaction);
@@ -552,7 +580,8 @@ async function previewNextEmployeeId(req, res) {
  * So the branches ticked on a role decide which people this screen shows, and ticking them all
  * shows everybody.
  */
-const EMPLOYEE_SCOPE_COLUMNS = { employee: "id", branch: "branchId", branchText: ["workBaseLocation", "currentWorkLocation"], branchOnReach: true };
+// Declared once in `scopeColumns.js`, shared with every other reader of employee rows.
+const { EMPLOYEE_SCOPE_COLUMNS } = require("./scopeColumns");
 /*
  * `level` is what the caller is about to do. It matters here more than almost anywhere, because
  * `EMPLOYEE_SCOPE_COLUMNS` declares `branchOnReach`: reaching a branch **is** the claim on its rows,
@@ -628,6 +657,7 @@ function parseId(req, res) {
 }
 
 function handleError(res, error, fallback) {
+  if (error.status) return res.status(error.status).json({ message: error.message });
   if (error.code === "P2002") return res.status(409).json({ message: "Employee ID already exists" });
   if (error.code === "P2025") return res.status(404).json({ message: "Employee not found" });
   // Something still points at this record and the database is right to refuse. A refusal is the
@@ -664,12 +694,21 @@ function withoutCredentialsDraft(employee) {
  */
 async function employeeDirectory(req, res) {
   try {
-    const data = await prisma.employee.findMany({
+    const rows = await prisma.employee.findMany({
       where: { archivedAt: null, employmentStatus: { in: await workingEmployeeStatuses() } },
-      select: { id: true, employeeId: true, employeeName: true },
+      select: { id: true, employeeId: true, employeeName: true, profilePhotoUrl: true },
       orderBy: { employeeName: "asc" },
     });
-    return res.json({ data });
+    /*
+     * `?for=attendance` - the Attendance Dashboard's Employee filter: only the people that dashboard
+     * can show, so neither somebody ticked Exclude From Attendance nor a Super Admin is offered (the
+     * same rule the register and the dashboard leave them out by). Every other picker is unchanged.
+     */
+    const offAttendance = req.query?.for === "attendance"
+      ? await attendanceService.attendanceOptionalEmployeeIds(rows.map((row) => row.id))
+      : null;
+    const data = offAttendance ? rows.filter((row) => !offAttendance.has(row.id)) : rows;
+    return res.json({ data: data.map((row) => ({ ...row, profilePhotoUrl: listPhotoUrl(row.profilePhotoUrl) })) });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -689,32 +728,73 @@ function isSuperAdmin(login) {
     || (login.roles || []).some((entry) => entry.role?.isActive && entry.role?.name === "SUPER_ADMIN");
 }
 
+/**
+ * A client's Appreciation as a **Shine**, and Not Satisfied as a **Shadow**, for the employee's review
+ * timeline, oldest first. Read from the feedback itself, never copied into the salary reviews, so it
+ * cannot drift from what the client said and never moves the salary.
+ *
+ * Where it came from - the Feedback ID, the project, its Event ID - is the feedback's own content,
+ * behind PROJECT / Feedback, while this list answers to HR's Employee Management. So the source is
+ * given only `withSource` (the reader may read feedback); without it, the Shine or Shadow and its
+ * date alone.
+ */
+const CLIENT_FEEDBACK_OUTCOME = { APPRECIATED: "Shine", NOT_SATISFIED: "Shadow" };
+function clientFeedbackOf(mentions = [], { withSource = false } = {}) {
+  return mentions
+    .filter((mention) => CLIENT_FEEDBACK_OUTCOME[mention.kind] && mention.projectFeedback)
+    .map(({ id, kind, projectFeedback }) => ({
+      id,
+      outcome: CLIENT_FEEDBACK_OUTCOME[kind],
+      givenOn: projectFeedback.createdAt,
+      ...(withSource ? {
+        feedbackCode: projectFeedback.feedbackCode,
+        eventId: projectFeedback.project?.eventId || "",
+        projectName: projectFeedback.project?.whatsappGroupName || "",
+      } : {}),
+    }))
+    .sort((first, second) => new Date(first.givenOn) - new Date(second.givenOn));
+}
+
 async function listEmployees(req, res) {
   const parsed = querySchema.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ message: "Validation failed", errors: parsed.error.flatten() });
   const { q, active, page, pageSize } = parsed.data;
-  const search = q ? { OR: [{ employeeId: { contains: q } }, { employeeName: { contains: q } }, { emailId: { contains: q } }, { contactNumber: { contains: q } }] } : {};
+  // Word Chunk Search: every word typed, any order.
+  const search = everyChunk(q, (chunk) => ({ OR: [{ employeeId: { contains: chunk } }, { employeeName: { contains: chunk } }, { emailId: { contains: chunk } }, { contactNumber: { contains: chunk } }] }));
   // A removed employee is off every list, this one included — and that means every tab of it, since
   // the tabs are cut from `employmentStatus` and a row that never arrives lands in none of them.
   // Removing somebody is not the same as offboarding them: the InActive tab is where a person the
   // studio parted with belongs, and somebody deleted is not a person to be read about there.
-  // Under `AND` rather than spread: the scope's `where` is itself an `OR`, and spreading it beside
-  // the search's own `OR` would replace the rule rather than narrow with it.
+  // Under `AND` rather than spread: the scope's `where` is itself an `OR`, and the search's words sit
+  // beside it there rather than replacing it.
   const visible = await employeeVisibility(req);
-  const where = { ...search, archivedAt: null, AND: [visible.where], ...(active === "true" ? { employmentStatus: { in: await workingEmployeeStatuses() } } : {}) };
+  const where = { archivedAt: null, AND: [visible.where, ...search], ...(active === "true" ? { employmentStatus: { in: await workingEmployeeStatuses() } } : {}) };
   try {
     const [data, total] = await prisma.$transaction([
       // The reviews come with the row so the form can show them without a second request.
       prisma.employee.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { createdAt: "desc" }, include: {
         reviews: { orderBy: { reviewDate: "asc" } },
+        // What clients said of this person in a Production Completion or Shoot Completion Feedback -
+        // Appreciation or Not Satisfied - which their review timeline shows as a Shine or a Shadow. A
+        // project or shoot since deleted takes its feedback, and so its mention, off the record - as
+        // the feedback list does (the feedback service's `LIVE_FEEDBACK`).
+        projectFeedbackMentions: {
+          where: { projectFeedback: { project: { deletedAt: null }, OR: [{ shootId: null }, { shoot: { deletedAt: null } }] } },
+          orderBy: { id: "asc" },
+          select: { id: true, kind: true, projectFeedback: { select: { id: true, feedbackCode: true, createdAt: true, project: { select: { eventId: true, whatsappGroupName: true } } } } },
+        },
         // All three ordered by id rather than by a date or a year, so each list reopens in the order
         // it was typed — a row whose date was never recorded would otherwise sort to one end of it.
         children: { orderBy: { id: "asc" } },
         qualifications: { orderBy: { id: "asc" } },
         experiences: { orderBy: { id: "asc" } },
+        // The answers to the details added in Settings → Payroll rules → Edit Payslip, for Payslip Details.
+        payslipValues: { select: { fieldId: true, value: true } },
         // Who referred this hire, so the form reopens on the name it was saved with. The referral's
         // money is deliberately not here: it answers to Accounts, and this list answers to HR.
         referral: { select: { referrerEmployeeId: true, referrerName: true } },
+        // Each time they left and came back, oldest first - the profile's Work History.
+        rejoins: { orderBy: { rejoinedOn: "asc" }, select: { leftOn: true, separationType: true, separationReason: true, designation: true, department: true, rejoinedOn: true, reason: true } },
       } }),
       prisma.employee.count({ where }),
     ]);
@@ -809,8 +889,23 @@ async function listEmployees(req, res) {
     const linkOpens = (invite) => Boolean(invite)
       && ["Created", "Verified"].includes(invite.status)
       && invite.expiresAt > new Date();
+    /*
+     * A resignation the employee has sent in and HR has not yet decided: their offboarding form,
+     * Submitted. It moves nobody - HR's approval is what records the separation and puts them on
+     * notice - but the repository lists them under Serving Notice from the moment it arrives, marked
+     * as waiting for HR, so a sent-in resignation is never invisible until somebody opens the forms.
+     */
+    const resignations = data.length
+      ? await prisma.employeeOffboardingInvite.findMany({
+        where: { employeeId: { in: data.map((employee) => employee.id) }, status: "Submitted" },
+        select: { employeeId: true, submittedAt: true, proposedLastWorkingDate: true },
+      })
+      : [];
+    const resignationFor = new Map(resignations.map((row) => [row.employeeId, row]));
+    // Whether this reader may see which client feedback named a person, or only that it did.
+    const readsFeedback = await iamService.hasPermission(req.user?.id, "PROJECT", "Feedback", "READ").catch(() => false);
     return res.json({
-      data: data.map(({ referral, ...employee }) => ({
+      data: data.map(({ referral, projectFeedbackMentions, ...employee }) => ({
         ...withoutCredentialsDraft(employee),
         hasLoginCredentials: loginFor.has(employee.id),
         // Whether this person is a Super Admin. The top of the org chart reports to nobody, so the
@@ -821,6 +916,10 @@ async function listEmployees(req, res) {
         loginUsername: loginFor.get(employee.id)?.username || "",
         loginEmail: loginFor.get(employee.id)?.email || "",
         hasOnboardingSubmission: awaitingReview.has(String(employee.id)),
+        // The submitted resignation awaiting HR, or null: `{ submittedAt, proposedLastWorkingDate }`.
+        resignationPending: resignationFor.has(employee.id)
+          ? { submittedAt: resignationFor.get(employee.id).submittedAt, proposedLastWorkingDate: resignationFor.get(employee.id).proposedLastWorkingDate }
+          : null,
         // Null on an invite that predates short codes and holds no token either - the same invite
         // `sendBackOnboarding` refuses, so the screen has nothing to offer for it and says so.
         onboardingUrl: onboardingUrlFor(latestInvite.get(String(employee.id))),
@@ -831,6 +930,7 @@ async function listEmployees(req, res) {
         // field are the same key rather than two shapes to keep in step.
         referredByEmployeeId: referral?.referrerEmployeeId || null,
         referredByName: referral?.referrerName || null,
+        clientFeedback: clientFeedbackOf(projectFeedbackMentions, { withSource: readsFeedback }),
       })),
       meta: { total, page, pageSize, totalPages: Math.ceil(total / pageSize) },
     });
@@ -868,6 +968,8 @@ async function createEmployee(req, res) {
           employeeId: await nextEmployeeId(transaction),
         },
       });
+      // The department, skill and language rows beside the ", "-joined text just written.
+      await employeeReferences.syncLists(transaction, employee.id, employeeData);
       if (reviews.length) await transaction.employeeReview.createMany({ data: reviews.map((review) => reviewRow(review, employee.id, actorId)) });
       if (childrenRows.length) await transaction.employeeChild.createMany({ data: childrenRows.map((child) => childRow(child, employee.id)) });
       if (qualificationRows.length) await transaction.employeeQualification.createMany({ data: qualificationRows.map((row) => qualificationRow(row, employee.id)) });
@@ -881,6 +983,16 @@ async function createEmployee(req, res) {
       });
       return employee;
     });
+    /*
+     * Their departments' WhatsApp groups, queued **after** the transaction and never inside it.
+     *
+     * The queue is rows and the adds happen in the background, so holding the employee's creation
+     * open while WhatsApp is talked to would risk the whole save for the sake of a group invitation.
+     * It never throws: an employee who exists with their groups unqueued is a far better outcome
+     * than an employee who could not be created because WhatsApp was unreachable, and the queue is
+     * retried from their own Employee Preference screen.
+     */
+    await whatsappGroups.addEmployeeToDepartmentGroups(data.id, { userId: actorId });
     return res.status(201).json({ data: withoutCredentialsDraft(data) });
   } catch (error) {
     await discardUploads(uploads);
@@ -943,9 +1055,10 @@ async function importEmployees(req, res) {
       create: async (input) => {
         const { reviews, children, qualifications, experiences, ...employeeData } = input;
         await prisma.$transaction(async (transaction) => {
-          await transaction.employee.create({
+          const created = await transaction.employee.create({
             data: { ...employeeData, ...await referenceColumnsFor(employeeData), employeeId: await nextEmployeeId(transaction) },
           });
+          await employeeReferences.syncLists(transaction, created.id, employeeData);
         });
       },
     });
@@ -967,7 +1080,7 @@ async function updateEmployee(req, res) {
     // schedule the employee already has rather than fall back to null. See `reviewTotals`.
     // Held to the same rows the list shows. Hiding a person from the repository is not protection
     // while their id can still be sent to the endpoint that edits them.
-    const existing = await scopedEmployee(req, id, { employeeId: true, joiningSalary: true, nextReviewDate: true }, { level: "READ_WRITE" });
+    const existing = await scopedEmployee(req, id, { employeeId: true, employeeName: true, joiningSalary: true, nextReviewDate: true, employmentStatus: true }, { level: "READ_WRITE" });
     if (!existing) return res.status(404).json({ message: "Employee not found" });
     if (parsed.data.employeeId && parsed.data.employeeId !== existing.employeeId) return res.status(400).json({ message: "Employee ID cannot be changed after creation." });
     const alternativesFault = alternativesProblem(id, parsed.data.alternative1EmployeeId ?? null, parsed.data.alternative2EmployeeId ?? null);
@@ -976,6 +1089,14 @@ async function updateEmployee(req, res) {
     if (approversFault) return res.status(400).json({ message: approversFault });
     const permissionApproverFault = permissionApproverProblem(id, parsed.data.permissionApproverEmployeeId ?? null);
     if (permissionApproverFault) return res.status(400).json({ message: permissionApproverFault });
+    const regularizationApproverFault = regularizationApproverProblem(id, parsed.data.regularizationApproverEmployeeId ?? null);
+    if (regularizationApproverFault) return res.status(400).json({ message: regularizationApproverFault });
+    // A regularization approver must still be on the repository, or the requests sent to them would
+    // wait on nobody - said here, rather than left to the foreign key as a server error.
+    if (parsed.data.regularizationApproverEmployeeId
+      && !(await prisma.employee.count({ where: { id: parsed.data.regularizationApproverEmployeeId, archivedAt: null } }))) {
+      return res.status(400).json({ message: "That Attendance Regularization Approver is no longer on the repository." });
+    }
     // Only when the request actually says something about it: `undefined` means "leave it alone",
     // and re-checking an unchanged value would refuse an edit that never touched the reporting line.
     if (parsed.data.reportsToEmployeeId !== undefined) {
@@ -984,18 +1105,42 @@ async function updateEmployee(req, res) {
     }
     const proofs = await storeIdentityProofs(parsed.data);
     uploads = proofs.uploads;
-    const { employeeId, reviews, children, qualifications, experiences, referredByEmployeeId, ...updates } = proofs.data;
+    const { employeeId, reviews, children, qualifications, experiences, referredByEmployeeId, payslipValues, ...updates } = proofs.data;
     // `undefined` means the request said nothing about the jobs, so nothing is uploaded for them.
     const attachments = experiences === undefined ? null : await storeExperienceAttachments(experiences || []);
     if (attachments) uploads = [...uploads, ...attachments.uploads];
     const actorId = Number(req.user.id);
 
     /*
+     * Whether this save is the moment this employee stops working here - anything outside the
+     * studio's working list, and not one of the two pre-hire placeholders, which cannot have
+     * reports of their own yet. Read once, before the transaction, since it decides whether that
+     * transaction has to shift this employee's direct reports up before writing the status.
+     */
+    const working = await workingEmployeeStatuses();
+    const leavesWorkingStatus = updates.employmentStatus !== undefined
+      && !working.includes(updates.employmentStatus)
+      && !ONBOARDING_STATUSES.includes(updates.employmentStatus);
+
+    /*
      * A request that says nothing about reviews - or about the referrer - leaves them alone.
      * `undefined` is "not mentioned"; `null` is "cleared", which for a referral means removing it,
      * and the service refuses that once an instalment has actually been paid.
      */
+    /*
+     * Somebody still holding pending work leaves through Offboarding, which hands it to whoever HR
+     * names (`separations/handover.js`). Changing the status here would strand it under the name of
+     * somebody who can no longer sign in, so it is refused and pointed there.
+     */
+    if (leavesWorkingStatus) {
+      const pending = await pendingWork(prisma, id);
+      if (pending.total) return res.status(409).json({ message: `${pending.total} pending item${pending.total === 1 ? " is" : "s are"} still under this employee. Use Offboarding, which reassigns them, instead of changing the status here.`, pending });
+    }
+
     const data = await prisma.$transaction(async (transaction) => {
+      // Before anything else, so a save that would leave this employee's direct reports pointing
+      // at somebody no longer working here is refused rather than silently written.
+      if (leavesWorkingStatus) await shiftDirectReportsUp(id, transaction);
       if (reviews !== undefined) {
         // The list the form sends is the whole list, so the stored rows are replaced by it.
         await transaction.employeeReview.deleteMany({ where: { employeeId: id } });
@@ -1014,6 +1159,8 @@ async function updateEmployee(req, res) {
         const rows = qualifications || [];
         if (rows.length) await transaction.employeeQualification.createMany({ data: rows.map((row) => qualificationRow(row, id)) });
       }
+      // The added payslip details' answers, each checked against what its field takes.
+      if (payslipValues !== undefined) await require("../payslip-fields/service").saveValues(id, payslipValues, transaction);
       if (attachments) {
         await transaction.employeeExperience.deleteMany({ where: { employeeId: id } });
         if (attachments.experiences.length) await transaction.employeeExperience.createMany({ data: attachments.experiences.map((row) => experienceRow(row, id)) });
@@ -1032,6 +1179,9 @@ async function updateEmployee(req, res) {
           ...await referenceColumnsFor(updates),
         },
       });
+      // Only the lists this patch mentions are rewritten: an edit that never touched skills leaves
+      // the skill rows exactly as they were, the way the text column beside them is left.
+      await employeeReferences.syncLists(transaction, id, updates);
       /*
        * ── One person, one name ────────────────────────────────────────────────────────────────
        *
@@ -1057,6 +1207,16 @@ async function updateEmployee(req, res) {
           where: { linkedEmployeeId: id },
           data: { name: updates.employeeName },
         });
+        /*
+         * And every record that wrote this person's name out beside a reference to them - the
+         * projects they manage, the leads they own, the cash they handled, the tasks their login
+         * holds. Those copies are what the screens print, and until Stage 8 of DATA-SCOPE.md drops
+         * them they went on showing who the person used to be. `services/nameCopies.js` names each
+         * one; the same transaction, for the same reason as the login above.
+         */
+        if (updates.employeeName !== existing.employeeName) {
+          await renamePersonCopies(transaction, { employeeId: id, from: existing.employeeName, to: updates.employeeName });
+        }
       }
       if (referredByEmployeeId !== undefined) {
         await syncEmployeeReferral(transaction, id, {
@@ -1067,6 +1227,11 @@ async function updateEmployee(req, res) {
       }
       return employee;
     });
+    /*
+     * Bringing somebody back is `reactivateEmployee`, not this save, so the group re-add lives there.
+     * It was written here first and never fired once - the ordinary form save is not how a studio
+     * marks an inactive employee active again.
+     */
     return res.json({ data: withoutCredentialsDraft(data) });
   } catch (error) {
     await discardUploads(uploads);
@@ -1085,15 +1250,6 @@ async function updateEmployee(req, res) {
  *
  * The removal itself is an archive, not a delete — see the comment on the write below.
  */
-/*
- * The two statuses that mean "not taken on yet", which is a different thing from not working.
- *
- * The same pair the browser names in `lib/employmentStatus.mjs`, and unlike the working statuses
- * these are not the studio's to rename: the onboarding flow writes them itself. Named here rather
- * than written into the check below so a tenth status added to the enum has one place to be
- * considered.
- */
-const ONBOARDING_STATUSES = ["HR Onboarding Pending", "Employee Submission Pending"];
 
 /**
  * The status to put somebody back on when they return.
@@ -1135,9 +1291,16 @@ async function returningStatus(previousEmploymentStatus) {
  * panel. That is also what leaves them able to be offboarded again later, since a second separation
  * is refused while one is on record.
  *
- * Their login is reopened with them, the other half of a departure closing it. Everything else on
- * the record — reviews, salary history, assets, attendance, documents — was never touched by the
- * departure and is not touched here.
+ * Their login is reopened with them, the other half of a departure closing it, **on a new
+ * auto-generated password**: somebody rejoining months later must not walk back in on the password
+ * they left with, nor on a desktop session saved before they went, so the old password is replaced,
+ * every saved session is revoked and the account must choose its own password again. The new one is
+ * emailed to their own address, and handed back in the response only to a caller holding
+ * `ADMIN / User Management` Read / Write - the permission that creates credentials - so the screen
+ * can show it for copying when the email does not land. Everything else on the record — username,
+ * roles, branch, reviews, salary history, assets, attendance, documents — was never touched by the
+ * departure and is not touched here. Withdrawing a notice changes none of this: that login never
+ * closed.
  */
 const reactivateSchema = z.object({ reason: z.string().trim().min(1).max(5000) });
 
@@ -1148,13 +1311,21 @@ async function reactivateEmployee(req, res) {
   const parsed = reactivateSchema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ message: "Give a reason for bringing this employee back." });
   try {
-    const employee = await scopedEmployee(req, id, { employmentStatus: true }, { level: "READ_WRITE" });
+    const employee = await scopedEmployee(req, id, { employmentStatus: true, dateOfRelieving: true, designation: true, department: true }, { level: "READ_WRITE" });
     if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+    const separation = await prisma.employeeSeparation.findFirst({ where: { employeeId: id }, select: { id: true, previousEmploymentStatus: true, relievedAt: true, separationType: true, separationReason: true, detailedReason: true, proposedLastWorkingDate: true } });
+    /*
+     * Somebody still serving their notice (an offboarding not yet relieved) is withdrawing it: the
+     * offboarding goes, the last working day with it, and they carry on as they are - their status
+     * and login were never touched.
+     */
+    const withdrawingNotice = Boolean(separation && !separation.relievedAt);
 
     // Somebody already working here has nothing to return from, and saying so is more use than
     // quietly rewriting the status of a record that was fine.
     const working = await workingEmployeeStatuses();
-    if (working.includes(employee.employmentStatus)) {
+    if (working.includes(employee.employmentStatus) && !withdrawingNotice) {
       return res.status(409).json({ message: "This employee is already active." });
     }
     // The two statuses that mean "not taken on yet" are not a departure either: there is nothing to
@@ -1163,10 +1334,42 @@ async function reactivateEmployee(req, res) {
       return res.status(409).json({ message: "This employee is still onboarding, so there is nothing to reactivate. Finish their onboarding instead." });
     }
 
-    const separation = await prisma.employeeSeparation.findFirst({ where: { employeeId: id }, select: { id: true, previousEmploymentStatus: true } });
-    const employmentStatus = await returningStatus(separation?.previousEmploymentStatus);
+    const employmentStatus = withdrawingNotice ? employee.employmentStatus : await returningStatus(separation?.previousEmploymentStatus);
+
+    /*
+     * Their work history, kept before the separation goes: when they left, how and why, and the day
+     * they came back. Without it a rejoin erased the departure, and attendance and payroll counted
+     * every day they were away as Absent. Only for somebody who actually left on a known day - a
+     * withdrawn notice never left, and a Long Leave with no relieving date has no gap to record.
+     */
+    const leftOn = withdrawingNotice ? null : (separation?.proposedLastWorkingDate || employee.dateOfRelieving || null);
+    const rejoinedOn = new Date(`${studioDateKey(new Date())}T00:00:00.000Z`);
+    /*
+     * The new password, hashed before the transaction opens. A cost-12 hash is a CPU-bound moment of
+     * its own: inside the transaction it held the employee's rows locked meanwhile, and on a busy
+     * server it ran the transaction past its time limit - the rejoin rolled back and a 500 said back.
+     */
+    const temporaryPassword = withdrawingNotice ? null : newTemporaryPassword();
+    const passwordHash = temporaryPassword ? await bcrypt.hash(temporaryPassword, 12) : null;
 
     const data = await prisma.$transaction(async (tx) => {
+      if (leftOn) {
+        await tx.employeeRejoin.create({
+          data: {
+            employeeId: id,
+            leftOn: new Date(`${studioDateKey(leftOn)}T00:00:00.000Z`),
+            separationType: separation?.separationType || null,
+            separationReason: separation?.separationReason || null,
+            detailedReason: separation?.detailedReason || null,
+            // The role the stint that ended was worked in, kept as it stood then.
+            designation: employee.designation ? String(employee.designation).slice(0, 150) : null,
+            department: employee.department ? String(employee.department).slice(0, 150) : null,
+            rejoinedOn,
+            reason: parsed.data.reason,
+            createdBy: Number(req.user.id) || null,
+          },
+        });
+      }
       if (separation) await tx.employeeSeparation.delete({ where: { id: separation.id } });
       const updated = await tx.employee.update({
         where: { id },
@@ -1179,10 +1382,67 @@ async function reactivateEmployee(req, res) {
           reactivatedByUserId: Number(req.user.id),
         },
       });
+      if (withdrawingNotice) return { updated, login: null };
       await reopenLogin(tx, id);
-      return updated;
+      const account = await tx.user.findFirst({ where: { linkedEmployeeId: id }, select: { id: true, name: true, username: true, email: true } });
+      if (!account) return { updated, login: null };
+      // Stamped as well as revoked: revoking stops a refresh, and the stamp ends the access tokens
+      // already in the wild, which are good for days (`services/passwordSessions`).
+      await tx.user.update({ where: { id: account.id }, data: { password: passwordHash, mustChangePassword: true, passwordChangedAt: new Date() } });
+      await tx.authSession.updateMany({ where: { userId: account.id, revokedAt: null }, data: { revokedAt: new Date() } });
+      return { updated, login: { ...account, temporaryPassword } };
     });
-    return res.json({ data: withoutCredentialsDraft(data) });
+
+    /*
+     * **Back into their departments' WhatsApp groups.**
+     *
+     * Here rather than in `updateEmployee`, which is where this was first written and never ran:
+     * bringing somebody back is **this** endpoint, not the ordinary save of the employee form, and the
+     * activity log is what showed it - `reactivateEmployee` against the status change, while the hook
+     * sat in a handler nobody was using for this.
+     *
+     * Leaving took them out of every group, so their rows all read REMOVED and nothing else would put
+     * them back: the automatic add runs once at creation and its rule is to leave alone a row somebody
+     * has acted on. `revive` is the one case that must override that.
+     *
+     * Only their **departments'** groups. A group somebody was added to by hand was a decision, and
+     * making it again is a person's. And `withdrawingNotice` is covered by the same call: somebody who
+     * withdrew their notice before being relieved had already been queued out when the exit was
+     * recorded, so they need putting back just as much.
+     *
+     * After the commit and never throwing, like every other WhatsApp queue here: the rejoin is what
+     * the person is waiting on, and the queue is retried from their own screen.
+     */
+    const back = await whatsappGroups.addEmployeeToDepartmentGroups(id, { userId: Number(req.user.id) || null, revive: true });
+    if (back.queued) console.log(`[employees] employee ${id} is back: queued into ${back.queued} WhatsApp ${back.queued === 1 ? "group" : "groups"}`);
+
+    if (!data.login) return res.json({ data: withoutCredentialsDraft(data.updated) });
+
+    // The email is sent after the commit, so a refused send never undoes the rejoin; it is said back
+    // instead, with the reason, as creating credentials does.
+    const { login } = data;
+    const sentTo = data.updated.emailId || login.email;
+    let emailFailureReason = null;
+    try {
+      const sent = await sendEmployeeCredentialsEmail({ employeeName: data.updated.employeeName, email: sentTo, username: login.username, loginEmail: login.email, temporaryPassword: login.temporaryPassword });
+      if (!sent.sent) emailFailureReason = sent.reason || "the email could not be sent";
+    } catch (emailError) {
+      console.error(`[hrm] Rejoin credential email refused for ${data.updated.employeeId || id}:`, emailError.message);
+      emailFailureReason = describeMailFailure(emailError);
+    }
+    if (!emailFailureReason) await prisma.user.update({ where: { id: login.id }, data: { credentialsSentAt: new Date() } });
+    const mayReadCredentials = await iamService.hasPermission(req.user?.id, "ADMIN", "User Management", "READ_WRITE");
+    return res.json({
+      data: withoutCredentialsDraft(data.updated),
+      credentials: {
+        username: login.username,
+        loginEmail: login.email,
+        sentTo,
+        emailSent: !emailFailureReason,
+        ...(emailFailureReason ? { warning: `The new password could not be emailed: ${emailFailureReason}.` } : {}),
+        ...(mayReadCredentials ? { temporaryPassword: login.temporaryPassword } : {}),
+      },
+    });
   } catch (error) { return handleError(res, error, "Unable to reactivate this employee"); }
 }
 
@@ -1225,10 +1485,18 @@ async function removeEmployee(req, id) {
     ].filter(Boolean).join(" and ");
     return { status: 409, error: `This employee still has ${holding}. Reassign those in Asset Management before deleting the record.` };
   }
-  await prisma.$transaction(async (tx) => {
-    await tx.employee.update({ where: { id }, data: { archivedAt: new Date() } });
-    await tx.user.updateMany({ where: { linkedEmployeeId: id }, data: { status: "INACTIVE" } });
-  });
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Before the archive itself, so a delete that would otherwise leave direct reports
+      // pointing at somebody no longer here is refused rather than silently written.
+      await shiftDirectReportsUp(id, tx);
+      await tx.employee.update({ where: { id }, data: { archivedAt: new Date() } });
+      await tx.user.updateMany({ where: { linkedEmployeeId: id }, data: { status: "INACTIVE" } });
+    });
+  } catch (error) {
+    if (error.status) return { status: error.status, error: error.message };
+    throw error;
+  }
   return { status: 204 };
 }
 
@@ -1239,6 +1507,69 @@ async function deleteEmployee(req, res) {
     if (answer.error) return res.status(answer.status).json({ message: answer.error });
     return res.status(204).send();
   } catch (error) { return handleError(res, error, "Unable to delete employee"); }
+}
+
+/**
+ * The credentials just created, handed over on WhatsApp from the sender's own account.
+ *
+ * ── The permission is User Management's, not the employee record's ────────────────────────────
+ *
+ * The same one `createLoginCredentials` asks for, and for a stronger reason than making the login
+ * was: this message *carries the temporary password*. Riding on `HRM / Employee Management`, which
+ * is what the rest of this router answers for, would let anybody who may edit an employee send
+ * that employee's password to their phone.
+ *
+ * ── Why the wording comes from the browser, and the number does not ───────────────────────────
+ *
+ * The dialog shows the finished message in an editable box and the password is only readable at
+ * that moment - the server never sends one back - so the text is the sender's, and rebuilding it
+ * here is not possible even in principle. The **number** is read off the employee record, so this
+ * cannot reach anybody but the person whose login was made.
+ *
+ * Nothing is stored. The message is not written to a lead thread (`sendWhatsAppToPerson` files
+ * nothing) and not logged here, because a log of it would be a password in a log.
+ */
+// The wording as the sender left it in the dialog's box - it already holds the username, the login
+// email and the temporary password, which is why none of them is taken separately here.
+const credentialsWhatsAppSchema = z.object({ message: z.string().trim().min(1).max(MAX_MESSAGE_LENGTH) });
+
+async function sendCredentialsWhatsApp(req, res) {
+  if (!(await iamService.hasPermission(req.user?.id, "ADMIN", "User Management", "READ_WRITE"))) {
+    return res.status(403).json({ message: "You need User Management access to send login credentials." });
+  }
+  const id = parseId(req, res); if (!id) return;
+  const parsed = credentialsWhatsAppSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: "Validation failed", errors: parsed.error.flatten() });
+
+  try {
+    const employee = await prisma.employee.findFirst({
+      where: { id, archivedAt: null },
+      select: { employeeName: true, contactNumber: true },
+    });
+    if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+    // Recorded in Settings → WhatsApp Activity Log as a redacted preview: the message holds a
+    // password, so it is never kept and never resent from there - only from this screen.
+    await whatsappActivity.track({
+      mode: "MANUAL", provider: "baileys", trigger: "EMPLOYEE_LOGIN_CREDENTIALS", eventRef: `employee-credentials:${id}`,
+      initiatedByUserId: req.user.id, senderUserId: req.user.id, links: { employeeId: id },
+      recipient: { kind: "PERSON", address: employee.contactNumber, name: employee.employeeName },
+      body: parsed.data.message, preview: "Login credentials (password withheld)", resendable: false,
+    }, () => sendWhatsAppToPerson({
+      userId: req.user.id,
+      phone: employee.contactNumber,
+      body: parsed.data.message,
+      noNumberMessage: "This employee has no contact number on their record. Add one before sending on WhatsApp.",
+    }));
+    return res.json({ message: `Login credentials sent on WhatsApp to ${employee.employeeName}.` });
+  } catch (error) {
+    // Passed through where the send said why - not linked, switched off, not on WhatsApp - since
+    // each of those is something the sender can act on. The fallback deliberately says nothing
+    // about the message itself, which holds a password.
+    if (error?.status) return res.status(error.status).json({ message: error.message });
+    console.error(`[hrm] Login credentials WhatsApp refused for employee ${id}:`, error.message);
+    return res.status(502).json({ message: "Unable to send these credentials on WhatsApp." });
+  }
 }
 
 async function createLoginCredentials(req, res) {
@@ -1304,8 +1635,11 @@ async function createLoginCredentials(req, res) {
     const permissionApproverEmployeeId = parsed.data.permissionApproverEmployeeId ?? null;
     const permissionApproverFault = permissionApproverProblem(id, permissionApproverEmployeeId);
     if (permissionApproverFault) return res.status(400).json({ message: permissionApproverFault });
+    const regularizationApproverEmployeeId = parsed.data.regularizationApproverEmployeeId ?? null;
+    const regularizationApproverFault = regularizationApproverProblem(id, regularizationApproverEmployeeId);
+    if (regularizationApproverFault) return res.status(400).json({ message: regularizationApproverFault });
 
-    const referencedIds = [...new Set([alternative1EmployeeId, alternative2EmployeeId, ...leaveApproverIds, permissionApproverEmployeeId].filter(Boolean))];
+    const referencedIds = [...new Set([alternative1EmployeeId, alternative2EmployeeId, ...leaveApproverIds, permissionApproverEmployeeId, regularizationApproverEmployeeId].filter(Boolean))];
     if (referencedIds.length) {
       const found = await prisma.employee.count({ where: { id: { in: referencedIds }, archivedAt: null } });
       if (found !== referencedIds.length) return res.status(400).json({ message: "One of those employees is no longer on the repository." });
@@ -1313,14 +1647,16 @@ async function createLoginCredentials(req, res) {
 
     // The account, its roles and the cover recorded alongside them are one thing to create, not
     // three: a user that exists with none of the roles it was meant to carry is an account nobody
-    // asked for.
+    // asked for. The password is hashed before it opens, as a rejoin's is - a cost-12 hash inside it
+    // could run it past its time limit on a busy server.
+    const passwordHash = await bcrypt.hash(parsed.data.temporaryPassword, 12);
     const user = await prisma.$transaction(async (transaction) => {
       const created = await transaction.user.create({
         data: {
           name: employee.employeeName,
           email: parsed.data.email,
           username: parsed.data.username,
-          password: await bcrypt.hash(parsed.data.temporaryPassword, 12),
+          password: passwordHash,
           role: "EMPLOYEE",
           status: "ACTIVE",
           linkedEmployeeId: employee.id,
@@ -1349,6 +1685,10 @@ async function createLoginCredentials(req, res) {
           leaveApprover2EmployeeId: leaveApproverIds[1],
           leaveApprover3EmployeeId: leaveApproverIds[2],
           permissionApproverEmployeeId,
+          regularizationApproverEmployeeId,
+          excludeFromAttendance: parsed.data.excludeFromAttendance,
+          // Flexible Shift is how attendance is counted, so somebody kept out of attendance has none.
+          allowFlexibleShift: parsed.data.excludeFromAttendance ? false : parsed.data.allowFlexibleShift,
           loginUsername: created.username,
         },
       });
@@ -1497,7 +1837,8 @@ async function getLoginCredentials(req, res) {
       select: {
         alternative1EmployeeId: true, alternative2EmployeeId: true,
         leaveApprover1EmployeeId: true, leaveApprover2EmployeeId: true, leaveApprover3EmployeeId: true,
-        permissionApproverEmployeeId: true,
+        permissionApproverEmployeeId: true, regularizationApproverEmployeeId: true,
+        excludeFromAttendance: true, allowFlexibleShift: true,
       },
     });
     if (!employee) return res.status(404).json({ message: "Employee not found" });
@@ -1520,6 +1861,9 @@ async function getLoginCredentials(req, res) {
         // they were picked, and a blank second slot is not a person to ask.
         leaveApproverIds: [employee.leaveApprover1EmployeeId, employee.leaveApprover2EmployeeId, employee.leaveApprover3EmployeeId].filter(Boolean),
         permissionApproverEmployeeId: employee.permissionApproverEmployeeId ?? null,
+        regularizationApproverEmployeeId: employee.regularizationApproverEmployeeId ?? null,
+        excludeFromAttendance: employee.excludeFromAttendance === true,
+        allowFlexibleShift: employee.allowFlexibleShift === true,
       },
     });
   } catch (error) {
@@ -1551,6 +1895,14 @@ const credentialUpdateSchema = z.object({
    * it. An administrator is never held whatever this says.
    */
   whatsappRequired: z.coerce.boolean().optional().default(false),
+  /*
+   * Employee Preference → Exclude → Exclude From Attendance. No default here, unlike WhatsApp: a
+   * client that does not send it leaves the employee as they are, rather than quietly bringing an
+   * excluded person back into the register.
+   */
+  excludeFromAttendance: z.coerce.boolean().optional(),
+  // Likewise: not sent leaves Allow Flexible Shift as it is.
+  allowFlexibleShift: z.coerce.boolean().optional(),
   alternative1EmployeeId: nullableEmployeeRef,
   alternative2EmployeeId: nullableEmployeeRef,
   leaveApprover1EmployeeId: nullableEmployeeRef,
@@ -1559,6 +1911,8 @@ const credentialUpdateSchema = z.object({
   // The one colleague who approves this person's permissions. One rather than three: a permission
   // is an hour out of a day and is settled the same morning it is asked for.
   permissionApproverEmployeeId: nullableEmployeeRef,
+  // The one colleague who approves this person's Attendance Regularization requests.
+  regularizationApproverEmployeeId: nullableEmployeeRef,
 });
 
 async function updateLoginCredentials(req, res) {
@@ -1590,8 +1944,11 @@ async function updateLoginCredentials(req, res) {
     const permissionApproverEmployeeId = parsed.data.permissionApproverEmployeeId ?? null;
     const permissionApproverFault = permissionApproverProblem(id, permissionApproverEmployeeId);
     if (permissionApproverFault) return res.status(400).json({ message: permissionApproverFault });
+    const regularizationApproverEmployeeId = parsed.data.regularizationApproverEmployeeId ?? null;
+    const regularizationApproverFault = regularizationApproverProblem(id, regularizationApproverEmployeeId);
+    if (regularizationApproverFault) return res.status(400).json({ message: regularizationApproverFault });
 
-    const referencedIds = [...new Set([alternative1EmployeeId, alternative2EmployeeId, ...leaveApproverIds, permissionApproverEmployeeId].filter(Boolean))];
+    const referencedIds = [...new Set([alternative1EmployeeId, alternative2EmployeeId, ...leaveApproverIds, permissionApproverEmployeeId, regularizationApproverEmployeeId].filter(Boolean))];
     if (referencedIds.length) {
       const found = await prisma.employee.count({ where: { id: { in: referencedIds }, archivedAt: null } });
       if (found !== referencedIds.length) return res.status(400).json({ message: "One of those employees is no longer on the repository." });
@@ -1615,6 +1972,12 @@ async function updateLoginCredentials(req, res) {
           leaveApprover2EmployeeId: leaveApproverIds[1],
           leaveApprover3EmployeeId: leaveApproverIds[2],
           permissionApproverEmployeeId,
+          regularizationApproverEmployeeId,
+          ...(parsed.data.excludeFromAttendance !== undefined && { excludeFromAttendance: parsed.data.excludeFromAttendance }),
+          // Flexible Shift is how attendance is counted, so somebody kept out of attendance has none.
+          ...(parsed.data.excludeFromAttendance === true
+            ? { allowFlexibleShift: false }
+            : parsed.data.allowFlexibleShift !== undefined && { allowFlexibleShift: parsed.data.allowFlexibleShift }),
         },
       });
     });
@@ -1663,9 +2026,11 @@ const credentialDraftSchema = z.object({
   alternative1EmployeeId: z.union([z.coerce.number().int().positive(), z.literal(""), z.null()]).optional(),
   alternative2EmployeeId: z.union([z.coerce.number().int().positive(), z.literal(""), z.null()]).optional(),
   leaveApproverIds: z.array(z.union([z.coerce.number().int().positive(), z.string().max(20)])).max(3).optional(),
-  // One employee, or blank for "the leave approvers decide" - the same shape as the two
+  // One employee, or blank for nobody (then permissions and regularizations cannot be raised) - the same shape as the two
   // alternative slots above, which is what the form sends it as.
   permissionApproverEmployeeId: z.union([z.coerce.number().int().positive(), z.literal(""), z.null()]).optional(),
+  // One employee, or blank: then a regularization goes to the Permission Approver.
+  regularizationApproverEmployeeId: z.union([z.coerce.number().int().positive(), z.literal(""), z.null()]).optional(),
   /*
    * The WhatsApp toggle, which `draftFrom` has always sent and this schema never listed.
    *
@@ -1675,6 +2040,9 @@ const credentialDraftSchema = z.object({
    * draft is meant to keep the page as it stands, and the toggle is part of the page.
    */
   whatsappAllowed: z.boolean().optional(),
+  // The Exclude From Attendance tick, beside it - listed here so a draft holding it is not refused.
+  excludeFromAttendance: z.boolean().optional(),
+  allowFlexibleShift: z.boolean().optional(),
 }).strict();
 
 async function saveLoginCredentialsDraft(req, res) {
@@ -1702,4 +2070,6 @@ async function saveLoginCredentialsDraft(req, res) {
   }
 }
 
-module.exports = { employeeSchema, ONBOARDING_STATUSES, EMPLOYEE_SCOPE_COLUMNS, employeeVisibility, isSuperAdmin, listEmployees, employeeDirectory, previewNextEmployeeId, createEmployee, employeeImportTemplate, importEmployees, updateEmployee, deleteEmployee, deleteEmployeeRecord, reactivateEmployee, returningStatus, createLoginCredentials, getLoginCredentialsDraft, saveLoginCredentialsDraft, getLoginCredentials, updateLoginCredentials, credentialUpdateSchema, credentialDraftSchema, withoutCredentialsDraft, reviewSchema, REVIEW_OUTCOMES, nextEmployeeId, reportingProblem };
+module.exports = {
+  scopedEmployee, parseId, handleError,
+  clientFeedbackOf, sendCredentialsWhatsApp, employeeSchema, ONBOARDING_STATUSES, EMPLOYEE_SCOPE_COLUMNS, employeeVisibility, isSuperAdmin, listEmployees, employeeDirectory, previewNextEmployeeId, createEmployee, employeeImportTemplate, importEmployees, updateEmployee, deleteEmployee, deleteEmployeeRecord, reactivateEmployee, returningStatus, createLoginCredentials, getLoginCredentialsDraft, saveLoginCredentialsDraft, getLoginCredentials, updateLoginCredentials, credentialUpdateSchema, credentialDraftSchema, withoutCredentialsDraft, reviewSchema, REVIEW_OUTCOMES, REVIEW_TYPES, nextEmployeeId, reportingProblem };

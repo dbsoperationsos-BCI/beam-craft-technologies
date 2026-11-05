@@ -7,7 +7,8 @@ function serializeMedia(row) {
   if (!row) return null;
   return {
     id: row.id, eventId: row.eventId, folderId: row.folderId, kind: row.kind, fileName: row.fileName, mimeType: row.mimeType,
-    sizeBytes: toNumber(row.sizeBytes), width: row.width, height: row.height, capturedAt: row.capturedAt,
+    sizeBytes: toNumber(row.sizeBytes), sourceSizeBytes: row.sourceSizeBytes == null ? null : toNumber(row.sourceSizeBytes), relativePath: row.relativePath ?? null,
+    width: row.width, height: row.height, capturedAt: row.capturedAt,
     previewUrl: row.kind === "VIDEO" ? storage.publicUrl(row.originalKey) : storage.publicUrl(row.previewKey),
     thumbnailUrl: storage.publicUrl(row.thumbnailKey),
     originalUrl: row.originalKey ? storage.publicUrl(row.originalKey) : null,

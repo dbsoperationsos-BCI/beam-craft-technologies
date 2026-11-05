@@ -61,8 +61,12 @@ test("the advance on Create Project is validated without a link", () => {
 });
 
 test("the advance asks for the cash entry's fields from the category down to the description", () => {
+  // Led by which scheduled payment it settles, as Add Entry is once its project is chosen.
   const names = fieldNames(projectAdvanceFormSections);
-  assert.equal(names[0], "category");
+  assert.deepEqual(names.slice(0, 2), ["settlesPayment", "settleMode"]);
+  assert.equal(names[2], "category");
+  // A partial payment's two amounts, then the day the rest is due, beside the amount.
+  assert.deepEqual(names.slice(names.indexOf("amount"), names.indexOf("amount") + 3), ["amount", "amountLater", "pendingDueDate"]);
   assert.equal(names[names.length - 1], "description");
   // The pickers and the summary between them belong to a form that has to be told which project
   // this is; Create Project already knows.
@@ -99,10 +103,18 @@ test("only the fields the answers so far put on screen are required", () => {
   // where it landed.
   const transfer = cashEntryProblems({ ...base, paymentMode: "Bank Transfer" }, { requireLink: false, sections: projectAdvanceFormSections });
   assert.deepEqual(Object.keys(transfer).sort(), ["receivedAccount", "transactionId"]);
-  // "Other" as the mode asks for neither, the way cash does; what it was goes in the description.
-  const otherMode = cashEntryProblems({ ...base, paymentMode: "Other" }, { requireLink: false, sections: projectAdvanceFormSections });
+  /*
+   * "Other" as the mode asks for neither a reference nor an account - it asks for a **remark**, which
+   * is the one note a cash entry insists on. The box is `paymentModeOther`, which the form used to
+   * call "Payment Mode Details"; the entry's Description is a different question and stays optional.
+   *
+   * And it is the one mode that does not ask **who received** the money: the remark says what the
+   * payment actually was, and the person filing it is the person it happened to. Asked here with no
+   * handler at all, so nothing but the remark may be outstanding.
+   */
+  const otherMode = cashEntryProblems({ ...base, handler: "", paymentMode: "Other" }, { requireLink: false, sections: projectAdvanceFormSections });
   assert.deepEqual(Object.keys(otherMode), ["paymentModeOther"]);
-  // "Other" as the receiver asks who it actually was.
+  // "Other" as the receiver asks who it actually was - on every mode that asks for a receiver at all.
   const other = cashEntryProblems({ ...base, paymentMode: "Cash", handler: OTHER_HANDLER }, { requireLink: false, sections: projectAdvanceFormSections });
   assert.equal(other.handlerOtherName, "Required");
 });
@@ -128,6 +140,35 @@ test("the field-keyed rules agree with the sentence-at-a-time ones", () => {
   }
 });
 
+test("money out still names who paid it, by both rules", () => {
+  /*
+   * The studio's own money leaving through somebody's hands is the thing to be accountable for, so a
+   * spent entry is refused until it names them - whatever its mode - and both rules agree about it,
+   * which is the point of this pair of tests.
+   */
+  const spent = { ...cashEntryInitialValues, entryType: "Spent", shootId: "sht_1", category: "Travel", amount: "500", entryDate: "2026-09-01", paymentMode: "Cash", paidTo: "Ravi", handler: "7" };
+  assert.equal(validateCashEntry(spent), "");
+  assert.deepEqual(cashEntryProblems(spent), {});
+
+  const nobody = { ...spent, handler: "" };
+  assert.equal(validateCashEntry(nobody), "Choose who paid the money out.");
+  assert.equal(Object.keys(cashEntryProblems(nobody)).includes("handler"), true);
+
+  // And somebody off the payroll is named by hand, as before.
+  const other = { ...spent, handler: OTHER_HANDLER };
+  assert.equal(validateCashEntry(other), "Enter who paid the money out.");
+  assert.equal(cashEntryProblems(other).handlerOtherName, "Required");
+
+  /*
+   * The one case that does not ask: money **received** through a mode that carries a remark. Held
+   * here beside its opposite, because the two rules reading the same question differently is exactly
+   * the fault this pair of tests exists to catch.
+   */
+  const receivedOther = { ...cashEntryInitialValues, entryType: "Received", projectId: "prj_1", category: "Advance", amount: "25000", entryDate: "2026-09-01", paymentMode: "Other", paymentModeOther: "Adjusted against an earlier advance" };
+  assert.equal(validateCashEntry(receivedOther), "");
+  assert.deepEqual(cashEntryProblems(receivedOther), {});
+});
+
 // A mode that carries neither a reference nor an account must not keep the one a mode chosen a
 // moment earlier asked for.
 test("the fields the payment mode does not use are sent as null, not left behind", () => {
@@ -136,4 +177,67 @@ test("the fields the payment mode does not use are sent as null, not left behind
   assert.equal(payload.receivedAccount, null);
   assert.equal(payload.paidTo, null);
   assert.equal(payload.shootId, null);
+});
+
+/*
+ * A branch transfer: one entry, the money leaving one branch's account and reaching another's. It is
+ * asked for its two branches in place of a project, both accounts, and who made it - never a client,
+ * a category or a payee.
+ */
+const transferContext = {
+  options: {},
+  lookups: {
+    branches: [
+      { id: 1, name: "Chennai", accounts: ["HDFC · ••••1111 · Chennai"] },
+      { id: 2, name: "Madurai", accounts: ["ICICI · ••••2222 · Madurai"] },
+    ],
+  },
+};
+const transfer = {
+  ...cashEntryInitialValues,
+  entryType: "Transfer",
+  fromBranchId: "1",
+  toBranchId: "2",
+  amount: "25000",
+  entryDate: "2026-10-27",
+  paymentMode: "Bank Transfer",
+  transactionId: "UTR123",
+  paidFromAccount: "HDFC · ••••1111 · Chennai",
+  receivedAccount: "ICICI · ••••2222 · Madurai",
+  handler: "7",
+};
+const shown = (values, context) => cashEntryFormSections.flatMap((section) => section.fields)
+  .filter((field) => !field.when || field.when(values, context)).map((field) => field.name);
+
+test("a branch transfer asks for its two branches and both accounts, and nothing about a client", () => {
+  const names = shown(transfer, transferContext);
+  for (const name of ["fromBranchId", "toBranchId", "paidFromAccount", "receivedAccount", "handler"]) assert.ok(names.includes(name), name);
+  for (const name of ["projectId", "shootId", "linkSummary", "category", "paidTo"]) assert.ok(!names.includes(name), name);
+  // Money in and out never see the transfer's branches.
+  assert.ok(!shown({ ...transfer, entryType: "Received" }, transferContext).includes("fromBranchId"));
+  assert.ok(!shown({ ...transfer, entryType: "Spent" }, transferContext).includes("toBranchId"));
+});
+
+test("each end of a transfer offers its own branch's accounts, and never the branch it left", () => {
+  const field = (name) => cashEntryFormSections.flatMap((section) => section.fields).find((item) => item.name === name);
+  assert.deepEqual(field("paidFromAccount").options(transfer, transferContext), ["HDFC · ••••1111 · Chennai"]);
+  assert.deepEqual(field("receivedAccount").options(transfer, transferContext), ["ICICI · ••••2222 · Madurai"]);
+  assert.deepEqual(field("toBranchId").options(transfer, transferContext), [{ value: "2", label: "Madurai" }]);
+});
+
+test("a transfer is saved with its branches as ids, its one category, and no project or payee", () => {
+  assert.equal(validateCashEntry(transfer), "");
+  assert.equal(validateCashEntry({ ...transfer, toBranchId: "1" }), "A transfer goes to a different branch.");
+  assert.equal(validateCashEntry({ ...transfer, fromBranchId: "" }), "Choose the branch the money left.");
+  const payload = cashEntryPayload(transfer);
+  assert.equal(payload.fromBranchId, 1);
+  assert.equal(payload.toBranchId, 2);
+  assert.equal(payload.category, "Branch Transfer");
+  assert.equal(payload.projectId, null);
+  assert.equal(payload.shootId, null);
+  assert.equal(payload.paidTo, null);
+  assert.equal(payload.paidFromAccount, "HDFC · ••••1111 · Chennai");
+  assert.equal(payload.receivedAccount, "ICICI · ••••2222 · Madurai");
+  // Money in and out send no branches, whatever the form still holds.
+  assert.equal(cashEntryPayload({ ...transfer, entryType: "Spent" }).fromBranchId, null);
 });

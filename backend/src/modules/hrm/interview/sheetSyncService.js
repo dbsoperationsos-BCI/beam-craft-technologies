@@ -10,6 +10,7 @@ const {
   buildExistingIndexes,
   mapRowToCandidate,
   validateCandidateRecord,
+  clearUnreadableFields,
   classifyAgainstExisting,
   importedRowKey,
   buildDeletedKeySet,
@@ -194,7 +195,14 @@ async function upsertCandidateRecord(record, link) {
         ...data,
         candidateCode: code,
         status: data.status || "Yet to Connect",
-        name: data.name || "",
+        /*
+         * Written through as it comes, `null` included.
+         *
+         * It used to be `data.name || ""`, from when the column was NOT NULL - so a row whose name
+         * could not be read was stored as an empty string, which on this schema is the one thing a
+         * blank must never be. Anything asking `name IS NOT NULL` would have read those as named.
+         */
+        name: data.name ?? null,
         lastSourceSyncAt: new Date(),
         createdByUserId: link?.createdByUserId ?? null,
       },
@@ -206,7 +214,13 @@ async function upsertCandidateRecord(record, link) {
   if (!changed) return { created: false, changed: false };
   await prisma.hrmInterviewCandidate.update({
     where: { candidateCode: code },
-    data: { ...data, status: data.status || existing.status, name: data.name || existing.name, deletedAt: null },
+    /*
+     * `name` keeps what the register holds when the sheet has none to give: a candidate somebody
+     * has already named is not renamed to nothing by a later pass over a cell that never parsed.
+     * `??` rather than `||`, so a name the sheet genuinely blanked is not confused with one it
+     * simply did not carry - only `null` falls through to the stored one.
+     */
+    data: { ...data, status: data.status || existing.status, name: data.name ?? existing.name, deletedAt: null },
   });
   return { created: false, changed: true };
 }
@@ -243,11 +257,16 @@ async function prepareInterviewSheetImport(link) {
   resolvedLink.coverResolver = coverResolver;
 
   const rows = [];
-  const counts = { valid: 0, invalid: 0, duplicate: 0, existing: 0, new: 0, deleted: 0, assignedByRule: 0, unassigned: 0 };
+  const counts = { valid: 0, clearedFields: 0, duplicate: 0, existing: 0, new: 0, deleted: 0, assignedByRule: 0, unassigned: 0, missingPhone: 0 };
 
   for (const sheetRow of Array.isArray(sheet.rows) ? sheet.rows : []) {
     const mapped = mapRowToCandidate(sheetRow.values || [], { ...mapping, headers }, resolvedLink, sheetRow.rowNumber, codes, indexes);
     const validation = validateCandidateRecord(mapped.record);
+    /*
+     * Emptied before the row is classified, so what is matched on is what will be stored: a phone
+     * the importer could not read is not a phone to find an existing candidate by either.
+     */
+    const cleared = clearUnreadableFields(mapped.record, validation.issues);
     const classification = classifyAgainstExisting(mapped.record, indexes, seenInBatch);
     const rowIssues = [...validation.issues];
     const rowKey = importedRowKey(mapped.record);
@@ -264,7 +283,16 @@ async function prepareInterviewSheetImport(link) {
         || (rowKey && importedRowKeys.has(rowKey))
         || matchesDeletedRecord(mapped.record, deletedKeys));
 
-    if (classification.classification === "DUPLICATE_IN_SHEET") {
+    if (classification.classification === "NO_PHONE") {
+      /*
+       * The one row this importer refuses outright. Every other unreadable value is blanked and the
+       * row goes in regardless - "cells, not rows" - but the phone is what decides whether a row is
+       * somebody the register already holds, so a row without one cannot be checked at all. Reported
+       * rather than guessed at, so the sheet can be put right.
+       */
+      rowIssues.push({ field: "phone", reason: "A phone number is required: it is what decides whether this row is somebody the register already holds." });
+      counts.missingPhone += 1;
+    } else if (classification.classification === "DUPLICATE_IN_SHEET") {
       rowIssues.push({ field: "duplicate", reason: "Duplicate row within the same spreadsheet import batch." });
       counts.duplicate += 1;
     } else if (classification.classification === "EXISTING") {
@@ -274,8 +302,9 @@ async function prepareInterviewSheetImport(link) {
     } else {
       counts.new += 1;
     }
-    if (validation.valid) counts.valid += 1;
-    else counts.invalid += 1;
+    counts.valid += 1;
+    // Cells, not rows: no row is refused for what one of its cells holds.
+    counts.clearedFields += cleared.length;
     if (mapped.assignment) counts.assignedByRule += 1;
     else if (!String(mapped.record?.candidate?.interviewer || "").trim()) counts.unassigned += 1;
 
@@ -285,11 +314,13 @@ async function prepareInterviewSheetImport(link) {
       record: mapped.record,
       mapping: mapped.mapping,
       assignment: mapped.assignment,
-      classification: !validation.valid ? "INVALID" : alreadyImported ? "ALREADY_IMPORTED" : classification.classification,
+      // Never INVALID any more: an unreadable cell is emptied above and the row goes in regardless.
+      classification: alreadyImported ? "ALREADY_IMPORTED" : classification.classification,
       rowKey,
       matchedRecord: classification.matchedRecord || null,
       matchedBy: classification.matchBy,
-      valid: validation.valid,
+      valid: true,
+      cleared,
       issues: rowIssues,
     });
   }
@@ -310,8 +341,13 @@ async function prepareInterviewSheetImport(link) {
     summary: {
       totalRows: rows.length,
       validRows: counts.valid,
-      invalidRows: counts.invalid,
+      // Kept at 0 rather than removed: the Settings panel reads it, and a sheet import genuinely
+      // has no invalid rows now.
+      invalidRows: 0,
+      clearedFields: counts.clearedFields,
       duplicateRows: counts.duplicate,
+      // Rows refused for having no phone number at all - see the classification above.
+      missingPhoneRows: counts.missingPhone,
       existingRows: counts.existing,
       newRows: counts.new,
       alreadyImportedRows: counts.deleted,
@@ -328,7 +364,10 @@ async function runInterviewSheetSync(link) {
   // `skippedSameContact` is the subset of `skippedExisting` recognised by phone or email rather
   // than by which row of the sheet they came from - a candidate the register already holds under
   // another record, which is the case worth naming rather than folding into housekeeping.
-  const totals = { created: 0, skippedExisting: 0, skippedSameContact: 0, skippedDuplicate: 0, skippedInvalid: 0, skippedDeleted: 0, failed: 0 };
+  // `clearedFields` counts emptied **cells**; no row is refused for one any more.
+  const totals = { created: 0, skippedExisting: 0, skippedSameContact: 0, skippedDuplicate: 0, clearedFields: 0, skippedDeleted: 0, failed: 0 };
+  // How many interview messages this sync has queued, for `interviewWelcome`'s per-sync limit.
+  let welcomesQueued = 0;
   const rowProblems = [];
   const noteProblem = (rowNumber, reason) => {
     if (rowProblems.length >= ROW_PROBLEM_LIMIT) return;
@@ -343,11 +382,13 @@ async function runInterviewSheetSync(link) {
       actions.push({ rowNumber: row.rowNumber, action: "SKIPPED_DUPLICATE" });
       continue;
     }
-    if (classification === "INVALID") {
-      totals.skippedInvalid += 1;
-      noteProblem(row.rowNumber, (row.issues || [])[0]?.reason);
-      actions.push({ rowNumber: row.rowNumber, action: "SKIPPED_INVALID", issues: row.issues || [] });
-      continue;
+    /*
+     * A cell the importer could not read was emptied, not a reason to drop the candidate. Still
+     * named, and by column, so somebody can go to the cell that needs correcting.
+     */
+    for (const issue of row.cleared || []) {
+      totals.clearedFields += 1;
+      noteProblem(row.rowNumber, `${issue.field}: ${issue.reason}`);
     }
     if (classification === "ALREADY_IMPORTED") {
       totals.skippedDeleted += 1;
@@ -382,6 +423,12 @@ async function runInterviewSheetSync(link) {
       // Noted only once the candidate is written, so a failed insert is retried next pass.
       await recordImportedRow(link?.id, row.rowKey || importedRowKey(row.record), code);
       actions.push({ rowNumber: row.rowNumber, action: "CREATED", candidateCode: code });
+      // The candidate is in the register now: queue their interview message, if switched on. After
+      // the fact and caught - a message that cannot be queued never fails the import.
+      const welcomed = await require("../../settings/automatic-whatsapp/interviewWelcome")
+        .afterCandidateCreated({ candidate: row.record.candidate, queuedThisSync: welcomesQueued })
+        .catch((error) => console.warn("[interview-welcome] could not queue the message for", code, error?.code || "ERROR"));
+      if (welcomed === "queued") welcomesQueued += 1;
     } catch (error) {
       totals.failed += 1;
       const reason = error?.message || "Unable to create the candidate.";
@@ -407,11 +454,13 @@ async function runInterviewSheetSync(link) {
 
   const summary = {
     created: totals.created,
-    skipped: totals.skippedExisting + totals.skippedDuplicate + totals.skippedInvalid + totals.skippedDeleted,
+    skipped: totals.skippedExisting + totals.skippedDuplicate + totals.skippedDeleted,
     skippedExisting: totals.skippedExisting,
     skippedSameContact: totals.skippedSameContact,
     skippedDuplicate: totals.skippedDuplicate,
-    skippedInvalid: totals.skippedInvalid,
+    // Always 0: a sheet row is no longer refused for what one of its cells holds.
+    skippedInvalid: 0,
+    clearedFields: totals.clearedFields,
     skippedDeleted: totals.skippedDeleted,
     failed: totals.failed,
     totalRows: preview.rows.length,
@@ -435,35 +484,11 @@ async function syncInterviewSheetLink(link) {
   }
 }
 
-/**
- * The candidates a deleted link had imported, removed with it - the register's copy only, so the
- * same sheet can be linked again and re-imported. Answers how many went.
- */
-async function deleteCandidatesFromSheet({ spreadsheetId, gid = "", targetTab = "" } = {}) {
-  const id = String(spreadsheetId || "").trim();
-  if (!id) return 0;
-  const where = { deletedAt: null, spreadsheetId: id };
-  const tabGid = String(gid ?? "").trim();
-  const tabName = String(targetTab || "").trim();
-  if (tabGid) where.gid = tabGid;
-  else if (tabName) where.targetTab = tabName;
-  // Removed rather than hidden, the way a candidate deleted from the register is: a hidden row
-  // still answers to a phone number, and the sheet would go on recognising people nobody can see.
-  const doomed = await prisma.hrmInterviewCandidate.findMany({ where, select: { id: true } });
-  if (!doomed.length) return 0;
-  const ids = doomed.map((row) => row.id);
-  const [, removed] = await prisma.$transaction([
-    prisma.hrmInterviewApplicationInvite.deleteMany({ where: { candidateId: { in: ids } } }),
-    prisma.hrmInterviewCandidate.deleteMany({ where: { id: { in: ids } } }),
-  ]);
-  return removed.count;
-}
 
 module.exports = {
   // Exported for the test that pins which columns a sheet owns; nothing else reads it.
   SHEET_WRITTEN_FIELDS,
   prepareInterviewSheetImport,
   syncInterviewSheetLink,
-  deleteCandidatesFromSheet,
   loadCandidateCodeAllocator,
 };

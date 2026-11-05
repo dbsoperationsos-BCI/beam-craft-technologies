@@ -28,7 +28,8 @@ import AppLogo from "@/components/shared/AppLogo";
  * square upload and a wide wordmark read as the same size there.
  */
 export function GalleryLogo({ studioName, logoUrl, variant = "clientSelection" }) {
-  return <AppLogo variant={variant} src={logoUrl} alt={studioName} />;
+  // `data-gallery-logo`: inside the client's app the app shows its own mark, so this one is hidden.
+  return <span data-gallery-logo className="contents"><AppLogo variant={variant} src={logoUrl} alt={studioName} /></span>;
 }
 
 /** The badge at the foot of the welcome screen. */

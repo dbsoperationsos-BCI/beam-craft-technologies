@@ -1,5 +1,6 @@
 "use client";
 
+import HelpTip from "./HelpTip";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import SchemaFormField, { visibleFields } from "@/components/schema-form/SchemaFormFields";
 import Button from "./Button";
@@ -10,7 +11,7 @@ import IconButton from "./IconButton";
  * companies they have worked at.
  *
  * All three ask for a handful of fields per row and nothing else, so this owns everything they
- * share — the framed section and its hint, the empty state, Add and Remove, the row keys — and the
+ * share — the framed section and its hint (the legend's ⓘ, beside `helperText`), the empty state, Add and Remove, the row keys — and the
  * cells themselves are drawn by `SchemaFormField`, the same renderer the public onboarding form and
  * the credential form already describe their fields to. So a row is a field list, exactly like a
  * section of either form, and a new one costs a description rather than a component.
@@ -26,11 +27,20 @@ import IconButton from "./IconButton";
  * as one before they submit rather than after.
  */
 
+/*
+ * Two namespaces, and they must not meet.
+ *
+ * A row that arrives without a key - every row read back from a record - is keyed by its position,
+ * and a row the form adds is keyed from this seed. Both used to spell it `row-N`, so a record
+ * holding two rows (`row-0`, `row-1`) and one press of Add (`row-1`, the seed's first) produced
+ * **two rows with one key**: React reused a cell for the wrong row, and Remove, which filters by
+ * key, deleted both of them at once. `added-` can never collide with an index.
+ */
 let rowKeySeed = 0;
-const nextRowKey = () => `row-${(rowKeySeed += 1)}`;
+const nextRowKey = () => `added-${(rowKeySeed += 1)}`;
 
 /** A row as this field holds it, whatever shape it arrived in — the record's, or a submission's. */
-export const withRowKey = (row = {}, index = 0) => ({ ...row, key: row.key || `row-${index}` });
+export const withRowKey = (row = {}, index = 0) => ({ ...row, key: row.key || `loaded-${index}` });
 
 export default function RepeatableDetailsField({
   addLabel = "+ Add",
@@ -38,10 +48,13 @@ export default function RepeatableDetailsField({
   disabled = false,
   emptyText = "Nothing added yet.",
   error = "",
+  helperText = "",
   errors = {},
   fields,
   hint,
   label,
+  // Classes for the list of rows, e.g. a max height with its own scroll for a list that can grow long.
+  listClassName = "",
   onChange,
   // What each row is called, for its heading and the Remove control's accessible name.
   required = false,
@@ -49,6 +62,8 @@ export default function RepeatableDetailsField({
   value,
 }) {
   const rows = (Array.isArray(value) ? value : []).map(withRowKey);
+  // The hint explains the list, so it joins the legend's ⓘ rather than a grey line under it.
+  const tip = [helperText, hint].filter(Boolean).join(" ");
   const blankRow = () => ({ key: nextRowKey(), ...Object.fromEntries(fields.map((field) => [field.name, field.type === "file" ? [] : ""])) });
 
   const replace = (next) => onChange?.(next);
@@ -60,13 +75,12 @@ export default function RepeatableDetailsField({
   }
 
   return <fieldset className={`min-w-0 rounded-lg border bg-slate-50/60 p-3 sm:p-4 ${error ? "border-red-400" : "border-slate-200"} ${className}`}>
-    <legend className="px-1 text-[11px] font-semibold text-slate-600 sm:text-xs">{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</legend>
-    {hint && <p className="text-[11px] font-normal leading-5 text-slate-500 sm:text-xs">{hint}</p>}
+    <legend className="px-1 text-[11px] font-semibold text-slate-600 sm:text-xs">{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}<HelpTip text={tip} /></legend>
     {error && <p role="alert" className="mt-1 text-[11px] font-normal text-red-600 sm:text-xs">{error}</p>}
 
     {rows.length === 0
-      ? <p className={`rounded-md border border-dashed border-slate-300 bg-white px-3 py-4 text-center text-[11px] font-normal text-slate-500 sm:text-xs ${hint ? "mt-3" : "mt-2"}`}>{emptyText}</p>
-      : <ul className="mt-3 space-y-3">
+      ? <p className={`rounded-md border border-dashed border-slate-300 bg-white px-3 py-4 text-center text-[11px] font-normal text-slate-500 sm:text-xs mt-2`}>{emptyText}</p>
+      : <ul className={`mt-3 space-y-3 ${listClassName}`}>
         {rows.map((row, index) => <li key={row.key} className="min-w-0 rounded-md border border-slate-200 bg-white p-3">
           {/* The heading names the row and gives Remove a place of its own, so the control never
               has to share a column with the fields or wrap under them on a narrow screen. */}

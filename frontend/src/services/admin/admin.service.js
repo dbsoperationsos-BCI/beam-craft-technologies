@@ -30,6 +30,9 @@ export const removeRoleFromUser = (userId, roleId) => apiRequest(`/api/admin/use
 // group is given as many roles as it needs.
 export const getRoles = () => apiRequest("/api/admin/roles");
 export const getRole = (roleId) => apiRequest(`/api/admin/roles/${roleId}`);
+// The active accounts carrying a role, for the role form's Manage Users section. Answers to
+// ADMIN / User Management, like the assign and remove calls above that change it.
+export const getRoleUsers = (roleId) => apiRequest(`/api/admin/roles/${roleId}/users`);
 // The whole role goes up in one call: identification, characteristics and the permission matrix
 // together, because that is how the dialog collects it.
 export const createRole = (payload) => apiRequest("/api/admin/roles", { method: "POST", body: JSON.stringify(payload) });
@@ -44,7 +47,3 @@ export const setRolePermissions = (roleId, permissions) => apiRequest(`/api/admi
 // Every permission, each carrying the named scopes it can be narrowed by.
 export const getPermissions = () => apiRequest("/api/admin/permissions");
 
-// The Admin Permission set: the one matrix every role marked Branch Admin carries. Guarded by
-// ADMIN / Role Management on the server, like everything else on this screen.
-export const getBranchAdminPermissions = () => apiRequest("/api/admin/branch-admin-permissions");
-export const saveBranchAdminPermissions = (permissions) => apiRequest("/api/admin/branch-admin-permissions", { method: "PUT", body: JSON.stringify({ permissions }) });

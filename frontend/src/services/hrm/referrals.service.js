@@ -37,12 +37,19 @@ export function getReferrals(status) {
 }
 
 /**
- * Mark one instalment Paid, or cancel it.
- *
- * Paid is not reversible from here: it says money left the studio, and correcting that is an
- * Accounts entry rather than a dropdown. The server refuses the reversal, so this cannot be used
- * to un-pay somebody by sending "Pending" back.
+ * Settles one instalment by hand - money handed over outside payroll (cash, a transfer). Only ever
+ * to Paid, which is not reversible here. Payroll then leaves it out: it carries only what is still
+ * Pending, so an instalment is never handed over twice. READ_WRITE on `HRM / Employee Referral`.
  */
 export function updateReferralPayout(payoutId, payload) {
   return apiRequest(`/api/hrm/referrals/payouts/${payoutId}`, { method: "PATCH", body: JSON.stringify(payload) });
+}
+
+/**
+ * Deletes one referral and its instalments - refused (409) once any instalment has been paid, since
+ * that is a record of money that left the studio. Ticked rows go through the table's bulk Delete
+ * (`DELETE /api/hrm/referrals/bulk`). READ_WRITE on `HRM / Employee Referral`.
+ */
+export function deleteReferral(id) {
+  return apiRequest(`/api/hrm/referrals/${id}`, { method: "DELETE" });
 }

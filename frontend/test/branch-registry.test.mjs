@@ -108,10 +108,10 @@ test("every screen that reads the branch list subscribes to the register", () =>
     ["components/employees/useCredentialForm.js", "getMasterData"],
     ["components/sales/WhatsappGroupNameDialog.js", "getMasterData"],
     ["components/sales/SaleDetailsSection.js", "getSalesSourceBranches"],
-    // Attendance office locations: the branch picker for the point a branch is measured from.
-    ["components/hrm/EmployeeAttendancePage.js", "getMasterData"],
-    // The studio-wide register's branch filter.
-    ["components/hrm/AttendanceRegisterPage.js", "getMasterData"],
+    // The administrator's attendance Dashboard, whose Branch filter narrows the studio's figures.
+    ["components/hrm/AdminAttendanceDashboard.js", "getMasterData"],
+    // The Vendor form's Capabilities → Supported Branches.
+    ["components/assets/VendorFormPanel.js", "getMasterData"],
   ];
   for (const [file, call] of readers) {
     const source = read(...file.split("/"));
@@ -142,8 +142,8 @@ test("no branch reader is left out of that list", () => {
     "components/employees/useCredentialForm.js",
     "components/sales/WhatsappGroupNameDialog.js",
     "components/sales/SaleDetailsSection.js",
-    "components/hrm/EmployeeAttendancePage.js",
-    "components/hrm/AttendanceRegisterPage.js",
+    "components/hrm/AdminAttendanceDashboard.js",
+    "components/assets/VendorFormPanel.js",
     // The register itself, which re-reads its own list after writing and then announces it.
     "components/settings/BranchesPanel.js",
     // The service layer: where the calls are declared rather than made.
@@ -161,4 +161,13 @@ test("no branch reader is left out of that list", () => {
     return /getMasterData\(\s*["']branches["']|getCrmBranches\(|getBranches\(|getSalesSourceBranches\(/.test(source);
   });
   assert.deepEqual(unlisted, [], "these files read the branch list but are not listed as subscribing to the register");
+});
+
+test("there is always one head office: on for the first branch, locked on for the one that is it", () => {
+  const panel = fs.readFileSync(path.join(process.cwd(), "src", "components", "settings", "BranchesPanel.js"), "utf8");
+  assert.match(panel, /setForm\(\{ \.\.\.emptyForm, isHeadOffice: !branches\.some\(\(branch\) => branch\.isHeadOffice\) \}\)/);
+  assert.match(panel, /const mustBeHeadOffice = isTheHeadOffice \|\| !branches\.some\(\(branch\) => branch\.isHeadOffice\);/);
+  assert.match(panel, /<ToggleSwitch label="Head office \*" checked=\{form\.isHeadOffice\} disabled=\{mustBeHeadOffice && form\.isHeadOffice\}/);
+  // The head office is never taken out of use from its menu.
+  assert.match(panel, /\.\.\.\(branch\.isHeadOffice \? \[\] : \[branch\.isActive/);
 });

@@ -88,7 +88,7 @@ test("Next Follow-up Date opens on today, on all three verticals", () => {
   // It is still cleared by the two statuses that end a conversation - a lead nobody is chasing
   // carries no date for the next call.
   assert.match(PAGE, /const STATUSES_WITHOUT_FOLLOW_UP = \["Invalid", "Rejected"\];/);
-  assert.match(PAGE, /if \(key === "leadStatus" && STATUSES_WITHOUT_FOLLOW_UP\.includes\(value\)\) \{/);
+  assert.match(PAGE, /if \(key === "leadStatus" && dropsNextFollowUp\(value, next\.vertical\)\) \{/);
 });
 
 test("the radio and the button move the form by one rule, not two", () => {

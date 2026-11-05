@@ -1,4 +1,5 @@
 const prisma = require("../../../config/db");
+const { studioClockTime, studioDateKey } = require("../../../services/studioTime");
 const { normalizeDateText } = require("./leadDates");
 const { verticalFromValue } = require("./callRouting");
 const sheets = require("./googleSheetsService");
@@ -23,7 +24,20 @@ const CRM_LEAD_SQL_COLUMNS = CRM_LEAD_COLUMN_PAIRS.map(([codeName]) => codeName)
 const CRM_LEAD_SELECT_COLUMNS = ["enquiryId", ...CRM_LEAD_SQL_COLUMNS, "deletedAt", "createdAt", "updatedAt"];
 // Every SELECT aliases the database column back to the name the code reads, so `toRecord` and
 // everything downstream keep working on camelCase keys.
-const CRM_LEAD_SELECT_LIST = [...CRM_LEAD_SELECT_COLUMNS, ...REFERENCE_COLUMNS].map((column) => `\`${DB_COLUMN[column]}\` AS \`${column}\``).join(", ");
+/*
+ * The three names a lead carries as text beside a reference are read through the reference, with
+ * the text as the fallback - the same rule `services/resolvedNames.js` applies to every Prisma read,
+ * written here in SQL because these queries are raw. Correlated on the primary key of a six-row and
+ * a twenty-row table, so it costs nothing a board page would notice; and every query using this
+ * list reads `FROM \`sales_crm_lead\`` unaliased, which is what the qualified columns rely on.
+ */
+const RESOLVED_LEAD_SQL = {
+  assignedBranch: "COALESCE((SELECT `b`.`name` FROM `branch` AS `b` WHERE `b`.`id` = `sales_crm_lead`.`branch_id`), `assigned_branch`)",
+  crm: "COALESCE((SELECT `e`.`employee_name` FROM `employee` AS `e` WHERE `e`.`id` = `sales_crm_lead`.`owner_employee_id`), `crm`)",
+  vertical: "COALESCE((SELECT `v`.`name` FROM `vertical` AS `v` WHERE `v`.`id` = `sales_crm_lead`.`vertical_id`), `vertical`)",
+};
+const leadColumnSql = (column) => `${RESOLVED_LEAD_SQL[column] || `\`${DB_COLUMN[column]}\``} AS \`${column}\``;
+const CRM_LEAD_SELECT_LIST = [...CRM_LEAD_SELECT_COLUMNS, ...REFERENCE_COLUMNS].map(leadColumnSql).join(", ");
 
 function crmWebhookUrl() {
   return process.env.CRM_WEBHOOK_URL || process.env.CRM_LEADS_WEBHOOK_URL || "";
@@ -38,9 +52,22 @@ function normalizeColumnValue(value) {
   return value === undefined || value === null ? null : String(value);
 }
 
+/**
+ * Whether every project raised against this lead is in Resource Management → Recycling Bin - at least
+ * one, and none live. Such a lead **reads** "Project deleted" (`PROJECT_DELETED_STATUS`) on the board,
+ * in its tabs, counts and filters, while its stored status is left exactly as it was: Restore brings
+ * the project back and the lead reads its own status again with nothing rewritten. Not a status anybody
+ * can choose. Written against the unaliased `sales_crm_lead`, as every lead query here is.
+ */
+const PROJECT_DELETED_STATUS = "Project deleted";
+const PROJECT_DELETED_SQL = "(EXISTS (SELECT 1 FROM `sales_project` AS `bin_project` WHERE `bin_project`.`enquiry_id` = `sales_crm_lead`.`enquiry_id` AND `bin_project`.`deleted_at` IS NOT NULL)"
+  + " AND NOT EXISTS (SELECT 1 FROM `sales_project` AS `live_project` WHERE `live_project`.`enquiry_id` = `sales_crm_lead`.`enquiry_id` AND `live_project`.`deleted_at` IS NULL))";
+
 function extractLeadFromRow(row = {}) {
   return {
     id: String(row.enquiryId || ""),
+    // See `PROJECT_DELETED_SQL`; read only where the query selected it.
+    ...(row.projectDeleted !== undefined ? { projectDeleted: Boolean(Number(row.projectDeleted)) } : {}),
     name: row.name || "",
     phone: row.phone || "",
     whatsappNumber: row.whatsappNumber || "",
@@ -200,13 +227,25 @@ function toRecord(row) {
  * rule kept in the form is a rule each of those has to remember separately. This is the single
  * object every INSERT and UPDATE takes its values from, so stating it here covers all of them.
  *
- * Mirrored in `STATUSES_WITHOUT_FOLLOW_UP` in frontend/src/components/sales/CRMPage.js, which takes
- * the fields off the form. That one is what the user sees; this one is what is true.
+ * **Converted ends it too, on Dum Dum and Corp only.** A wedding or corporate client who has booked
+ * is done being chased. A Qua Qua client is not - the same family comes back for the newborn, the
+ * birthday, the next shoot - so a Converted Qua Qua lead keeps whatever next follow-up it was given
+ * (none is demanded) and is counted on the pending tabs like any other. "Converted & Followup" is
+ * not on the list anywhere. A lead moved to Converted gets the day as its Last Followup Date on
+ * every vertical - see `CONVERTED_STATUS` below.
+ *
+ * Qua Qua is recognised the way `board_key` recognises it (`leadQueryService.js`), so this rule and
+ * the board the lead sits on cannot disagree. Mirrored in `dropsNextFollowUp` in
+ * frontend/src/components/sales/CRMPage.js, which takes the fields off the form. That one is what
+ * the user sees; this one is what is true.
  */
 const STATUSES_WITHOUT_FOLLOW_UP = ["Invalid", "Rejected"];
 
-const endsTheConversation = (status) => STATUSES_WITHOUT_FOLLOW_UP
-  .some((ended) => ended.toLowerCase() === String(status || "").trim().toLowerCase());
+const sameStatus = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+const isQuaQuaVertical = (vertical) => String(vertical || "").trim().replace(/ /g, "").toLowerCase() === "quaqua";
+
+const endsTheConversation = (status, vertical) => STATUSES_WITHOUT_FOLLOW_UP.some((ended) => sameStatus(ended, status))
+  || (sameStatus(status, "Converted") && !isQuaQuaVertical(vertical));
 
 function normalizeDateColumn(value) {
   return normalizeColumnValue(normalizeDateText(value));
@@ -265,10 +304,10 @@ function flattenLeadColumns(record) {
      *
      * `null` and not `""`: the column is a date and the tabs read `follow_up_day`, the generated
      * fold of it, so an empty string is a date that could not be parsed rather than a date that was
-     * never set. Overall Pending counts `follow_up_day IS NULL` as work owed on a day the board
-     * cannot name - which is right for a lead still being chased and wrong for one that is not.
+     * never set. The pending tabs list every lead whose follow-up date falls on their day,
+     * whatever its status, so a lead nobody is chasing has to have no date at all.
      */
-    nextFollowUpDate: endsTheConversation(details.leadStatus || lead.status)
+    nextFollowUpDate: endsTheConversation(details.leadStatus || lead.status, lead.vertical)
       ? null
       : normalizeDateColumn(details.nextFollowUpDate || lead.nextFollowUpDate),
     lastConvertedDate: normalizeDateColumn(details.lastConvertedDate || lead.lastConvertedDate),
@@ -276,7 +315,7 @@ function flattenLeadColumns(record) {
     // the lead's copy and back to null.
     cnaSequence: normalizeColumnValue(details.cnaSequence ?? lead.cnaSequence),
     // The time goes with the date: half a booking is not a booking.
-    nextFollowUpTime: endsTheConversation(details.leadStatus || lead.status)
+    nextFollowUpTime: endsTheConversation(details.leadStatus || lead.status, lead.vertical)
       ? null
       : normalizeColumnValue(details.nextFollowUpTime || lead.nextFollowUpTime),
     shoots: serializeJsonArray(details.shoots),
@@ -565,7 +604,8 @@ async function listLeadsSharingPhone(phone) {
   return prisma.$queryRawUnsafe(
     `SELECT \`enquiry_id\` AS \`enquiryId\`, \`name\`, \`vertical\`, \`status\`,
             \`created_date\` AS \`createdDate\`, \`added_time\` AS \`addedTime\`,
-            \`next_follow_up_date\` AS \`nextFollowUpDate\`, \`last_follow_up_date\` AS \`lastFollowUpDate\`
+            \`next_follow_up_date\` AS \`nextFollowUpDate\`, \`last_follow_up_date\` AS \`lastFollowUpDate\`,
+            ${leadColumnSql("crm")}
      FROM \`sales_crm_lead\`
      WHERE \`deleted_at\` IS NULL
        AND (RIGHT(REGEXP_REPLACE(COALESCE(\`contact_number\`, ''), '[^0-9]', ''), 10) = ?
@@ -615,7 +655,7 @@ async function findVerticalDuplicate({ phone, vertical, excludeId = "" } = {}) {
 // would be absurd.
 async function getCrmLeadById(id) {
   const [row] = await prisma.$queryRawUnsafe(
-    `SELECT ${CRM_LEAD_SELECT_LIST}
+    `SELECT ${CRM_LEAD_SELECT_LIST}, ${PROJECT_DELETED_SQL} AS \`projectDeleted\`
      FROM \`sales_crm_lead\` WHERE \`enquiry_id\` = ? AND \`deleted_at\` IS NULL LIMIT 1`,
     String(id || "").trim(),
   );
@@ -1032,7 +1072,23 @@ async function listCrmLeads() {
   return mysqlRows.map(toRecord);
 }
 
+/**
+ * The lead's Added Time and Enquiry Date, taken from the studio's clock where the record brings none.
+ *
+ * The Add Lead form stamps them in the browser, from the computer's own clock - a machine set to UTC
+ * wrote every manual lead 5:30 behind, and a blank one fell back to the row's insert time, which is
+ * written in whatever zone the database runs on. A time a sheet, a file or a call brought with it is
+ * kept; only a missing one is filled, and always in India time. See `services/studioTime.js`.
+ */
+function stampStudioTime(record, when = new Date()) {
+  if (!record?.lead) return record;
+  if (!String(record.lead.addedTime || "").trim()) record.lead.addedTime = studioClockTime(when);
+  if (!String(record.lead.createdDate || "").trim()) record.lead.createdDate = studioDateKey(when);
+  return record;
+}
+
 async function createCrmLead(record) {
+  stampStudioTime(record);
   let created;
   try {
     created = sheetsUnavailable ? null : await sheets.createCrmLead(record);
@@ -1068,6 +1124,8 @@ async function createCrmLead(record) {
 }
 
 async function createCrmLeads(records) {
+  const now = new Date();
+  for (const record of records || []) stampStudioTime(record, now);
   let createdRecords;
   try {
     createdRecords = sheetsUnavailable ? null : await sheets.createCrmLeads(records);
@@ -1395,6 +1453,10 @@ const CONVERTED_STATUS_KEYS = new Set([
   "followup & converted", "followup and converted", "followup-converted",
 ]);
 
+// Plain "Converted", the one converted status that ends the follow-ups (see `STATUSES_WITHOUT_FOLLOW_UP`).
+const CONVERTED_STATUS = "converted";
+const isConvertedStatus = (status) => String(status || "").trim().toLowerCase() === CONVERTED_STATUS;
+
 /**
  * The studio's day, which is what every date in the CRM means. A project saved just after
  * midnight IST converted today, not yesterday as `toISOString` on a UTC server would have it.
@@ -1451,7 +1513,9 @@ async function markCrmLeadConverted(enquiryId, actor = {}, requestedStatus = "")
     id,
     {
       lead: { ...record.lead, status, leadStatus: status },
-      details: { ...record.details, leadStatus: status, lastConvertedDate: studioToday() },
+      // Converting is the lead's last follow-up, so it is stamped with the day too. The next
+      // follow-up date is cleared by `flattenLeadColumns` for a plain Converted lead.
+      details: { ...record.details, leadStatus: status, lastConvertedDate: studioToday(), lastFollowUpDate: studioToday() },
     },
     actor,
   );
@@ -1492,68 +1556,6 @@ async function deleteCrmLead(id) {
   return removed;
 }
 
-/**
- * Removes the leads a linked sheet put in the CRM, when that link is deleted.
- *
- * Unlinking used to stop the sync and leave everything it had imported behind, which is not what
- * deleting a source reads as: the leads stayed, nothing owned them, and re-linking the same sheet
- * imported the lot a second time.
- *
- * Deliberately not `deleteCrmLeads`: that one deletes the rows from the spreadsheet as well.
- * Removing a link from this app must not reach into the user's own Google Sheet, so this is a
- * soft delete of the CRM's copy and nothing else - the sheet is untouched and can be linked again.
- *
- * A tab is identified by its gid where the link has one and by its name otherwise; a link that
- * names neither owns everything imported from that spreadsheet.
- */
-async function deleteCrmLeadsFromSheet({ spreadsheetId, gid = "", targetTab = "" } = {}) {
-  const id = String(spreadsheetId || "").trim();
-  if (!id) return 0;
-
-  // Database column names, not code names: the snake_case migration renamed every one of these
-  // and this function was reading the table under its old spelling.
-  const clauses = ["`deleted_at` IS NULL", "`spreadsheet_id` = ?"];
-  const params = [id];
-  const tabGid = String(gid ?? "").trim();
-  const tabName = String(targetTab || "").trim();
-  if (tabGid) {
-    clauses.push("`gid` = ?");
-    params.push(tabGid);
-  } else if (tabName) {
-    clauses.push("`target_tab` = ?");
-    params.push(tabName);
-  }
-  const where = clauses.join(" AND ");
-
-  // Read the ids first: the legacy mirror and the webhook both need to know which leads went,
-  // and after the update there is no way to tell them from any other deleted row.
-  const rows = await prisma.$queryRawUnsafe(
-    `SELECT \`enquiry_id\` AS \`enquiryId\` FROM \`sales_crm_lead\` WHERE ${where}`,
-    ...params,
-  );
-  const ids = rows.map((row) => row.enquiryId).filter(Boolean);
-  if (!ids.length) return 0;
-
-  const removed = await prisma.$executeRawUnsafe(
-    `UPDATE \`sales_crm_lead\` SET \`deleted_at\` = CURRENT_TIMESTAMP(3) WHERE ${where}`,
-    ...params,
-  );
-
-  for (let offset = 0; offset < ids.length; offset += STATUS_UPDATE_SLICE) {
-    const slice = ids.slice(offset, offset + STATUS_UPDATE_SLICE);
-    try {
-      await prisma.$executeRawUnsafe(
-        `DELETE FROM \`leads\` WHERE \`external_id\` IN (${slice.map(() => "?").join(", ")})`,
-        ...slice,
-      );
-    } catch (error) {
-      console.warn("Legacy leads delete skipped:", error.message);
-    }
-  }
-
-  await sendCrmWebhook("crm.leads.bulk_deleted", { ids, count: Number(removed || 0), reason: "sheet-link-deleted" });
-  return Number(removed || 0);
-}
 
 /*
  * Soft-deletes a selection, in one pass over the rows.
@@ -1566,8 +1568,8 @@ async function deleteCrmLeadsFromSheet({ spreadsheetId, gid = "", targetTab = ""
  *     rounding error: the statement is ~5s at 17,500 leads and it was being paid twice, which is
  *     most of what somebody watching a "Deleting..." button was waiting for.
  *   * The legacy `leads` mirror was passed `IN (?)` with every id joined into **one** string, so it
- *     matched nothing whatever it was pointed at. It has real placeholders now, the way
- *     `deleteCrmLeadsFromSheet` below already writes it - and it is abandoned after the first
+ *     matched nothing whatever it was pointed at. It has real placeholders now - and it is
+ *     abandoned after the first
  *     failure rather than retried per slice, because the usual reason it fails is that the table is
  *     not there at all, and thousands of failed statements is a slow way to find that out.
  *
@@ -1617,21 +1619,25 @@ async function deleteCrmLeads(ids) {
  * not true of the database.
  *
  * So a delete is a `DELETE`. What that has to take with it, and what it must not, is the whole of
- * the care here - nothing in this schema is joined by a foreign key, so nothing is removed for us
- * and nothing stops us removing too much.
+ * the care here. Since 20260924150000 the database holds the same rules as keys - the owned tables
+ * cascade, the commercial ones refuse - so nothing here can be forgotten; the lists below stay so the
+ * order is explicit, the refusal is worded, and the one table with no key (the call log, created at
+ * runtime) is still handled.
  *
  * ── What goes with the lead ──
  *
- * The four tables that are *about* the lead and mean nothing without it: its activity trail, its
- * newborn/birthday occurrences, its place on the Watchers list, and the meetings booked against it.
- * Left behind, these are rows pointing at an enquiry id nobody can open.
+ * The tables that are *about* the lead and mean nothing without it: its activity trail, its
+ * newborn/birthday occurrences, its place on the Watchers list, the meetings booked against it, the
+ * WhatsApp group names generated for it, and the transcripts of the calls matched to it. Left
+ * behind, these are rows pointing at an enquiry id nobody can open.
  *
  * ── What is unlinked instead ──
  *
- * Calls and their transcripts. A call **happened** - it is a fact about the studio's phone, not a
- * detail of the lead - so deleting the caller must not delete the record of them ringing. The call
- * is unlinked and returns to the Calls board as a caller nobody has added, which is exactly what
- * `retireCallyzerCallLeads.js` does for the same reason.
+ * The calls themselves. A call **happened** - it is a fact about the studio's phone, not a detail of
+ * the lead - so deleting the caller must not delete the record of them ringing. The call is unlinked
+ * and returns to the Calls board as a caller nobody has added, which is exactly what
+ * `retireCallyzerCallLeads.js` does for the same reason. (Its transcript goes with the lead: it is
+ * the studio's reading of that lead's conversation, and a later match makes a new one.)
  *
  * ── What refuses the delete ──
  *
@@ -1641,8 +1647,8 @@ async function deleteCrmLeads(ids) {
  * its Converted History and its CRM link would answer with nothing. That is a worse fault than the
  * one this change fixes, so the lead stays and the caller is told which ones and why.
  */
-const LEAD_OWNED_TABLES = ["sales_crm_lead_activity", "sales_crm_lead_occasion", "sales_crm_lead_watch", "sales_crm_meeting"];
-const LEAD_UNLINKED_TABLES = ["sales_crm_call_log", "sales_call_transcript"];
+const LEAD_OWNED_TABLES = ["sales_crm_lead_activity", "sales_crm_lead_occasion", "sales_crm_lead_watch", "sales_crm_meeting", "sales_whatsapp_group_name", "sales_call_transcript"];
+const LEAD_UNLINKED_TABLES = ["sales_crm_call_log"];
 /** Where a lead's id appearing means real work was done against it, and it may not be deleted. */
 const LEAD_COMMERCIAL_TABLES = { sales_project: "a project", sales_quotation: "a quotation", sales_project_crd_document: "a CRD document" };
 
@@ -1660,8 +1666,15 @@ async function leadsWithCommercialRecords(ids) {
       const slice = ids.slice(offset, offset + BULK_DELETE_SLICE);
       let rows = [];
       try {
+        /*
+         * A project in Resource Management → Recycling Bin still refuses the delete - Restore needs its
+         * lead - but says where it is, since it is on no other screen: `live` is 0 when every project
+         * of the enquiry is in the bin. Table names are this file's constants; values go through `?`.
+         */
         rows = await prisma.$queryRawUnsafe(
-          `SELECT DISTINCT \`enquiry_id\` FROM \`${table}\` WHERE \`enquiry_id\` IN (${slice.map(() => "?").join(", ")})`,
+          table === "sales_project"
+            ? `SELECT \`enquiry_id\`, MAX(\`deleted_at\` IS NULL) AS \`live\` FROM \`sales_project\` WHERE \`enquiry_id\` IN (${slice.map(() => "?").join(", ")}) GROUP BY \`enquiry_id\``
+            : `SELECT DISTINCT \`enquiry_id\` FROM \`${table}\` WHERE \`enquiry_id\` IN (${slice.map(() => "?").join(", ")})`,
           ...slice,
         );
       } catch (error) {
@@ -1672,7 +1685,7 @@ async function leadsWithCommercialRecords(ids) {
       }
       for (const row of rows) {
         const id = String(row.enquiry_id || "");
-        if (id && !blocked.has(id)) blocked.set(id, label);
+        if (id && !blocked.has(id)) blocked.set(id, table === "sales_project" && !Number(row.live) ? "a project now in the Project Vault" : label);
       }
     }
   }
@@ -1747,9 +1760,127 @@ const BULK_DELETE_SLICE = 20000;
  * Details offers the two together: sending them separately would double the statements and
  * leave a selection half-updated if the second one failed.
  */
+/*
+ * ── Moving leads to another vertical ──────────────────────────────────────────────────────────
+ *
+ * Bulk Update's Vertical: the selected leads leave the board they are on for another one.
+ *
+ * - **One number, one enquiry per vertical.** A lead whose number (either of its two) is already an
+ *   enquiry in the target vertical - or is taken there by a lead moved earlier in the same batch -
+ *   stays where it is and is reported, never moved into a duplicate. The rest move.
+ * - **What only the old vertical asks is cleared**, as the studio chose: Dum Dum's wedding couple and
+ *   reference, Qua Qua's baby / mother and the shoot it was booked for, Corp's company, and the old
+ *   vertical's custom fields; leaving Qua Qua also drops its newborn and birthday occasions. What every
+ *   vertical shares - name, numbers, status, owner, branch, source, budget, follow-ups, remarks - stays.
+ * - **Qua Qua's "Converted & Followup" becomes "Converted"** anywhere else, the only status one
+ *   vertical has and the others do not. And a Converted lead off Qua Qua carries no next follow-up
+ *   (`endsTheConversation`), so it is cleared as every other write clears it.
+ * - The Enquiry ID is kept: by now it is on quotations and messages, as `reissueEnquiryIdOnPlacement`
+ *   explains for every vertical change but a call's first placement.
+ * - `vertical` and its `vertical_id` move together; `board_key`, generated from the first, follows.
+ */
+const VERTICAL_ONLY_COLUMNS = {
+  "Dum Dum": ["relationship", "groomName", "groomContact", "groomLocation", "brideName", "brideContact", "brideLocation", "referenceName", "referenceContact"],
+  "Qua Qua": ["babyOrMotherName", "dateOfBirthOrEdod", "shootType", "ihOh", "shootId", "contactRepeated"],
+  Corp: ["companyName", "primaryDecisionMaker", "designation", "contactNumber", "alternateMobileNumber", "officialEmailId", "companyWebsite", "companyType", "companySize", "branches", "projectType", "shootCity", "expectedBudget", "competitions"],
+};
+const MOVE_VERTICALS = ["Dum Dum", "Qua Qua", "Corp"];
+// The board's reading of a lead's vertical: blank or unrecognised is Dum Dum (`board_key`).
+const boardVertical = (value) => verticalFromValue(value) || "Dum Dum";
+
+async function moveCrmLeadsToVertical(ids, vertical, actor = {}) {
+  const target = verticalFromValue(vertical);
+  if (!MOVE_VERTICALS.includes(target)) throw Object.assign(new Error("Choose Dum Dum, Qua Qua or Corp."), { status: 400 });
+  const wanted = [...new Set((Array.isArray(ids) ? ids : []).map((id) => String(id || "").trim()).filter(Boolean))];
+  if (!wanted.length) return { moved: 0, skipped: [], unchanged: 0 };
+
+  const rows = [];
+  for (let offset = 0; offset < wanted.length; offset += STATUS_UPDATE_SLICE) {
+    const slice = wanted.slice(offset, offset + STATUS_UPDATE_SLICE);
+    rows.push(...await prisma.$queryRawUnsafe(
+      `SELECT \`enquiry_id\` AS \`enquiryId\`, \`phone\`, \`contact_number\` AS \`contactNumber\`, \`vertical\`, \`status\`
+       FROM \`sales_crm_lead\` WHERE \`deleted_at\` IS NULL AND \`enquiry_id\` IN (${slice.map(() => "?").join(", ")})`,
+      ...slice,
+    ));
+  }
+  const moving = rows.filter((row) => boardVertical(row.vertical) !== target);
+  const unchanged = rows.length - moving.length;
+  if (!moving.length) return { moved: 0, skipped: [], unchanged };
+
+  // The numbers the target vertical already holds, from leads not being moved now.
+  const movingIds = new Set(moving.map((row) => row.enquiryId));
+  const held = new Set();
+  const there = await prisma.$queryRawUnsafe(
+    "SELECT `enquiry_id` AS `enquiryId`, `phone`, `contact_number` AS `contactNumber`, `vertical` FROM `sales_crm_lead` WHERE `deleted_at` IS NULL",
+  );
+  for (const row of there) {
+    if (movingIds.has(row.enquiryId) || boardVertical(row.vertical) !== target) continue;
+    for (const value of [row.phone, row.contactNumber]) { const key = phoneMatchKey(value); if (key) held.add(key); }
+  }
+  const skipped = [];
+  const accepted = [];
+  for (const row of moving) {
+    const keys = [row.phone, row.contactNumber].map(phoneMatchKey).filter(Boolean);
+    const clash = keys.find((key) => held.has(key));
+    if (clash) { skipped.push({ enquiryId: row.enquiryId, phone: row.phone || row.contactNumber || "" }); continue; }
+    keys.forEach((key) => held.add(key));
+    accepted.push(row);
+  }
+  if (!accepted.length) return { moved: 0, skipped, unchanged };
+
+  const verticalId = (await referenceLookups()).verticalId(target) ?? null;
+  // One statement per vertical the leads are leaving, since each clears its own columns.
+  const bySource = new Map();
+  for (const row of accepted) {
+    const source = boardVertical(row.vertical);
+    if (!bySource.has(source)) bySource.set(source, []);
+    bySource.get(source).push(row);
+  }
+  let moved = 0;
+  for (const [source, group] of bySource) {
+    const cleared = (VERTICAL_ONLY_COLUMNS[source] || []).map((column) => `\`${DB_COLUMN[column]}\` = NULL`);
+    const assignments = [
+      "`vertical` = ?", "`vertical_id` = ?", "`custom_fields` = '{}'", ...cleared,
+      // Converted & Followup is Qua Qua's alone; elsewhere it is Converted.
+      ...(target !== "Qua Qua" ? ["`status` = CASE WHEN LOWER(REPLACE(REPLACE(TRIM(`status`), ' ', ''), '-', '')) IN ('converted&followup', 'convertedandfollowup', 'followup&converted') THEN 'Converted' ELSE `status` END"] : []),
+      "`updated_at` = CURRENT_TIMESTAMP(3)",
+    ];
+    for (let offset = 0; offset < group.length; offset += STATUS_UPDATE_SLICE) {
+      const slice = group.slice(offset, offset + STATUS_UPDATE_SLICE).map((row) => row.enquiryId);
+      moved += Number(await prisma.$executeRawUnsafe(
+        `UPDATE \`sales_crm_lead\` SET ${assignments.join(", ")} WHERE \`deleted_at\` IS NULL AND \`enquiry_id\` IN (${slice.map(() => "?").join(", ")})`,
+        target, verticalId, ...slice,
+      ) || 0);
+      // A Converted lead off Qua Qua books no next call - the rule every other write keeps.
+      if (target !== "Qua Qua") {
+        await prisma.$executeRawUnsafe(
+          `UPDATE \`sales_crm_lead\` SET \`next_follow_up_date\` = NULL, \`next_follow_up_time\` = NULL
+           WHERE LOWER(TRIM(\`status\`)) = 'converted' AND \`enquiry_id\` IN (${slice.map(() => "?").join(", ")})`,
+          ...slice,
+        );
+      }
+      // Newborn and birthday occasions are Qua Qua's; a lead leaving it takes none along.
+      if (source === "Qua Qua") {
+        await prisma.$executeRawUnsafe(`DELETE FROM \`sales_crm_lead_occasion\` WHERE \`enquiry_id\` IN (${slice.map(() => "?").join(", ")})`, ...slice);
+      }
+    }
+  }
+
+  await recordBulkActivity(accepted.map((row) => ({
+    enquiryId: row.enquiryId, action: "UPDATED", field: "vertical", fieldLabel: "Vertical",
+    fromValue: boardVertical(row.vertical), toValue: target,
+  })), actor);
+  await sendCrmWebhook("crm.leads.vertical_changed", { ids: accepted.map((row) => row.enquiryId), vertical: target, count: moved });
+  return { moved, skipped, unchanged };
+}
+
 async function setCrmLeadStatus(ids, changes = {}, actor = {}) {
   const status = changes.status ? String(changes.status).trim() : "";
-  const lastFollowUpDate = changes.lastFollowUpDate ? String(changes.lastFollowUpDate).trim() : "";
+  // Moving a lead to Converted is the last time it is followed up, so the day is stamped when the
+  // dialog did not name one - the same as converting it from the popup or from a project.
+  const lastFollowUpDate = changes.lastFollowUpDate
+    ? String(changes.lastFollowUpDate).trim()
+    : (isConvertedStatus(status) ? studioToday() : "");
   const nextFollowUpDate = changes.nextFollowUpDate ? String(changes.nextFollowUpDate).trim() : "";
   if (!status && !lastFollowUpDate && !nextFollowUpDate) return 0;
 
@@ -1772,8 +1903,13 @@ async function setCrmLeadStatus(ids, changes = {}, actor = {}) {
    * left a Rejected lead carrying the call it was booked for - which is what the Pending Followups
    * tabs read, so it kept turning up on a worklist under a status saying it was over. The same rule
    * `flattenLeadColumns` states for every other write.
+   *
+   * Converted clears it only off Qua Qua, and a selection can span boards, so that one is decided
+   * per row below (`board_key`) rather than here. Occasions are Qua Qua's alone, so Converted never
+   * clears an occasion's date.
    */
-  const clearsFollowUp = endsTheConversation(status);
+  const clearsFollowUp = STATUSES_WITHOUT_FOLLOW_UP.some((ended) => sameStatus(ended, status));
+  const clearsOffQuaQua = !clearsFollowUp && sameStatus(status, "Converted");
 
   const occasionChanges = {};
   if (status) occasionChanges.status = status;
@@ -1812,9 +1948,16 @@ async function setCrmLeadStatus(ids, changes = {}, actor = {}) {
    */
   const nextDateAssignment = clearsFollowUp
     ? { sql: "`next_follow_up_date` = ?", value: null }
-    : (nextFollowUpDate ? { sql: "`next_follow_up_date` = ?", value: nextFollowUpDate } : null);
+    : clearsOffQuaQua
+      // Qua Qua keeps its date, or takes the one the dialog gave; every other board is cleared.
+      ? { sql: "`next_follow_up_date` = CASE WHEN `board_key` = 'quaqua' THEN COALESCE(?, `next_follow_up_date`) ELSE NULL END", value: nextFollowUpDate || null }
+      : (nextFollowUpDate ? { sql: "`next_follow_up_date` = ?", value: nextFollowUpDate } : null);
   // The time goes with the date: half a booking is not a booking.
-  const nextTimeAssignment = clearsFollowUp ? { sql: "`next_follow_up_time` = ?", value: null } : null;
+  const nextTimeAssignment = clearsFollowUp
+    ? { sql: "`next_follow_up_time` = ?", value: null }
+    : clearsOffQuaQua
+      ? { sql: "`next_follow_up_time` = CASE WHEN `board_key` = 'quaqua' THEN `next_follow_up_time` ELSE ? END", value: null }
+      : null;
   const passes = [];
   if (workingOccasions.size) {
     const plain = ids.filter((id) => !workingOccasions.has(String(id)));
@@ -1970,7 +2113,7 @@ async function renameCrmLeadGroup(groupId, groupName) {
   return updatedRecords;
 }
 
-module.exports = {
+module.exports = { PROJECT_DELETED_SQL, PROJECT_DELETED_STATUS,
   ENQUIRY_ID_REFERENCES,
   getCrmLeadById,
   listLeadsSharingPhone,
@@ -1981,6 +2124,9 @@ module.exports = {
   // The ready-made SELECT list, so a query written outside this file cannot name the columns the
   // way they were spelled before the snake_case migration.
   CRM_LEAD_SELECT_LIST,
+  stampStudioTime,
+  RESOLVED_LEAD_SQL,
+  leadColumnSql,
   // The one definition of "the same client's number", shared with the Callyzer webhook so a
   // delivery matches exactly the leads the CRM would call duplicates.
   phoneMatchKey,
@@ -2001,8 +2147,9 @@ module.exports = {
   markCrmLeadConverted,
   deleteCrmLead,
   deleteCrmLeads,
-  deleteCrmLeadsFromSheet,
   setCrmLeadStatus,
+  moveCrmLeadsToVertical,
+  VERTICAL_ONLY_COLUMNS,
   assignCrmLeads,
   renameCrmLeadGroup,
   ensureCrmLeadColumns,

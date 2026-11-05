@@ -1,4 +1,5 @@
 const prisma = require("../../../config/db");
+const { publishedSaleExtrasTotal } = require("../../sales/sale-extras/totals");
 const { renderMessage, TEMPLATE_KEYS } = require("../../../services/messageTemplate");
 
 /**
@@ -50,7 +51,8 @@ async function outstandingFor(projectId, client = prisma) {
     client.projectExtraQuotation.aggregate({ where: { projectId, status: "APPROVED", deletedAt: null }, _sum: { amount: true } }),
     client.cashEntry.aggregate({ where: { projectId, entryType: "Received", deletedAt: null }, _sum: { amount: true } }),
   ]);
-  const signed = Number(project.initialConvertedValue || 0) + Number(extras._sum.amount || 0);
+  // Plus the project's published Sale Extras (Edit Sale Details), counted once.
+  const signed = Number(project.initialConvertedValue || 0) + Number(extras._sum.amount || 0) + await publishedSaleExtrasTotal(projectId, client);
   return Math.max(0, signed - Number(received._sum.amount || 0));
 }
 
@@ -60,10 +62,10 @@ async function outstandingFor(projectId, client = prisma) {
  * Null where there is nothing to send - money spent, or a studio that has deleted the template -
  * and the screen then shows nothing rather than a message full of bare placeholders.
  */
-async function receiptMessageFor(entry, client = prisma) {
+async function receiptMessageFor(entry, client = prisma, { invoiceLink } = {}) {
   if (!entry || entry.entryType !== "Received") return null;
   const outstanding = await outstandingFor(entry.projectId, client);
-  return renderMessage(TEMPLATE_KEYS.CASH_RECEIVED, {
+  const message = await renderMessage(TEMPLATE_KEYS.CASH_RECEIVED, {
     "payment amount": money(entry.amount),
     "payment date": onDate(entry.entryDate),
     // Named for what it was spent on where a shoot was chosen, and for the project otherwise: a
@@ -76,7 +78,14 @@ async function receiptMessageFor(entry, client = prisma) {
     "payment id": entry.entryId || "",
     "client name": entry.clientName || entry.project?.clientName || "",
     "project id": entry.project?.eventId || "",
+    "invoice link": invoiceLink || undefined,
   }, client);
+  /*
+   * The link goes with the receipt whatever the wording: a studio whose template predates
+   * `{invoice link}` gets it as a line of its own at the end, rather than a receipt with no invoice.
+   */
+  if (message && invoiceLink && !message.body.includes(invoiceLink)) message.body = `${message.body.trimEnd()}\n\nInvoice: ${invoiceLink}`;
+  return message;
 }
 
 module.exports = { receiptMessageFor, outstandingFor };

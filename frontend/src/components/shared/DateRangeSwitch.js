@@ -26,6 +26,11 @@ import { CUSTOM_RANGE, dateRangeOptions } from "@/lib/crmDateRange.mjs";
  * told apart is a range picker nobody can set. A label above each is two words that cannot be
  * truncated away, and it is how every other pair of dates in this application is drawn.
  *
+ * `options` replaces the ranges for a screen that reads a different span of time - the activity log
+ * counts in hours and days back from now rather than in calendar days - and `withTime` makes the two
+ * custom pickers a date **and** a time (`DateField withTime`, `2026-09-08T22:30`), for a list whose
+ * rows are moments rather than days. Both default to what every other caller already draws.
+ *
  * The component holds nothing. The value, the two custom days and what to do about them are the
  * caller's, because the caller is what has to send them to a server - see `resolveDateRange`.
  */
@@ -35,9 +40,18 @@ export default function DateRangeSwitch({
   custom = {},
   onChange,
   onCustomChange,
+  // What is wrong with the custom range, drawn under its To end - the end a reader sets second.
+  customError = "",
+  options = dateRangeOptions,
+  // Passed to the menu: a list longer than the usual six periods can ask to be shown whole.
+  menuMaxHeight,
   value,
+  withTime = false,
 }) {
   const isCustom = value === CUSTOM_RANGE;
+  // A value carrying a time still bounds the calendar by its day: `parseDateKey` reads the leading
+  // `YYYY-MM-DD` and ignores the `T22:30` after it.
+  const fieldWidth = withTime ? "w-44 shrink-0 sm:w-48" : "w-40 shrink-0 sm:w-44";
 
   /*
    * The switch, and — while Custom Date is chosen — the two days it stands for.
@@ -57,16 +71,19 @@ export default function DateRangeSwitch({
       // Never past the other end: a start after its end is a range nobody meant, and saying
       // so in the calendar is better than accepting it and answering with an empty board.
       maxDate={custom.to || ""}
+      withTime={withTime}
       onChange={(next) => onCustomChange?.({ ...custom, from: next })}
-      className="w-40 shrink-0 sm:w-44"
+      className={fieldWidth}
     />
     <DateField
       label="To"
       placeholder="End date"
       value={custom.to || ""}
       minDate={custom.from || ""}
+      withTime={withTime}
+      error={customError}
       onChange={(next) => onCustomChange?.({ ...custom, to: next })}
-      className="w-40 shrink-0 sm:w-44"
+      className={fieldWidth}
     />
   </>;
 
@@ -75,7 +92,8 @@ export default function DateRangeSwitch({
     ariaLabel={ariaLabel}
     value={value}
     onChange={(next) => onChange?.(next)}
-    options={dateRangeOptions}
+    options={options}
+    menuMaxHeight={menuMaxHeight}
     // The list widens from a day to a month and ends with the one that asks its own question.
     // Alphabetised it would read All Time, Custom Date, This Month, This Week, Today, Yesterday,
     // which is five ranges in no order anybody thinks about time in.

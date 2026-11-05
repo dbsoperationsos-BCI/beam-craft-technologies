@@ -130,3 +130,12 @@ test("the public onboarding endpoint no longer fixes the genders in code", () =>
   assert.ok(!/maritalStatus\s*!==\s*"Married"/.test(source),
     "the spouse rule compares against the word \"Married\" again instead of asking the list");
 });
+
+test("a picker list carries a photo link, never an inline picture", () => {
+  const { listPhotoUrl } = require("../src/services/employeeOptionLists");
+  assert.equal(listPhotoUrl("https://bucket.example/p.jpg"), "https://bucket.example/p.jpg");
+  assert.equal(listPhotoUrl("  HTTP://bucket.example/p.jpg "), "HTTP://bucket.example/p.jpg");
+  for (const value of ["data:image/jpeg;base64,AAAA", "", "   ", null, undefined, 42, "javascript:alert(1)", "//host/p.jpg"]) {
+    assert.equal(listPhotoUrl(value), null, String(value));
+  }
+});

@@ -24,13 +24,19 @@ const settingsSchema = z.object({
   deliverablePricing: pricing.optional(),
 });
 
-/** Decimal columns arrive as Prisma Decimals; the client wants plain numbers. */
+/**
+ * Decimal columns arrive as Prisma Decimals; the client wants plain numbers. A value the studio has
+ * not set is answered as null - never as an assumed ₹2,000, ₹1,000, 20% or 18% - so nothing a
+ * quotation is priced with is invented here.
+ */
+const numberOrNull = (value) => (value === null || value === undefined ? null : Number(value));
+
 function serialize(row) {
   return {
-    serviceRate: Number(row?.serviceRate ?? 2000),
-    deliverableRate: Number(row?.deliverableRate ?? 1000),
-    defaultDiscountPercent: Number(row?.defaultDiscountPercent ?? 20),
-    gstPercent: Number(row?.gstPercent ?? 18),
+    serviceRate: numberOrNull(row?.serviceRate),
+    deliverableRate: numberOrNull(row?.deliverableRate),
+    defaultDiscountPercent: numberOrNull(row?.defaultDiscountPercent),
+    gstPercent: numberOrNull(row?.gstPercent),
     servicePricing: row?.servicePricing || {},
     deliverablePricing: row?.deliverablePricing || {},
   };

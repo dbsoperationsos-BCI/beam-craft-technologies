@@ -330,7 +330,12 @@ export default function LeadAiPanel({ leadId, lead, scope = "lead", onError }) {
           ? { question: text, history, vertical: getActiveVertical() }
           : { enquiryId: askedAbout, question: text, history }),
       });
-      if (!response.ok || !response.body) throw new Error(`The AI service responded ${response.status}.`);
+      // Refused before the stream opens - a lead out of reach, the assistant switched off, too many
+      // at once - the server says why in a JSON body, and that is what the reader is shown.
+      if (!response.ok || !response.body) {
+        const refusal = await response.json().catch(() => null);
+        throw new Error(refusal?.message || `The AI service responded ${response.status}.`);
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -426,7 +431,7 @@ export default function LeadAiPanel({ leadId, lead, scope = "lead", onError }) {
     return (
       <div className="flex min-h-[20rem] flex-col items-center justify-center gap-2 p-5 text-center">
         <p className="text-sm font-medium text-slate-700">Nebula AI is unavailable.</p>
-        {/* The reason carries the fix - "ollama pull qwen3:1.7b" - which is worth showing. */}
+        {/* The reason carries the fix - "ollama pull qwen3:8b" - which is worth showing. */}
         <p className="max-w-md text-xs text-slate-500">{status.reason}</p>
       </div>
     );

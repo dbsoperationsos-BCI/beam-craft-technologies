@@ -1,10 +1,14 @@
 "use client";
 
+import { usePreference } from "@/components/preferences/PreferencesProvider";
+import ToggleSwitch from "@/components/shared/ToggleSwitch";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import DataTable from "@/components/data-table/DataTable";
 import useTableSelection from "@/components/data-table/useTableSelection";
 import { TableCellValue } from "@/components/data-table/tableCells";
 import DataTableShell from "@/components/data-table/DataTableShell";
+import KanbanBoard from "@/components/data-table/KanbanBoard";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import DataTableInfoPanel from "@/components/data-table/DataTableInfoPanel";
 import { crdDocumentInfoSections } from "@/constants/infoPanelConfig";
 import TableFooter from "@/components/data-table/TableFooter";
@@ -12,16 +16,16 @@ import ModulePageHeader from "@/components/layout/ModulePageHeader";
 import { useRouteAccess } from "@/components/auth/PermissionsProvider";
 import Button from "@/components/shared/Button";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
-import Dialog from "@/components/ui/Dialog";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import Tabs from "@/components/ui/Tabs";
 import useCompactView from "@/components/shared/useCompactView";
-import DropdownMenu from "@/components/ui/DropdownMenu";
 import CrdTermsSettingsPanel from "./CrdTermsSettingsPanel";
 import CrdDocumentViewPanel from "./CrdDocumentViewPanel";
+import CrdLinkReadyDialog from "./CrdLinkReadyDialog";
 import { verticalLabel } from "./whatsappGroupNameUtils";
 import { createCrdDocumentLink, getCrdDocuments } from "@/services/sales/crd-documents.service";
 import { publicOrigin } from "@/lib/publicOrigin";
+import { columnCount, daysSince } from "@/lib/kanbanSummary.mjs";
 
 // The origin the client's link is built on, resolved exactly the way the public quotation link is,
 // so both public URLs point at the same place and default to HTTPS in production.
@@ -37,6 +41,15 @@ const crdDocumentColumns = [
   { id: "clientMainNumber", label: "Contact Number" },
   { id: "sourceBranch", label: "Nearest Branch" },
   { id: "vertical", label: "Vertical" },
+  /*
+   * Who the document is on: the project's **pre-production coordinator**.
+   *
+   * Not a field of its own. That person is already named on the project and is already one of the five
+   * columns the data scope narrows the register by, which is why this row reaches this reader at all - so
+   * the column shows the fact that was already deciding what is on screen. Without it, a list narrowed to
+   * the reader's own work looked exactly like a list of everybody's.
+   */
+  { id: "assignedTo", label: "Assigned To" },
   // Where the row came from: "Project" is one Start / Edit Project raised, "Manual" one raised
   // here from Create CRD Document.
   { id: "type", label: "Type" },
@@ -48,16 +61,18 @@ const crdDocumentColumns = [
 const crdDocumentTabs = ["All", "Submitted", "Yet To Receive", "Link Not sent"];
 
 /*
- * The vertical the table is narrowed to, beside the heading.
+ * ── One list, both verticals ──────────────────────────────────────────────────────────────────
  *
- * The two verticals that have a CRD document between them, and nothing else: a document is one
- * vertical's or the other's, and the two are read by different people. There is deliberately no
- * "All" - the table always shows one vertical - and no Corp, which does not collect this document.
+ * There was a picker beside the heading and the table showed one vertical at a time, on the argument
+ * that a document belongs to one vertical or the other and the two are read by different people. What
+ * that cost was worse than what it bought: the page opened on Dum Dum, so Qua Qua's documents were
+ * behind a control, and a reader who did not notice it saw a list that was simply missing rows - with
+ * status tabs counting confidently over the half they could see.
+ *
+ * The vertical is a **column** on the row, and it always was: sortable and filterable like every other
+ * column, so somebody who wants one vertical narrows that column and somebody who wants the whole of
+ * what the studio is owed does nothing at all.
  */
-const verticalFilters = [
-  { value: "WED", label: "Dum Dum" },
-  { value: "QQ", label: "Qua Qua" },
-];
 
 function formatDate(value) {
   if (!value) return "-";
@@ -70,6 +85,9 @@ function displayValue(row, column) {
   if (column.type === "date") return formatDate(value);
   // Stored as WED / QQ / CORP; read as Dum Dum / Qua Qua / Corp.
   if (column.id === "vertical") return verticalLabel(value) || "-";
+  // A standalone document belongs to no project, so it has no coordinator to name - and a project that
+  // has not been staffed yet has none either. Both read as a dash rather than borrowing somebody.
+  if (column.id === "assignedTo") return value || "-";
   return value || "-";
 }
 
@@ -77,15 +95,61 @@ function displayValue(row, column) {
 // everywhere in the OS.
 const statusStyles = { Submitted: "bg-emerald-500", "Yet To Receive": "bg-amber-500", "Link Not sent": "bg-slate-400" };
 
+/** A project's row whose link has not gone out yet: Create Link, which issuing it marks Sent. */
+const linkNotSent = (row) => !row.standalone && row.status === "Link Not sent";
+
+/*
+ * The Board: a column per status, in the tabs' order and colours. A card opens the document, as a
+ * double-click does. The one move a person makes here is Create Link - issuing the link marks it
+ * sent - so a project's card whose link has not gone out may be dropped on Yet To Receive, for
+ * whoever may write, and the link is issued and handed over exactly as the ⋮ does. Submitted is the
+ * client's to reach, so it takes no drop.
+ */
+// In the document's flow: no link yet, sent and waiting, filled in - the reverse of the tabs.
+const BOARD_COLUMNS = ["Link Not sent", "Yet To Receive", "Submitted"].map((tab) => ({ value: tab, label: tab, className: `${statusStyles[tab] || "bg-slate-400"} text-white` }));
+const boardStatusOf = (row) => row.status;
+// One rule for the tag and the count: more than 7 days since the document was raised (no link-sent
+// date is kept), outside Submitted, which is done.
+const WAITING_DAYS = 7;
+const documentFlag = (row, column) => {
+  if (column.value === "Submitted") return "";
+  const days = daysSince(row.crdDocument?.createdAt || row.createdAt);
+  return days !== null && days > WAITING_DAYS ? `Waiting ${days} days` : "";
+};
+const documentColumnFigure = (rows, column) => (column.value === "Submitted" ? null
+  : columnCount(rows, (row) => Boolean(documentFlag(row, column)), `Waiting ${WAITING_DAYS}+ days`, `Cards in this column waiting more than ${WAITING_DAYS} days`));
+const BOARD_CARD = {
+  title: (row) => row.clientName || row.eventId || "CRD document",
+  subtitle: (row) => [row.documentCode || row.eventId || row.enquiryId, row.assignedTo].filter(Boolean).join(" · "),
+  meta: (row) => (row.receivedAt ? `Received ${formatDate(row.receivedAt)}` : row.verticalLabel || ""),
+};
+
 export default function CrdDocumentsPage() {
   // PROJECT / CRD Documents. Sending a link issues a document to a client, so it is a write.
   const { canWrite } = useRouteAccess();
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(true);
+  /*
+   * ── My Documents ──────────────────────────────────────────────────────────────────────────────
+   *
+   * The scope widens "mine" to "mine and my team's" - it follows `reportsToEmployeeId` the whole way down,
+   * so a manager four levels above a coordinator sees their documents. That is the right default and it is
+   * also why a coordinator who has a team of their own cannot find their own work in it.
+   *
+   * On, the list is the documents this reader is the **pre-production coordinator** for, which is the owner
+   * the Assigned To column names. Remembered per person, the way the CRM board remembers its own: somebody
+   * who works their own list should not turn it on every morning.
+   */
+  const [mineOnly, setMineOnly] = usePreference("crd:my-documents", false);
+  /*
+   * Whether anybody is under this reader, answered by the server because it is what knows the org chart.
+   * For everybody else the two states are the same list, and a switch that changes nothing invites a reader
+   * to flip it, see no difference and conclude the screen is broken.
+   */
+  const [managesAnyone, setManagesAnyone] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [tableStats, setTableStats] = useState({ total: 0 });
   const [activeTab, setActiveTab] = useState("All");
-  const [activeVertical, setActiveVertical] = useState("WED");
   const [configuringTerms, setConfiguringTerms] = useState(false);
   const [sendLinkProject, setSendLinkProject] = useState(null);
   // The issued link for the row in the dialog.
@@ -96,7 +160,10 @@ export default function CrdDocumentsPage() {
   const loadDocuments = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await getCrdDocuments();
+      const response = await getCrdDocuments({ mine: mineOnly });
+      // Whether this reader has a team, which is the only case the switch means anything in - answered by
+      // the server, which is what knows the org chart.
+      setManagesAnyone(Boolean(response?.managesAnyone));
       // The stored code is what the table sorts and filters on; `verticalLabel` is the name the
       // info panel and the record view read, which take their values off the row as they are.
       setDocuments(Array.isArray(response?.data) ? response.data.map((document) => ({ ...document, verticalLabel: verticalLabel(document.vertical) })) : []);
@@ -106,7 +173,9 @@ export default function CrdDocumentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [showError]);
+    // `mineOnly` is a dependency, so flipping the switch re-reads: the rows are a different set and the
+    // server is the only thing that knows who each document is on.
+  }, [showError, mineOnly]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadDocuments(); }, 0);
@@ -114,24 +183,24 @@ export default function CrdDocumentsPage() {
   }, [loadDocuments]);
 
   /**
-   * Issues the client's link and opens the dialog with it already in hand.
+   * Create Link / Send Link: the client's link, then CRD Link Ready with it written as the message.
    *
-   * Done here rather than in an effect once the dialog is open, so the URL is on screen the moment
-   * it appears and a failure is reported before anything opens. The backend hands back the same
-   * token every time, so pressing this again re-copies the existing link rather than replacing the
-   * one the client may already be holding.
+   * **Create Link** is offered on a row whose link has not gone out - no document yet, or one raised
+   * when the project answered "Applicable" and never sent. Issuing it is sending it: the server marks
+   * the document Sent, so the row moves to Yet To Receive the moment the link exists, and the dialog
+   * is how it then reaches the client. **Send Link** on a row already further along - or a document
+   * created on this screen, which is issued with its link - shows the link it has, for sending again.
+   * The backend hands back the same token every time, so the client's link is never replaced.
    */
   const openSendLink = useCallback(async (project) => {
-    // A document created from this screen already has its link and no project to issue one for, so
-    // Send Link on one of those rows shows the link it was given rather than asking for another.
-    if (project.standalone || project.crdDocument?.publicPath) {
+    if (!linkNotSent(project)) {
       setSendLinkUrl(`${publicOrigin()}${project.crdDocument?.publicPath || ""}`);
       setSendLinkProject(project);
       return;
     }
     try {
       const response = await createCrdDocumentLink(project.id);
-      setDocuments((current) => current.map((document) => document.id === project.id ? { ...document, status: "Yet To Receive", crdDocument: response?.data || document.crdDocument } : document));
+      setDocuments((current) => current.map((document) => document.id === project.id ? { ...document, status: "Yet To Receive", documentCode: response?.data?.documentCode || document.documentCode, crdDocument: response?.data || document.crdDocument } : document));
       setSendLinkUrl(`${publicOrigin()}${response?.data?.publicPath || ""}`);
       setSendLinkProject(project);
     } catch (error) {
@@ -139,46 +208,9 @@ export default function CrdDocumentsPage() {
     }
   }, [showError]);
 
-  /**
-   * Sends the link to the client, on WhatsApp, with the message already written.
-   *
-   * `wa.me` opens WhatsApp on whatever the person is using - the desktop app, the browser, the phone
-   * - with the client's number and the message filled in, and **they press send**. It is not an
-   * automated send and must not become one: the studio's number is a real account and bulk or
-   * unattended sending from it is what gets a number banned. The Image Selection gallery share works
-   * exactly this way, and this is that same pattern rather than a second one.
-   *
-   * The number is kept as the studio stores it and stripped of everything that is not a digit -
-   * `wa.me` wants a country code and digits, no `+` and no spaces. Absent where there is no number
-   * to send to, rather than offered and refused.
-   */
-  function whatsappShareUrl() {
-    const digits = String(sendLinkProject?.clientMainNumber || "").replace(/\D/g, "");
-    if (!digits || !sendLinkUrl) return "";
-    const name = String(sendLinkProject?.clientName || "").trim();
-    const text = [
-      name ? `Hi ${name},` : "Hi,",
-      "",
-      "Please fill in your Customer Identification Document here:",
-      sendLinkUrl,
-      "",
-      "It opens without a sign-in and saves as you go, so you can come back to it.",
-    ].join("\n");
-    return `https://wa.me/${digits}?text=${encodeURIComponent(text)}`;
-  }
-
   function closeSendLink() {
     setSendLinkProject(null);
     setSendLinkUrl("");
-  }
-
-  async function copySendLink() {
-    try {
-      await navigator.clipboard.writeText(sendLinkUrl);
-      showNotice("CRD document link copied.");
-    } catch {
-      showError("Unable to copy. Select the link manually.");
-    }
   }
 
   // Single click selects the row and fills the panel beside it; double-click reads the document
@@ -187,34 +219,41 @@ export default function CrdDocumentsPage() {
   const [infoPanelState, setInfoPanelState] = useState("collapsed");
   const [viewingDocument, setViewingDocument] = useState(null);
 
+  // One list for the row's ⋮ and the board card's ⋮.
+  const documentActions = useCallback((document) => [
+    // Always offered, whatever the reader may change: on a touch screen this is the only way into
+    // the record view, since a double-click there is the browser's own zoom gesture.
+    { label: "View", onSelect: () => setViewingDocument(document) },
+    // Only once there is a response to share. View is where the link is issued and copied, so
+    // this is the same destination by a name that says what it is for.
+    ...(document.crdDocument?.submittedAt ? [{ label: "Share Response", onSelect: () => setViewingDocument(document) }] : []),
+    // Create Link while the link has not gone out; Send Link once it has, to send it again.
+    ...(canWrite ? [{ label: linkNotSent(document) ? "Create Link" : "Send Link", onSelect: () => void openSendLink(document) }] : []),
+  ], [canWrite, openSendLink]);
+
   const columns = useMemo(() => crdDocumentColumns.map((column) => ({
     ...column,
     header: column.label,
     accessorFn: (row) => displayValue(row, column),
-    cell: column.id === "status" ? ({ row }) => <TableCellValue value={row.original.status} type="status" statusStyles={statusStyles} /> : column.id === "actions" ? ({ row }) => <OptionsMenu ariaLabel={`Actions for ${row.original.eventId || "CRD document"}`} items={[
-      // Always offered, whatever the reader may change: on a touch screen this is the only way into
-      // the record view, since a double-click there is the browser's own zoom gesture.
-      { label: "View", onSelect: () => setViewingDocument(row.original) },
-      // Only once there is a response to share. View is where the link is issued and copied, so
-      // this is the same destination by a name that says what it is for.
-      ...(row.original.crdDocument?.submittedAt ? [{ label: "Share Response", onSelect: () => setViewingDocument(row.original) }] : []),
-      ...(canWrite ? [{ label: "Send Link", onSelect: () => void openSendLink(row.original) }] : []),
-    ]} /> : ({ row }) => displayValue(row.original, column),
+    cell: column.id === "status" ? ({ row }) => <TableCellValue value={row.original.status} type="status" statusStyles={statusStyles} /> : column.id === "actions" ? ({ row }) => <OptionsMenu ariaLabel={`Actions for ${row.original.eventId || "CRD document"}`} items={documentActions(row.original)} /> : ({ row }) => displayValue(row.original, column),
     exportValue: (row) => displayValue(row, column),
     width: column.id === "actions" ? 56 : 180,
     minWidth: column.id === "actions" ? 56 : 150,
-  })), [canWrite, openSendLink]);
+  })), [documentActions]);
 
-  // The vertical narrows the table first and the status tabs count within it, so the numbers on the
-  // tabs always describe what the reader is actually looking at.
-  const verticalDocuments = useMemo(() => documents.filter((document) => String(document.vertical || "").toUpperCase() === activeVertical), [activeVertical, documents]);
-
+  // The tabs count the list, which is now the whole list - the same rule as before, with nothing
+  // narrowing it above them.
   const tabCounts = useMemo(() => Object.fromEntries(crdDocumentTabs.map((tab) => [
     tab,
-    tab === "All" ? verticalDocuments.length : verticalDocuments.filter((document) => document.status === tab).length,
-  ])), [verticalDocuments]);
+    tab === "All" ? documents.length : documents.filter((document) => document.status === tab).length,
+  ])), [documents]);
 
-  const visibleDocuments = useMemo(() => activeTab === "All" ? verticalDocuments : verticalDocuments.filter((document) => document.status === activeTab), [activeTab, verticalDocuments]);
+  const visibleDocuments = useMemo(() => activeTab === "All" ? documents : documents.filter((document) => document.status === activeTab), [activeTab, documents]);
+
+  const [layout, setLayout] = useTableBoardLayout("sales-crd-documents");
+  const onBoard = layout === "board";
+  const canDropAt = useCallback((row, to) => canWrite && to === "Yet To Receive" && linkNotSent(row), [canWrite]);
+  const dropDocument = useCallback((row) => void openSendLink(row), [openSendLink]);
 
   const updatedText = lastUpdated ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(lastUpdated) : "-";
 
@@ -230,7 +269,28 @@ export default function CrdDocumentsPage() {
   return <section className="flex h-full min-h-0 w-full min-w-0 flex-col">
     <ModulePageHeader
       title="CRD Documents"
-      titleAddon={<div className="border-l border-slate-200 pl-3"><DropdownMenu ariaLabel="Vertical" items={verticalFilters} value={activeVertical} onChange={setActiveVertical} /></div>}
+      /*
+       * `leadingActions`, which is where the CRM board draws its own **My Leads** switch - the slot for a
+       * control that scopes what the page is *showing* rather than doing something to it, sitting with the
+       * actions on the right and ahead of the quiet Nebula icon because everything after that icon is an
+       * action and this is not one.
+       *
+       * Drawn only for a reader with somebody under them - see `managesAnyone`.
+       */
+      leadingActions={managesAnyone && <ToggleSwitch
+        label="My Documents"
+        ariaLabel="Show only the documents assigned to you, or all of them"
+        title={mineOnly
+          ? "Showing only documents you are the pre-production coordinator for. Turn off to see everything you have access to."
+          : "Showing every document you have access to. Turn on to see only the ones you are the pre-production coordinator for."}
+        checked={mineOnly}
+        onCheckedChange={(next) => {
+          setMineOnly(next);
+          // The rows are about to be a different set, so a selection made against the old one is dropped -
+          // the same thing the CRM board does when its own switch moves.
+          bulk.clear?.();
+        }}
+      />}
       /*
        * Settings, and nothing else.
        *
@@ -240,19 +300,38 @@ export default function CrdDocumentsPage() {
        * second way in created a document belonging to no project, which then had no Event ID, no
        * Enquiry ID and nothing to attach the client's answers back to.
        */
-      actions={canWrite ? <OptionsMenu ariaLabel="CRD Documents settings" items={[{ label: "Settings", onSelect: () => setConfiguringTerms(true) }]} /> : null}
-      tabs={crdDocumentTabs.map((tab) => ({ id: tab, label: tab, count: tabCounts[tab] || 0 }))}
+      actions={<TableBoardSwitch value={layout} onChange={setLayout} />}
+      // The ⋮ in the header's own slot, so the row ends Nebula, then ⋮.
+      menu={canWrite ? <OptionsMenu ariaLabel="CRD Documents settings" items={[{ label: "Settings", onSelect: () => setConfiguringTerms(true) }]} /> : undefined}
+      // The Board stands every document under its status, so the status tabs step aside while it shows.
+      tabs={onBoard ? undefined : crdDocumentTabs.map((tab) => ({ id: tab, label: tab, count: tabCounts[tab] || 0 }))}
       tabValue={activeTab}
       onTabChange={setActiveTab}
       tabsAriaLabel="CRD document status filters"
     />
     <FloatingNotice notice={notice} onClose={clearNotice} />
     <div className="min-h-0 flex-1">
-      <DataTableShell className="h-full min-h-0" footer={<TableFooter spread><span>Last updated: {updatedText}</span><span>Total rows: {tableStats.total}</span></TableFooter>}>
+      <DataTableShell className="h-full min-h-0" footer={<TableFooter spread><span>Last updated: {updatedText}</span><span>Total rows: {onBoard ? documents.length : tableStats.total}</span></TableFooter>}>
         {/* The shell stacks its children, so the table and the panel beside it need a row of their
             own — without it the info panel lands under the table instead of next to it. */}
         <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <div className="flex min-h-0 min-w-0 flex-1">
+        {onBoard ? <KanbanBoard
+          rows={documents}
+          columns={BOARD_COLUMNS}
+          statusOf={boardStatusOf}
+          // How many have sat 7+ days since the document was raised, and each of them tagged with how long.
+          columnAmount={documentColumnFigure}
+          cardFlag={documentFlag}
+          card={BOARD_CARD}
+          onOpen={setViewingDocument}
+          // The card's ⋮ is the row's ⋮.
+          cardActions={documentActions}
+          canDropAt={canDropAt}
+          onDrop={dropDocument}
+          loading={loading}
+          noun="documents"
+          ariaLabel="CRD documents board"
+        /> : <div className="flex min-h-0 min-w-0 flex-1">
         <DataTable
           columns={columns}
           data={visibleDocuments}
@@ -268,7 +347,7 @@ export default function CrdDocumentsPage() {
           ariaLabel="CRD documents table"
           features={{ filtering: true, sorting: true, columnVisibility: true, infiniteScroll: { pageSize: 50 }, csvExport: { enabled: true, fileName: "crd-documents", onResult: (exported) => showNotice(exported ? "CRD Documents CSV export downloaded." : "No CRD documents available to export.") }, selection: bulk.selection }}
         />
-        </div>
+        </div>}
         <DataTableInfoPanel
           title="CRD Document"
           entity={infoDocument}
@@ -284,42 +363,6 @@ export default function CrdDocumentsPage() {
         panel beside the table, and repeating them was all View used to do. */}
     {viewingDocument && <CrdDocumentViewPanel row={viewingDocument} onClose={() => setViewingDocument(null)} />}
     {configuringTerms && <CrdTermsSettingsPanel onClose={() => setConfiguringTerms(false)} />}
-    {sendLinkProject && <Dialog
-      title="Send CRD Link"
-      description={sendLinkProject.eventId ? `Share this link with the client to collect the CRD document for ${sendLinkProject.eventId}.` : sendLinkProject.standalone ? "Share this link with the client to collect their CRD document." : "Prepare a CRD document link."}
-      size="md"
-      onClose={closeSendLink}
-      /*
-       * Close, then the two ways of getting the link to the client, then the one way of checking it.
-       *
-       * Send on WhatsApp is the primary action because it is what actually happens to this link:
-       * the studio sends it to the client on WhatsApp. Copy Link stays for a client who is reached
-       * some other way, and Open Form is the studio's own check that the link works before it goes
-       * anywhere - which is worth having in front of whoever is about to send it.
-       *
-       * The WhatsApp button is absent, not disabled, when the project has no number: there is
-       * nothing to send to, and a control that only refuses is worse than one that is not there.
-       */
-      footer={sendLinkUrl ? <>
-        <Button type="button" onClick={closeSendLink}>Close</Button>
-        <Button type="button" onClick={() => void copySendLink()}>Copy Link</Button>
-        <Button type="button" onClick={() => window.open(sendLinkUrl, "_blank", "noopener,noreferrer")}>Open Form</Button>
-        {whatsappShareUrl() && <Button type="button" variant="primary" onClick={() => window.open(whatsappShareUrl(), "_blank", "noopener,noreferrer")}>Send on WhatsApp</Button>}
-      </> : <Button type="button" onClick={closeSendLink}>Close</Button>}
-    >
-      {sendLinkProject.eventId || sendLinkProject.standalone ? <div className="space-y-4 pb-2">
-        {sendLinkUrl && <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
-          <p className="text-xs font-semibold text-slate-600">Public CRD document link</p>
-          <a href={sendLinkUrl} target="_blank" rel="noreferrer" className="mt-1 block break-all text-sm font-medium text-blue-700 underline">{sendLinkUrl}</a>
-          <p className="mt-2 text-xs text-slate-500">The client opens this without signing in, and it saves as they go so they can come back to it. Their event details arrive filled in and shown to be checked; what they fill in is their own and their partner&apos;s details.</p>
-        </div>}
-        <dl className="grid gap-3 text-sm text-slate-700 sm:grid-cols-2">
-          <div><dt className="font-semibold text-slate-900">Event ID</dt><dd className="mt-1">{sendLinkProject.eventId || "Not started yet"}</dd></div>
-          <div><dt className="font-semibold text-slate-900">Enquiry ID</dt><dd className="mt-1">{sendLinkProject.enquiryId || "-"}</dd></div>
-          <div><dt className="font-semibold text-slate-900">Client Name</dt><dd className="mt-1">{sendLinkProject.clientName || "-"}</dd></div>
-          <div><dt className="font-semibold text-slate-900">Contact Number</dt><dd className="mt-1">{sendLinkProject.clientMainNumber || "-"}</dd></div>
-        </dl>
-      </div> : <p className="text-sm text-slate-600">Select a CRD document row to send a project-specific link.</p>}
-    </Dialog>}
+    {sendLinkProject && <CrdLinkReadyDialog row={sendLinkProject} link={sendLinkUrl} onClose={closeSendLink} />}
   </section>;
 }

@@ -13,6 +13,7 @@ import {
   previousPhrase,
   projectListFiltersFromParams,
   projectsHref,
+  openProjectHref,
   relativeTime,
   rowsForView,
   sameView,
@@ -151,7 +152,7 @@ test("the noun beside a figure agrees with it", () => {
 
 test("the ten cards read in the order the studio works a job", () => {
   assert.deepEqual(SUMMARY_CARDS.map((card) => card.label), ["Total Projects", "Yet to Upload", "Client Sending Not Done", "Client Not Started", "Client In Progress", "Client Submitted", "Yet to Download", "Link Expiring Soon", "Expired Projects", "Downloaded"]);
-  assert.deepEqual(ATTENTION_ROWS.map((row) => row.key), ["overdue", "notOpened", "inactive", "newSubmissions", "readyToDownload", "yetToUpload", "notPublished", "expiringSoon", "expired", "downloaded"]);
+  assert.deepEqual(ATTENTION_ROWS.map((row) => row.key), ["overdue", "notOpened", "inactive", "newSubmissions", "clientSubmitted", "readyToDownload", "yetToUpload", "notPublished", "expiringSoon", "expired", "downloaded"]);
   // A link about to stop and one that already has are the two ends of the same life, so they sit
   // beside each other and nothing counts a project on both.
   assert.deepEqual(SUMMARY_CARDS.slice(7, 9).map((card) => card.view.attention), ["expiringSoon", "expired"]);
@@ -204,4 +205,17 @@ test("the sidebar lands on the dashboard from one entry, with no screens listed 
   for (const href of ["/image-selection/dashboard", "/image-selection/projects"]) {
     assert.deepEqual(permissionForRoute(href), { module: "IMAGE_SELECTION", feature: "Project Management" }, href);
   }
+});
+
+test("a Yet to Download row opens on its shoot folder, and nothing else does", () => {
+  const row = { id: "p1", readyToDownloadFolderId: "f-wed" };
+  const ready = { attention: "readyToDownload" };
+  assert.equal(projectsHref({ projectId: "p1", folderId: "f-wed", at: 5 }), "/image-selection/projects?projectId=p1&folderId=f-wed&at=5");
+  assert.equal(openProjectHref(row, ready, 5), "/image-selection/projects?projectId=p1&folderId=f-wed&at=5");
+  // Every other view, and no view at all, opens the project as a click always has.
+  for (const view of [null, { attention: "yetToUpload" }, { attention: "downloaded" }, { attention: "expiringSoon" }, { stage: "submitted" }, { stage: "linkSent" }]) {
+    assert.equal(openProjectHref(row, view, 5), "/image-selection/projects?projectId=p1&at=5");
+  }
+  // No folder found for the shoot: the project, as it always opened.
+  assert.equal(openProjectHref({ id: "p1", readyToDownloadFolderId: null }, ready, 5), "/image-selection/projects?projectId=p1&at=5");
 });

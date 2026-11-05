@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  ATTENDANCE_CELLS,
   SCHEDULE_KINDS,
   compareScheduleEntries,
   scheduleByDay,
@@ -72,8 +73,8 @@ test("a day reads in running order: timed bookings first, in clock order", () =>
 test("whole-day bookings follow the timed ones, in the legend's order", () => {
   // They have no clock to sort by, so the order is the one the legend reads - and it is stable
   // rather than whatever the two queries happened to return.
-  const days = scheduleByDay([mainEvent("p1", "2026-09-02"), shoot("s1", "2026-09-02")]);
-  assert.deepEqual(days.get("2026-09-02").map((entry) => entry.kind), ["shoot", "project"]);
+  const days = scheduleByDay([shoot("s1", "2026-09-02"), { id: "h1", kind: "holiday", title: "Diwali", day: "2026-09-02", startAt: null, endAt: null }]);
+  assert.deepEqual(days.get("2026-09-02").map((entry) => entry.kind), ["holiday", "shoot"]);
 });
 
 test("two shoots on one day keep a stable order rather than the query's", () => {
@@ -100,7 +101,7 @@ test("with no kinds named, everything is drawn", () => {
 });
 
 test("every kind has a colour, a legend label and a cell fill", () => {
-  assert.deepEqual(SCHEDULE_KINDS.map((kind) => kind.value), ["holiday", "meeting", "shoot", "project", "interview"]);
+  assert.deepEqual(SCHEDULE_KINDS.map((kind) => kind.value), ["holiday", "block", "meeting", "shoot", "interview", "attendance", "teamAttendance"]);
   for (const kind of SCHEDULE_KINDS) {
     assert.ok(kind.label, `${kind.value} has no legend label`);
     assert.ok(kind.dot, `${kind.value} has no legend colour`);
@@ -112,16 +113,19 @@ test("every kind has a colour, a legend label and a cell fill", () => {
   // And they are told apart by colour, which is the whole point of the legend.
   assert.equal(new Set(SCHEDULE_KINDS.map((kind) => kind.dot)).size, SCHEDULE_KINDS.length);
   /*
-   * Attendance is not one of them, and is not coming back. It was drawn grey behind the rest
-   * because it was the background of a day rather than a thing in it — and a chip per person per
-   * day is what finally took it off the calendar altogether. Who was at work is the register's
-   * question.
+   * Attendance is back, and not as it was. It used to put a chip per person per day for the whole
+   * studio, which is what took it off the calendar. Now it is the signed-in person's own days only,
+   * and only those that were not simply on time - Absent, On leave, Comp off, Late, Half day, Early
+   * exit - each coloured by its status rather than by the kind.
    *
-   * Holidays are the one kind that is not a booking, and they are here for the opposite reason:
-   * the studio being shut is the same fact for everybody, and it is the whole of what an employee
-   * holding no other permission sees on this calendar.
+   * Holidays are the one kind that is not a booking: the studio being shut is the same fact for
+   * everybody.
    */
-  assert.equal(SCHEDULE_KINDS.find((kind) => kind.value === "attendance"), undefined, "attendance is on the calendar again");
+  assert.equal(scheduleKind("attendance").label, "My Attendance");
+  assert.match(scheduleEntryCell({ kind: "attendance", title: "Absent" }), /red/);
+  assert.match(scheduleEntryCell({ kind: "attendance", title: "Late" }), /amber/);
+  assert.match(scheduleEntryCell({ kind: "attendance", title: "Comp off" }), /teal/);
+  assert.equal(new Set(Object.values(ATTENDANCE_CELLS)).size, 6, "every status has a colour of its own");
   assert.match(scheduleKind("holiday").cell, /rose/);
 });
 
@@ -136,15 +140,15 @@ test("a chip takes its kind's colour and nothing varies it", () => {
   }
 });
 
-test("a day is ordered meetings, then shoots, then main events", () => {
+test("a day is ordered meetings, then shoots - and a project's main event is not a calendar entry", () => {
   // `SCHEDULE_KINDS` order is what a day is sorted by, so a cell that can show three shows the
   // three most specific things booked on it.
   const day = scheduleByDay([
-    { id: "p1", kind: "project", day: "2026-09-02", reference: "DBS-SID-0003" },
     { id: "s1", kind: "shoot", day: "2026-09-02", reference: "DBS-SID-DD-ERD-000003" },
     { id: "m1", kind: "meeting", day: "2026-09-02", startAt: "2026-09-02T04:00:00.000Z" },
   ]).get("2026-09-02");
-  assert.deepEqual(day.map((entry) => entry.kind), ["meeting", "shoot", "project"]);
+  assert.deepEqual(day.map((entry) => entry.kind), ["meeting", "shoot"]);
+  assert.ok(!SCHEDULE_KINDS.some((kind) => kind.value === "project"), "main events are back on the calendar");
 });
 
 test("a holiday leads the day it falls on, above whatever is still booked in it", () => {
@@ -207,14 +211,13 @@ test("an interview is drawn in its own colour and sorts after the studio's own b
   // Violet, told apart from the meetings' blue at a glance in a cell that holds both.
   assert.match(scheduleKind("interview").cell, /violet/);
   /*
-   * Last in `SCHEDULE_KINDS`, so last among the whole-day entries of a day: a shoot and a main
-   * event are the studio's work and an interview is somebody visiting it. A *timed* meeting still
+   * Late in `SCHEDULE_KINDS`, so after the whole-day shoots of a day: a shoot is the studio's work
+   * and an interview is somebody visiting it. A *timed* meeting still
    * sorts above all of them, because the sort reads clock times first.
    */
   const day = scheduleByDay([
     interview("i1", "2026-09-02", "Asha R", "10:30 am"),
     shoot("s1", "2026-09-02"),
-    mainEvent("p1", "2026-09-02"),
   ]).get("2026-09-02");
-  assert.deepEqual(day.map((entry) => entry.kind), ["shoot", "project", "interview"]);
+  assert.deepEqual(day.map((entry) => entry.kind), ["shoot", "interview"]);
 });

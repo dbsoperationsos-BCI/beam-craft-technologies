@@ -28,6 +28,11 @@ const PAGE = fs.readFileSync(
   path.join(__dirname, "..", "..", "frontend", "src", "components", "project-management", "ClientGiftsPage.js"),
   "utf8",
 );
+// The list itself, shared by the Client Gifts page and Pre Production's General panel.
+const STATUS_LIST = fs.readFileSync(
+  path.join(__dirname, "..", "..", "frontend", "src", "constants", "clientGifts.js"),
+  "utf8",
+);
 
 test("the pending state is named for what has not happened yet", () => {
   assert.equal(GIFT_STATUS_PENDING, "Yet To Sent");
@@ -58,8 +63,9 @@ test("the screen's list of states is the server's", () => {
    * this list, and the server refuses a status it does not hold. A copy that drifts is a menu item
    * that fails on press, which is exactly the kind of fault nobody finds until a user does.
    */
-  const listed = PAGE.match(/const statuses = \[([^\]]*)\]/);
-  assert.ok(listed, "the page no longer declares the gift statuses");
+  assert.match(PAGE, /const statuses = CLIENT_GIFT_STATUSES;/, "the page no longer reads the shared gift statuses");
+  const listed = STATUS_LIST.match(/export const CLIENT_GIFT_STATUSES = \[([^\]]*)\]/);
+  assert.ok(listed, "the shared list no longer declares the gift statuses");
   const statuses = listed[1].split(",").map((entry) => entry.trim().replace(/^"|"$/g, "")).filter(Boolean);
   assert.deepEqual(statuses, GIFT_STATUSES);
   /*

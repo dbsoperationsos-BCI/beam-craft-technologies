@@ -17,15 +17,24 @@ import {
 } from "@/services/sales/whatsapp-chat.service";
 
 /**
- * The studio's WhatsApp: who may chat from a lead, and whether their account is linked.
+ * The studio's WhatsApp: who may chat from a lead, who is held to linking one at all, and whether
+ * their account is linked.
+ *
+ * Two different reasons land somebody here, and a row can be either or both: being on the **Sales**
+ * team, a CRM who can chat from a lead, and **Required** - Allow WhatsApp ticked on their Login
+ * Credentials, which holds them to the application-wide gate regardless of department. The second
+ * exists because an administrator switching that tick on for somebody outside Sales had no way to
+ * see afterwards whether that person had actually linked - the only other place that answer showed
+ * was the gate itself, on that person's own screen, the next time they opened the application.
  *
  * Its own file since the User Settings overlay that used to hold it was removed. That overlay had
  * become a second way into one screen - Studio Branding moved to Settings, leaving it with this
  * table and nothing else, and Settings already listed the same table under User Settings > WhatsApp.
  * So the overlay went and the table stayed, which is the half that anything actually renders.
  *
- * Drawn by `SettingsOverlay`. It reports what is already true and each CRM links their own WhatsApp
- * from the WhatsApp Chat tab of a lead, so nothing here is a form and nothing here submits.
+ * Drawn by `SettingsOverlay`. It reports what is already true - a CRM links their own WhatsApp from
+ * the WhatsApp Chat tab of a lead, and anybody Required links from the gate itself - so nothing here
+ * is a form and nothing here submits.
  */
 
 // Four different answers, and the difference between the last two matters: a CRM who linked
@@ -244,16 +253,11 @@ export default function WhatsAppUsersTable() {
       <ToggleSwitch
         label="WhatsApp chat"
         ariaLabel="WhatsApp chat for the whole studio"
+        helperText="Off stops chat from leads and disconnects every CRM's WhatsApp."
         checked={chat.enabled}
         disabled={!chat.canEdit || switching}
         onCheckedChange={(next) => (next ? void applySwitch(true) : setSwitchingOff(true))}
       />
-
-      <p className="text-xs text-slate-500 sm:text-sm">
-        The CRMs who can chat from a lead, and whether their WhatsApp is linked. Each one links their
-        own account from the WhatsApp Chat tab of any lead - it is their WhatsApp, so nobody else can
-        link or unlink it for them.
-      </p>
 
       {/* Under the switch and above the table, which is the order the three things are decided in:
           whether anybody may chat, how hard they may chat before being warned, then who is
@@ -306,7 +310,7 @@ export default function WhatsAppUsersTable() {
         ]}
         rows={rows}
         rowKey={(row) => row.key}
-        emptyMessage="No CRMs yet."
+        emptyMessage="Nobody is on Sales or required to link WhatsApp yet."
         // The cells carry their own looks - a status dot, a usage reading, a switch with its
         // reason - so the row is drawn here rather than column by column.
         renderRow={(row) => {
@@ -317,6 +321,10 @@ export default function WhatsAppUsersTable() {
                     <td className="whitespace-nowrap px-5 py-3 text-sm font-semibold text-slate-800">
                       {row.name}
                       {row.isSelf && <span className="ml-2 text-xs font-normal text-slate-400">(you)</span>}
+                      {/* Sales is why most rows are here and needs no label of its own; Required is
+                          the exception worth naming - it is the only sign, anywhere but that
+                          person's own screen, that Allow WhatsApp reaches somebody outside Sales. */}
+                      {row.required && <span className="ml-2 inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700">Required</span>}
                       {row.role && <p className="mt-0.5 text-xs font-normal text-slate-500">{row.role}</p>}
                     </td>
                     <td className="whitespace-nowrap px-5 py-3 text-sm text-slate-600">

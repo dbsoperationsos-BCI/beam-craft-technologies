@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const prisma = require("../src/config/db");
-const { branchOptions, FALLBACK_BRANCHES } = require("../src/services/branchOptions");
+const { branchOptions } = require("../src/services/branchOptions");
 const { branches: crmBranches } = require("../src/modules/sales/crm-leads/controller");
 
 /*
@@ -15,8 +15,8 @@ const { branches: crmBranches } = require("../src/modules/sales/crm-leads/contro
  * `Bangalore KA`, `Hyderabad TL` and `Visakhapatnam AP`. So Assigned Branch on a lead offered six
  * values that matched nothing, and a branch added or renamed in Settings never reached the CRM.
  *
- * The two screens answer from one place now, and these hold that: the same rows, the same rule, and
- * a fallback spelled the way the table spells them.
+ * The two screens answer from one place now, and these hold that: the same rows and the same rule,
+ * from the branch table alone.
  *
  * Needs MySQL, like test/iam.test.js. Fixtures carry the `TBO-` prefix and are removed either way.
  */
@@ -103,27 +103,15 @@ test("the CRM's list is narrowed to what the reader reaches", async () => {
   );
 });
 
-test("the fallback is only for a studio with no branches, and is spelled like the table", async () => {
-  /*
-   * It stands in for a database with no `branch` rows at all. Spelled the way the table spells them
-   * - the CRM's copy was not, which is the fault this replaces - so the stand-in and the real answer
-   * describe the same studio.
-   */
-  assert.deepEqual(
-    [...FALLBACK_BRANCHES].sort(),
-    ["Bangalore KA", "Coimbatore TN", "Erode TN", "Hyderabad TL", "Tiruppur TN", "Visakhapatnam AP"],
-  );
-  // With branches recorded it is never reached: this file's own fixture is in the answer, and it is
-  // not in the fallback.
+test("only the branch table answers; nothing is written down to stand in for it", async () => {
+  // With branches recorded, the answer is the table's own rows - this file's fixture among them.
   const names = await branchOptions(prisma);
-  assert.ok(names.includes(F.mine.name), "the fallback is being returned while branches exist");
+  assert.ok(names.includes(F.mine.name));
+  const source = require("node:fs").readFileSync(require.resolve("../src/services/branchOptions"), "utf8");
+  assert.doesNotMatch(source, /FALLBACK_BRANCHES|\[\s*"Erode TN"/, "a written-down branch list is back");
 });
 
-test("a reader who reaches no branch is offered none, not the fallback", async () => {
-  /*
-   * Handing them the fallback would offer branches nobody said they could use - and the fallback is
-   * not narrowed by anything, so it would be the widest possible answer for the narrowest reader.
-   */
+test("a reader who reaches no branch is offered none", async () => {
   const iamService = require("../src/services/iam.service");
   const original = iamService.reachableBranchIds;
   iamService.reachableBranchIds = async () => [];

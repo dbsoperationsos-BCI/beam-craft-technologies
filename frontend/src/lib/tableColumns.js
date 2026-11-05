@@ -1,3 +1,5 @@
+import { matchesWordChunks } from "./wordChunks.mjs";
+
 /**
  * How a CRM-style table reads, filters and sorts a column.
  *
@@ -65,15 +67,16 @@ export function buildFilterOptions(columns, rows) {
 /**
  * Rows narrowed by the active column filters and put in the sorted order.
  *
- * A filter matches on a substring, case-insensitively, which is what makes a typed partial
- * like "2026-08" work the same as a value picked off a list.
+ * A filter matches by Word Chunk Search (`lib/wordChunks.mjs`): every word typed, in any order,
+ * ignoring case - which is what makes a typed partial like "2026-08" work the same as a value
+ * picked off a list.
  */
 export function applyFiltersAndSort(rows, columns, filters, sort) {
   const active = Object.entries(filters || {}).filter(([, value]) => String(value || "").trim());
   const filtered = rows.filter((row) => active.every(([columnId, value]) => {
     const column = columns.find((item) => item.id === columnId);
     if (!column) return true;
-    return columnMatchText(column, row).includes(String(value).trim().toLowerCase());
+    return matchesWordChunks(columnMatchText(column, row), value);
   }));
 
   const column = columns.find((item) => item.id === sort?.id);

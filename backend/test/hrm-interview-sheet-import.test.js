@@ -231,3 +231,40 @@ test("a candidate code is DBS-INTV- and six digits, and reads back to its number
   assert.equal(parseCandidateCode("DBS-EID-QQ-ERD-000007"), 0);
   assert.equal(parseCandidateCode(""), 0);
 });
+
+test('"When Can You Join" may be a word, because that is what the column holds', () => {
+  /*
+   * The studio's own screening form asks whether somebody is an immediate joiner and writes a
+   * *word* into `availableFrom` when they are - the column is `VARCHAR(40)` and has always held
+   * either a day or an answer like "Immediate", "15 days" or "Negotiable".
+   *
+   * The sheet importer validated it as a day, so a row carrying exactly what the application form
+   * puts there was refused outright - and since one bad cell fails the whole row, a sheet of ten
+   * candidates could import none of them.
+   */
+  const { validateCandidateRecord } = require("../src/modules/hrm/interview/sheetImport");
+  for (const answer of ["Immediate", "Immediately", "15 days", "1 month", "Negotiable", "ASAP"]) {
+    const result = validateCandidateRecord({ candidate: { name: "Asha", availableFrom: answer } });
+    assert.equal(result.valid, true, `"${answer}" is refused: ${result.issues.map((i) => i.reason).join(", ")}`);
+  }
+  // A real date still passes, and is still folded to a day by the mapper.
+  assert.equal(validateCandidateRecord({ candidate: { name: "Asha", availableFrom: "25/09/2026" } }).valid, true);
+});
+
+test("the other date columns are still refused when they are not days", () => {
+  /*
+   * The reason that rule exists: "next week" in Interview Date is a note in the wrong column, and
+   * filing it as a day would put the candidate in no tab. Only `availableFrom` is exempt, which is
+   * why the validated list is its own rather than the list the mapper normalises.
+   */
+  const { validateCandidateRecord, CANDIDATE_DATE_FIELDS, CANDIDATE_REQUIRED_DAY_FIELDS } = require("../src/modules/hrm/interview/sheetImport");
+  for (const field of ["interviewDate", "appliedDate", "dateOfBirth", "lastFollowUpDate", "nextFollowUpDate"]) {
+    const result = validateCandidateRecord({ candidate: { name: "Asha", [field]: "next week" } });
+    assert.equal(result.valid, false, `${field} accepts a value that is not a day`);
+  }
+  // Exactly one field is exempt, and it is that one.
+  assert.deepEqual(
+    CANDIDATE_DATE_FIELDS.filter((field) => !CANDIDATE_REQUIRED_DAY_FIELDS.includes(field)),
+    ["availableFrom"],
+  );
+});

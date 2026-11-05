@@ -16,6 +16,8 @@
  * needs a way back.
  */
 
+const { listPhotoUrl } = require("../../services/employeeOptionLists");
+
 const LINK_REFUSED = "Choose an employee from the list, or clear the link.";
 
 /**
@@ -70,6 +72,7 @@ const LINKABLE_EMPLOYEE_FIELDS = {
   department: true,
   designation: true,
   employmentStatus: true,
+  profilePhotoUrl: true,
 };
 
 /**
@@ -87,6 +90,7 @@ function linkableEmployee(employee, takenByUserId = null) {
     department: employee.department || null,
     designation: employee.designation || null,
     employmentStatus: employee.employmentStatus || null,
+    profilePhotoUrl: listPhotoUrl(employee.profilePhotoUrl),
     linkedToUserId: takenByUserId ?? null,
   };
 }

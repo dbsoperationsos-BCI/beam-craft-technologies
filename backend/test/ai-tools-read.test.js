@@ -38,23 +38,12 @@ test("every registered module has tools, through a service rather than a fresh q
   assert.strictEqual(byModule.ADMIN, undefined);
 });
 
-test("nothing destructive or bulk is exposed", () => {
-  /*
-   * Reads, plus one additive write behind a confirmation. Nothing here can reassign in bulk or
-   * delete anything - "reassign all uncontacted leads" is 423 rows and no undo, and it is exactly
-   * the action not to hand a model that cannot reliably decide when to call a tool.
-   */
+test("every tool only reads - Nebula answers, it never changes a record", () => {
   for (const tool of registry.allTools()) {
-    assert.ok(
-      tool.risk === "READ" || tool.risk === "LOW_RISK_WRITE",
-      `${tool.name} is ${tool.risk}; only READ and LOW_RISK_WRITE are exposed`,
-    );
-    // A write must demand write permission, not read.
-    if (tool.risk !== "READ") assert.strictEqual(tool.requiredLevel, "READ_WRITE", tool.name);
+    assert.strictEqual(tool.risk, "READ", `${tool.name} is ${tool.risk}`);
+    assert.strictEqual(tool.requiredLevel, "READ", tool.name);
   }
-
-  const writes = registry.allTools().filter((tool) => tool.risk !== "READ").map((tool) => tool.name);
-  assert.deepStrictEqual(writes, ["sales.addRemark"], "the write allowlist grew without review");
+  assert.ok(!registry.allTools().some((tool) => tool.name === "sales.addRemark"), "the one write tool is gone");
 });
 
 test("no tool can be talked into an unbounded result", () => {
@@ -110,7 +99,10 @@ test("a tool asked for a record that does not exist says so, and does not throw"
   // "Not found" is an answer the model can relay; an exception is a broken turn.
   const context = { userId: 1, modules: ["SALES", "IMAGE_SELECTION"] };
   const real = iamService.hasPermission;
+  const realUser = iamService.getUserWithPermissions;
   iamService.hasPermission = async () => true;
+  // The lead scope reads the login itself; stub it so the test does not depend on user 1 existing.
+  iamService.getUserWithPermissions = async () => ({ id: 1, name: "Test User", role: "SUPER_ADMIN" });
 
   return Promise.resolve()
     .then(async () => {
@@ -120,7 +112,7 @@ test("a tool asked for a record that does not exist says so, and does not throw"
       const project = await registry.executeTool("imageselection.getProject", { id: "nope" }, context);
       assert.strictEqual(project.found, false);
     })
-    .finally(() => { iamService.hasPermission = real; });
+    .finally(() => { iamService.hasPermission = real; iamService.getUserWithPermissions = realUser; });
 });
 
 test("a tool that needs an id refuses an empty one", () => {

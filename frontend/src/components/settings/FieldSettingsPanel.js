@@ -102,6 +102,7 @@ export default function FieldSettingsPanel({ onError, unsavedRef }) {
           mode="input"
           label="Module"
           ariaLabel="Module"
+          helperText="The sidebar module whose form answers you want to change."
           placeholder="Select module"
           value={moduleId}
           onChange={(value) => guardPickerChange(() => {
@@ -120,6 +121,7 @@ export default function FieldSettingsPanel({ onError, unsavedRef }) {
           mode="input"
           label="Screen"
           ariaLabel="Screen"
+          helperText="The screen inside that module where the field appears."
           placeholder={screenEnabled ? "Select screen" : "Select a module first"}
           value={screenId}
           disabled={!screenEnabled}
@@ -135,6 +137,7 @@ export default function FieldSettingsPanel({ onError, unsavedRef }) {
           mode="input"
           label="Field"
           ariaLabel="Field"
+          helperText="The field whose list of choices you want to edit."
           placeholder={!screenId ? "Select a screen first" : listEnabled ? "Select field" : "No fields on this screen"}
           value={listId}
           disabled={!listEnabled}

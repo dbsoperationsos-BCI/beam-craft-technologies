@@ -11,10 +11,13 @@ import DateField from "@/components/shared/DateField";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import Loader from "@/components/shared/Loader";
 import ToggleSwitch from "@/components/shared/ToggleSwitch";
+import useFormErrors from "@/components/shared/useFormErrors";
+import { markedFieldsMessage } from "@/lib/formErrors.mjs";
 import Dialog from "@/components/ui/Dialog";
 import SelectionItemsTable from "./SelectionItemsTable";
 import WhatsAppGroupLinkDialog from "./WhatsAppGroupLinkDialog";
 import ShootSelectionStatus from "./ShootSelectionStatus";
+import { withFolderNames } from "@/lib/shootGroups.mjs";
 import { useModuleAccess } from "@/components/auth/PermissionsProvider";
 import ReadOnlyFieldset from "@/components/shared/ReadOnlyFieldset";
 import {
@@ -32,8 +35,11 @@ import {
   unlinkProjectWhatsappGroup,
 } from "@/services/image-selection/image-selection.service";
 import {
+  NEW_SELECTION_ITEM_LIMIT,
   hasSettingsChanges,
+  pendingSelectionDrafts,
   projectSettingsState,
+  saveThenShare,
   settingsFormState,
   validateSelectionLimit,
 } from "@/lib/imageSelectionSettings.mjs";
@@ -60,7 +66,7 @@ function Toggle({ label, description, checked, onChange, disabled = false, title
     </div>
   );
 }
-export default function ImageSelectionSettingsPanel({ project, onSaved, onProjectChanged, onProjectUpdated, onViewInvite, rootFolderNames = [] }) {
+export default function ImageSelectionSettingsPanel({ project, projectDisabled = false, onSaved, onProjectChanged, onProjectUpdated, onViewInvite, rootFolders = [] }) {
   /*
    * One permission for the module: the settings saved here, and publishing the gallery they
    * describe, are the same job.
@@ -71,8 +77,11 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
    * screen, disabled, and the pointer says so on the way past instead of a save failing after
    * somebody has already typed.
    */
-  const { canWrite: canEditSettings } = useModuleAccess("IMAGE_SELECTION", "Project Management");
-  const readOnlyTitle = "You have read-only access to Image Selection.";
+  const { canWrite: moduleCanWrite } = useModuleAccess("IMAGE_SELECTION", "Project Management");
+  // A project disabled from Expand is read here as it stands: nothing in the rail - publishing, the
+  // PIN, the link, the WhatsApp group - can be changed until it is enabled again.
+  const canEditSettings = moduleCanWrite && !projectDisabled;
+  const readOnlyTitle = projectDisabled ? "This project is disabled. Enable it from Expand to upload photos or send the client link." : "You have read-only access to Image Selection.";
   const [publication, setPublication] = useState(null);
   const [deliverables, setDeliverables] = useState([]);
   // How many photos the client has picked per selection item, for the "10 ✓" beside each name —
@@ -81,7 +90,9 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
   const [selectionCounts, setSelectionCounts] = useState({});
   const [settings, setSettings] = useState(null);
   const [initial, setInitial] = useState(null);
-  const [errors, setErrors] = useState({});
+  // The selection limits that will not save, keyed by item id; each row says why under itself.
+  const fields = useFormErrors();
+  const { clearAll: clearErrors } = fields;
   const [message, setMessage] = useState("");
   // The copy buttons' snackbar — the same confirmation the desktop app gives, so copying the
   // Client URL or PIN visibly worked instead of succeeding in silence.
@@ -92,10 +103,35 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
   const [activePanel, setActivePanel] = useState("settings");
   // The picker for the project's WhatsApp group, opened from the rail's Link / Change.
   const [groupDialog, setGroupDialog] = useState(false);
-  // The studio-wide gallery validity, which is what an unset expiry date falls back to, and the
-  // studio-wide selection limit, which is what a new selection item is given when none is typed.
+  // The studio-wide gallery validity, which is what an unset expiry date falls back to.
   const [validityMonths, setValidityMonths] = useState(6);
-  const [defaultLimit, setDefaultLimit] = useState(50);
+  // The table's add rows, held here so Review & Share can add a typed item nobody pressed + for.
+  const [drafts, setDrafts] = useState({});
+  // Review & Share is saving what is pending; a second press while it runs does nothing.
+  const sharingRef = useRef(false);
+  const [sharing, setSharing] = useState(false);
+  // A folder deleted from the tree has taken its selection items and limits with it on the server.
+  // The rail loads its items once, so the deleted folder's items are dropped here the moment the
+  // folder leaves the tree - never only after a page reload. Only a folder that WAS listed and is
+  // gone counts, so the empty list before the tree first loads drops nothing. Adjusted during
+  // render, the same way the workspace applies a folder deep link.
+  const rootFolderKey = rootFolders.map((folder) => folder.id).join(",");
+  const [listedFolderKey, setListedFolderKey] = useState(rootFolderKey);
+  if (rootFolderKey !== listedFolderKey) {
+    const current = new Set(rootFolderKey.split(",").filter(Boolean));
+    const gone = new Set(listedFolderKey.split(",").filter((id) => id && !current.has(id)));
+    setListedFolderKey(rootFolderKey);
+    if (gone.size) {
+      const removedIds = new Set(deliverables.filter((item) => gone.has(item.shoot?.folderId)).map((item) => item.id));
+      if (removedIds.size) {
+        const keep = (item) => !removedIds.has(item.id);
+        setDeliverables((items) => items.filter(keep));
+        setSettings((value) => (value ? { ...value, deliverables: value.deliverables.filter(keep) } : value));
+        setInitial((value) => (value ? { ...value, deliverables: value.deliverables.filter(keep) } : value));
+      }
+      setDrafts((value) => Object.fromEntries(Object.entries(value).filter(([groupId]) => ![...gone].some((id) => groupId === `folder:${id}`))));
+    }
+  }
   // Always the current project, without making it a reload trigger. Saving hands a refreshed
   // project back up to the page, and reloading the whole panel on that would throw away the
   // values that were just saved and flash the loader over a form the user is still looking at.
@@ -122,17 +158,17 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
     // twelve months is offered twelve rather than the shipped six.
     const validityMonths = settingsResult.status === "fulfilled" ? settingsResult.value.data?.galleryValidityMonths ?? 6 : 6;
     setValidityMonths(validityMonths);
-    setDefaultLimit(settingsResult.status === "fulfilled" ? settingsResult.value.data?.defaultSelectionLimit ?? 50 : 50);
     if (publicationResult.status === "fulfilled") setPublication(publicationResult.value.data);
     setDeliverables(items);
     const next = settingsFormState(projectRef.current, items, { validityMonths });
     setSettings(next);
     setInitial(next);
-    setErrors({});
+    clearErrors();
+    setDrafts({});
     const failure = publicationResult.status === "rejected" ? publicationResult.reason : deliverableResult.status === "rejected" ? deliverableResult.reason : null;
     setMessage(failure ? failure.message || "Unable to load settings." : "");
     setLoading(false);
-  }, [project.id]);
+  }, [clearErrors, project.id]);
   useEffect(() => {
     const timer = window.setTimeout(load, 0);
     return () => window.clearTimeout(timer);
@@ -196,13 +232,13 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
     const deliverableState = items.map((item) => ({ id: item.id, enabled: item.enabled, selectionLimit: item.selectionLimit }));
     setSettings((current) => ({ ...current, deliverables: deliverableState }));
     setInitial((current) => ({ ...current, deliverables: deliverableState }));
-    setErrors({});
+    clearErrors();
     onProjectChanged?.();
   }
-  async function addSelectionItem({ name, selectionLimit, shootName = null }) {
+  async function addSelectionItem({ name, selectionLimit, shootName = null, shootFolderId = null }) {
     setBusy(true);
     try {
-      const response = await addImageSelectionDeliverable(project.id, { name, selectionLimit: selectionLimit || defaultLimit, shootName });
+      const response = await addImageSelectionDeliverable(project.id, { name, selectionLimit: selectionLimit || NEW_SELECTION_ITEM_LIMIT, shootName, shootFolderId });
       applyItems(response.data || []);
       return true;
     } catch (error) {
@@ -227,13 +263,19 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
       showError(`Unable to copy the ${label}. Select it manually.`);
     }
   }
+  // The limits that will not save, keyed by item id.
+  const limitProblems = () => Object.fromEntries(settings.deliverables
+    .filter((item) => !validateSelectionLimit(item.selectionLimit))
+    .map((item) => [item.id, "Enter a limit between 1 and 100000."]));
+  function validateLimits() {
+    return fields.check(limitProblems());
+  }
   async function save() {
-    const nextErrors = {};
-    settings.deliverables.forEach((item) => {
-      if (!validateSelectionLimit(item.selectionLimit))
-        nextErrors[item.id] = "Invalid limit";
-    });
-    if (Object.keys(nextErrors).length) return setErrors(nextErrors);
+    if (validateLimits()) await persistSettings();
+  }
+  // True once the settings and limits are stored; false, with the error shown and the edits left
+  // in place, when they are not.
+  async function persistSettings() {
     setBusy(true);
     try {
       // The client's name and number are not asked for here, so they are left out entirely: the
@@ -262,7 +304,7 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
       const next = saved ? { ...settings, ...projectSettingsState(saved, { validityMonths }) } : settings;
       setSettings(next);
       setInitial(next);
-      setErrors({});
+      clearErrors();
       // Saving an expiry date moves it on the published link too, and the publication this panel is
       // holding was read before that happened — so it is read again, otherwise "Link expires on"
       // below the Client URL would keep reporting the date the gallery no longer expires on.
@@ -272,8 +314,10 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
       } catch { /* the settings did save; the line below the URL catches up on the next load */ }
       if (saved) onProjectUpdated?.(saved);
       onSaved?.();
+      return true;
     } catch (error) {
       showError(error.message || "Unable to save selections.");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -293,23 +337,57 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
       setBusy(false);
     }
   }
-  // Review & Share: make sure the gallery is published, then open the WhatsApp template so the
-  // message is read before it is sent — publishing alone no longer ends the flow.
+  // Review & Share: save whatever is pending - the limits, checkboxes and validity in the form, and
+  // any item typed into an add row but never added - then make sure the gallery is published, then
+  // open the WhatsApp template so the message is read before it is sent. The template replaces
+  // this panel, so nothing may still be unsaved when it opens: a step that fails stops here, with
+  // its error shown and the edits still in place.
   async function reviewAndShare() {
-    if (publication?.status !== "PUBLISHED") {
-      setBusy(true);
-      try {
-        const result = await publishGallery(project.id);
-        setPublication(result.data);
-        onProjectChanged?.();
-      } catch (error) {
-        showError(error.message || "Unable to publish the gallery.");
-        return;
-      } finally {
-        setBusy(false);
-      }
+    if (sharingRef.current) return;
+    sharingRef.current = true;
+    setSharing(true);
+    const pending = pendingSelectionDrafts(drafts);
+    try {
+      await saveThenShare({
+        validate: () => {
+          // Each refused limit says why on its own row; the notice says only how many.
+          const badDrafts = pending.filter((draft) => !validateSelectionLimit(draft.selectionLimit)).length;
+          const badLimits = Object.keys(limitProblems()).length;
+          if (!validateLimits() || badDrafts) {
+            setActivePanel("selection");
+            showError(markedFieldsMessage(badLimits + badDrafts));
+            return false;
+          }
+          return true;
+        },
+        save: dirty ? persistSettings : null,
+        addDrafts: pending.length ? async () => {
+          for (const draft of pending) {
+            if (!(await addSelectionItem(draft))) return false;
+            setDrafts((current) => ({ ...current, [draft.groupId]: { name: "", limit: "" } }));
+          }
+          return true;
+        } : null,
+        publish: publication?.status !== "PUBLISHED" ? async () => {
+          setBusy(true);
+          try {
+            const result = await publishGallery(project.id);
+            setPublication(result.data);
+            onProjectChanged?.();
+            return true;
+          } catch (error) {
+            showError(error.message || "Unable to publish the gallery.");
+            return false;
+          } finally {
+            setBusy(false);
+          }
+        } : null,
+        open: onViewInvite,
+      });
+    } finally {
+      sharingRef.current = false;
+      setSharing(false);
     }
-    onViewInvite();
   }
   // Unlinking is one press rather than a dialog: it changes where the *next* invite goes and
   // nothing else, and the group is one press away from being linked again.
@@ -352,17 +430,19 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
   // A project with no Sales Manager link has no Post Production Allocation behind it, so its
   // selection items are typed here rather than derived. A linked project's table is unchanged.
   const manual = !project.salesProjectId;
+  // Shoot groups are headed by their folder's live name, so a rename shows here at once.
+  const shownDeliverables = withFolderNames(deliverables, rootFolders);
   // Selection items are added and removed one at a time rather than through Save, so the fieldset
   // has to reach them too - the footer's Save Changes never sees these edits.
   const renderTable = (onExpand) => (
     <ReadOnlyFieldset canWrite={canEditSettings} reason={readOnlyTitle}>
     <SelectionItemsTable
       dense
-      deliverables={deliverables}
+      deliverables={shownDeliverables}
       selections={settings.deliverables}
       selectionCounts={selectionCounts}
-      errors={errors}
-      onLimitChange={(id, selectionLimit) => updateDeliverable(id, { selectionLimit })}
+      errors={fields.errors}
+      onLimitChange={(id, selectionLimit) => { fields.clear(id); updateDeliverable(id, { selectionLimit }); }}
       onToggle={toggleDeliverable}
       onExpand={onExpand}
       onAdd={manual ? addSelectionItem : undefined}
@@ -370,7 +450,9 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
       adding={busy}
       // A manual project's root folders are its shoots in the client gallery, so they stand as
       // groups here without being typed again. A linked project's shoots come from its allocation.
-      folderShoots={manual ? rootFolderNames : []}
+      folderShoots={manual ? rootFolders : []}
+      drafts={drafts}
+      onDraftsChange={setDrafts}
     />
     </ReadOnlyFieldset>
   );
@@ -436,6 +518,7 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
           <section className="shrink-0 border-b border-slate-200 py-3">
             <DateField
               label="Expiry Date"
+              helperText="The last day the client can make their photo selection."
               value={settings.selectionValidUntil}
               restriction="past"
               className="mb-3 [&_button]:min-h-8 [&_button]:text-[10px]"
@@ -554,7 +637,7 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
               selection stands — the read-at-a-glance answer to "what is in this gallery". */}
           <section className="shrink-0 py-3">
             <p className="mb-1.5 text-[10px] font-bold text-slate-700">Shoots &amp; Selection Items</p>
-            <ShootSelectionStatus deliverables={deliverables} selectionCounts={selectionCounts} folderShoots={manual ? rootFolderNames : []} />
+            <ShootSelectionStatus deliverables={shownDeliverables}selectionCounts={selectionCounts} folderShoots={manual ? rootFolders : []} />
           </section>
             </ReadOnlyFieldset>
           ) : (
@@ -576,7 +659,7 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
             {(dirty || !canEditSettings) && (
               <button
                 type="button"
-                disabled={busy || !canEditSettings}
+                disabled={busy || sharing || !canEditSettings}
                 title={canEditSettings ? undefined : readOnlyTitle}
                 onClick={save}
                 className="rounded-md bg-blue-600 px-2 py-1.5 text-[10px] font-medium text-white disabled:cursor-restricted disabled:opacity-50"
@@ -586,12 +669,12 @@ export default function ImageSelectionSettingsPanel({ project, onSaved, onProjec
             )}
             <button
               type="button"
-              disabled={busy || !canEditSettings}
+              disabled={busy || sharing || !canEditSettings}
               title={canEditSettings ? undefined : readOnlyTitle}
               onClick={reviewAndShare}
               className="rounded-md bg-blue-50 px-2 py-1.5 text-[10px] font-medium text-blue-600 disabled:cursor-restricted disabled:opacity-50"
             >
-              Review &amp; Share
+              {sharing ? "Saving..." : "Review & Share"}
             </button>
           </div>
         </footer>

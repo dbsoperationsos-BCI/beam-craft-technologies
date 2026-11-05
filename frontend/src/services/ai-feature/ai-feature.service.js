@@ -11,7 +11,8 @@ const query = (params) => { const search = new URLSearchParams(); for (const [ke
 const json = (method, body) => ({ method, body: JSON.stringify(body ?? {}) });
 
 // Overview
-export const getAiOverview = () => apiRequest(`${base}/overview`);
+// The dashboard: positions, the period's figures and the trend for the range picked above the cards.
+export const getAiOverview = ({ range } = {}) => apiRequest(`${base}/overview${query({ range })}`);
 export const getAiRecentActivity = () => apiRequest(`${base}/overview/activity`);
 
 // Defaults
@@ -31,12 +32,6 @@ export const getAiEventSettings = (id) => apiRequest(`${eventPath(id)}/settings`
 export const saveAiEventSettings = (id, patch) => apiRequest(`${eventPath(id)}/settings`, json("PUT", patch));
 export const listAiEventActivity = (id, params) => apiRequest(`${eventPath(id)}/activity${query(params)}`);
 
-// Sub-events
-export const listAiSubEvents = (id) => apiRequest(`${eventPath(id)}/sub-events`);
-export const createAiSubEvent = (id, payload) => apiRequest(`${eventPath(id)}/sub-events`, json("POST", payload));
-export const updateAiSubEvent = (id, subEventId, payload) => apiRequest(`${eventPath(id)}/sub-events/${encodeURIComponent(subEventId)}`, json("PATCH", payload));
-export const deleteAiSubEvent = (id, subEventId) => apiRequest(`${eventPath(id)}/sub-events/${encodeURIComponent(subEventId)}`, { method: "DELETE" });
-export const reorderAiSubEvents = (id, order) => apiRequest(`${eventPath(id)}/sub-events/reorder`, json("PUT", { order }));
 
 // Guests and groups
 export const listAiGuests = (id, params) => apiRequest(`${eventPath(id)}/guests${query(params)}`);
@@ -57,14 +52,10 @@ export const deleteAiFolder = (id, folderId) => apiRequest(`${eventPath(id)}/fol
 export const listAiMedia = (id, params) => apiRequest(`${eventPath(id)}/media${query(params)}`);
 export const getAiMedia = (id, mediaId) => apiRequest(`${eventPath(id)}/media/${encodeURIComponent(mediaId)}`);
 export const deleteAiMedia = (id, mediaId) => apiRequest(`${eventPath(id)}/media/${encodeURIComponent(mediaId)}`, { method: "DELETE" });
-export function uploadAiMedia(id, file, { folderId } = {}) {
-  const body = new FormData();
-  body.append("file", file, file.name);
-  if (folderId) body.append("folderId", folderId);
-  return apiRequest(`${eventPath(id)}/media/upload`, { method: "POST", body });
-}
-export const noteAiUploadBatch = (id, count) => apiRequest(`${eventPath(id)}/media/batch`, json("POST", { count }));
+// Uploading is `ai-media-upload.service.js`: the optimized-upload contract, one folder at a time.
 export const getAiProcessing = (id) => apiRequest(`${eventPath(id)}/processing`);
+/** One event's Detection & Storage figures, for its Project Dashboard. */
+export const getAiEventDetection = (id) => apiRequest(`${eventPath(id)}/detection`);
 export const retryAiFailed = (id) => apiRequest(`${eventPath(id)}/processing/retry-failed`, { method: "POST" });
 /** The URL of a private face crop; it needs the bearer header, so load it with `fetchAiFaceThumbnail`. */
 export const aiFaceThumbnailPath = (id, faceId) => `${eventPath(id)}/faces/${encodeURIComponent(faceId)}/thumbnail`;
@@ -84,3 +75,7 @@ export const decideAiMatch = (id, matchId, status) => apiRequest(`${eventPath(id
 export const getAiShare = (id) => apiRequest(`${eventPath(id)}/share`);
 export const createAiShare = (id, payload) => apiRequest(`${eventPath(id)}/share`, json("POST", payload));
 export const revokeAiShare = (id) => apiRequest(`${eventPath(id)}/share`, { method: "DELETE" });
+/** Edits a live link in place: `{ shortCode?, requirePin?, pin? }`. */
+export const updateAiShare = (id, payload) => apiRequest(`${eventPath(id)}/share`, json("PATCH", payload));
+/** What a QR poster is drawn from: the live link's QR grid, the event's name and the studio's logos. */
+export const getAiSharePoster = (id) => apiRequest(`${eventPath(id)}/share/poster`);

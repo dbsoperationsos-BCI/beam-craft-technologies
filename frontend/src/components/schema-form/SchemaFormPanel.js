@@ -1,5 +1,6 @@
 "use client";
 
+import HelpTip from "@/components/shared/HelpTip";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import Button from "@/components/shared/Button";
@@ -19,7 +20,18 @@ import useFocusTrap from "@/components/shared/useFocusTrap";
 import requiredProblems, { describeMissing } from "./requiredProblems";
 
 /** A section is either a described one, `{ id, title, fields }`, or a bare `[id, title]` link. */
-const sectionLink = (section) => Array.isArray(section) ? section : [section.id, section.title];
+/*
+ * A section's rail entry: `[id, label, children, disabled]`. `disabled` - a section's own
+ * `disabled`, `true` or the reason as text - lists it in the rail, shut, and leaves its body off the
+ * page: a part of the record that exists in name but is not open yet.
+ */
+const sectionLink = (section) => Array.isArray(section) ? section : [section.id, section.title, null, section.disabled || false];
+/**
+ * The first section an entry leads to: itself, or - for a group of `[id, label, children]` - its first
+ * child's, however deep. A disabled one is passed over: it is not drawn, so opening on it would open
+ * on nothing.
+ */
+const firstSectionOf = (link) => (link?.[2]?.length ? firstSectionOf(link[2].find((child) => !child[3]) || link[2][0]) : link?.[0]);
 
 /**
  * False while rendering on the server, true in the browser — asked the way React means it to be
@@ -53,7 +65,11 @@ export default function SchemaFormPanel({
   readOnly = false,
   readOnlyReason,
   title,
+  // Drawn right after the title - a short status of what the panel is about (a project On Hold).
+  titleAddon,
   description,
+  // The description as the ⓘ beside the title rather than a line under it (Settings).
+  descriptionAsTip = false,
   sections,
   /** Fields shown above the first section, belonging to the form rather than to any one section. */
   leadFields,
@@ -83,6 +99,8 @@ export default function SchemaFormPanel({
   notes,
   context,
   sidebarAriaLabel,
+  // A search box at the top of the section rail - see SchemaFormSidebar's `search`. Settings passes one.
+  sidebarSearch = null,
   // A panel that shows one section at a time drives the rail itself: pass the section on screen and
   // a handler for the rail's clicks, and the scroll spy stands down. Settings works this way — each
   // section is its own screen rather than a stop on one long scroll — while every form that stacks
@@ -100,11 +118,27 @@ export default function SchemaFormPanel({
   onSubmit,
   error,
   footer,
+  /*
+   * A column beside the body, on the right from `lg` and under it below that — for what belongs to
+   * the whole record and should stay in view while the body scrolls, the way a project's pending
+   * follow-ups sit beside its pre production shoot cards. It scrolls on its own.
+   */
+  aside,
+  asideAriaLabel,
+  /*
+   * A left column of the caller's own, from `lg` up, drawn exactly like the section sidebar and
+   * scrolling on its own beside the body - for a tab whose own navigation is not a list of form
+   * sections (production's Execution steps). Used only where the section sidebar is not shown.
+   */
+  rail,
+  railAriaLabel,
   submitLabel,
   savingLabel,
   submitVariant = "primary",
   submitDisabled = false,
   cancelLabel = "Cancel",
+  // Another action drawn beside the submit button (Pre Production's Download), never a submit itself.
+  footerExtra = null,
   saving = false,
   children,
   loading = false,
@@ -114,6 +148,10 @@ export default function SchemaFormPanel({
   // are separate pages, and the rail moves between them rather than scrolling to them. With this on,
   // only the chosen section is drawn, and `children` may be a function of the chosen section's id.
   navigate = false,
+  // The row of section links above the form on a phone and tablet. A short form whose few sections
+  // are read by scrolling (each heading sticks while it is in view) leaves it out: there it only
+  // repeated the heading below it. The side list from lg up is unaffected.
+  sectionNavOnPhone = true,
   // For a panel whose rail is the map of what it will cover rather than a way around what is
   // already there - Settings, where the entries are the subject and one of them happens to be
   // the only one built so far.
@@ -142,7 +180,9 @@ export default function SchemaFormPanel({
   const showSidebar = alwaysShowSidebar || links.length > 1;
 
   const mounted = useMounted();
-  const [scrolledSection, setScrolledSection] = useState(links[0]?.[0]);
+  // The first *section*, not the first rail entry: a group heading is not on the page, and starting
+  // on it left the group holding the opening section shut until the reader scrolled.
+  const [scrolledSection, setScrolledSection] = useState(() => firstSectionOf(links.find((link) => !link[3]) || links[0]));
   const contentRef = useRef(null);
   const { selectSection, onContentScroll } = useSchemaFormScrollSpy(contentRef, setScrolledSection);
   // Controlled when the caller supplies the handler: the rail then reports clicks instead of
@@ -216,6 +256,13 @@ export default function SchemaFormPanel({
    * showing Bank Details reads as a fault in the form rather than as something to go and fix.
    */
   function handleSubmit(event) {
+    /*
+     * A submit belongs to its own form. The panel is portalled to <body>, but React still bubbles its
+     * events up the component tree - so a panel stacked on another (Status → Update on "Project
+     * started", over the project's own panel) handed its submit to the panel underneath too, which
+     * saved the project and closed everything instead of going back to Status.
+     */
+    event.stopPropagation();
     if (loading) { event.preventDefault(); return; }
     if (validateRequired && problems.hasProblems) {
       event.preventDefault();
@@ -261,9 +308,19 @@ export default function SchemaFormPanel({
     return () => { document.body.style.overflow = previousOverflow; };
   }, []);
 
+  /*
+   * Cancel then submit, together at the right.
+   *
+   * The submit used to carry `ml-auto`, which put Cancel at the far left and the submit at the far
+   * right - a footer read as two unrelated controls, and one that did not match the dialogs beside
+   * it (`ui/Dialog` has always grouped its footer with `sm:justify-end`). The row below is now
+   * right-aligned for every panel, so a footer is one group of buttons wherever it is drawn, and a
+   * footer written here says only what its buttons are and in what order.
+   */
   const standardFooter = submitLabel ? <>
     <Button className="max-sm:flex-1" type="button" onClick={onClose} disabled={saving}>{cancelLabel}</Button>
-    <Button className="ml-auto max-sm:flex-1" variant={submitVariant} disabled={saving || submitDisabled}>{saving && savingLabel ? savingLabel : submitLabel}</Button>
+    {footerExtra ? <div className="max-sm:flex-1">{footerExtra}</div> : null}
+    <Button className="max-sm:flex-1" variant={submitVariant} disabled={saving || submitDisabled}>{saving && savingLabel ? savingLabel : submitLabel}</Button>
   </> : footer;
 
   // Rendered into `body` rather than where it was written.
@@ -280,17 +337,18 @@ export default function SchemaFormPanel({
   // interaction in any case.
   const panel = <div className={`fixed inset-0 bg-black/50 sm:pt-12 ${zIndexClassName}`}>
     <FloatingNotice notice={shownNotice && shownNotice.message !== dismissedError ? shownNotice : null} onClose={() => setDismissedError(shownNotice?.message || "")} />
-    <form ref={panelRef} role="dialog" aria-modal="true" aria-label={title} onSubmit={handleSubmit} className="flex h-dvh min-h-0 flex-col overflow-hidden bg-white shadow-2xl sm:h-[calc(100dvh-3rem)] sm:rounded-t-md">
+    <form ref={panelRef} role="dialog" aria-modal="true" aria-label={title} onSubmit={handleSubmit} noValidate className="flex h-dvh min-h-0 flex-col overflow-hidden bg-white shadow-2xl sm:h-[calc(100dvh-3rem)] sm:rounded-t-md">
       <header className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-200 px-4 py-3 sm:gap-4 sm:px-5 sm:pb-4 sm:pt-5">
         <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
           {onBack && <IconButton onClick={onBack} disabled={saving} label={backAriaLabel || "Back"} size="sm" className="text-slate-500 hover:bg-slate-50 hover:text-slate-700">←</IconButton>}
-          <div className="min-w-0"><h1 className="text-base font-semibold text-slate-900 sm:text-lg">{title}</h1><p className="mt-1 text-xs text-slate-500 sm:mt-1.5 sm:text-sm">{description}</p></div>
+          <div className="min-w-0"><div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"><h1 className="flex items-center text-base font-semibold text-slate-900 sm:text-lg">{title}{descriptionAsTip && <HelpTip text={description} />}</h1>{titleAddon}</div>{!descriptionAsTip && <p className="mt-1 text-xs text-slate-500 sm:mt-1.5 sm:text-sm">{description}</p>}</div>
         </div>
         <IconButton onClick={onClose} label={closeAriaLabel} title="Close" size="sm" className="self-center text-slate-500 hover:bg-slate-50 hover:text-slate-700"><CloseIcon aria-hidden="true" sx={{ fontSize: 24 }} /></IconButton>
       </header>
       {tabs && <div className="shrink-0 border-b border-slate-200 bg-white px-4 sm:px-5">{tabs}</div>}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
-        {showSidebar && <SchemaFormSidebar sections={links} activeId={activeSection} onSelect={goToSection} ariaLabel={sidebarAriaLabel} />}
+        {showSidebar && <SchemaFormSidebar sections={links} activeId={activeSection} onSelect={goToSection} ariaLabel={sidebarAriaLabel} phoneNav={sectionNavOnPhone} search={sidebarSearch} />}
+        {!showSidebar && rail && <aside aria-label={railAriaLabel} className="relative z-10 hidden w-60 shrink-0 overflow-y-auto overscroll-contain border-r border-slate-200 bg-slate-50 p-3 lg:block">{rail}</aside>}
         <main ref={contentRef} onScroll={navigate || sectionsControlled ? undefined : onContentScroll} className="min-w-0 flex-1 overflow-y-auto overscroll-contain">
           {/* Nothing in the body means anything until the record it describes has arrived, so the
               wait replaces it rather than sitting above a form of empty fields. */}
@@ -304,7 +362,7 @@ export default function SchemaFormPanel({
                 {visibleFields(leadFields, values, context).map((field) => <SchemaFormField key={field.name} field={field} values={values} onChange={onChange} errors={shownErrors} notes={notes} context={context} />)}
               </div>
             </div> : null}
-            {shownSections.filter((section) => !Array.isArray(section)).filter((section) => !navigate || section.id === activeSection).map((section) => <SchemaFormSection key={section.id} id={section.id} title={section.title}>
+            {shownSections.filter((section) => !Array.isArray(section) && !section.disabled).filter((section) => !navigate || section.id === activeSection).map((section) => <SchemaFormSection key={section.id} id={section.id} title={section.title}>
               {section.summary && <SchemaFormSummary items={section.summary(values, context)} className="mb-4" />}
               {section.render?.({ values, onChange, context, errors: shownErrors })}
               {section.fields && <div className={`grid gap-4 ${section.columns === 1 ? "" : "md:grid-cols-2"}`}>
@@ -317,13 +375,21 @@ export default function SchemaFormPanel({
             {!navigate && !sectionsControlled && <SchemaFormEndSpacer />}
           </ReadOnlyFieldset>}
         </main>
+        {aside && <aside aria-label={asideAriaLabel} className="max-h-[45%] min-h-0 shrink-0 overflow-y-auto overscroll-contain border-t border-slate-200 bg-slate-50 lg:max-h-none lg:w-80 lg:border-l lg:border-t-0 xl:w-96">{aside}</aside>}
       </div>
       {/* Only when there is something to put in it. A panel that neither submits nor offers an
           action - Settings, which saves each section as it goes - was drawing an empty bordered
           strip along the bottom of the screen for a button that is not there. */}
       {standardFooter && <footer className="relative z-10 flex shrink-0 bg-white">
         {showSidebar && <div className="hidden w-60 shrink-0 border-r border-slate-200 bg-slate-50 lg:block" />}
-        <div className="flex min-w-0 flex-1 items-center gap-3 border-t border-slate-200 px-3 py-2.5 sm:flex-wrap sm:px-5 sm:py-3">{standardFooter}</div>
+        {/* `sm:justify-end`, as `ui/Dialog`'s footer has: every button of a footer sits together at
+            the right, in the order it was written. On a phone they are `flex-1` and fill the row
+            instead, so there is nothing to align. No footer carries an auto margin - one button
+            pushed to the other end is what made these rows read as two unrelated sets. */}
+        <div className="flex min-w-0 flex-1 items-center gap-3 border-t border-slate-200 px-3 py-2.5 sm:flex-wrap sm:justify-end sm:px-5 sm:py-3">{standardFooter}</div>
+        {/* The aside's column carries on down past the footer, so the save button ends where the
+            form does rather than sitting under the column beside it. */}
+        {aside && <div className="hidden shrink-0 border-l border-slate-200 bg-slate-50 lg:block lg:w-80 xl:w-96" />}
       </footer>}
     </form>
   </div>;

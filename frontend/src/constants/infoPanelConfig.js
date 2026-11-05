@@ -1,3 +1,8 @@
+import { preProductionVerticalFieldRuns, preProductionVerticalOf } from "./preProductionVerticalFields.js";
+import { verticalCode } from "../components/sales/whatsappGroupNameUtils.js";
+import { MONTH_NAMES, monthLabel, rupees } from "../lib/payrollRecovery.mjs";
+import { assetCategoryLabel, assetTypeLabel } from "../lib/assetCategoryLabels.mjs";
+
 /**
  * Every info panel in the app, described rather than drawn. `DataTableInfoPanel` renders whatever
  * it is handed from here, so adding a field to a panel is an edit to this file alone.
@@ -28,8 +33,8 @@ export function assetForInfo(asset) {
   if (!asset) return null;
   return {
     ...asset,
-    categoryName: asset.category?.parent?.name || asset.category?.name,
-    typeName: asset.category?.name,
+    categoryName: assetCategoryLabel(asset),
+    typeName: assetTypeLabel(asset),
     branchName: asset.branch?.name,
     assignedPersonName: asset.assignedPerson?.employeeName,
     assignedPersonEmployeeId: asset.assignedPerson?.employeeId,
@@ -129,7 +134,7 @@ export const vendorInfoSections = [
   { title: "Contact", fields: [["contactPerson", "Contact Person"], ["mobileNumber", "Mobile Number"], ["whatsappNumber", "WhatsApp Number"], ["alternateNumber", "Alternate Number"], ["email", "Email"]] },
   { title: "Address", fields: [["address", "Address"], ["area", "Area"], ["city", "City"], ["district", "District"], ["state", "State"], ["country", "Country"], ["pincode", "Pincode"]] },
   { title: "Tax & Bank Details", fields: [["gstNumber", "GST Number"], ["panNumber", "PAN Number"], ["aadhaarNumber", "Aadhaar Number"], ["bankName", "Bank Name"], ["accountNumber", "Account Number"], ["ifscCode", "IFSC Code"], ["upiId", "UPI ID"]] },
-  { title: "Capabilities", fields: [["preferredLanguages", "Preferred Languages"], ["skills", "Skills"]] },
+  { title: "Capabilities", fields: [["preferredLanguages", "Preferred Languages"], ["skills", "Skills"], ["supportedBranchNames", "Supported Branches"], ["canBeProductionTeamMember", "Can Be a Production Team Member", "boolean"]] },
   { title: "Social & Reference", fields: [["website", "Website"], ["instagram", "Instagram"], ["facebook", "Facebook"], ["referredBy", "Referred By"], ["remarks", "Remarks"]] },
   { title: "Record History", fields: [["addedByName", "Added By"], ["createdAt", "Added On", "date"]] },
 ];
@@ -158,7 +163,7 @@ export function vendorForInfo(vendor) {
  * recorded, which is why it is the shorter of the two.
  */
 export const employeeInfoSections = [
-  { title: "Employee information", fields: [["employeeId", "Employee ID"], ["employeeName", "Employee Name"], ["employmentStatus", "Employment Status"], ["contactNumber", "Contact Number"], ["emailId", "Email ID"], ["dateOfJoining", "Date Of Joining", "date"]] },
+  { title: "Employee information", fields: [["employeeId", "Employee ID"], ["employeeName", "Employee Name"], ["employmentStatus", "Employment Status"], ["contactNumber", "Contact Number"], ["emailId", "Email ID"], ["dateOfJoining", "Date Of Joining", "date"], ["dateOfRelieving", "Last Working Day", "date"]] },
   { title: "Role", fields: [["designation", "Designation"], ["department", "Department"], ["skills", "Skills"], ["vertical", "Vertical"], ["workBaseLocation", "Work Base Location"], ["currentWorkLocation", "Current Work Location"], ["photoShooter", "Photo Shooter", "boolean"], ["workType", "Work Type"], ["languagesKnown", "Languages Known"]] },
   { title: "Personal", fields: [["bloodGroup", "Blood Group"], ["fatherName", "Father’s Name"], ["motherName", "Mother’s Name"], ["dateOfBirth", "Date Of Birth", "date"], ["maritalStatus", "Marital Status"], ["weddingAnniversary", "Wedding Anniversary", "date"], ["currentAddress", "Current Address"], ["permanentAddress", "Permanent Address"]] },
   // Both are lists on the record rather than columns, so the panel reads the one-line summaries the
@@ -223,6 +228,64 @@ export const projectManagementInfoSections = [
   },
   ...workflowSections,
   ...commonProjectInfoSections.slice(4),
+];
+
+/**
+ * One shoot on the Pre Production board, read back in full.
+ *
+ * The row is the shoot, not the project, so the project's columns lead as the context the shoot
+ * sits in and the coordinator's own answers follow. The order matches the form that fills them in,
+ * so a field is read where it was written.
+ */
+export const preProductionInfoSections = [
+  { title: "Project", fields: [["eventId", "Event ID"], ["clientName", "Client Name"], ["clientMainNumber", "Client Number"], ["sourceBranch", "Source Branch"], ["product", "Vertical", "vertical"], ["crdDocumentStatus", "CRD Document Groom / Bride / Baby Shoot"], ["crdDocumentState", "CRD Document State"], ["crdSidesReceived", "CRD Sides Received"], ["crdCompletion", "CRD Completion %"], ["crdSubmittedAt", "CRD Submitted At", "date"], ["projectStatus", "Project Status"], ["mainEventDate", "Main Event Date", "date"]] },
+  { title: "People", fields: [["crmName", "CRM"], ["preProductionCoordinator", "Pre Production Coordinator"], ["creativeManager", "Creative Manager"], ["postProductionCoordinator", "Post Production Coordinator"]] },
+  { title: "Shoot", fields: [["shootId", "Shoot ID"], ["shoot", "Shoot"], ["shootType", "Shoot Type"], ["subEventDate", "Sub Event Date", "date"], ["isMainEvent", "Main Event", "boolean"], ["shootPlace", "Shoot Place"], ["district", "District"], ["state", "State"], ["sessionTiming", "Session Timing"]] },
+  { title: "Location", fields: [["locationAddress", "Location Address"], ["locationLink", "Location Link"]] },
+  { title: "Event Timing", fields: [["eventStartTime", "Event Start Time"], ["eventEndTime", "Event End Time"], ["reportingTime", "Reporting Time"], ["scheduleRemarks", "Remarks"]] },
+  { title: "Concepts", fields: [["conceptList", "Concept List", "multiline"]] },
+  { title: "Travel & Accommodation", fields: [["travelAccommodationNeeded", "Travel & Accommodation Needed", "boolean"], ["travelPaidBy", "Travel Paid By"], ["accommodationPaidBy", "Accommodation Paid By"], ["foodTakenCareBy", "Food Taken Care By"], ["accommodationAddress", "Accommodation Location Address"], ["accommodationLink", "Accommodation Link"], ["accommodationRemarks", "Remarks"]] },
+  { title: "Status", fields: [["completionStatus", "Pre Production Status"], ["shootStatusRemarks", "Status Remarks"]] },
+  { title: "Storage", fields: [["storageId", "Storage ID"], ["receivedTheStorage", "Received The Storage", "boolean"], ["storageStatus", "Storage Status"]] },
+  { title: "Sales Handover", fields: [["salesPreProductionRemarks", "Sales Pre Production Remarks"]] },
+  { title: "System Details", fields: [["updatedAt", "Last Updated", "date"], ["updatedBy", "Last Updated By"]] },
+];
+
+/**
+ * The sections for one pre production row, given the project's vertical: the base list
+ * with that vertical's checklist slotted in before Follow-up & Status — the same placement the
+ * edit form gives it. Reads the same field runs as every other pre production surface.
+ */
+/** An intro call reads as it was asked - Yes or No - rather than as the Completed / Pending it is kept as. */
+export const preProductionInfoFormatters = {
+  preProductionYesNo: (value) => (value === "Completed" ? "Yes" : "No"),
+  // DD, not the stored WED - see `verticalCode`.
+  vertical: (value) => verticalCode(value) || "—",
+};
+
+export function preProductionInfoSectionsFor(product) {
+  const vertical = preProductionVerticalOf(product);
+  const run = preProductionVerticalFieldRuns[vertical];
+  if (!run.length) return preProductionInfoSections;
+  const section = {
+    title: vertical === "dumdum" ? "Dum Dum Checklist" : "Qua Qua Checklist",
+    fields: run.map((field) => [field.id, field.label, field.type === "toggle" ? "boolean" : field.type === "yesno" ? "preProductionYesNo" : field.type === "date" ? "date" : undefined].filter((part) => part !== undefined)),
+  };
+  const at = preProductionInfoSections.findIndex((entry) => entry.title === "Follow-up & Status");
+  return [...preProductionInfoSections.slice(0, at), section, ...preProductionInfoSections.slice(at)];
+}
+
+/**
+ * One project row on the Pre Production board — the project's own columns plus the summary of its
+ * shoots the board computes. Everything per-shoot is read by opening the project's cards, so this
+ * panel deliberately stops at the summary.
+ */
+export const preProductionProjectInfoSections = [
+  { title: "Project", fields: [["eventId", "Event ID"], ["clientName", "Client Name"], ["clientMainNumber", "Client Number"], ["sourceBranch", "Source Branch"], ["product", "Vertical", "vertical"], ["crdDocumentStatus", "CRD Document Groom / Bride / Baby Shoot"], ["crdDocumentState", "CRD Document State"], ["crdSidesReceived", "CRD Sides Received"], ["crdCompletion", "CRD Completion %"], ["crdSubmittedAt", "CRD Submitted At", "date"], ["projectStatus", "Project Status"], ["mainEventDate", "Main Event Date", "date"]] },
+  { title: "People", fields: [["crmName", "CRM"], ["productionManager", "Production Manager"], ["preProductionCoordinator", "Pre Production Coordinator"], ["creativeManager", "Creative Manager"], ["postProductionCoordinator", "Post Production Coordinator"]] },
+  { title: "Storage", fields: [["storageId", "Storage ID"], ["receivedTheStorage", "Received The Storage", "boolean"], ["storageStatus", "Storage Status"]] },
+  { title: "Shoots", fields: [["shootCount", "Shoots"], ["shootNames", "Shoot Names"], ["shootIds", "Shoot IDs"], ["subEventDates", "Sub Event Dates"], ["completionStatusLabel", "Pre Production Status"], ["preProductionStatusRemarks", "Status Remarks"], ["completionSummary", "Shoots Planned"], ["shootsPending", "Shoots Pending"], ["lastFollowupDate", "Last Followup Date", "date"], ["nextFollowupDate", "Next Followup Date", "date"], ["followupRemarks", "Followup Remarks"], ["nextFollowupDate", "Next Followup Due", "date"]] },
+  { title: "Sales Handover", fields: [["salesPreProductionRemarks", "Sales Pre Production Remarks"]] },
 ];
 
 export const productionProjectInfoSections = [
@@ -317,12 +380,63 @@ export const clientGiftsInfoSections = [
       ["whatsappGroupName", "WhatsApp Group Name"],
       ["clientMainNumber", "Client Main Number"],
       ["sourceBranch", "Source Branch"],
-      ["vertical", "Vertical"],
+      // Formatted like every other project panel: DD, not the WED the group name generator keeps.
+      ["vertical", "Vertical", "vertical"],
       ["crmName", "CRM"],
       ["projectManager", "Project Manager"],
       ["projectStatus", "Project Status"],
     ],
   },
+];
+
+/*
+ * Project Management → Feedback: one review, read back. The info panel (a row's click) and View
+ * (its double-click or ⋮ menu, `RecordViewPanel`) both draw these, so the two cannot differ. The
+ * Shoot and Project sections are what Give Feedback's Project Description card shows.
+ */
+/*
+ * One attendance request - a leave, permission, comp-off or on-duty - read beside its table and in
+ * full on a double-click, on HRM → Request and Employee Attendance.
+ *
+ * One list for all four kinds. `attendanceRequestSections` (in `components/hrm/attendanceRequests`,
+ * beside the type labels `attendanceRequestForInfo` reads) narrows Period to the request's own kind,
+ * so a leave never shows a From Time. Reason and Remarks are prose, so they are `multiline` and keep
+ * the breaks they were typed with.
+ *
+ * The table says how far a request got as a count; this says who, under Approvers - each approver
+ * and whether they have approved, rejected or not yet answered (`approverProgress`, formatted by
+ * `attendanceRequestFormatters`). Only where the server sends the names: it withholds them from the
+ * person who raised a request once it is rejected (`requesterMaySeeApprovers`), and the field is
+ * simply absent then.
+ */
+export const attendanceRequestInfoSections = [
+  { title: "Request", fields: [["typeLabel", "Request Type"], ["displayStatus", "Status"], ["createdAt", "Applied On", "datetime"]] },
+  { title: "Employee", fields: [["employeeName", "Employee Name"], ["employeeCode", "Employee ID"]] },
+  {
+    title: "Period",
+    fields: [
+      ["workedDate", "Holiday / Weekly Off Worked", "date"],
+      // A Comp-Off Credit's day as attendance recorded it, and what became of it.
+      ["creditDayKind", "Day"],
+      ["creditLoginAt", "Login", "datetime"],
+      ["creditLogoutAt", "Logout", "datetime"],
+      ["creditWorked", "Worked"],
+      ["creditStatus", "Comp-Off Credit"],
+      ["creditExpiresOn", "Use By", "date"],
+      ["dayOff", "Day Off", "date"],
+      ["permissionDate", "Date", "date"],
+      ["fromDate", "From Date", "date"],
+      ["toDate", "To Date", "date"],
+      ["daysLabel", "Days"],
+      ["fromTime", "From Time"],
+      ["toTime", "To Time"],
+      ["durationLabel", "Duration"],
+    ],
+  },
+  // An Incorrect Login request's day as the server read it when it was raised, and what it asks for.
+  { title: "Attendance Correction", fields: [["currentStatus", "Current Status"], ["requestedStatus", "Change To"]] },
+  { title: "Reason", fields: [["reason", "Reason", "multiline"]] },
+  { title: "Decision", fields: [["approvalsSummary", "Approvals"], ["approvers", "Approvers", "approverProgress"], ["decidedAt", "Decided On", "datetime"], ["decisionRemarks", "Remarks", "multiline"]] },
 ];
 
 /*
@@ -352,4 +466,113 @@ export const referralInfoSections = [
       ["payouts", "Schedule", "referralInstalments"],
     ],
   },
+];
+
+/*
+ * One request from the user activity log, read beside the grid - every field the row carries,
+ * including the four the grid has no room for: who the account belongs to, their branch, the path
+ * that was called and the browser that called it.
+ *
+ * `logTime` and `durationMs` are formatters the screen passes in: the log reads its time to the
+ * second in the grid's own format, and a duration is milliseconds rather than a bare number.
+ */
+export const activityLogInfoSections = [
+  {
+    title: "Request",
+    fields: [
+      ["createdAt", "Log time", "logTime"],
+      ["username", "Username"],
+      ["userName", "Full name"],
+      ["branchName", "Branch"],
+      ["module", "Utility name"],
+      ["action", "Action name"],
+      ["method", "HTTP method"],
+      ["path", "Route path"],
+    ],
+  },
+  /*
+   * **What the write changed**, in a section of its own.
+   *
+   * Its own, because it is the answer to the question this panel is usually opened for - "he says he
+   * updated it and it is not reflecting" - and because it is several sentences rather than one value:
+   * under Request it would have read as one more line of plumbing between the route path and the
+   * status code. A line whose save changed nothing on a watched record, or was refused, has none and
+   * the section says so rather than disappearing.
+   */
+  {
+    title: "What changed",
+    fields: [["changes", "Changes", "changes"]],
+  },
+  {
+    title: "Response",
+    fields: [
+      ["statusCode", "Status code"],
+      ["statusText", "Response status"],
+      ["durationMs", "Duration", "durationMs"],
+    ],
+  },
+  {
+    title: "Device",
+    fields: [
+      ["clientIp", "Client host"],
+      ["userAgent", "User agent", "multiline"],
+    ],
+  },
+];
+// ---------------------------------------------------------------------------
+// Payroll
+// ---------------------------------------------------------------------------
+
+/** "October 2026" for a payroll month. */
+const payrollMonth = (year, month) => (year && month ? `${MONTH_NAMES[Number(month) - 1]} ${year}` : "");
+/** The months skipped on the Main Page, as the registers list them: "Oct 2026, Nov 2026". */
+const skippedText = (keys) => (keys || []).map(monthLabel).join(", ");
+
+/** Payroll → Advance Salary: one advance, read the way its form collects it. */
+export const payrollAdvanceInfoSections = [
+  { title: "Advance", fields: [["employeeName", "Employee Name"], ["employeeCode", "Employee ID"], ["advanceId", "Advance ID"], ["status", "Status"], ["amountText", "Amount"], ["advanceDate", "Advance Date", "date"], ["reason", "Reason", "multiline"]] },
+  { title: "Deduction", fields: [["fromMonth", "From Month (salary it comes off)"], ["skippedText", "Skipped Months"]] },
+  { title: "Record History", fields: [["createdAt", "Added On", "datetime"], ["updatedAt", "Last Changed", "datetime"]] },
+];
+
+/** Money in rupees and the months worded, so the panel never reads a bare number or a month index. */
+export function payrollAdvanceForInfo(advance) {
+  if (!advance) return null;
+  return {
+    ...advance,
+    amountText: rupees(advance.amount),
+    fromMonth: payrollMonth(advance.deductYear, advance.deductMonth),
+    skippedText: skippedText(advance.skippedMonths),
+  };
+}
+
+/** Payroll → Recovery: one recovery - what is owed, how it is taken back, and where it came from. */
+export const payrollRecoveryInfoSections = [
+  { title: "Recovery", fields: [["employeeName", "Employee Name"], ["employeeCode", "Employee ID"], ["recoveryId", "Recovery ID"], ["status", "Status"], ["totalAmountText", "Total Amount"], ["monthlyDeductionText", "Monthly Deduction"], ["monthsText", "No. of Months"], ["instalmentsText", "Instalments Deducted"], ["reason", "Reason", "multiline"]] },
+  { title: "Schedule", fields: [["startMonthText", "Start Month"], ["startDate", "Start Date", "date"], ["endDate", "End Date", "date"], ["skippedText", "Skipped Months"]] },
+  { title: "Source", fields: [["advancesText", "Made From"]] },
+  { title: "Record History", fields: [["createdAt", "Added On", "datetime"], ["updatedAt", "Last Changed", "datetime"]] },
+];
+
+export function payrollRecoveryForInfo(recovery) {
+  if (!recovery) return null;
+  return {
+    ...recovery,
+    // An LOP policy breach is days, not money - its total and monthly share say so.
+    totalAmountText: recovery.deductBy === "LOP" ? `${Number(recovery.totalDays) || 0} days of LOP` : rupees(recovery.totalAmount),
+    monthlyDeductionText: recovery.deductBy === "LOP" ? `${(recovery.lopDaysPerMonth || []).join(", ")} days` : rupees(recovery.monthlyDeduction),
+    monthsText: recovery.months ? `${recovery.months} ${Number(recovery.months) === 1 ? "month" : "months"}` : "",
+    instalmentsText: recovery.months ? `${recovery.instalmentsDeducted ?? 0} of ${recovery.months}` : "",
+    startMonthText: payrollMonth(recovery.startYear, recovery.startMonth),
+    skippedText: skippedText(recovery.skippedMonths),
+    // Where it came from: the advances converted into it, or entered here.
+    advancesText: (recovery.advanceIds || []).length ? `Advances ${recovery.advanceIds.join(", ")}` : "Entered on Recovery",
+  };
+}
+
+/** Payroll → Policy Breach: one fine - how much, and how it is taken from salary. Mapped by `payrollRecoveryForInfo`. */
+export const payrollPolicyBreachInfoSections = [
+  { title: "Policy Breach", fields: [["employeeName", "Employee Name"], ["employeeCode", "Employee ID"], ["policyBreachId", "Policy Breach ID"], ["status", "Status"], ["totalAmountText", "Total Amount"], ["monthlyDeductionText", "Monthly Deduction"], ["monthsText", "No. of Months"], ["instalmentsText", "Instalments Deducted"], ["reason", "Reason", "multiline"]] },
+  { title: "Schedule", fields: [["startMonthText", "Start Month"], ["startDate", "Start Date", "date"], ["endDate", "End Date", "date"], ["skippedText", "Skipped Months"]] },
+  { title: "Record History", fields: [["createdAt", "Added On", "datetime"], ["updatedAt", "Last Changed", "datetime"]] },
 ];

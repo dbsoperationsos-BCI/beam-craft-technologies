@@ -149,10 +149,11 @@ export default function CrmDashboardPage() {
         {/* The same controls the Reports page uses, in the same order, so moving between the two
             does not mean learning a second filter bar. Only the two that mean something here. */}
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-          <DateField label="From" value={draft.from} onChange={(value) => set({ from: value })} />
-          <DateField label="To" value={draft.to} onChange={(value) => set({ to: value })} />
+          <DateField label="From" helperText="First day of calls counted; press Apply to update." value={draft.from} onChange={(value) => set({ from: value })} />
+          <DateField label="To" helperText="Last day of calls counted; press Apply to update." value={draft.to} onChange={(value) => set({ to: value })} />
           <Dropdown
             label="Vertical"
+            helperText="Show one vertical only, or leave on all verticals."
             ariaLabel="Vertical"
             value={draft.vertical}
             onChange={(value) => set({ vertical: value })}

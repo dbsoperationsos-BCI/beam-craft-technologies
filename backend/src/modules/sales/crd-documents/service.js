@@ -1,7 +1,9 @@
 const crypto = require("crypto");
+const { SHOOT_DATE_ASC } = require("../../../services/shootOrder");
 const { snapshotDocumentBranding, brandingForDocument } = require("../../../services/documentBranding");
 const { z } = require("zod");
 const prisma = require("../../../config/db");
+const { eventsForShoots, shootsForEvents } = require("./events");
 const { storeImage, storeImages, discardUploads } = require("../../../services/imageStorage");
 const { storeDocuments } = require("../../../services/documentStorage");
 const { normalizePhoneNumber } = require("../../../services/phoneNumber");
@@ -97,6 +99,20 @@ const projectSelect = {
   sourceBranch: true,
   crmName: true,
   projectStatus: true,
+  /*
+   * Who the document is on: the project's **pre-production coordinator**.
+   *
+   * Not a column on the document. That person is already named on the project and is already one of the
+   * five columns `dataScope` narrows the register by - see `NAMED_ON_FIELDS` - which is why the document
+   * reaches them at all. A copy of the id here would be the same fact in two rows, for the two to
+   * disagree the first time a project's coordinator changed.
+   *
+   * The relation as well as the text, because the text is a copy (Rule 5): the current name comes back
+   * from the employee, and the copy answers only for rows filled in before anybody was linked.
+   */
+  preProductionCoordinator: true,
+  preProductionCoordinatorEmployeeId: true,
+  preProductionCoordinatorEmployee: { select: { employeeName: true, employeeId: true } },
 };
 
 // Everything the studio side reads off a document row. A standalone document carries its own
@@ -291,11 +307,11 @@ async function prefillForProject(project, row = null) {
     // No project means no shoots to read: a standalone document is issued before any exist.
     project.id ? prisma.projectShoot.findFirst({
       where: { projectId: project.id, deletedAt: null, isMainEvent: true },
-      orderBy: [{ dateCreated: "asc" }, { createdAt: "asc" }],
+      orderBy: [{ dateCreated: SHOOT_DATE_ASC }, { createdAt: "asc" }],
     }) : null,
     project.id ? prisma.projectShoot.findFirst({
       where: { projectId: project.id, deletedAt: null },
-      orderBy: [{ dateCreated: "asc" }, { createdAt: "asc" }],
+      orderBy: [{ dateCreated: SHOOT_DATE_ASC }, { createdAt: "asc" }],
     }) : null,
   ]);
   const snapshot = project.groupNameGeneratorJson && typeof project.groupNameGeneratorJson === "object" ? project.groupNameGeneratorJson : {};
@@ -380,6 +396,9 @@ async function documentWithPrefill(project, document, row = null) {
    */
   next.studioAnswered = compact(startFromBooking) ? ["eventStartAt"] : [];
 
+  // One event per shoot of the project, the client's answers kept per shoot (`events.js`).
+  next.common.events = eventsForShoots(await shootsForEvents(prisma, project.id), next.common.events, next.common);
+
   next.groom = mergeSidePrefill(next, "groom", { name: prefill.groomName, phone: prefill.groomPhone || project.clientMainNumber });
   next.bride = mergeSidePrefill(next, "bride", { name: prefill.brideName, phone: prefill.bridePhone });
   return next;
@@ -443,6 +462,8 @@ async function documentWithPrefillQuaQua(project, document) {
   fillBlank(next, "whatsappGroupName", project.whatsappGroupName);
   fillBlank(next, "branch", quaQuaBranchFromCity(project.sourceBranch) || quaQuaBranchFromCity(lead?.city) || quaQuaBranchFromCity(lead?.shootCity));
   fillBlank(next, "shootType", quaQuaShootTypeFromLead(lead?.shootType));
+  // One event per shoot of the project, the client's answers kept per shoot (`events.js`).
+  next.events = eventsForShoots(await shootsForEvents(prisma, project.id), next.events);
   return next;
 }
 
@@ -560,14 +581,36 @@ async function readableProjectFor(document, access) {
   return prisma.salesProject.findFirst({ where: { ...where, deletedAt: null }, select: { id: true } });
 }
 
-async function listDocuments({ access } = {}) {
+/**
+ * The extra narrowing behind the screen's **My Documents** switch, or nothing.
+ *
+ * `mine` is `{ employeeId, userId, seesUnassigned }` - the shape the CRM board's own toggle uses. A
+ * document is mine when its project's **pre-production coordinator is me**, which is the owner the
+ * Assigned To column names: narrowing on all five named-on columns would answer "projects I am involved
+ * in", a different question, and would leave the column and the switch disagreeing about whose row it is.
+ *
+ * A project with **no coordinator** belongs to nobody, and most do not have one yet. Such a row has to
+ * surface somewhere or it is only ever found by turning the switch off, so it surfaces for a reader who
+ * sees everything - they are the ones who staff projects, and an unowned document is work waiting to be
+ * given out. A coordinator reading their own work is not shown other people's unstaffed documents.
+ */
+function mineWhere(mine) {
+  if (!mine?.employeeId) return null;
+  const own = [{ preProductionCoordinatorEmployeeId: mine.employeeId }];
+  if (mine.seesUnassigned) own.push({ preProductionCoordinatorEmployeeId: null });
+  return { OR: own };
+}
+
+async function listDocuments({ access, mine } = {}) {
   const [projects, documents] = await Promise.all([
     prisma.salesProject.findMany({
       where: {
         deletedAt: null,
         crdDocumentStatus: { not: null },
         NOT: { crdDocumentStatus: CRD_NOT_APPLICABLE },
-        AND: [accessOrNothing(access)],
+        // The scope first, then the switch: "only mine" narrows what the reader may see and can never
+        // widen it.
+        AND: [accessOrNothing(access), ...(mineWhere(mine) ? [mineWhere(mine)] : [])],
       },
       select: {
         ...projectSelect,
@@ -587,6 +630,9 @@ async function listDocuments({ access } = {}) {
     return {
       ...project,
       clientName: project.whatsappGroupName,
+      // Read through the relation, with the project's own copy behind it - see `projectSelect`.
+      assignedTo: project.preProductionCoordinatorEmployee?.employeeName || project.preProductionCoordinator || "",
+      assignedToEmployeeCode: project.preProductionCoordinatorEmployee?.employeeId || "",
       // Where the row came from: a project carries its own, which is what Start / Edit Project
       // created. See TYPE_MANUAL for the other kind.
       type: TYPE_PROJECT,
@@ -605,12 +651,24 @@ async function listDocuments({ access } = {}) {
   // (`NO_OWN_CRD_ROW`): a document whose enquiry answers to no project the caller may see is
   // nobody's here, and one whose project has since been started as "Applicable" is shown through
   // that project's own row instead - see `ensureLink`, which adopts it rather than issuing a second.
-  const standalone = documents.filter((document) => !document.projectId);
-  const readableEnquiries = new Set((await prisma.salesProject.findMany({
-    where: { deletedAt: null, enquiryId: { in: standalone.map((document) => compact(document.enquiryId)).filter(Boolean) }, AND: [NO_OWN_CRD_ROW, accessOrNothing(access)] },
-    select: { enquiryId: true },
-  })).map((project) => compact(project.enquiryId)));
-  const standaloneRows = standalone.filter((document) => readableEnquiries.has(compact(document.enquiryId))).map((document) => ({
+  // Every document not shown through a project row above: linked to a project that answered "Not
+  // Applicable" (raised by hand since 20260924150000), or, from before that, linked to nothing and
+  // found through its enquiry.
+  const projectRowIds = new Set(projects.map((project) => project.id));
+  const standalone = documents.filter((document) => !projectRowIds.has(document.projectId));
+  const linkedIds = standalone.map((document) => document.projectId).filter(Boolean);
+  const enquiries = standalone.filter((document) => !document.projectId).map((document) => compact(document.enquiryId)).filter(Boolean);
+  const readableProjects = linkedIds.length || enquiries.length
+    ? await prisma.salesProject.findMany({
+      where: { deletedAt: null, OR: [{ id: { in: linkedIds } }, { enquiryId: { in: enquiries } }], AND: [NO_OWN_CRD_ROW, accessOrNothing(access)] },
+      select: { id: true, enquiryId: true },
+    })
+    : [];
+  const readableIds = new Set(readableProjects.map((project) => project.id));
+  const readableEnquiries = new Set(readableProjects.map((project) => compact(project.enquiryId)));
+  const standaloneRows = standalone
+    .filter((document) => (document.projectId ? readableIds.has(document.projectId) : readableEnquiries.has(compact(document.enquiryId))))
+    .map((document) => ({
     id: `crd-${document.id}`,
     standalone: true,
     // Raised by hand from Create CRD Document, for a project whose CRD Document was answered
@@ -626,6 +684,13 @@ async function listDocuments({ access } = {}) {
     whatsappGroupName: "",
     clientName: standaloneClientName(document),
     clientMainNumber: compact(document.contactNumber),
+    /*
+     * Nobody. A document raised by hand against an enquiry that answers to no project has no
+     * pre-production coordinator to take, and naming one would be a claim about who is responsible for
+     * work that has not been staffed. Blank is the true answer.
+     */
+    assignedTo: "",
+    assignedToEmployeeCode: "",
     sourceBranch: "",
     vertical: document.vertical || null,
     crmName: "",
@@ -637,7 +702,13 @@ async function listDocuments({ access } = {}) {
     crdDocument: serialize(document),
   }));
 
-  const rows = [...projectRows, ...standaloneRows].sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt));
+  /*
+   * A standalone document has no project and so no coordinator: with **My Documents** on it belongs to
+   * nobody, exactly like a project with nobody staffed on it, and it is shown on the same rule - to a
+   * reader who sees everything, and to nobody else.
+   */
+  const ownedStandalone = mine?.employeeId && !mine.seesUnassigned ? [] : standaloneRows;
+  const rows = [...projectRows, ...ownedStandalone].sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt));
   return fillVerticalsFromLeads(rows);
 }
 
@@ -658,15 +729,18 @@ async function listAvailableEnquiryIds({ access } = {}) {
     prisma.salesProject.findMany({
       // Only projects the caller may see: a document may only be raised for one of those.
       where: { deletedAt: null, AND: [NO_OWN_CRD_ROW, accessOrNothing(access)] },
-      select: { enquiryId: true, eventId: true, whatsappGroupName: true, vertical: true },
+      select: { id: true, enquiryId: true, eventId: true, whatsappGroupName: true, vertical: true },
       orderBy: { createdAt: "desc" },
     }),
-    prisma.salesProjectCrdDocument.findMany({ where: { projectId: null }, select: { enquiryId: true } }),
+    prisma.salesProjectCrdDocument.findMany({ select: { enquiryId: true, projectId: true } }),
   ]);
 
-  const taken = new Set(documents.map((document) => compact(document.enquiryId)).filter(Boolean));
+  // Taken: a project already holding a document (linked), or - for documents from before the link
+  // existed - an enquiry a document was raised against.
+  const linkedProjects = new Set(documents.map((document) => document.projectId).filter(Boolean));
+  const taken = new Set(documents.filter((document) => !document.projectId).map((document) => compact(document.enquiryId)).filter(Boolean));
   const rows = projects
-    .filter((project) => compact(project.enquiryId) && !taken.has(compact(project.enquiryId)))
+    .filter((project) => compact(project.enquiryId) && !linkedProjects.has(project.id) && !taken.has(compact(project.enquiryId)))
     .map((project) => ({
       enquiryId: project.enquiryId,
       eventId: project.eventId || "",
@@ -711,11 +785,11 @@ const createDocumentSchema = z.object({
 });
 
 /**
- * Creates a CRD document and its link in one go, for a client with no project yet.
+ * Creates a CRD document and its link in one go, for a project that opted out of collecting one.
  *
- * A fresh token every time is right here, and wrong in `ensureLink`: this is a new client being
- * given their own document, not the same project's link being re-copied. An Enquiry ID is optional
- * and is only a pointer at the CRM lead, so the public form can prefill from what the lead knows.
+ * A fresh token every time is right here, and wrong in `ensureLink`: this is a client being given
+ * their own document, not the same project's link being re-copied. The Enquiry ID names the project
+ * the document is raised for, and the document is linked to that project.
  */
 async function createDocument(input, userId, { access } = {}) {
   const parsed = createDocumentSchema.safeParse(input || {});
@@ -736,7 +810,7 @@ async function createDocument(input, userId, { access } = {}) {
   // yet - has no row at all, which is exactly what this button is for. See `NO_OWN_CRD_ROW`.
   const project = await prisma.salesProject.findFirst({
     where: { enquiryId: data.enquiryId, deletedAt: null, AND: [accessOrNothing(access)] },
-    select: { crdDocumentStatus: true },
+    select: { id: true, crdDocumentStatus: true },
   });
   if (!project) throw httpError(404, "No project was found for that Enquiry ID.");
   if (project.crdDocumentStatus && project.crdDocumentStatus !== CRD_NOT_APPLICABLE) {
@@ -755,7 +829,11 @@ async function createDocument(input, userId, { access } = {}) {
     try {
       const created = await prisma.salesProjectCrdDocument.create({
         data: {
-          projectId: null,
+          // The project it was raised for, since 20260924150000 - a document is the project's, and
+          // goes with it. It used to be left null and found again through the enquiry every time;
+          // the register still tells this kind of row apart by the project's own answer, not by
+          // whether the link is there (see `listDocuments`).
+          projectId: project.id,
           ...branding,
           publicToken: newToken(),
           /*
@@ -1254,6 +1332,7 @@ async function submitByToken(token, input) {
 
 module.exports = {
   ensureLink,
+  findLiveProject,
   ensureProjectCrdDocument,
   ensureResponseLink,
   createDocument,

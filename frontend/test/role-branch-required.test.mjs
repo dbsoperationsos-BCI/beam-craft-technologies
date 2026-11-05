@@ -19,8 +19,8 @@ const DIALOG = src("components", "admin", "RoleDialog.js");
 
 test("the roles dialog refuses a save with no branch chosen", () => {
   assert.match(DIALOG, /const branchesMissing = !\(values\.branchIds \|\| \[\]\)\.length;/);
-  assert.match(DIALOG, /if \(branchesMissing\) \{/);
-  assert.match(DIALOG, /onSubmit=\{readOnly \? undefined : submit\}/);
+  assert.match(DIALOG, /if \(!readOnly && branchesMissing\) \{/);
+  assert.match(DIALOG, /onSubmit=\{formReadOnly \? undefined : submit\}/);
 });
 
 /*
@@ -35,22 +35,23 @@ test("the roles dialog refuses a save with no branch chosen", () => {
  * `event?.preventDefault?.()` did nothing, and the page reloaded after a successful save.
  */
 test("refusing a save stops the browser submitting the form anyway", () => {
-  const submit = DIALOG.slice(DIALOG.indexOf("function submit("), DIALOG.indexOf("function submit(") + 320);
+  const submit = DIALOG.slice(DIALOG.indexOf("function submit("), DIALOG.indexOf("function submit(") + 520);
   assert.match(submit, /function submit\(event\)/, "submit must accept the event");
-  const refusal = submit.slice(submit.indexOf("if (branchesMissing)"));
+  const refusal = submit.slice(submit.indexOf("if (!readOnly && branchesMissing)"));
   assert.match(refusal, /event\?\.preventDefault\?\.\(\)/, "the refusal path must call preventDefault");
   assert.ok(refusal.indexOf("preventDefault") < refusal.indexOf("return"), "and before it returns");
 });
 
 test("a save that is allowed hands the event on, so the page does not reload", () => {
-  const submit = DIALOG.slice(DIALOG.indexOf("function submit("), DIALOG.indexOf("function submit(") + 320);
+  const submit = DIALOG.slice(DIALOG.indexOf("function submit("), DIALOG.indexOf("function submit(") + 520);
   assert.match(submit, /onSubmit\(event\)/, "RoleManagement.save calls preventDefault on what it is given");
 });
 
 test("and says so on the field, not only at the top of the form", () => {
   assert.match(DIALOG, /error=\{branchError\}/);
   assert.match(DIALOG, /Select at least one branch\./);
-  assert.match(DIALOG, /error=\{branchError \? "Complete required fields: Branches" : error\}/);
+  // The top of the form says only that a field is marked; the field says which and why.
+  assert.match(DIALOG, /error=\{branchError \? markedFieldsMessage\(1\) : error\}/);
 });
 
 /*

@@ -1,6 +1,6 @@
 const { z } = require("zod");
 const service = require("./service");
-const { BRAND_CODES, BRAND_PDF_CONTENT_KEYS, GENERAL_PDF_CONTENT_KEYS, GENERAL_ASSET_KEYS, BRAND_ASSET_KEYS, MAX_INFRASTRUCTURE_PHOTOS, SECTION_KEYS, brandCodeFor, pdfContentOverrides, pdfSectionsFor } = require("./defaults");
+const { BRAND_CODES, BRAND_PDF_CONTENT_KEYS, GENERAL_PDF_CONTENT_KEYS, PRICING_PDF_CONTENT_KEYS, MAX_VALIDITY_MONTHS, GENERAL_ASSET_KEYS, BRAND_ASSET_KEYS, MAX_INFRASTRUCTURE_PHOTOS, SECTION_KEYS, brandCodeFor, pdfContentOverrides, pdfSectionsFor } = require("./defaults");
 const { storeImage, storeImages } = require("../../../services/imageStorage");
 
 /**
@@ -98,7 +98,9 @@ function refuseOverfullCollages(body, res) {
 function parse(schema, body, res, message) {
   const parsed = schema.safeParse(body || {});
   if (parsed.success) return parsed.data;
-  res.status(400).json({ message, errors: parsed.error.flatten() });
+  // A rule about a value (the validity months) is said in its own words; a malformed field is not.
+  const rule = parsed.error.issues.find((issue) => issue.code === "custom");
+  res.status(400).json({ message: rule?.message || message, errors: parsed.error.flatten() });
   return null;
 }
 
@@ -130,6 +132,19 @@ async function getConfiguration(req, res) {
     return res.json({ data });
   } catch (error) {
     return handleError(error, res, "load the brand configuration");
+  }
+}
+
+/** The shoots a brand does, names only - what a lead's Event Details rows are offered. */
+async function listShoots(req, res) {
+  const code = brandCodeParam(req, res);
+  if (!code) return undefined;
+  try {
+    const data = await service.brandShoots(code);
+    if (!data) return res.status(404).json({ message: "Quotation brand not found." });
+    return res.json({ data });
+  } catch (error) {
+    return handleError(error, res, "load the brand's shoots");
   }
 }
 
@@ -179,9 +194,14 @@ const pickAssets = (assets, keys) => (assets ? Object.fromEntries(keys.map((key)
  * accepted here, so a brand's words cannot arrive through this door either.
  */
 const generalSchema = z.object({
-  pdfContent: z.record(z.string(), z.string().max(2000)).nullable().optional(),
+  pdfContent: z.record(z.string(), z.string().max(2000)).nullable().optional().refine((content) => {
+    // The validity in whole months, 1 to 60, or left blank for the template's three.
+    const months = String(content?.validityMonths ?? "").trim();
+    return !months || (/^\d{1,2}$/.test(months) && Number(months) >= 1 && Number(months) <= MAX_VALIDITY_MONTHS);
+  }, { message: `Validity must be a whole number of months from 1 to ${MAX_VALIDITY_MONTHS}.` }),
   pdfAssets: pdfAssetsSchema.nullable().optional(),
-  // Which of the four shared sections the client's copy prints. Unknown keys are dropped.
+  // Which of the shared sections - and parts of the Pricing & Total card - the client's copy prints.
+  // Unknown keys are refused.
   pdfSections: z.record(z.enum(SECTION_KEYS), z.boolean()).nullable().optional(),
 });
 
@@ -199,7 +219,8 @@ async function updateGeneral(req, res) {
   if (!parsed) return undefined;
   try {
     const data = provided(req.body, parsed);
-    if ("pdfContent" in data) data.pdfContent = pdfContentOverrides(data.pdfContent || {}, GENERAL_PDF_CONTENT_KEYS);
+    // The shared words and the Pricing & Total card's, both General's to keep.
+    if ("pdfContent" in data) data.pdfContent = pdfContentOverrides(data.pdfContent || {}, [...GENERAL_PDF_CONTENT_KEYS, ...PRICING_PDF_CONTENT_KEYS]);
     if ("pdfAssets" in data) data.pdfAssets = pickAssets(await storePdfAssets(data.pdfAssets), GENERAL_ASSET_KEYS);
     if ("pdfSections" in data) data.pdfSections = pdfSectionsFor(data.pdfSections);
     return res.json({ message: "Shared quotation content saved.", data: await service.updateGeneral(data, Number(req.user?.id) || null) });
@@ -313,6 +334,7 @@ const deleteHandler = (kind, remove) => async (req, res) => {
 module.exports = {
   listBrands,
   getConfiguration,
+  listShoots,
   getAdminConfiguration,
   updateBrand,
   getGeneral,

@@ -27,13 +27,9 @@ const iamService = require("./iam.service");
  * `userId` it is every active branch: validating an edit needs to know what *exists*, not what one
  * person may choose.
  *
- * The fallback stands in only for a studio with no branches recorded at all, and is not narrowed:
- * there is nothing to narrow it by. A caller who reaches no branch is offered none rather than the
- * fallback, which would hand them branches nobody said they could use.
+ * Only the `branch` table answers: a studio with no branches recorded, or a caller who reaches none,
+ * is offered none - never a list written down here, which would name branches nobody created.
  */
-
-/** Only for a database with no `branch` rows. The studio's own six, spelled as the table spells them. */
-const FALLBACK_BRANCHES = ["Erode TN", "Tiruppur TN", "Coimbatore TN", "Bangalore KA", "Hyderabad TL", "Visakhapatnam AP"];
 
 /**
  * The branch names a caller may choose from.
@@ -50,9 +46,6 @@ const FALLBACK_BRANCHES = ["Erode TN", "Tiruppur TN", "Coimbatore TN", "Bangalor
  * whatever wrote the record, and a picker built from this list shows nothing for a spelling it does
  * not hold. Given the ids, the screen matches on the reference the server already resolved and
  * names the branch correctly however the text reads.
- *
- * The fallback rows carry `id: null` deliberately. They stand in for a database with no branches at
- * all, and an id there would point at a row that does not exist.
  */
 async function branchOptionRows(client, userId = null, scope = {}) {
   /*
@@ -67,9 +60,7 @@ async function branchOptionRows(client, userId = null, scope = {}) {
     select: { id: true, name: true },
     orderBy: { name: "asc" },
   });
-  const named = rows.filter((row) => row.name);
-  if (named.length) return named;
-  return reachable === null || reachable.length ? FALLBACK_BRANCHES.map((name) => ({ id: null, name })) : [];
+  return rows.filter((row) => row.name);
 }
 
 /** The names alone, which is what a picker and a validator each ask for. */
@@ -77,4 +68,4 @@ async function branchOptions(client, userId = null, scope = {}) {
   return (await branchOptionRows(client, userId, scope)).map((row) => row.name);
 }
 
-module.exports = { branchOptions, branchOptionRows, FALLBACK_BRANCHES };
+module.exports = { branchOptions, branchOptionRows };

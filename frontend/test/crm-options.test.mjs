@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 
 import { crmOptionsFrom, crmNamesFromRows } from "../src/lib/crmOptions.js";
 
+// The avatar each option carries is covered by employee-avatar tests; these assert value and label.
+const plain = (options) => options.map(({ value, label }) => ({ value, label }));
+
 /*
  * Who the CRM offers as a CRM.
  *
@@ -14,20 +17,22 @@ import { crmOptionsFrom, crmNamesFromRows } from "../src/lib/crmOptions.js";
  */
 
 test("the roster comes from the employees", () => {
-  const options = crmOptionsFrom([{ employeeName: "Priya S" }, { employeeName: "Arun K" }], []);
-  assert.deepEqual(options, [{ value: "Arun K", label: "Arun K" }, { value: "Priya S", label: "Priya S" }]);
+  const options = crmOptionsFrom([{ employeeName: "Priya S", id: 7, profilePhotoUrl: "/p.jpg" }, { employeeName: "Arun K" }], []);
+  assert.deepEqual(plain(options), [{ value: "Arun K", label: "Arun K" }, { value: "Priya S", label: "Priya S" }]);
+  assert.equal(options.find((option) => option.value === "Priya S").avatar.photoUrl, "/p.jpg");
 });
 
 test("names already on the leads are offered too", () => {
   // Somebody who has left still has leads against them, and those have to stay findable.
   const options = crmOptionsFrom([{ employeeName: "Arun K" }], ["Thara"]);
   assert.deepEqual(options.map((option) => option.value), ["Arun K", "Thara"]);
+  assert.equal(options[1].avatar.name, "Thara", "a name only on a lead still gets initials");
 });
 
 test("one person is one choice, whatever the spelling on the row", () => {
   // The roster writes "Diya" and a sheet wrote "diya"; two choices would make the filter look broken.
   const options = crmOptionsFrom([{ employeeName: "Diya" }], ["diya", "DIYA"]);
-  assert.deepEqual(options, [{ value: "Diya", label: "Diya" }], "and the roster's spelling is the one kept");
+  assert.deepEqual(plain(options), [{ value: "Diya", label: "Diya" }], "and the roster's spelling is the one kept");
 });
 
 test("blanks are not people", () => {
@@ -37,8 +42,8 @@ test("blanks are not people", () => {
 
 test("plain names and rows are both accepted", () => {
   // The endpoint answers with employee rows; a caller holding bare names should not have to wrap them.
-  assert.deepEqual(crmOptionsFrom(["Ram"], []), [{ value: "Ram", label: "Ram" }]);
-  assert.deepEqual(crmOptionsFrom([{ name: "Ram" }], []), [{ value: "Ram", label: "Ram" }]);
+  assert.deepEqual(plain(crmOptionsFrom(["Ram"], [])), [{ value: "Ram", label: "Ram" }]);
+  assert.deepEqual(plain(crmOptionsFrom([{ name: "Ram" }], [])), [{ value: "Ram", label: "Ram" }]);
 });
 
 test("the names in use are read off the rows", () => {

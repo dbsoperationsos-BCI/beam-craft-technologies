@@ -26,8 +26,11 @@ const saveOverridesSchema = z.object({ items: z.array(overrideItemSchema).min(1)
 const manualItemSchema = z.object({
   name: z.string().trim().min(1).max(191),
   selectionLimit: z.coerce.number().int().min(MIN_SELECTION_LIMIT).max(MAX_SELECTION_LIMIT),
-  // The shoot group the item is filed under — "Pre Wedding", "Wedding" — created in the same
-  // table. Absent files the item under no group, where older typed items already live.
+  // The shoot the item is filed under: `shootFolderId`, the root folder that IS the shoot, by id -
+  // or, from a screen that only knows a name, `shootName` ("Pre Wedding", "Wedding"), matched to a
+  // root folder of that name (none is refused: an item belongs to a folder). Neither files the item
+  // under no group, where older typed items already live.
+  shootFolderId: z.string().trim().min(1).max(191).nullish(),
   shootName: z.string().trim().min(1).max(191).nullish(),
 });
 const configParamsSchema = projectParamsSchema.extend({ configId: z.string().trim().min(1).max(191) });

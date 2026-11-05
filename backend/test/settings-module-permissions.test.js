@@ -26,9 +26,11 @@ const SETTINGS = PERMISSIONS.filter((perm) => perm.module === "SETTINGS");
 /** The rail, in the order the overlay draws it. User Preference is deliberately absent - see below. */
 const RAIL = [
   "User Settings", "Table Settings", "Field Settings", "Project Settings", "Exclude Phone Numbers",
-  "Integrations", "Quotation Settings", "Employee Referral", "Message Template", "Organization",
-  "Holidays", "Login Slide", "Application Monitoring",
+  "Integrations", "Quotation Settings", "Employee Referral", "Message Template", "Template Settings", "Wishes",
+  "Organization", "Holidays", "Login Slide", "Client Page Images", "Payment Reminder", "Shoot Crew Notice", "Application Monitoring", "WhatsApp Activity Log", "Automatic WhatsApp Message", "Activity Log Purge",
 ];
+// The rows the split itself made; one added since carries a migration of its own.
+const ADDED_SINCE = ["Client Page Images", "Payment Reminder", "Shoot Crew Notice", "Template Settings", "Wishes", "WhatsApp Activity Log", "Automatic WhatsApp Message", "Activity Log Purge"];
 
 test("every entry on the Settings rail is a permission of its own", () => {
   assert.deepEqual(SETTINGS.map((perm) => perm.feature), RAIL);
@@ -83,14 +85,71 @@ test("each re-pointed guard names the rail entry its screen is", () => {
 
 test("the migration creates every row and carries the old grants onto them", () => {
   const sql = read("prisma", "migrations", "20260915190000_settings_module_permissions", "migration.sql");
-  for (const feature of RAIL) assert.ok(sql.includes(`'${feature}'`), `the migration does not create SETTINGS / ${feature}`);
-  for (const perm of SETTINGS) assert.ok(sql.includes(`'${perm.level}'`), `the migration writes a different level for ${perm.feature} than the catalogue does`);
+  for (const feature of RAIL.filter((name) => !ADDED_SINCE.includes(name))) assert.ok(sql.includes(`'${feature}'`), `the migration does not create SETTINGS / ${feature}`);
+  for (const perm of SETTINGS.filter((row) => !ADDED_SINCE.includes(row.feature))) assert.ok(sql.includes(`'${perm.level}'`), `the migration writes a different level for ${perm.feature} than the catalogue does`);
   // Copied at the level the role already held, so a role that could open Settings yesterday opens
   // exactly as much of it today - and re-running writes nothing a second time.
   assert.match(sql, /INSERT INTO `role_permission`[\s\S]*`grant`\.`access_level`/);
   assert.match(sql, /WHERE NOT EXISTS \(\s*SELECT 1 FROM `role_permission` AS `already`/);
   // Deactivated rather than deleted, which is what the seed does with a retired permission.
   assert.match(sql, /UPDATE `permission`\s*SET `is_active` = 0/);
+});
+
+test("Client page images is a permission of its own, migrated for SUPER_ADMIN alone and guarding its own route", () => {
+  const sql = read("prisma", "migrations", "20261003120000_client_page_images", "migration.sql");
+  const row = SETTINGS.find((perm) => perm.feature === "Client Page Images");
+  assert.ok(sql.includes(`'${row.level}'`) && sql.includes("'Client Page Images'"));
+  assert.match(sql, /ADD COLUMN `client_login_slides` JSON NULL/);
+  assert.match(sql, /WHERE `role`\.`name` = 'SUPER_ADMIN'/);
+  assert.doesNotMatch(sql, /BRANCH_ADMIN|`grant`/, "granted to SUPER_ADMIN only, copied from no other role");
+  assert.match(read("src", "modules", "image-selection", "settings", "client-page-images.routes.js"), /requireModule\("SETTINGS", "Client Page Images"\)/);
+  // Ahead of the settings router, which would otherwise answer the path and ask for Organization.
+  const server = read("src", "server.js");
+  assert.ok(server.indexOf('"/api/image-selection/settings/client-page-images"') < server.indexOf('app.use("/api/image-selection/settings", imageSelectionSettingsRoutes)'));
+  const overlay = fs.readFileSync(path.join(__dirname, "..", "..", "frontend", "src", "components", "settings", "SettingsOverlay.js"), "utf8");
+  assert.match(overlay, /useModuleAccess\("SETTINGS", "Client Page Images"\)/);
+});
+
+test("WhatsApp Activity Log is a permission of its own, migrated for SUPER_ADMIN alone and guarding its own route", () => {
+  const sql = read("prisma", "migrations", "20261017120000_whatsapp_activity_log", "migration.sql");
+  const row = SETTINGS.find((perm) => perm.feature === "WhatsApp Activity Log");
+  assert.ok(sql.includes(`'${row.level}'`) && sql.includes("'WhatsApp Activity Log'"));
+  assert.match(sql, /CREATE TABLE `whatsapp_activity` \(/);
+  assert.match(sql, /CREATE TABLE `whatsapp_activity_attempt` \(/);
+  assert.match(sql, /WHERE `role`\.`name` = 'SUPER_ADMIN'/);
+  assert.doesNotMatch(sql, /BRANCH_ADMIN|`grant`|is_admin/, "granted to SUPER_ADMIN only, copied from no other role");
+  assert.match(read("src", "modules", "settings", "whatsapp-activity", "routes.js"), /requireModule\("SETTINGS", "WhatsApp Activity Log"\)/);
+  assert.match(read("src", "server.js"), /app\.use\("\/api\/settings\/whatsapp-activity", settingsWhatsappActivityRoutes\)/);
+  const overlay = fs.readFileSync(path.join(__dirname, "..", "..", "frontend", "src", "components", "settings", "SettingsOverlay.js"), "utf8");
+  assert.match(overlay, /useModuleAccess\("SETTINGS", "WhatsApp Activity Log"\)/);
+});
+
+test("Automatic WhatsApp Message is a permission of its own, migrated for SUPER_ADMIN alone and guarding its own route", () => {
+  const sql = read("prisma", "migrations", "20261020120000_photo_selection_submitted_notification", "migration.sql");
+  const row = SETTINGS.find((perm) => perm.feature === "Automatic WhatsApp Message");
+  assert.ok(sql.includes(`'${row.level}'`) && sql.includes("'Automatic WhatsApp Message'"));
+  assert.match(sql, /ADD COLUMN `photo_selection_notify_enabled` BOOLEAN NOT NULL DEFAULT false/);
+  assert.match(sql, /'PHOTO_SELECTION_SUBMITTED'/, "the template ships with the switch");
+  assert.match(sql, /WHERE `role`\.`name` = 'SUPER_ADMIN'/);
+  assert.doesNotMatch(sql, /BRANCH_ADMIN|`grant`|is_admin/, "granted to SUPER_ADMIN only, copied from no other role");
+  assert.match(read("src", "modules", "settings", "automatic-whatsapp", "routes.js"), /requireModule\("SETTINGS", "Automatic WhatsApp Message"\)/);
+  assert.match(read("src", "server.js"), /app\.use\("\/api\/settings\/automatic-whatsapp", settingsAutomaticWhatsappRoutes\)/);
+  const overlay = fs.readFileSync(path.join(__dirname, "..", "..", "frontend", "src", "components", "settings", "SettingsOverlay.js"), "utf8");
+  assert.match(overlay, /useModuleAccess\("SETTINGS", "Automatic WhatsApp Message"\)/);
+});
+
+test("Activity Log Purge is a permission of its own, migrated for SUPER_ADMIN alone and guarding its own route", () => {
+  const sql = read("prisma", "migrations", "20261020150000_activity_log_purge_permission", "migration.sql");
+  const row = SETTINGS.find((perm) => perm.feature === "Activity Log Purge");
+  assert.ok(sql.includes(`'${row.level}'`) && sql.includes("'Activity Log Purge'"));
+  assert.match(sql, /WHERE `role`\.`name` = 'SUPER_ADMIN'/);
+  assert.doesNotMatch(sql, /BRANCH_ADMIN|`grant`/, "granted to SUPER_ADMIN only, copied from no other role");
+  assert.match(read("src", "modules", "settings", "activity-log-purge", "routes.js"), /requireModule\("SETTINGS", "Activity Log Purge"\)/);
+  assert.match(read("src", "server.js"), /app\.use\("\/api\/settings\/activity-log-purge", activityLogPurgeRoutes\)/);
+  const overlay = fs.readFileSync(path.join(__dirname, "..", "..", "frontend", "src", "components", "settings", "SettingsOverlay.js"), "utf8");
+  assert.match(overlay, /useModuleAccess\("SETTINGS", "Activity Log Purge"\)/);
+  // Under Application Monitoring on the rail, as the catalogue lists it.
+  assert.ok(overlay.indexOf('id: "application-monitoring"') < overlay.indexOf('id: "activity-log-purge"'));
 });
 
 test("the sections above another module's data keep that module's permission too", () => {
@@ -135,11 +194,19 @@ test("nothing decides Settings by the legacy role column", () => {
   const overlay = web("components", "settings", "SettingsOverlay.js");
 
   // The menu row is offered outright - everybody has User Preference, which is not the studio's to
-  // withhold - and what is behind it is decided by the thirteen SETTINGS permissions.
+  // withhold - and what is behind it is decided by the SETTINGS permissions.
   assert.doesNotMatch(topbar, /role === "EMPLOYEE" \? \[\] :/, "the Settings row is hidden by the legacy role column again");
   assert.match(topbar, /\{\s*label: "Settings",\s*\n\s*onSelect:/, "the Settings row is gone from the account menu");
 
   // And the rail is whatever the permission-gated sections built, with nothing filtering it after.
   assert.doesNotMatch(overlay, /isEmployee/, "the overlay narrows its rail by the legacy role column again");
   assert.match(overlay, /const visibleSections = settingsSections;/);
+});
+
+test("Template Settings is a permission of its own, migrated for SUPER_ADMIN alone", () => {
+  const sql = read("prisma", "migrations", "20261012100000_template_settings_permission", "migration.sql");
+  const row = SETTINGS.find((perm) => perm.feature === "Template Settings");
+  assert.ok(sql.includes(`'${row.level}'`), "the migration writes the catalogue's level");
+  assert.match(sql, /WHERE `role`\.`name` = 'SUPER_ADMIN'/);
+  assert.doesNotMatch(sql, /'BRANCH_ADMIN'|'ADMIN'/);
 });

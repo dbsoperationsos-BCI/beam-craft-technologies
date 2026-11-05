@@ -135,8 +135,17 @@ test("adding a call creates the lead rather than writing one that already exists
    * The Call ID is deliberately not sent as the lead's id. It is not a lead id, and a form seeded
    * with it would ask the server to write a lead that is not there.
    */
-  assert.match(BOARD, /const saved = await apiRequest\("\/api\/sales\/crm-leads", \{ method: "POST"/, "Add Lead no longer creates the lead");
-  const fromCall = BOARD.slice(BOARD.indexOf("function leadFormFromCall"), BOARD.indexOf("function splitDistrictState"));
+  /*
+   * The form has a third job since - assigning an unassigned lead, opened by dragging a card out of
+   * the board's Unassigned column - and **that** one updates, because the lead is already there. So
+   * the call's path is the `else`: `assigning` is empty while a call is being placed, and a call
+   * still has no lead until Confirm writes one.
+   */
+  assert.match(BOARD, /: await apiRequest\("\/api\/sales\/crm-leads", \{ method: "POST"/, "Add Lead no longer creates the lead");
+  assert.match(BOARD, /const saved = assigning\s*\n\s*\? await apiRequest\(`\/api\/sales\/crm-leads\/\$\{encodeURIComponent\(assigning\)\}`, \{ method: "PUT"/, "and the assigning path no longer updates the lead it opened on");
+  // To `leadFormFromLead`, which follows it: that one keeps the lead's own id, being an update, and
+  // reading it as part of this function would answer the opposite of what the next line asks.
+  const fromCall = BOARD.slice(BOARD.indexOf("function leadFormFromCall"), BOARD.indexOf("function leadFormFromLead"));
   assert.doesNotMatch(fromCall, /\bid: lead\.id\b/, "the Add Lead form is carrying the Call ID across as a lead id again");
   assert.match(fromCall, /\n {4}id: "",\n/, "leadFormFromCall no longer opens on a lead with no id of its own");
 });

@@ -34,6 +34,14 @@ const prisma = require("../config/db");
 /** What the code said before any of these lists were editable. */
 const FALLBACK_WORKING_STATUSES = ["Active", "in Training", "PIP"];
 const FALLBACK_SPOUSE_STATUSES = ["Married"];
+/*
+ * The two statuses that mean "not taken on yet", which is a different thing from not working.
+ *
+ * The same pair the browser names in `lib/employmentStatus.mjs`, and unlike the working statuses
+ * these are not the studio's to rename: the onboarding flow writes them itself. Named once so a
+ * tenth status added to the enum has one place to be considered.
+ */
+const ONBOARDING_STATUSES = ["HR Onboarding Pending", "Employee Submission Pending"];
 const FALLBACK_GENDERS = ["Male", "Female", "Other"];
 /*
  * The two the candidate is offered rather than the application reasoning about. Blood group is the
@@ -204,8 +212,24 @@ async function salesEmployees({ select } = {}) {
   return wanted;
 }
 
+/**
+ * The photo a bulk list may carry: a link, never the picture itself.
+ *
+ * `Employee.profilePhotoUrl` is MediumText because, with no object storage configured, the photo is
+ * kept as a `data:` URI - up to megabytes of base64 per person. A dropdown of the whole roster that
+ * shipped those would be a response of tens of megabytes to draw a row of avatars, so a list passes
+ * the photo through here and only an http(s) link survives. Anything else reads as no photo, and
+ * the avatar falls back to initials; the full photo is still on the employee's own record.
+ */
+function listPhotoUrl(url) {
+  const text = typeof url === "string" ? url.trim() : "";
+  return /^https?:\/\//i.test(text) ? text : null;
+}
+
 module.exports = {
+  ONBOARDING_STATUSES,
   publicOnboardingOptionLists,
+  listPhotoUrl,
   isSalesDepartment,
   salesEmployees,
   workingEmployeeStatuses,

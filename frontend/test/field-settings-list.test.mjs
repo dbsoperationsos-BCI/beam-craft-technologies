@@ -37,7 +37,7 @@ test("every list the studio maintains is offered under HRM", () => {
    */
   const offered = fieldListsForScreen("employee-repository").map((item) => item.value).sort();
   assert.deepEqual(offered, [
-    "blood-groups", "client-designations", "departments", "designations", "emergency-contact-relationships",
+    "blood-groups", "departments", "designations", "emergency-contact-relationships",
     "employee-statuses", "genders", "languages", "marital-statuses", "skills", "verticals",
     "work-locations", "work-types",
   ]);
@@ -135,7 +135,7 @@ test("the list can be searched, and the search is what the rows are drawn from",
   assert.match(EDITOR, /\{shown\.map\(\(record\) =>/, "the rows are drawn from the unfiltered list, so the search does nothing");
   assert.doesNotMatch(EDITOR, /\{records\.map\(\(record\) =>/);
   // Matched on the name, which is the only thing this screen shows.
-  assert.match(EDITOR, /String\(record\.name \|\| ""\)\.toLowerCase\(\)\.includes\(needle\)/);
+  assert.match(EDITOR, /matchesWordChunks\(record\.name, needle\)/);
   assert.match(EDITOR, /aria-label=\{`Search \$\{label\.toLowerCase\(\)\}`\}/);
 });
 

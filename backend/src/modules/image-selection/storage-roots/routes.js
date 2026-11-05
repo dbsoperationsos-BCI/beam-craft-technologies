@@ -1,6 +1,7 @@
 const express = require("express");
 const { protect } = require("../../../middleware/authMiddleware");
 const { requireModule } = require("../../../middleware/permissionMiddleware");
+const { requireWorkspaceAccess } = require("../projects/modules");
 const { listStorageRoots, createStorageRoot, updateStorageRoot, deleteStorageRoot } = require("./controller");
 
 const router = express.Router();
@@ -13,8 +14,10 @@ router.use(protect);
 // Project Management and so existed in no catalogue - a guard naming a permission nobody can hold
 // refuses everybody but a Super Admin, and it ran first, so the correct guard below it never
 // decided anything. The dead line is gone.
+// Reading the list is part of every module's import, so any Visual Curation module's Read lists them
+// (no project here); changing the roots stays Project Management's Read / Write.
+router.get("/", requireWorkspaceAccess(), listStorageRoots);
 router.use(requireModule("IMAGE_SELECTION", "Project Management"));
-router.get("/", listStorageRoots);
 router.post("/", createStorageRoot);
 router.patch("/:storageRootId", updateStorageRoot);
 router.delete("/:storageRootId", deleteStorageRoot);

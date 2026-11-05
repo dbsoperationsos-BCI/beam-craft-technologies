@@ -32,7 +32,9 @@ test("the Signed Quotation box is offered only where no quotation answered it", 
    * written in - New Project from nothing, a CRM lead with no budget, and a duplicate all book that
    * way, and closing the field for them left the money unrecordable.
    */
-  assert.match(PANEL, /onSignedQuotationChange=\{String\(form\.quotationId \|\| ""\)\.trim\(\) \? undefined : \(value\) => update\("initialConvertedValue", value\)\}/);
+  assert.match(PANEL, /const quotationLinked = Boolean\(String\(form\.quotationId \|\| ""\)\.trim\(\)\);/);
+  // Typing stops it following the lines, clearing hands it back - see project-lines-signed-quotation.test.mjs.
+  assert.match(PANEL, /onSignedQuotationChange=\{quotationLinked \? undefined : \(value\) => \{ setSignedFollowsLines\(value === ""\); update\("initialConvertedValue", value\); \}\}/);
   assert.doesNotMatch(PANEL, /onSignedQuotationChange=\{mode === "edit"/, "the box is decided by the job again rather than by the quotation");
 });
 
@@ -48,14 +50,16 @@ test("and so does not demand it either", () => {
    * the schedule says every share works out at zero until the figure is set.
    */
   assert.doesNotMatch(SALE, /\["initialConvertedValue", "Signed Quotation"\]/, "a field the booking form cannot answer is required by it");
-  assert.match(SALE, /const required = \[\["enquiryId", "Enquiry ID"\], \["whatsappGroupName", "WhatsApp Group Name"\], \["sourceBranch", "Source Branch"\]\]/);
+  assert.match(SALE, /const required = \[\["enquiryId", "Choose the enquiry\."\], \["whatsappGroupName", "Choose or enter the WhatsApp group name\."\], \["sourceBranch", "Choose the source branch\."\]\]/);
+  // The number and, for a typed group name, the vertical are checked beside them, each under its box.
+  assert.match(SALE, /problems\.clientMainNumber = isPhoneValid\(form\)/);
+  assert.match(SALE, /problems\.groupType = /);
 });
 
 test("the Projects page is where the amount is answered", () => {
-  // Edit only: starting a project records the sale as it was sold, and the figure becomes editable
-  // once the project exists - reached through `PROJECT / Projects` READ_WRITE, as it already was.
+  // Start and Edit Project alike - reached through `PROJECT / Projects` READ_WRITE, as it already was.
   const START = read("components", "project-management", "StartProjectFormPanel.js");
-  assert.match(START, /onSignedQuotationChange=\{isEdit \? \(value\) => setForm/);
+  assert.match(START, /onSignedQuotationChange=\{\(value\) => setForm\(\(current\) => \(\{ \.\.\.current, initialConvertedValue: value \}\)\)\}/);
 });
 
 test("pressing the primary button again always lets the same refusal be said again", () => {
@@ -91,7 +95,14 @@ test("the refusals a press can raise are all reachable after a dismissal", () =>
    */
   const submit = PANEL.slice(PANEL.indexOf("async function submit("), PANEL.indexOf("return <SchemaFormPanel"));
   assert.ok(submit, "submit has moved");
-  assert.match(submit, /Complete required fields:/);
+  // The sale fields are marked under their own boxes, the banner saying only how many.
+  assert.match(submit, /if \(!saleFields\.check\(saleFieldProblems\(form\)\)\) \{/);
   assert.match(submit, /Signed Quotation, under Shedule Payment, must be zero or a positive amount\./);
   assert.match(submit, /Fill in the required fields in Payment Received before creating the project\./);
+});
+
+test("a gift's Assigned To dropdown is shown only while that gift is Applicable", () => {
+  const START = read("components", "project-management", "StartProjectFormPanel.js");
+  assert.match(START, /\{form\.welcomeGift === "Applicable" && <EmployeeDropdown label="Welcome Gift Assigned To" required /);
+  assert.match(START, /\{form\.shootCompletedGift === "Applicable" && <EmployeeDropdown label="Shoot Completed Gift Assigned To" required /);
 });

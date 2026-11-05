@@ -89,23 +89,29 @@ test("what belongs to the lead goes with it", () => {
   assert.match(plain(body), /DELETE FROM \$\{table\} WHERE enquiry_id IN/, "the lead's own rows are no longer deleted with it");
 });
 
-test("a call is unlinked, never deleted - it happened", () => {
+test("a call is unlinked, never deleted - it happened; its transcript goes with the lead", () => {
   /*
    * A call is a fact about the studio's phone rather than a detail of the lead, so removing the
    * caller must not remove the record of them ringing. Unlinked, it returns to the Calls board as a
    * caller nobody has added - the same move `retireCallyzerCallLeads.js` makes for the same reason.
+   *
+   * The transcript is different (decided 2026-09-24, with the keys of 20260924150000): it is the
+   * studio's reading of *that lead's* conversation, and a later match makes a new one, so it goes
+   * with the lead like its meetings do. The call log is the one table left to unlink, because it is
+   * created at runtime and carries no key.
    */
   const unlinked = SERVICE.match(/const LEAD_UNLINKED_TABLES = \[([^\]]*)\]/);
   assert.ok(unlinked, "LEAD_UNLINKED_TABLES is gone");
-  for (const table of ["sales_crm_call_log", "sales_call_transcript"]) {
-    assert.match(unlinked[1], new RegExp(`"${table}"`), `${table} is no longer unlinked when its lead is deleted`);
-  }
+  assert.match(unlinked[1], /"sales_crm_call_log"/, "the call log is no longer unlinked when its lead is deleted");
+  assert.doesNotMatch(unlinked[1], /transcript/, "the transcript is being unlinked rather than removed with its lead");
   const body = purge();
   assert.match(body, /for \(const table of LEAD_UNLINKED_TABLES\)/, "the calls are named but never unlinked");
   assert.match(plain(body), /UPDATE \$\{table\} SET enquiry_id = '' WHERE enquiry_id IN/);
   // And emphatically not deleted - a call is not the lead's to take with it.
   const owned = SERVICE.match(/const LEAD_OWNED_TABLES = \[([^\]]*)\]/)[1];
-  assert.doesNotMatch(owned, /call_log|transcript/, "a call is being deleted with its lead");
+  assert.doesNotMatch(owned, /call_log/, "a call is being deleted with its lead");
+  assert.match(owned, /"sales_call_transcript"/);
+  assert.match(owned, /"sales_whatsapp_group_name"/, "a group name generated for the lead goes with it");
 });
 
 test("a lead carrying real work refuses to be deleted", () => {

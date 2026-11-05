@@ -1,20 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import HelpTip from "./HelpTip";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import useCloseWhenTriggerHidden from "./useCloseWhenTriggerHidden";
 import EventIcon from "@mui/icons-material/Event";
 import CalendarPanel, { parseDateKey } from "./CalendarPanel";
+import calendarPlacement from "./calendarPlacement";
 import useEscapeKey from "@/components/shared/useEscapeKey";
-
-// Roughly what the calendar occupies once open, which is all the placement decision needs: whether
-// there is room below the field, and where the panel's top edge goes when there is not. These match
-// the size CalendarPanel actually renders at, and the ones FilterDateInput measures against; keep
-// the three in step, or the calendar will be placed against a size it is not.
-const CALENDAR_HEIGHT = 372;
-const CALENDAR_WIDTH = 300;
-const GAP = 8;
-const EDGE = 12;
 
 /*
  * ── A date, and optionally a time with it ─────────────────────────────────────────────────────
@@ -54,7 +47,11 @@ const displayValue = (value, withTime) => (withTime ? String(value ?? "").replac
 // `placeholder` is what the button reads before a day is picked. It defaults to "Select date" -
 // what this field has always said - and is worth naming where two of these sit side by side and the
 // empty state is the only thing telling them apart.
-export default function DateField({ className = "", disabled = false, error = "", label, labelClassName = "", maxDate = "", minDate = "", onChange, placeholder = "Select date", readOnly = false, restriction = "none", required = false, value, withTime = false }) {
+// `hideLabel` keeps the label for screen readers only, for a filter row where the placeholder names
+// the field and a label above would make the row two lines tall. `formatValue` is how the closed
+// field reads its day - "5 Oct 2026" rather than the stored `2026-10-05` - where a person reads it.
+// Only a day the field can read is reworded: a value it cannot read is shown exactly as it is.
+export default function DateField({ className = "", disabled = false, error = "", formatValue, helperText = "", hideLabel = false, label, labelClassName = "", maxDate = "", minDate = "", onChange, placeholder = "Select date", readOnly = false, restriction = "none", required = false, value, withTime = false }) {
   const triggerRef = useRef(null);
   const calendarRef = useRef(null);
   const [open, setOpen] = useState(false);
@@ -91,15 +88,14 @@ export default function DateField({ className = "", disabled = false, error = ""
   const measure = useCallback(() => {
     const rect = triggerRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const width = Math.min(CALENDAR_WIDTH, window.innerWidth - 2 * EDGE);
-    // Below the field when it fits, or when there is even less room above; otherwise above it.
-    const above = window.innerHeight - rect.bottom < CALENDAR_HEIGHT && rect.top > window.innerHeight - rect.bottom;
-    setAnchor({
-      width,
-      left: Math.max(EDGE, Math.min(rect.left, window.innerWidth - width - EDGE)),
-      ...(above ? { bottom: window.innerHeight - rect.top + GAP } : { top: rect.bottom + GAP }),
-    });
+    setAnchor(calendarPlacement(rect, calendarRef.current?.offsetHeight));
   }, []);
+
+  // Placed again once the calendar is drawn, against the height it really has - before the paint,
+  // so it never shows for a frame where the estimate put it.
+  useLayoutEffect(() => {
+    if (open) measure();
+  }, [measure, open, withTime]);
 
   // The calendar is portalled for the same reason the dropdown menu is, and carries the same cost:
   // scrolling the pane moves the field but not the calendar. Closing is the honest answer.
@@ -110,7 +106,12 @@ export default function DateField({ className = "", disabled = false, error = ""
 
   useEffect(() => {
     if (!open) return undefined;
-    const close = (event) => { if (!triggerRef.current?.contains(event.target) && !calendarRef.current?.contains(event.target)) setOpen(false); };
+    const close = (event) => {
+      // The calendar's month and year pickers portal their menus outside it, so a click in one is
+      // still a click inside the calendar: without this, choosing a year closed it.
+      if (event.target.closest?.('[role="listbox"]')) return;
+      if (!triggerRef.current?.contains(event.target) && !calendarRef.current?.contains(event.target)) setOpen(false);
+    };
 
     // Fixed coordinates do not follow the field, so any scroll — including the pane the field sits
     // in, which is why this listens in the capture phase — re-measures against where it now is.
@@ -140,9 +141,11 @@ export default function DateField({ className = "", disabled = false, error = ""
     setOpen(false);
   }
 
-  return <div className={`block text-[11px] font-semibold text-slate-600 sm:text-xs ${className}`}>
-    <span className={labelClassName}>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</span>
-    <span className="relative mt-1.5 block">
+  // `relative` holds a hidden label (`sr-only`) inside the field, as Dropdown's does - else it is
+  // placed against the app shell and a field low in a scrolling table makes the shell scroll.
+  return <div className={`relative block text-[11px] font-semibold text-slate-600 sm:text-xs ${className}`}>
+    <span className={hideLabel ? "sr-only" : labelClassName}>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}<HelpTip text={helperText} /></span>
+    <span className={`relative block ${hideLabel ? "" : "mt-1.5"}`}>
       {/*
         `readOnly` is a value being read back, and it loses the calendar icon with the calendar:
         there is no list to open, so an icon pointing at one is pointing at nothing. It takes
@@ -151,11 +154,11 @@ export default function DateField({ className = "", disabled = false, error = ""
         control waiting on an earlier answer rather than a value being shown.
       */}
       {readOnly
-        ? <span className="flex min-h-9 w-full cursor-default items-center rounded-lg border border-slate-300 bg-slate-100 px-3 text-xs font-normal text-slate-600 sm:text-sm">
-          <span className={`truncate ${value ? "" : "text-slate-400"}`}>{displayValue(value, withTime) || placeholder}</span>
+        ? <span data-field-control className="flex min-h-9 w-full cursor-default items-center rounded-lg border border-slate-300 bg-slate-100 px-3 text-xs font-normal text-slate-600 sm:text-sm">
+          <span className={`truncate ${value ? "" : "text-slate-400"}`}>{(value && formatValue && !unrecognisedFormat ? formatValue(value) : displayValue(value, withTime)) || placeholder}</span>
         </span>
-        : <button ref={triggerRef} type="button" disabled={disabled} onClick={toggleCalendar} className={`flex min-h-9 w-full items-center rounded-lg border bg-white px-3 text-left text-xs font-normal text-slate-700 outline-none transition sm:text-sm focus:ring-2 disabled:cursor-not-allowed disabled:bg-slate-50 ${error ? "border-red-400 focus:border-red-500 focus:ring-red-100" : unrecognisedFormat ? "border-amber-400 focus:border-amber-500 focus:ring-amber-100" : "border-slate-300 focus:border-blue-500 focus:ring-blue-100"}`}>
-          <span className={`truncate ${value ? "" : "text-slate-400"}`}>{displayValue(value, withTime) || placeholder}</span><EventIcon aria-hidden="true" className="ml-auto shrink-0 text-slate-900" fontSize="small" />
+        : <button ref={triggerRef} type="button" data-field-control data-invalid={error ? true : undefined} disabled={disabled} onClick={toggleCalendar} className={`flex min-h-9 w-full items-center rounded-lg border bg-white px-3 text-left text-xs font-normal text-slate-700 outline-none transition sm:text-sm focus:ring-2 disabled:cursor-not-allowed disabled:bg-slate-50 ${error ? "border-red-400 focus:border-red-500 focus:ring-red-100" : unrecognisedFormat ? "border-amber-400 focus:border-amber-500 focus:ring-amber-100" : "border-slate-300 focus:border-blue-500 focus:ring-blue-100"}`}>
+          <span className={`truncate ${value ? "" : "text-slate-400"}`}>{(value && formatValue && !unrecognisedFormat ? formatValue(value) : displayValue(value, withTime)) || placeholder}</span><EventIcon aria-hidden="true" className="ml-auto shrink-0 text-slate-900" fontSize="small" />
         </button>}
       {open && anchor && typeof document !== "undefined" && createPortal(
         <span
@@ -167,8 +170,8 @@ export default function DateField({ className = "", disabled = false, error = ""
           // layers scale silently loses to any dialog stacked higher - at z-140 it opened behind
           // the Meetings dialog (z-180) and the Table Settings builder (z-170), which reads as the
           // date field being dead. 9999 matches Dropdown's portalled menu and FilterDateInput's
-          // calendar, the other controls of this kind.
-          style={{ position: "fixed", left: anchor.left, width: anchor.width, zIndex: 9999, ...(anchor.top === undefined ? { bottom: anchor.bottom } : { top: anchor.top }) }}
+          // calendar, the other controls of this kind. `calendarPlacement` sets it.
+          style={anchor}
           className="pointer-events-auto block max-h-[calc(100vh-24px)] overflow-y-auto rounded-2xl bg-white p-3 text-slate-700 shadow-xl ring-1 ring-slate-200"
         >
           {/* Above the calendar rather than below it, because `CalendarPanel` ends in its own

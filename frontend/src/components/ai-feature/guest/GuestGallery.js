@@ -1,106 +1,126 @@
 "use client";
-import { useCallback, useState } from "react";
-import Logout from "@mui/icons-material/Logout";
-import AppLogo from "@/components/shared/AppLogo";
-import useStudioBranding from "@/components/shared/useStudioBranding";
+import { useCallback, useEffect, useState } from "react";
 import EmptyState from "@/components/ai-feature/shared/EmptyState";
-import { listGuestFolders, listGuestGallery, listGuestMyPhotos, rejectGuestMatch, setGuestRsvp, uploadGuestPhoto, uploadGuestSelfie } from "@/services/ai-feature/ai-feature-public.service";
-import { formatEventRange } from "@/lib/aiFeature.mjs";
+import GuestSelfies from "@/components/shared/GuestSelfies";
+import { buildDerivatives } from "@/lib/imageDerivatives.mjs";
+import { derivativeOptionsFor } from "@/lib/visualCurationCompression.mjs";
+import { fetchGuestSelfieThumbnail, listGuestSelfies, listGuestMyPhotos, removeGuestSelfie, rejectGuestMatch, uploadGuestPhoto, uploadGuestSelfie } from "@/services/ai-feature/ai-feature-public.service";
 import FindMyPhotos from "./FindMyPhotos";
-import GuestPhotoPane from "./GuestPhotoPane";
-import GuestRsvpBar from "./GuestRsvpBar";
-import GuestSubEvents from "./GuestSubEvents";
+import GuestEventFooter from "./GuestEventFooter";
+import GuestEventHeader from "./GuestEventHeader";
 import GuestUploadButton from "./GuestUploadButton";
-import { PAGE_SIZE, defaultGuestTab, guestTabsFor, isSessionExpired } from "./guestActions";
+import GuestWhatsAppSummary from "./GuestWhatsAppSummary";
+import MobileEventHero from "./MobileEventHero";
+import MyPhotosTab from "./MyPhotosTab";
+import { PAGE_CONTAINER, PAGE_SIZE, defaultGuestTab, guestTabsFor, isSessionExpired, selfieLimitMessage, selfieLimitReached } from "./guestActions";
 
 /**
- * The event once the guest is in: a bar that stays put with the event, the guest and the tabs,
- * then whichever tab is open. Every call goes through `guard`, so a session the server no longer
- * honours sends the guest back to the join card rather than leaving a broken page.
+ * The event once the guest is in: one shell - `GuestEventHeader` sticky at the top, My Photos in a
+ * main pane that grows, `GuestEventFooter` after it - on one ordinary page scroll. A guest sees only
+ * the photos their own selfie matched; there is no whole-event gallery. My Photos holds the selfie
+ * search too, and the event's guest upload when it is open: a guest without a selfie, or
+ * one choosing a different selfie, gets `FindMyPhotos` there, and the matches once a selfie is in.
+ * A guest with a selfie is shown their matches as they stand - no new search is run on arrival.
+ * Every call goes through `guard`, so a
+ * session the server no longer honours sends the guest back to the join card rather than leaving
+ * a broken page.
  */
-export default function GuestGallery({ code, session, meta, guest, onGuestChange, onExpired, onLeave, notify }) {
-  const branding = useStudioBranding();
+export default function GuestGallery({ code, session, meta, guest, onGuestChange, onExpired, onLeave, notify, offerWhatsApp = false }) {
   const tabs = guestTabsFor(meta);
-  const [tab, setTab] = useState(() => defaultGuestTab(tabs, guest));
+  const [tab, setTab] = useState(() => defaultGuestTab(tabs));
   // Bumped when a selfie lands, so My Photos reads again rather than showing the list from before.
   const [mineVersion, setMineVersion] = useState(0);
+  // True while a guest who already has a selfie is choosing a different one.
+  const [replacing, setReplacing] = useState(false);
   const allowSharing = Boolean(meta?.gallery?.allowSharing);
   const eventName = meta?.event?.name;
 
   const guard = useCallback((error) => { if (isSessionExpired(error)) onExpired(); }, [onExpired]);
-  const fetchAll = useCallback((page) => listGuestGallery(code, session, { page, pageSize: PAGE_SIZE }).then((response) => response.data), [code, session]);
   const fetchMine = useCallback((page) => listGuestMyPhotos(code, session, { page, pageSize: PAGE_SIZE }).then((response) => response.data), [code, session]);
-  const fetchFolderPage = useCallback((folderId) => (page) => listGuestGallery(code, session, { folderId, page, pageSize: PAGE_SIZE }).then((response) => response.data), [code, session]);
-  const listFolders = useCallback(() => listGuestFolders(code, session).then((response) => response.data), [code, session]);
 
   async function notMe(item) {
     try { await rejectGuestMatch(code, session, item.matchId); onGuestChange({ ...guest, matchedCount: Math.max(0, (guest?.matchedCount || 1) - 1) }); }
     catch (error) { guard(error); notify?.(error.message || "Could not remove that photo.", "error"); throw error; }
   }
-  async function rsvp(value) {
-    try { const response = await setGuestRsvp(code, session, value); onGuestChange(response.data); notify?.("Thanks - your answer is saved.", "success"); }
-    catch (error) { guard(error); notify?.(error.message || "Could not save your answer.", "error"); }
+  async function selfie(file, source) {
+    try { const response = await uploadGuestSelfie(code, session, file, source); if (response.data?.guest) onGuestChange(response.data.guest); setMineVersion((current) => current + 1); return response.data; }
+    catch (error) {
+      guard(error);
+      // Refused as over the limit (another tab, an older count): show the limit from now on. The
+      // route's rate limit is a 429 too, so the message tells the two apart.
+      if (Number(error?.status) === 429 && /maximum/i.test(error?.message || "") && guest?.selfieLimit) onGuestChange({ ...guest, selfieUploads: guest.selfieLimit });
+      throw error;
+    }
   }
-  async function selfie(file) {
-    try { const response = await uploadGuestSelfie(code, session, file); if (response.data?.guest) onGuestChange(response.data.guest); setMineVersion((current) => current + 1); return response.data; }
-    catch (error) { guard(error); throw error; }
-  }
+  /**
+   * A guest's photo is optimized on the phone to the event's own presets (`meta.media`, the pair
+   * the studio or the event chose) and only the preview and thumbnail travel - the same rule as a
+   * staff upload. A format the phone cannot decode (HEIC on some browsers) goes whole for the
+   * server to convert, which is the one documented exception; a photo that decoded but could not
+   * be encoded is a failure the guest sees, never a silent upload of the original.
+   */
   async function uploadPhoto(file) {
-    try { return await uploadGuestPhoto(code, session, file); }
+    try {
+      let prepared = null;
+      try { prepared = await buildDerivatives(file, derivativeOptionsFor("aiFeature", meta?.media)); }
+      catch (error) { if (error?.code !== "UNDECODABLE") throw error; }
+      return await uploadGuestPhoto(code, session, file, prepared);
+    }
     catch (error) { guard(error); throw error; }
   }
-  const showMine = tabs.some((item) => item.id === "mine");
-  const showFind = tabs.some((item) => item.id === "find");
+  // Your Selfies: the guest's own selfies, read again whenever one is added or removed.
+  const [selfies, setSelfies] = useState(null);
+  useEffect(() => {
+    if (!meta?.features?.selfieSearch) return undefined;
+    let live = true;
+    listGuestSelfies(code, session).then((response) => { if (live) setSelfies(response.data); }).catch((error) => { if (live) guard(error); });
+    return () => { live = false; };
+  }, [code, session, mineVersion, meta?.features?.selfieSearch, guard]);
+  const loadSelfie = useCallback((id) => fetchGuestSelfieThumbnail(code, session, id), [code, session]);
+  async function removeSelfie(id) {
+    try { const response = await removeGuestSelfie(code, session, id); if (response.data?.guest) onGuestChange(response.data.guest); setMineVersion((current) => current + 1); notify?.("Selfie removed.", "success"); }
+    catch (error) { guard(error); notify?.(error.message || "Could not remove that selfie.", "error"); throw error; }
+  }
+  const canList = Boolean(meta?.gallery?.showMyPhotos);
+  const canFind = Boolean(meta?.features?.selfieSearch);
   const selfieStatus = guest?.selfieStatus || "NONE";
+  // A guest whose last selfie failed keeps the matches an earlier one found, so only a guest with
+  // neither a selfie nor a match is sent to the search.
+  const finding = canFind && (replacing || !canList || (selfieStatus !== "UPLOADED" && !guest?.matchedCount));
   function found(result) {
+    setReplacing(false);
     if (result?.matched) notify?.(`${result.matched} ${result.matched === 1 ? "photo" : "photos"} found.`, "success");
-    if (result?.goToMine || (showMine && result?.matched)) setTab("mine");
+    else if (canList && result?.matched === null) notify?.("Your selfie is in. Your photos will appear shortly.", "success");
+    else if (canList && result?.matched === 0) notify?.("Your selfie is in. No photos found yet.", "success");
   }
 
-  const mineEmpty = selfieStatus === "UPLOADED"
-    ? <EmptyState title="No photos of you yet" message="New photos are matched automatically as the photographer uploads. Check back in a little while." />
-    : <EmptyState title="Find yourself in the photos" message={showFind ? "Share a selfie and we will pick out every photo you appear in." : "The host has not opened selfie search for this event."} action={showFind && <button type="button" onClick={() => setTab("find")} className="inline-flex min-h-11 items-center rounded-full bg-[#7fa4fa] px-5 text-sm font-semibold text-white hover:bg-[#638df0]">Find my photos</button>} />;
+  /*
+   * The page's one scroll is this box, not the document. `body` carries `overflow-x: hidden` for
+   * the whole application, which makes it the header's scroll container in the browser's eyes - a
+   * container that never scrolls, so a `sticky` header inside it scrolled away with the photos.
+   * Giving the gallery a box of exactly the window's height that scrolls itself puts the header
+   * in a container that does scroll, and it stays put. Still one scrollbar: the document has
+   * nothing left to scroll.
+   */
+  return <div className="flex h-dvh flex-col overflow-y-auto overscroll-contain bg-[#f4f7fb]">
+    <GuestEventHeader eventName={eventName} guest={guest} meta={meta} tabs={tabs} tab={tab} onTabChange={(next) => { setTab(next); setReplacing(false); }} onLeave={onLeave} />
 
-  return <div className="flex min-h-dvh flex-col bg-[#f4f7fb]">
-    <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
-      <div className="mx-auto flex w-full max-w-6xl items-center gap-3 px-4 py-2.5">
-        <span className="hidden sm:block"><AppLogo variant="clientSelectionMobile" /></span>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-slate-900 sm:text-base">{eventName}</p>
-          <p className="truncate text-xs text-slate-500">{[guest?.name && `Hi ${guest.name}`, formatEventRange(meta?.event?.startDate, meta?.event?.endDate)].filter(Boolean).join(" · ")}</p>
-        </div>
-        <button type="button" onClick={onLeave} aria-label="Leave event" className="inline-flex min-h-10 shrink-0 items-center gap-1 rounded-full px-3 text-xs font-semibold text-slate-600 hover:bg-slate-100 sm:text-sm"><Logout style={{ fontSize: 16 }} aria-hidden="true" /><span className="hidden sm:inline">Leave</span></button>
-      </div>
-      {tabs.length > 1 && <nav aria-label="Gallery sections" className="mx-auto w-full max-w-6xl overflow-x-auto px-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <div className="flex gap-1">
-          {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)} className={`min-h-11 shrink-0 whitespace-nowrap border-b-2 px-3 text-sm font-semibold transition ${tab === item.id ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-800"}`}>{item.label}</button>)}
-        </div>
-      </nav>}
-    </header>
-
-    <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-4 sm:py-6">
-      {meta?.features?.rsvp && <div className="mb-4"><GuestRsvpBar guest={guest} onChange={rsvp} /></div>}
-      {tab === "all" && <GuestPhotoPane listKey="all" fetchPage={fetchAll} onError={guard} eventName={eventName} allowSharing={allowSharing} notify={notify}
-        toolbar={(paged) => <>
-          <p className="text-sm text-slate-600">{paged.loading ? "" : `${paged.total} ${paged.total === 1 ? "photo" : "photos"}`}</p>
-          {meta?.features?.guestUploads && <GuestUploadButton onUpload={uploadPhoto} onDone={paged.reload} notify={notify} />}
-        </>}
-        empty={<EmptyState title="No photos yet" message="The photographer has not uploaded anything yet. Check back soon." />} />}
-      {tab === "mine" && showMine && <GuestPhotoPane listKey={`mine:${selfieStatus}:${mineVersion}`} fetchPage={fetchMine} onError={guard} eventName={eventName} allowSharing={allowSharing} notify={notify} onNotMe={notMe} empty={mineEmpty}
-        toolbar={(paged) => <>
-          <p className="text-sm text-slate-600">{paged.loading || !paged.total ? "" : `${paged.total} ${paged.total === 1 ? "photo" : "photos"} of you`}</p>
-          {showFind && selfieStatus === "UPLOADED" && <button type="button" onClick={() => setTab("find")} className="min-h-10 text-sm font-semibold text-blue-700 underline decoration-blue-200 underline-offset-4">Use a different selfie</button>}
-        </>} />}
-      {tab === "subEvents" && <GuestSubEvents meta={meta} listFolders={listFolders} fetchFolderPage={fetchFolderPage} onError={guard} allowSharing={allowSharing} notify={notify} />}
+    {/* The pane grows to fill the window, so a short list still puts the footer at the bottom and
+        a long one scrolls the page - one scroll, the header staying put over it. */}
+    <main className={`${PAGE_CONTAINER} flex-1 py-4 sm:py-6`}>
+      {/* The WhatsApp line sits on My Photos, where the guest's own photos are; a join-card box the
+          server refused is asked again on whichever tab the guest lands. */}
+      {meta?.features?.whatsappSummary && <GuestWhatsAppSummary code={code} session={session} guest={guest} onGuestChange={onGuestChange} notify={notify} onError={guard} showBar={tab === "mine"} startOpen={offerWhatsApp} />}
+      {tab === "mine" && <MobileEventHero event={meta?.event} />}
+      {/* A guest's own photos go to the studio; one shows here only once their selfie matches it. */}
+      {tab === "mine" && meta?.features?.guestUploads && <div className="mb-3 flex justify-end"><GuestUploadButton onUpload={uploadPhoto} onDone={() => setMineVersion((current) => current + 1)} notify={notify} /></div>}
+      {tab === "mine" && canFind && !finding && selfies?.count > 0 && <GuestSelfies selfies={selfies} loadThumbnail={loadSelfie} onRemove={removeSelfie} onAdd={() => setReplacing(true)} className="mb-4 md:mb-5" />}
+      {tab === "mine" && (finding
+        ? <FindMyPhotos guest={guest} features={meta?.features} onUpload={selfie} onFound={found} replacing={replacing} onReplace={() => setReplacing(true)} onCancel={canList && replacing ? () => setReplacing(false) : undefined} />
+        : <MyPhotosTab listKey={`mine:${selfieStatus}:${mineVersion}`} fetchPage={fetchMine} onError={guard} eventName={eventName} allowSharing={allowSharing} notify={notify} onNotMe={notMe} selfieStatus={selfieStatus} whatsappOn={Boolean(meta?.features?.whatsappSummary && guest?.whatsappSummary?.on)} showFind={canFind} limitReached={selfieLimitReached(guest)} limitMessage={selfieLimitMessage(guest)} onFindSelfie={() => setReplacing(true)} />)}
       {!tabs.length && <EmptyState title="Nothing to show yet" message="The host has not opened the gallery for guests. Check back later." />}
-      {tab === "find" && showFind && <FindMyPhotos guest={guest} onUpload={selfie} canShowMine={showMine} onFound={found} />}
     </main>
 
-    <footer className="border-t border-slate-200 bg-white px-4 py-6">
-      <div className="mx-auto flex w-full max-w-6xl flex-col items-center gap-3 text-center sm:flex-row sm:justify-between sm:text-left">
-        <div className="flex items-center gap-3"><AppLogo variant="clientSelectionMobile" />{branding?.studioName && <p className="text-xs text-slate-500">Photos by {branding.studioName}</p>}</div>
-        <button type="button" onClick={onLeave} className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-slate-200 px-4 text-sm font-semibold text-slate-600 hover:bg-slate-50"><Logout style={{ fontSize: 16 }} aria-hidden="true" />Leave event</button>
-      </div>
-    </footer>
+    <GuestEventFooter />
   </div>;
 }

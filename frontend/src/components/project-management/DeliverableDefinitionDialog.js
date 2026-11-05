@@ -9,6 +9,7 @@ import Dropdown from "@/components/shared/Dropdown";
 import TextField from "@/components/shared/TextField";
 import TextAreaField from "@/components/shared/TextAreaField";
 import RadioGroupField from "@/components/shared/RadioGroupField";
+import useFormErrors from "@/components/shared/useFormErrors";
 import { MEDIA_TYPE_OPTIONS } from "@/lib/deliverablePricing.mjs";
 import {
   brandFormRows,
@@ -19,6 +20,9 @@ import {
 } from "@/lib/deliverableBrands.mjs";
 import { deliverableAnswerText } from "@/lib/deliverableAnswers.mjs";
 import { definitionNameTaken } from "@/lib/projectDefinitionNames.mjs";
+
+// Stable, so it runs once when a refusal appears rather than on every render of the form.
+const revealOnMount = (node) => node?.scrollIntoView?.({ block: "nearest" });
 
 /**
  * One deliverable's settings, configured in a dialog rather than in the table.
@@ -53,6 +57,12 @@ export default function DeliverableDefinitionDialog({
    */
   initialName = "",
   /*
+   * A deliverable to start a new one from - More → Duplicate. Everything it holds is the new form's
+   * starting point except its name, which is left empty to be typed: the dialog is still adding,
+   * Add still creates, and nothing is ever written back to the deliverable it was copied from.
+   */
+  copyOf = null,
+  /*
    * Yes and No, as the words the two columns hold. Not the `"true"` / `"false"` the Service
    * dialog's own dropdowns carry - a service's Remarks is still a boolean column, and these two
    * are text, so the value a choice writes has to be the word that is stored.
@@ -81,33 +91,38 @@ export default function DeliverableDefinitionDialog({
   onSubmit,
 }) {
   const isEdit = Boolean(deliverable?.id);
+  // What the form opens holding: the deliverable being edited, or the one being duplicated.
+  const source = deliverable || copyOf;
   const [initial] = useState(() => ({
+    // A copy keeps its source's name out: the name is the one thing a duplicate must be given.
     name: deliverable?.name || initialName || "",
     /*
      * No. of Count and Image Selection are answered Yes or No, and hold the word they were chosen
      * as. A deliverable never answered opens on neither, which is a real state for Image Selection:
      * only Yes admits one to that module, so an unanswered deliverable stays out.
      */
-    photoCount: deliverableAnswerText(deliverable?.photoCountEnabled),
-    imageSelection: deliverableAnswerText(deliverable?.imageSelectionEnabled),
+    photoCount: deliverableAnswerText(source?.photoCountEnabled),
+    imageSelection: deliverableAnswerText(source?.imageSelectionEnabled),
     /*
      * Whether the deliverable is given rather than charged for - its own answer, and nothing to do
      * with any service's. No unless it was answered Yes.
      */
-    complimentary: String(deliverable?.complimentary === true),
+    complimentary: String(source?.complimentary === true),
     /*
      * Remarks is not one of that pair. It is a note about the deliverable, typed, and it decides
      * nothing - see the field below.
      */
-    remarks: deliverableAnswerText(deliverable?.remarksEnabled),
+    remarks: deliverableAnswerText(source?.remarksEnabled),
     // Image or video. A deliverable saved before this was asked opens with neither and can still
     // be saved as it is - the question is offered, not demanded.
-    mediaType: deliverable?.mediaType || "",
+    mediaType: source?.mediaType || "",
     // Every brand it is sold by with every variant, or one empty brand holding one empty variant,
     // so a new deliverable opens on a form to fill in rather than on a button to press first.
-    brands: brandFormRows(deliverable?.brands),
+    // Edit keeps each row's server id so Save updates it in place; a duplicate makes rows of its own.
+    brands: brandFormRows(source?.brands, { keepServerIds: Boolean(deliverable?.id) }),
   }));
   const [form, setForm] = useState(initial);
+  const fields = useFormErrors();
   // Counts the brands and variants added since the dialog opened, so each gets a key of its own.
   const [nextRowId, setNextRowId] = useState(0);
   /*
@@ -165,9 +180,8 @@ export default function DeliverableDefinitionDialog({
   }
 
   /*
-   * The button is disabled until pressing it would do something.
-   *
-   * Adding needs a name; editing needs a change. An Update that writes the same values back is a
+   * Editing needs a change, so Update stays disabled until there is one; a missing or taken name
+   * is said under its box when the button is pressed. An Update that writes the same values back is a
    * request nobody meant to make, and a button that looks live when it has nothing to do is the
    * thing that makes people press it twice and wonder which press counted.
    *
@@ -182,6 +196,7 @@ export default function DeliverableDefinitionDialog({
   return (
     <Dialog
       title={isEdit ? "Edit Deliverable" : "Add Deliverable"}
+      descriptionAsTip
       description="These settings decide what a project is asked for when this deliverable is used."
       size="form"
       layer="dialogOverPanel"
@@ -193,8 +208,8 @@ export default function DeliverableDefinitionDialog({
           className="max-sm:flex-1"
           type="button"
           variant="primary"
-          disabled={saving || !named || nameTaken || (isEdit && !dirty)}
-          onClick={() => onSubmit({
+          disabled={saving || (isEdit && !dirty)}
+          onClick={() => fields.check({ name: named ? (nameTaken ? "A deliverable with this name already exists." : "") : "Enter the deliverable name." }) && onSubmit({
             name: named,
             /*
              * The three answers as typed, and null where nothing was - unanswered, which for Image
@@ -230,7 +245,9 @@ export default function DeliverableDefinitionDialog({
         </Button>
       </>}
     >
-      {error && <p className="mb-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
+      {/* Announced, and scrolled to: Add and Update sit in the footer, so a refusal pressed from the
+          foot of a long form would otherwise land above the fold, unseen and unheard. */}
+      {error && <p ref={revealOnMount} role="alert" className="mb-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         {/* Typed, with nothing offered while it is typed - see `AddDeliverableForm`. */}
@@ -239,10 +256,11 @@ export default function DeliverableDefinitionDialog({
           required
           value={form.name}
           maxLength={191}
-          onChange={(event) => set({ name: event.target.value })}
+          onChange={(event) => { set({ name: event.target.value }); fields.clear("name"); }}
           placeholder="Type a deliverable name"
+          helperText="Shown on quotations and projects; each deliverable needs its own name."
           disabled={saving}
-          error={nameTaken ? "A deliverable with this name already exists." : ""}
+          error={fields.errors.name || (nameTaken ? "A deliverable with this name already exists." : "")}
           className="sm:col-span-2"
         />
 
@@ -254,6 +272,7 @@ export default function DeliverableDefinitionDialog({
           options={MEDIA_TYPE_OPTIONS}
           value={form.mediaType}
           onChange={chooseMediaType}
+          helperText="Image variants ask for size and frame; video variants ask for length."
           disabled={saving}
         />
 
@@ -280,6 +299,7 @@ export default function DeliverableDefinitionDialog({
                     onChange={(value) => setBrand(brand.id, { name: value })}
                     options={brandSuggestions}
                     placeholder="e.g. Canvera"
+                    helperText="The company that makes it, as quotations should name it."
                     disabled={saving}
                   />
                   {/* Never on the only brand: removing it would leave the form with nothing to
@@ -308,6 +328,7 @@ export default function DeliverableDefinitionDialog({
                         maxLength={100}
                         onChange={(event) => setVariant(brand.id, variant.id, { size: event.target.value })}
                         placeholder="e.g. 12x18"
+                        helperText="Print size as quotations show it."
                         disabled={saving}
                       />}
                       {isImage && <TextField
@@ -317,6 +338,7 @@ export default function DeliverableDefinitionDialog({
                         maxLength={60}
                         onChange={(event) => setVariant(brand.id, variant.id, { frameInches: event.target.value })}
                         placeholder="e.g. 1.5 inch"
+                        helperText="Frame width around the print."
                         disabled={saving}
                       />}
                       {isVideo && <TextField
@@ -326,6 +348,7 @@ export default function DeliverableDefinitionDialog({
                         maxLength={100}
                         onChange={(event) => setVariant(brand.id, variant.id, { videoLength: event.target.value })}
                         placeholder="e.g. 3 minutes"
+                        helperText="Running time as quotations show it."
                         disabled={saving}
                       />}
                       <TextField
@@ -337,6 +360,7 @@ export default function DeliverableDefinitionDialog({
                         value={variant.price}
                         onChange={(event) => setVariant(brand.id, variant.id, { price: event.target.value })}
                         placeholder="Not priced yet"
+                        helperText="What this variant costs; blank if unpriced."
                         disabled={saving}
                       />
                       {/* Never on the only variant, for the same reason the only brand keeps its
@@ -372,6 +396,7 @@ export default function DeliverableDefinitionDialog({
         <Dropdown
           label="No.of.Count"
           ariaLabel="No.of.Count"
+          helperText="Yes asks for a count on a project's line, e.g. number of photos."
           value={form.photoCount}
           onChange={(value) => set({ photoCount: value })}
           options={yesNoOptions}
@@ -381,6 +406,7 @@ export default function DeliverableDefinitionDialog({
         <Dropdown
           label="Image Selection"
           ariaLabel="Image Selection"
+          helperText="Only Yes sends this deliverable to Image Selection."
           value={form.imageSelection}
           onChange={(value) => set({ imageSelection: value })}
           options={yesNoOptions}
@@ -392,6 +418,7 @@ export default function DeliverableDefinitionDialog({
         <Dropdown
           label="Complimentary"
           ariaLabel="Complimentary"
+          helperText="Yes means it is given free, whatever service brings it."
           value={form.complimentary}
           onChange={(value) => set({ complimentary: value })}
           options={booleanOptions}
@@ -414,6 +441,7 @@ export default function DeliverableDefinitionDialog({
           maxLength={2000}
           onChange={(event) => set({ remarks: event.target.value })}
           placeholder="Anything worth noting about this deliverable"
+          helperText="A note about this deliverable; it changes nothing on a project."
           disabled={saving}
           className="sm:col-span-2"
         />

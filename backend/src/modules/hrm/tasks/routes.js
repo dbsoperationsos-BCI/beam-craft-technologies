@@ -62,6 +62,8 @@ router.use(async (req, res, next) => {
 router.get("/options", controller.options);
 router.get("/mine", controller.listMine);
 router.get("/given", controller.listGiven);
+// Before `/:id`, which would otherwise read "dashboard" as a task id.
+router.get("/dashboard", controller.dashboard);
 router.post("/", controller.createTask);
 router.get("/:id", controller.getTask);
 /*
@@ -81,6 +83,10 @@ router.patch("/:id", controller.updateTask);
  */
 router.post("/:id/start", controller.startTask);
 router.post("/:id/complete", controller.completeTask);
+router.post("/:id/approve", controller.approveTask);
+router.post("/:id/revoke", controller.revokeTask);
+// A feedback issue answered Issues sorted or Rejected by whoever holds it - a write, as every verb here.
+router.post("/:id/feedback-outcome", controller.resolveFeedbackTask);
 router.post("/:id/reassign", controller.reassignTask);
 router.post("/:id/cancel", controller.cancelTask);
 /*

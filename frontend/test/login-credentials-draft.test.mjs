@@ -63,12 +63,12 @@ test("a field the draft deliberately emptied stays empty", () => {
   assert.equal(shown.alternative1EmployeeId, "");
 });
 
-test("nothing outside this page's ten answers is carried", () => {
+test("nothing outside this page's thirteen answers is carried", () => {
   // `savedAt` is the draft's own bookkeeping and must not reach the form as a field. The list is
   // spelled out rather than counted, so adding an answer to this page is a decision taken here too.
   const shown = asShown({ username: "x", savedAt: "2026-09-08T00:00:00.000Z" });
   assert.equal("savedAt" in shown, false);
-  assert.deepEqual(Object.keys(shown).sort(), ["alternative1EmployeeId", "alternative2EmployeeId", "branchId", "email", "leaveApproverIds", "permissionApproverEmployeeId", "roleIds", "temporaryPassword", "username", "whatsappAllowed"]);
+  assert.deepEqual(Object.keys(shown).sort(), ["alternative1EmployeeId", "alternative2EmployeeId", "branchId", "email", "leaveApproverIds", "permissionApproverEmployeeId", "regularizationApproverEmployeeId", "roleIds", "temporaryPassword", "username", "whatsappAllowed", "excludeFromAttendance", "allowFlexibleShift"].sort());
 });
 
 /*

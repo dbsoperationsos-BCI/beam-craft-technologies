@@ -21,8 +21,15 @@ function fakeRepository() {
     findLiveSalesProjectForUpdate: async (id) => { state.lockedSalesProjects = [...(state.lockedSalesProjects || []), id]; return (state.deletedSalesProjects || []).includes(id) ? null : { id }; },
     findProjectBySalesProjectId: async () => null,
     listSalesProjectsAwaitingImageProject: async (statuses) => { state.lastSyncStatuses = statuses; return state.awaitingSalesProjects || []; },
+    // Linked rows whose Sales project's group was renamed since: `state.renamed`, `{ id, name }` each.
+    listRenamedLinkedProjects: async () => state.renamed || [],
     selectionProgressData: async () => state.progressData || { publishedProjectIds: [], configs: [], selectedConfigIds: [] },
+    // Every linked project has a shoot already past unless a test stages `state.shoots`.
+    listShootDatesForSalesProjects: async (ids) => { state.lastShootQuery = ids; return state.shoots || ids.map((projectId) => ({ projectId, dateCreated: new Date("2026-01-01") })); },
     createProject: async (data) => { const item = project({ id: `project-${id++}`, ...data }); state.projects.push(item); return item; },
+    // The AI Culling, AI Editing and Signature Album projects made with a workspace, each numbered.
+    createModuleProject: async ({ module, ...data }) => { const item = { id: `module-project-${id++}`, module, projectCode: `DBS-VC-${module}-${id}`, ...data }; (state.moduleProjects ||= []).push(item); return item; },
+    countModuleProjects: async (projectId) => (state.moduleProjects || []).filter((item) => item.imageSelectionProjectId === projectId).length,
     updateProject: async (projectId, data) => { const item = state.projects.find((candidate) => candidate.id === projectId); Object.assign(item, data, { updatedAt: new Date() }); return item; },
     listFoldersForDuplicate: async () => state.folders,
     createFolder: async (data) => { const item = { id: `new-folder-${state.createdFolders.length + 1}`, ...data }; state.createdFolders.push(item); return item; },
@@ -64,15 +71,17 @@ test("lists one project per Sales Manager project, the one created first", async
   assert.ok(ids.includes("first")); assert.ok(!ids.includes("later")); assert.ok(ids.includes("manual"));
 });
 
-// Allocation, not a picker: a Sales Manager project moved into an in-progress state appears in
-// the list as a linked project on the next read, named by its WhatsApp group name — and a
-// concurrent list creating the same project first is absorbed, not surfaced as an error.
-test("listing creates linked projects for newly in-progress Sales Manager projects", async () => {
+// Allocation, not a picker: a Sales Manager project that has been started - any status but Yet to
+// Start - appears in the list as a linked project on the next read, named by its WhatsApp group
+// name — and a concurrent list creating the same project first is absorbed, not surfaced as an error.
+test("listing creates linked projects for newly started Sales Manager projects", async () => {
   const repo = fakeRepository();
   repo.state.awaitingSalesProjects = [{ id: "sales-9", whatsappGroupName: "  WED qwerty HYD  " }];
   const service = createImageSelectionProjectService(repo);
   const listed = await service.list({ sort: "dateAdded", order: "desc", archived: false });
-  assert.deepEqual(repo.state.lastSyncStatuses, ["Work in Progress - Pre & Production", "Work in Progress - Post Production"]);
+  // Every status but Yet to Start: Completed, On Hold and the rest are linked too, and neither
+  // Production nor Pre Production is asked about.
+  assert.deepEqual(repo.state.lastSyncStatuses, ["Yet to Start"]);
   const linked = listed.find((item) => item.salesProjectId === "sales-9");
   assert.ok(linked); assert.equal(linked.projectName, "WED qwerty HYD"); assert.equal(linked.sourceType, "Sales");
 
@@ -324,15 +333,46 @@ test("requires at least one workspace tab when the choice is sent", () => {
   assert.equal(createProjectSchema.safeParse(base).success, true);
 });
 
-// Edit re-opens the manual creation form, so it can save everything that form holds — while a
-// rename on its own must not disturb the client or the tabs it does not mention.
-test("the edit form updates the client and workspace tabs together", async () => {
+// Edit re-opens the creation form for the name and client - and never changes which modules the
+// project is in: those are chosen when it is created, so ticks an older form still sends are not applied.
+test("the edit form updates the client, and never the modules the project is in", async () => {
   const repo = fakeRepository(); const service = createImageSelectionProjectService(repo);
-  const saved = await service.edit("project-1", { projectName: "Renamed", clientName: "Anika", clientMainNumber: "+91 9000000000", workspaceTabs: { photoSelection: true, photoCulling: true, signatureAlbum: false } });
+  repo.state.projects[0].photoCullingTab = false;
+  const saved = await service.edit("project-1", { projectName: "Renamed", clientName: "Anika", clientMainNumber: "+91 9000000000", workspaceTabs: { photoSelection: true, photoCulling: true, signatureAlbum: true } });
   assert.equal(saved.projectName, "Renamed");
   assert.equal(saved.clientName, "Anika");
-  assert.equal(saved.photoCullingTab, true);
-  assert.equal(saved.signatureAlbumTab, false);
+  assert.equal(saved.photoCullingTab, false);
+  assert.notEqual(saved.signatureAlbumTab, true);
+});
+
+// One Create Project makes the workspace and a project of its own in each other module named -
+// own ID, the form's name and client copied - in one transaction.
+test("creating in several modules makes a project in each, each with its own ID", async () => {
+  const repo = fakeRepository(); const service = createImageSelectionProjectService(repo);
+  const created = await service.create({ projectName: "Wedding ABC", salesProjectId: null, clientName: "Praba", clientMainNumber: "+91 9876543210", modules: ["culling", "editing", "album"] }, 7);
+  assert.equal(created.photoSelectionTab, false);
+  assert.equal(created.photoCullingTab, true);
+  assert.deepEqual(created.moduleProjects.map((item) => item.module), ["culling", "editing", "album"]);
+  assert.equal(new Set(created.moduleProjects.map((item) => item.projectCode)).size, 3);
+  for (const item of repo.state.moduleProjects) {
+    assert.equal(item.imageSelectionProjectId, created.id);
+    assert.equal(item.projectName, "Wedding ABC");
+    assert.equal(item.clientName, "Praba");
+  }
+  // Photo Selection alone makes no module records at all.
+  const photos = await service.create({ projectName: "Only Selection", salesProjectId: null, clientName: "Praba", clientMainNumber: "+91 9876543210", modules: ["photos"] }, 7);
+  assert.equal(photos.moduleProjects, undefined);
+});
+
+// Deleting Photo Selection's project leaves the AI Culling, AI Editing and Signature Album projects
+// made with it - and their photos - where they are: Photo Selection lets go of the workspace.
+test("deleting Photo Selection's project keeps the projects it was created with", async () => {
+  const repo = fakeRepository(); const service = createImageSelectionProjectService(repo);
+  const created = await service.create({ projectName: "Wedding ABC", salesProjectId: null, clientName: "Praba", clientMainNumber: "+91 9876543210", modules: ["photos", "culling"] }, 7);
+  const result = await service.remove(created.id);
+  assert.equal(result.photoSelectionTab, false);
+  assert.equal(repo.state.projects.find((item) => item.id === created.id).deletedAt ?? null, null);
+  assert.equal(repo.state.moduleProjects.length, 1);
 });
 
 test("a rename on its own leaves the client and tabs untouched", async () => {
@@ -364,86 +404,50 @@ test("carries the workspace-tab choice into a duplicate", async () => {
  * because all three belong to Project Management. Deleting the project there therefore has to take
  * it, or it stays in the sidebar with nothing behind it and no instruction it will accept.
  *
- * It takes the photographs too. This delete used to be soft on both sides - the project hidden,
- * its gallery and cloud files left standing - on the reasoning that Image Selection's own delete
- * asks for the client's submitted selections to be confirmed by hand and a delete over here is
- * not that confirmation. What that left was a project invisible to every screen, unreachable by
- * the one call that could have purged it (which refuses a linked project, and refuses a hidden
- * one), and still billed for. There was no second step, so deferring to one deferred forever.
+ * Deleting a project moves it to Resource Management → Recycling Bin, so the gallery is hidden with
+ * it - stamped with the project's own time, for Restore to find - and its photographs are kept. The
+ * purge belongs to the bin's Delete permanently (`purgeDeletedProject`), which is the step that
+ * cannot be undone.
  */
-test("deleting a project in Project Management takes its Image Selection project and its photographs", () => {
+test("deleting a project in Project Management hides its Image Selection project; Delete permanently purges the photographs", () => {
   const fs = require("node:fs");
   const path = require("node:path");
   const source = fs.readFileSync(path.join(__dirname, "..", "src", "modules", "sales", "projects", "controller.js"), "utf8");
-  /*
-   * From `removeProject`, which is where the cascade lives, through both of its callers.
-   *
-   * It has two now. `DELETE /projects/:id` is one; `DELETE /projects/bulk` - the tick boxes on the
-   * Projects table - is the other, and it reaches the cascade through `deleteProjectRecord`. That
-   * is the point of slicing the whole run of them rather than one handler: a bulk delete that wrote
-   * its own `updateMany` would leave every ticked project's gallery standing in the Image Selection
-   * sidebar with nothing behind it, which is the exact failure this test exists to prevent, forty
-   * times over and in one press.
-   */
-  const remove = source.slice(source.indexOf("async function removeProject"), source.indexOf("async function verifyProjectShoots"));
+  // `retireProjectWithin` holds the steps inside the transaction - written once, so the Delete
+  // button, the bulk delete and Pre Production → Import's replace delete a project the same way.
+  const remove = source.slice(source.indexOf("async function retireProjectWithin"), source.indexOf("async function verifyProjectShoots"));
   assert.ok(remove, "removeProject is no longer where this test looked for it");
 
   // One transaction: a project cannot be deleted while its gallery survives, or the other way about.
   assert.match(remove, /prisma\.\$transaction\(async \(transaction\) => \{/);
   assert.match(remove, /transaction\.salesProject\.updateMany/);
-  assert.match(remove, /transaction\.imageSelectionProject\.updateMany/);
 
   // Matched on the project alone, with no `albumProofing` clause: the Projects page and Album
-  // Proofing file their projects in one table under that flag, and both go.
+  // Proofing file their projects in one table under that flag, and both go - with the project's time.
   const cascade = remove.slice(remove.indexOf("imageSelectionProject.updateMany"), remove.indexOf("return { gallery"));
-  assert.match(cascade, /where: \{ salesProjectId: id, deletedAt: null \}/);
+  assert.match(cascade, /where: \{ salesProjectId: id, deletedAt: null \}, data: \{ deletedAt \}/);
   assert.equal(cascade.includes("albumProofing"), false, "the cascade must not pin a section, or the other keeps its project");
 
-  // The ids are read before that update, because `updateMany` answers with a count. Only the
-  // Projects page's rows are collected: an Album Proofing project is hidden by the same stamp but
-  // never purged, its proof pages carrying upload ids that no foreign key protects.
-  const collect = remove.slice(remove.indexOf("const galleries ="), remove.indexOf("const gallery ="));
-  assert.match(collect, /imageSelectionProject\.findMany/);
-  assert.match(collect, /albumProofing: false/);
-
-  /*
-   * The purge is Image Selection's own, reused whole - this controller never learns what a
-   * derivative is - and it runs after the transaction, because R2 cannot take part in one.
-   *
-   * It sits in `removeProject` rather than beside the route, which is what puts it on **both** ways
-   * in: `DELETE /projects/:id` and the tick boxes' bulk delete. Written beside the single route it
-   * would have left every bulk-deleted booking's photographs in the bucket.
-   *
-   * Measured against the end of the transaction callback rather than against the route's 404, since
-   * the purge now comes before that handler in the file: `return { gallery` is the callback's last
-   * line, so a purge after it is a purge after the commit.
-   */
-  const purge = remove.slice(remove.indexOf("if (removed === null) return null;"));
-  assert.match(purge, /imageSelectionProjects\.purgeData\(galleryId\)/);
-  assert.ok(remove.indexOf("imageSelectionProjects.purgeData") > remove.indexOf("return { gallery"),
-    "the purge must run after the transaction has committed, never inside it");
-  // And before either caller answers, so both the route and the bulk delete carry it.
-  assert.ok(remove.indexOf("imageSelectionProjects.purgeData") < remove.indexOf("async function deleteProjectRecord"),
-    "the purge is beside one caller instead of in the helper both of them go through");
-
-  // A bucket failure leaves a project already invisible everywhere and a retryable mess in the
-  // bucket. It must not answer 500 for a delete that has already happened and cannot be undone.
-  assert.match(purge, /catch \(error\) \{[\s\S]*console\.error/);
+  // The delete erases nothing: a project in the bin comes back with its photographs.
+  assert.doesNotMatch(remove, /purgeData\(/);
 
   // Nothing is touched when the project is not this caller's, or is already gone - and each caller
-  // says so in its own register: the route with a 404, the bulk delete by throwing, which is what
-  // leaves that project counted as missed and its row still ticked.
+  // says so in its own register: the route with a 404, the bulk delete by throwing.
   assert.match(remove, /if \(result\.count !== 1\) return null;/);
   assert.match(remove, /if \(removed === null\) return res\.status\(404\)/);
   assert.match(remove, /if \(removed === null\) throw new Error\("Project not found\."\);/);
-
-  /*
-   * And the bulk delete asks `mayDeleteProject` per project. `requireProjectDeleter` guards the
-   * single route but cannot guard this one - it is middleware reading one id out of the URL - so
-   * without this line a selection would be a way around the only rule saying who may delete a
-   * project at all.
-   */
+  // And the bulk delete asks `mayDeleteProject` per project, since `requireProjectDeleter` cannot.
   assert.match(remove, /if \(!await mayDeleteProject\(project, req\.user\)\) throw new Error\(PROJECT_DELETE_REFUSAL\);/);
+
+  // Delete permanently: Image Selection's own purge, reused whole, for the Projects page's galleries
+  // only - an Album Proofing project's proof pages carry upload ids no foreign key protects - and
+  // before the row goes, so a bucket failure leaves the project in the bin to be tried again.
+  const bin = fs.readFileSync(path.join(__dirname, "..", "src", "modules", "assets", "recycling-bin.service.js"), "utf8");
+  const purge = bin.slice(bin.indexOf("async function purgeDeletedProject"), bin.indexOf("module.exports"));
+  assert.match(purge, /albumProofing: false/);
+  assert.match(purge, /imageSelectionProjects\.purgeData\(gallery\.id\)/);
+  assert.ok(purge.indexOf("imageSelectionProjects.purgeData") < purge.indexOf("prisma.$transaction"), "photos first, then the row");
+  assert.match(purge.slice(purge.indexOf("catch (error)")), /throw httpError\(502/);
 });
 
 /*
@@ -512,7 +516,7 @@ test("the sync will not create a project for a booking deleted since it read the
  * dashboard either. It is a net, not the mechanism: the rows it hides still have to be purged.
  */
 test("a project whose Sales Manager project is deleted is out of the list and out of the counts", () => {
-  const { LIVE_PARENT, createRepository } = require("../src/modules/image-selection/projects/repository");
+  const { LIVE_PARENT, IN_PHOTO_SELECTION, createRepository } = require("../src/modules/image-selection/projects/repository");
 
   // A manual project has no parent to outlive, so it is always in scope.
   assert.deepEqual(LIVE_PARENT, { OR: [{ salesProjectId: null }, { salesProject: { is: { deletedAt: null } } }] });
@@ -521,8 +525,88 @@ test("a project whose Sales Manager project is deleted is out of the list and ou
   const client = { imageSelectionProject: { findMany: (args) => { queries.push(args); return []; } } };
   createRepository(client).listProjects({ search: "", archived: false, orderBy: [] });
   assert.deepEqual(queries[0].where.OR, LIVE_PARENT.OR, "the list must not show a project whose booking is deleted");
+  // Word Chunk Search: every word typed, any order, beside the rule rather than replacing it.
+  createRepository(client).listProjects({ search: "naidu lokesh", archived: false, orderBy: [] });
+  assert.deepEqual(queries[1].where.OR, LIVE_PARENT.OR);
+  // Photo Selection's own projects only: a workspace made only for another module is not one.
+  assert.deepEqual(queries[0].where.AND, [IN_PHOTO_SELECTION]);
+  assert.deepEqual(queries[1].where.AND, [IN_PHOTO_SELECTION, { projectName: { contains: "naidu" } }, { projectName: { contains: "lokesh" } }]);
 
   const dashboard = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "src", "modules", "image-selection", "dashboard", "repository.js"), "utf8");
-  assert.match(dashboard, /const \{ LIVE_PARENT \} = require\("\.\.\/projects\/repository"\);/, "the dashboard must read the list's rule, not restate it");
-  assert.match(dashboard, /const projectScope = \{ deletedAt: null, albumProofing: false, \.\.\.LIVE_PARENT \};/);
+  assert.match(dashboard, /const \{ LIVE_PARENT, IN_PHOTO_SELECTION \} = require\("\.\.\/projects\/repository"\);/, "the dashboard must read the list's rule, not restate it");
+  assert.match(dashboard, /const projectScope = \{ deletedAt: null, albumProofing: false, \.\.\.LIVE_PARENT, AND: \[IN_PHOTO_SELECTION\] \};/);
+});
+
+test("a linked project is listed from the day after its first shoot, and a manual one as always", async () => {
+  const repo = fakeRepository();
+  const day = (offset) => new Date(Date.now() + offset * 86400000);
+  repo.state.projects = [
+    project({ id: "manual", projectName: "Manual", salesProjectId: null }),
+    project({ id: "no-shoots", projectName: "No shoots", sourceType: "Sales", salesProjectId: "sales-none" }),
+    project({ id: "all-ahead", projectName: "All ahead", sourceType: "Sales", salesProjectId: "sales-ahead" }),
+    project({ id: "one-passed", projectName: "One passed", sourceType: "Sales", salesProjectId: "sales-one" }),
+    project({ id: "undated", projectName: "Undated", sourceType: "Sales", salesProjectId: "sales-undated" }),
+  ];
+  repo.state.shoots = [
+    { projectId: "sales-ahead", dateCreated: day(5) },
+    { projectId: "sales-ahead", dateCreated: day(20) },
+    // Shot two days ago, beside two still to come: the one is enough.
+    { projectId: "sales-one", dateCreated: day(-2) },
+    { projectId: "sales-one", dateCreated: day(5) },
+    { projectId: "sales-one", dateCreated: day(10) },
+    // No date is an unscheduled shoot, which has not happened.
+    { projectId: "sales-undated", dateCreated: null },
+  ];
+  const service = createImageSelectionProjectService(repo);
+  const listed = await service.list({ sort: "dateAdded", order: "desc" });
+  assert.deepEqual(listed.map((row) => row.id).sort(), ["manual", "one-passed"]);
+  // One read of the shoots for the whole list, not one per project.
+  assert.deepEqual(repo.state.lastShootQuery.sort(), ["sales-ahead", "sales-none", "sales-one", "sales-undated"]);
+  // Held back, not removed: nothing was deleted or recreated, and the day its shoot passes it is listed.
+  assert.equal(repo.state.projects.length, 5);
+  assert.ok(!repo.state.purged);
+  repo.state.shoots.push({ projectId: "sales-ahead", dateCreated: day(-1) });
+  assert.ok((await service.list({ sort: "dateAdded", order: "desc" })).some((row) => row.id === "all-ahead"));
+  assert.equal(repo.state.projects.length, 5, "the same row, not a new one");
+});
+
+test("the archived list is not held back by shoot dates", async () => {
+  const repo = fakeRepository();
+  repo.state.projects = [project({ id: "archived", sourceType: "Sales", salesProjectId: "sales-a", archivedAt: new Date() })];
+  repo.state.shoots = [];
+  const listed = await createImageSelectionProjectService(repo).list({ archived: true, sort: "dateAdded", order: "desc" });
+  assert.deepEqual(listed.map((row) => row.id), ["archived"]);
+});
+
+test("a linked project whose WhatsApp group was renamed takes the new name, by its id, and nothing else changes", async () => {
+  const repo = fakeRepository();
+  const linked = project({ id: "linked-1", projectName: "WED old name", salesProjectId: "sales-3", sourceType: "Sales" });
+  repo.state.projects.push(linked);
+  repo.state.renamed = [{ id: "linked-1", name: "dxcfghjk" }];
+  const listed = await createImageSelectionProjectService(repo).list({ sort: "dateAdded", order: "desc", archived: false });
+  const row = listed.find((item) => item.id === "linked-1");
+  assert.equal(row.projectName, "dxcfghjk");
+  assert.equal(row.salesProjectId, "sales-3", "the link is the same row");
+  assert.equal(repo.state.projects.filter((item) => item.salesProjectId === "sales-3").length, 1, "renamed, not re-made");
+});
+
+test("a rename that would give two projects one name is left as it was", async () => {
+  const repo = fakeRepository();
+  repo.state.projects.push(project({ id: "manual-1", projectName: "dxcfghjk", salesProjectId: null, sourceType: "Manual" }));
+  repo.state.projects.push(project({ id: "linked-1", projectName: "WED old name", salesProjectId: "sales-3", sourceType: "Sales" }));
+  repo.state.renamed = [{ id: "linked-1", name: "dxcfghjk" }];
+  const warn = console.warn; const warned = []; console.warn = (...args) => warned.push(args.join(" "));
+  try { await createImageSelectionProjectService(repo).list({ sort: "dateAdded", order: "desc", archived: false }); } finally { console.warn = warn; }
+  assert.equal(repo.state.projects.find((item) => item.id === "linked-1").projectName, "WED old name");
+  assert.ok(warned.some((line) => line.includes("kept project linked-1's old name")));
+});
+
+test("a Sales project whose group name another project already carries is not linked twice, and is logged rather than skipped silently", async () => {
+  const repo = fakeRepository();
+  repo.state.projects.push(project({ id: "manual-1", projectName: "WED Asha", salesProjectId: null, sourceType: "Manual" }));
+  repo.state.awaitingSalesProjects = [{ id: "sales-7", whatsappGroupName: "WED Asha" }];
+  const warn = console.warn; const warned = []; console.warn = (...args) => warned.push(args.join(" "));
+  try { await createImageSelectionProjectService(repo).list({ sort: "dateAdded", order: "desc", archived: false }); } finally { console.warn = warn; }
+  assert.equal(repo.state.projects.filter((item) => item.projectName === "WED Asha").length, 1, "never merged into, never duplicated");
+  assert.ok(warned.some((line) => line.includes("sales project sales-7")));
 });

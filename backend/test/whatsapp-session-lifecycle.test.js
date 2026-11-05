@@ -97,3 +97,18 @@ test("the backoff grows and is capped", () => {
   }
   assert.equal(backoffMs(20), RECONNECT_MAX_MS, "and never grows without bound");
 });
+
+/*
+ * A 403 is WhatsApp refusing the saved login. It used to be retried six times like a dropped
+ * connection, and a later Connect resumed the same dead credentials and was refused again - no
+ * fresh QR ever came. It now stops at once and clears them, so the next Connect pairs from scratch.
+ */
+test("a 403 clears the saved login at once instead of retrying it", () => {
+  assert.equal(CLOSE.forbidden, 403);
+  for (const attempts of [0, 3, MAX_RECONNECT_ATTEMPTS]) {
+    const decision = decideOnClose({ ...paired, attempts, statusCode: 403, lastClose: "403 Connection Failure" });
+    assert.equal(decision.action, "clear-credentials", `after ${attempts} attempts`);
+    assert.match(decision.error, /refused the saved login \(403\)/);
+    assert.match(decision.error, /new code/);
+  }
+});

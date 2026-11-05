@@ -72,3 +72,36 @@ test("a manual project's item submits alone", () => {
   assert.deepEqual(plan.submittedIds, ["retouches"]);
   assert.equal(plan.completesProject, false);
 });
+
+// Submit All: several items in one request, each checked by the same rules before anything is
+// written, so one item that cannot go refuses the lot and nothing is half-sent.
+test("Submit All sends every named item together", () => {
+  const plan = submissionPlan(items(), ["album", "wedding-retouches"], { album: 25, "wedding-retouches": 4 });
+  assert.deepEqual(plan.submittedIds, ["album", "wedding-retouches"]);
+  assert.equal(plan.completesProject, false, "retouches is still open");
+});
+
+test("Submit All that sends every open item completes the project", () => {
+  const plan = submissionPlan(items(), ["album", "retouches", "wedding-retouches"], { album: 1, retouches: 1, "wedding-retouches": 1 });
+  assert.equal(plan.completesProject, true);
+});
+
+test("Submit All names an item once however often it was sent", () => {
+  assert.deepEqual(submissionPlan(items(), ["album", "album", "retouches"], { album: 2, retouches: 3 }).submittedIds, ["album", "retouches"]);
+});
+
+test("Submit All is refused whole when one item has nothing picked", () => {
+  assert.throws(
+    () => submissionPlan(items(), ["album", "retouches"], { album: 25, retouches: 0 }),
+    (error) => error.status === 409 && /retouches/.test(error.message) && /Nothing was sent/.test(error.message),
+  );
+});
+
+test("Submit All is refused whole when one item was already sent", () => {
+  const sent = items().map((entry) => (entry.id === "retouches" ? { ...entry, selectionSubmittedAt: new Date() } : entry));
+  assert.throws(() => submissionPlan(sent, ["album", "retouches"], { album: 25 }), (error) => error.status === 409 && /already been submitted/.test(error.message));
+});
+
+test("Submit All is refused whole when one item is not this project's", () => {
+  assert.throws(() => submissionPlan(items(), ["album", "someone-elses-item"], { album: 25 }), (error) => error.status === 404);
+});

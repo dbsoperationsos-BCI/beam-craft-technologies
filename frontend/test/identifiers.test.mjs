@@ -77,6 +77,7 @@ const EXPECTED = [
   ["Employee Referral", "EMPLOYEE_REFERRAL", {}, "DBS-REF-000001"],
   ["Vendor Management", "VENDOR", {}, "DBS-VNMGMT-000001"],
   ["Client Storage", "CLIENT_STORAGE", {}, "DBS-STOMGMT-000001"],
+  ["Speak-up", "SPEAK_UP", {}, "DBS-SPK-00001"],
 ];
 
 test("the first identifier of every scheme is the one the studio asked for", () => {

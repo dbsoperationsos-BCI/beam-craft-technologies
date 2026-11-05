@@ -35,8 +35,8 @@ test("both masters carry the answer, and both default to No", () => {
 test("both dialogs ask it, and open on No where it was never answered", () => {
   assert.match(SERVICE_DIALOG, /<Dropdown\s*\n\s*label="Complimentary"/);
   assert.match(DELIVERABLE_DIALOG, /<Dropdown\s*\n\s*label="Complimentary"/);
-  assert.match(SERVICE_DIALOG, /complimentary: String\(service\?\.complimentary === true\)/);
-  assert.match(DELIVERABLE_DIALOG, /complimentary: String\(deliverable\?\.complimentary === true\)/);
+  assert.match(SERVICE_DIALOG, /complimentary: String\(source\?\.complimentary === true\)/);
+  assert.match(DELIVERABLE_DIALOG, /complimentary: String\(source\?\.complimentary === true\)/);
   // And both send it as the boolean the column is.
   assert.match(SERVICE_DIALOG, /complimentary: form\.complimentary === "true",/);
   assert.match(DELIVERABLE_DIALOG, /complimentary: form\.complimentary === "true",/);
@@ -47,10 +47,11 @@ test("both Settings tables list it", () => {
   assert.equal([...PANEL.matchAll(/complimentary: row\.complimentary === true \? "Yes" : "No",/g)].length, 2);
 });
 
-test("a pricing line, a brand and a variant answer none of it", () => {
+test("a brand and a variant answer none of it", () => {
   // The head row above has answered once; repeating it down every line reads as an answer about
-  // the line. Three sub-row builders, and each leaves the cell blank.
-  assert.equal([...PANEL.matchAll(/^\s+complimentary: "",$/gm)].length, 3);
+  // the line. Two sub-row builders - a service has no pricing rows under it any more - and each
+  // leaves the cell blank.
+  assert.equal([...PANEL.matchAll(/^\s+complimentary: "",$/gm)].length, 2);
 });
 
 /*
@@ -156,6 +157,6 @@ test("a cell's dropdown is no wider than the answers it holds", () => {
 
 test("the column rebuilds when the flag does", () => {
   // Otherwise turning it on would leave the memoised columns as they were.
-  assert.match(SECTION, /\], \[busy, complimentaryColumn, renderTimingCell, servicesEditable, updateServiceCell\]\);/);
-  assert.match(SECTION, /\], \[busy, complimentaryColumn, deliverablesEditable, updateDeliverableCell\]\);/);
+  assert.match(SECTION, /\], \[busy, complimentaryColumn, onReorderServices, renderTimingCell, serviceLineNote, servicesByShoot, servicesEditable, sessionTimingColumn, shootsById, updateServiceCell\]\);/);
+  assert.match(SECTION, /\], \[busy, complimentaryColumn, deliverableLineNote, deliverablesByShoot, deliverablesEditable, onReorderDeliverables, shootsById, updateDeliverableCell\]\);/);
 });

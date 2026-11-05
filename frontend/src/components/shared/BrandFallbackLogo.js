@@ -50,8 +50,14 @@ export function brandNameFor(branding) {
  * `style` is how `AppLogo` hands both files the height and width cap its variant states. It is
  * given to each of them rather than to a wrapper, because only one is ever displayed and the pair
  * has no element between them to size.
+ *
+ * `dark` is a surface that is dark whatever the appearance picker says (`AppLogo`'s
+ * `surface="dark"`): it takes the white-lettered mark alone, rather than the pair the theme
+ * chooses between - which on a light theme would put black lettering on the dark.
  */
-export default function BrandFallbackLogo({ className = "", style, alt = FALLBACK_LOGO_ALT }) {
+export default function BrandFallbackLogo({ className = "", style, alt = FALLBACK_LOGO_ALT, dark = false }) {
+  // eslint-disable-next-line @next/next/no-img-element
+  if (dark) return <img src="/brand/beam-craft-white-text.svg" alt={alt} style={style} className={`studio-logo-fallback ${className}`} />;
   return <>
     {/* eslint-disable-next-line @next/next/no-img-element */}
     <img src="/brand/beam-craft-black-text.svg" alt={alt} style={style} className={`studio-logo-fallback studio-logo-fallback-light ${className}`} />

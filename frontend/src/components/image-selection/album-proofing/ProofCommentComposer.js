@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import ArrowUpwardRounded from "@mui/icons-material/ArrowUpwardRounded";
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import useFormErrors from "@/components/shared/useFormErrors";
 
 /**
  * The card a correction is written in, in both proofing rooms.
@@ -32,6 +33,7 @@ export default function ProofCommentComposer({
   maxLength = 2000,
 }) {
   const inputRef = useRef(null);
+  const fields = useFormErrors();
 
   // The field grows with what is typed, from one line to a few, and scrolls after that: a comment
   // is usually a sentence, and a box sized for a paragraph asks for one.
@@ -48,10 +50,10 @@ export default function ProofCommentComposer({
   // dialog this replaced got that for free, and losing it would have made Escape close the room.
   useEscapeKey(() => { if (!busy) onCancel(); });
 
-  const canSend = Boolean(value.trim()) && !busy;
-
+  // An empty send is answered under the box rather than by a button that will not press.
   function submit() {
-    if (canSend) onSubmit();
+    if (busy) return;
+    if (fields.check({ comment: value.trim() ? "" : "Write the correction." })) onSubmit();
   }
 
   return (
@@ -68,7 +70,9 @@ export default function ProofCommentComposer({
           disabled={busy}
           aria-label={editing ? "Edit your correction" : "Add a correction"}
           placeholder={editing ? "Edit your correction" : "Add a correction"}
-          onChange={(event) => onChange(event.target.value)}
+          aria-invalid={fields.errors.comment ? true : undefined}
+          aria-describedby={fields.errors.comment ? "proof-comment-error" : undefined}
+          onChange={(event) => { fields.clear("comment"); onChange(event.target.value); }}
           // Enter sends, the way it does in every comment box; a deliberate newline is Shift+Enter.
           onKeyDown={(event) => {
             if (event.key !== "Enter" || event.shiftKey) return;
@@ -89,12 +93,13 @@ export default function ProofCommentComposer({
         <button
           type="submit"
           aria-label={editing ? "Save correction" : "Add correction"}
-          disabled={!canSend}
+          disabled={busy}
           className="mb-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-blue-600 text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
         >
           <ArrowUpwardRounded style={{ fontSize: 16 }} />
         </button>
       </div>
+      {fields.errors.comment && <p id="proof-comment-error" role="alert" className="px-2 pb-1 text-xs font-normal text-red-600">{fields.errors.comment}</p>}
     </form>
   );
 }

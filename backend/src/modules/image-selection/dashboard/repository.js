@@ -1,16 +1,20 @@
 const prisma = require("../../../config/db");
 const { projectClientNames } = require("../../../services/projectClientNames");
-const { LIVE_PARENT } = require("../projects/repository");
+const { LIVE_PARENT, IN_PHOTO_SELECTION } = require("../projects/repository");
+const { createRepository: createProjectRepository } = require("../projects/repository");
 const { ACTIVE_BATCH_STATUSES, OUTSTANDING_UPLOAD_STATUSES } = require("../uploads/batchRepository");
+const { reachedConfigWhere } = require("../shoot-visibility");
 
 // Every read here is pinned to the Projects page's own rows: Album Proofing files its projects in
 // the same table under `albumProofing: true`, and a deleted project is gone from every count. The
 // parent check is the list's, imported rather than restated, so a project the Projects page will
 // not show can never be a number on the dashboard either.
-const projectScope = { deletedAt: null, albumProofing: false, ...LIVE_PARENT };
+// A workspace made only for AI Culling, AI Editing or Signature Album is not a Photo Selection
+// project, so it is no figure here either (`IN_PHOTO_SELECTION`, the list's own rule).
+const projectScope = { deletedAt: null, albumProofing: false, ...LIVE_PARENT, AND: [IN_PHOTO_SELECTION] };
 const projectSelect = {
   id: true, projectCode: true, projectName: true, sourceType: true, salesProjectId: true, clientName: true,
-  archivedAt: true, createdAt: true, updatedAt: true, lastOpenedAt: true, totalPhotoSize: true, selectedDownloadedAt: true,
+  archivedAt: true, createdAt: true, updatedAt: true, lastOpenedAt: true, totalPhotoSize: true, selectedDownloadedAt: true, disabledAt: true,
   salesProject: { select: { whatsappGroupNameId: true, whatsappGroupName: true } },
 };
 const publicationSelect = {
@@ -19,10 +23,15 @@ const publicationSelect = {
 };
 // A live selection item and the numbers its limit is derived from — the same three fields the
 // deliverable service reads, so the dashboard's limit is the gallery's limit.
+// The shoot each item belongs to rides along, so a Yet to Download row can say which shoot folder
+// to open: a deliverable's or an allocation's shoot, or the group a manual project's item was typed
+// under.
 const configSelect = {
-  id: true, imageSelectionProjectId: true, createdAt: true, selectionSubmittedAt: true, selectionLimitOverride: true,
-  projectShootDeliverableId: true, projectPostProductionAllocationId: true,
-  shootDeliverable: { select: { selectionLimit: true, numberOfPhotos: true, quantity: true } },
+  id: true, imageSelectionProjectId: true, createdAt: true, selectionSubmittedAt: true, selectedDownloadedAt: true, selectionLimitOverride: true, name: true,
+  projectShootDeliverableId: true, projectPostProductionAllocationId: true, manualShootName: true,
+  manualShootFolder: { select: { id: true, name: true } },
+  shootDeliverable: { select: { deliverableName: true, selectionLimit: true, numberOfPhotos: true, quantity: true, shootId: true, shoot: { select: { shoot: true } } } },
+  postProductionAllocation: { select: { serviceName: true, shootId: true, shoot: { select: { shoot: true } } } },
 };
 
 // The card's "Processing" number and the sweep's test for a batch with nothing outstanding are
@@ -39,23 +48,37 @@ function createDashboardRepository(client = prisma) {
     // what the table itself says about each. Projects, not photos: this never loads a photo row.
     listProjects: () => client.imageSelectionProject.findMany({ where: projectScope, select: projectSelect, orderBy: { createdAt: "desc" } }),
     countAllProjects: () => client.imageSelectionProject.count({ where: projectScope }),
+    // The Projects page's own read of its linked projects' shoot dates, not a copy of it.
+    listShootDatesForSalesProjects: (salesProjectIds) => createProjectRepository(client).listShootDatesForSalesProjects(salesProjectIds),
     /**
      * What the range added: projects created, photos added, photos picked and selection items
      * submitted between `from` and `to`. Four counts in the database, every one pinned to the
      * Projects page's own rows through the project relation.
      */
-    periodCounts: async ({ from, to }) => {
+    // `excludeIds` leaves out the projects disabled from Expand.
+    periodCounts: async ({ from, to }, { excludeIds = [] } = {}) => {
       const inRange = { gte: from, lt: to };
+      const scope = excludeIds.length ? { ...projectScope, id: { notIn: excludeIds } } : projectScope;
       const [projectsCreated, photosAdded, selectionsMade, legacySelections, itemsSubmitted] = await Promise.all([
-        client.imageSelectionProject.count({ where: { ...projectScope, createdAt: inRange } }),
-        client.imageSelectionUpload.count({ where: { project: projectScope, status: "READY", createdAt: inRange } }),
-        client.imageSelectionPhotoSelection.count({ where: { selectedAt: inRange, deliverableConfig: { imageSelectionProject: projectScope } } }),
-        client.imageSelectionUpload.count({ where: { project: projectScope, status: "READY", selected: true, selectedAt: inRange } }),
-        client.imageSelectionDeliverableConfig.count({ where: { selectionSubmittedAt: inRange, imageSelectionProject: projectScope } }),
+        client.imageSelectionProject.count({ where: { ...scope, createdAt: inRange } }),
+        client.imageSelectionUpload.count({ where: { project: scope, status: "READY", createdAt: inRange } }),
+        client.imageSelectionPhotoSelection.count({ where: { selectedAt: inRange, deliverableConfig: { imageSelectionProject: scope } } }),
+        client.imageSelectionUpload.count({ where: { project: scope, status: "READY", selected: true, selectedAt: inRange } }),
+        client.imageSelectionDeliverableConfig.count({ where: { selectionSubmittedAt: inRange, imageSelectionProject: scope } }),
       ]);
       return { projectsCreated, photosAdded, selectionsMade: selectionsMade + legacySelections, itemsSubmitted };
     },
     clientNames: (salesProjects) => projectClientNames(salesProjects),
+
+    // The root folders of the projects on Yet to Download, in the order the project's tree lists
+    // them (`folders/repository.js`), so the row opens on the first shoot a reader would see.
+    rootFolders: (projectIds) => (projectIds.length
+      ? client.imageSelectionFolder.findMany({
+        where: { projectId: { in: projectIds }, parentId: null, deletedAt: null },
+        select: { id: true, projectId: true, name: true, projectShootId: true },
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      })
+      : Promise.resolve([])),
 
     /**
      * Everything the classifier needs, batched for a whole set of projects — five reads however
@@ -73,7 +96,8 @@ function createDashboardRepository(client = prisma) {
       const pickedBefore = asOf ? { selectedAt: { lt: asOf } } : {};
       const [publications, configs, photoCounts, legacySelected] = await Promise.all([
         client.imageSelectionGalleryPublication.findMany({ where: { projectId: { in: projectIds } }, select: publicationSelect }),
-        client.imageSelectionDeliverableConfig.findMany({ where: { imageSelectionProjectId: { in: projectIds }, enabled: true, inactiveAt: null }, select: configSelect }),
+        // An item whose shoot has not reached its day is not counted, as the gallery does not offer it.
+        client.imageSelectionDeliverableConfig.findMany({ where: { imageSelectionProjectId: { in: projectIds }, enabled: true, inactiveAt: null, ...reachedConfigWhere(asOf || undefined) }, select: configSelect }),
         client.imageSelectionUpload.groupBy({ by: ["projectId"], where: { projectId: { in: projectIds }, status: "READY", ...addedBefore }, _count: { _all: true } }),
         // The older whole-gallery flag, all that galleries published before per-item selection set.
         client.imageSelectionUpload.groupBy({ by: ["projectId"], where: { projectId: { in: projectIds }, status: "READY", selected: true, ...pickedBefore }, _count: { _all: true } }),

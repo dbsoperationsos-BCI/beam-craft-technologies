@@ -103,16 +103,51 @@ test("the generator offers a quotation only its brand's shoots", () => {
     "an empty brand list no longer falls back to the studio's own");
 });
 
-test("Field Settings offers Shoot Type under Quotations and draws the per-brand editor", () => {
+test("Field Settings offers Shoot Type under Leads & Followups and Quotations, and draws the per-brand editor", () => {
   /*
    * Settings -> Fields asks module, then screen, then field, and the first two are the sidebar's
-   * own - so Shoot Type is reached under Sales & CRM -> Quotations, which is the screen it is
-   * actually asked on.
+   * own - so Shoot Type is reached under Sales & CRM -> Quotations and under Leads & Followups,
+   * the two screens it is actually asked on. One list, one editor, offered under both.
    */
   const lists = read("..", "frontend", "src", "constants", "moduleFieldLists.js");
-  assert.match(lists, /value: "shoot-types"[\s\S]{0,200}screens: \["quotations"\][\s\S]{0,80}editor: "quotation-shoot-types"/,
-    "Shoot Type is not offered under Quotations, or no longer names the editor that draws it per brand");
+  assert.match(lists, /value: "shoot-types"[\s\S]{0,200}screens: \["leads-followups", "quotations"\][\s\S]{0,80}editor: "quotation-shoot-types"/,
+    "Shoot Type is not offered under both screens, or no longer names the editor that draws it per brand");
 
   const nav = read("..", "frontend", "src", "constants", "navigation.mjs");
   assert.match(nav, /id: "quotations", label: "Quotations"/, "Quotations is not a screen the sidebar has");
+});
+
+/*
+ * The lead reads the same list. CRM -> Add Lead and the lead popup offer, on each Event Details
+ * row, the shoots of the lead's own vertical - through `GET /:code/shoots`, names alone, which a
+ * session holding only CRM Leads may read. It was `shootOptions` in `CRMPage.js`, a second
+ * vocabulary beside this one that no studio could add to.
+ */
+test("a brand's shoots answer the lead exactly as they answer the generator", async () => {
+  for (const code of ["DUM_DUM", "QUA_QUA", "CORP"]) {
+    const [shoots, configuration] = await Promise.all([service.brandShoots(code), service.brandConfiguration(code)]);
+    assert.deepEqual(shoots, configuration.shoots, `${code}: the lead and the generator are offered different shoots`);
+    assert.ok(shoots.every((name) => typeof name === "string" && name.trim()), `${code}: a shoot is not a name`);
+  }
+  assert.equal(await service.brandShoots("NOT_A_BRAND"), null, "a code that is not a brand should answer nothing, not a fallback");
+});
+
+test("the shoots alone may be read with CRM Leads, the configuration may not", () => {
+  const routes = fs.readFileSync(path.join(__dirname, "..", "src", "modules", "sales", "quotation-brands", "routes.js"), "utf8");
+  const shootsGuard = routes.match(/const readsShoots = checkAnyPermission\(\[([\s\S]*?)\]\);/);
+  assert.ok(shootsGuard, "GET /:code/shoots has no guard of its own");
+  assert.match(shootsGuard[1], /module: "SALES", feature: "CRM Leads", level: "READ"/, "somebody who works leads cannot read their vertical's shoots");
+  assert.match(routes, /router\.get\("\/:code\/shoots", readsShoots, controller\.listShoots\);/);
+  // The priced configuration stays where it was: quotations or quotation settings, never leads.
+  const configurationGuard = routes.match(/const readsConfiguration = checkAnyPermission\(\[([\s\S]*?)\]\);/);
+  assert.doesNotMatch(configurationGuard[1], /CRM Leads/, "CRM Leads was given the whole priced configuration");
+});
+
+test("the CRM reads the brand's shoots for the lead's vertical and keeps no list of its own", () => {
+  const crm = read("..", "frontend", "src", "components", "sales", "CRMPage.js");
+  const hook = read("..", "frontend", "src", "components", "sales", "useLeadSuggestionLists.js");
+  assert.doesNotMatch(crm, /const shootOptions = \[/, "CRMPage.js still holds its own shoot type list");
+  assert.match(hook, /getQuotationBrandShoots\(brand\)/, "the hook does not read the brand's shoots");
+  assert.match(crm, /useLeadSuggestionLists\(\{ vertical: addLeadForm\.vertical \}\)/, "Add Lead does not read its vertical's shoots");
+  assert.match(crm, /useLeadSuggestionLists\(\{ vertical \}\)/, "the lead popup does not read its vertical's shoots");
 });

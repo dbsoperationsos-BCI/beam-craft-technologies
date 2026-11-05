@@ -62,6 +62,10 @@ const registerBatchSchema = z.object({
     }))
     .min(1)
     .max(MAX_REGISTER_FILES),
+  // Registered through the AI Culling tab: held for culling before Photo Selection.
+  holdForCulling: z.boolean().optional().default(false),
+  // Registered through the AI Editing tab: in the editing bay before Photo Selection.
+  holdForEditing: z.boolean().optional().default(false),
 });
 
 module.exports = { projectParamsSchema, browseQuerySchema, registerSchema, registerFilesSchema, registerBatchSchema, copySelectedSchema, relativePathSchema, relativeFilePathSchema, MAX_REGISTER_FILES };

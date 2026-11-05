@@ -233,6 +233,23 @@ export function usePreference(key, fallback) {
   return [value, setValue, reset];
 }
 
+/**
+ * Several preferences at once, for a caller whose keys are a list rather than a fixed few - the last
+ * page of every dropdown family (`lib/lastPage.mjs`). `values` holds what is stored for each key;
+ * outside the provider nothing is remembered and `set` does nothing.
+ */
+export function usePreferenceValues(keys) {
+  const context = useContext(PreferencesContext);
+  const preferences = context?.preferences;
+  const joined = keys.join("|");
+  const values = useMemo(
+    () => Object.fromEntries(joined.split("|").map((key) => [key, preferences?.[key]])),
+    [preferences, joined],
+  );
+  const set = useCallback((key, next) => { context?.set(key, next); }, [context]);
+  return { values, set };
+}
+
 /** Whether the server's answer has arrived. Nothing has to wait for it; a few things like to know. */
 export function usePreferencesReady() {
   return useContext(PreferencesContext)?.ready ?? true;

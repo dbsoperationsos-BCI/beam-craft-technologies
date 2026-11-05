@@ -6,6 +6,18 @@ export function getWhatsappSession() {
   return apiRequest("/api/sales/whatsapp-chat/session");
 }
 
+/**
+ * Whether the signed-in user's **own** WhatsApp is linked, and whether they are allowed to link it.
+ *
+ * The same answer `getWhatsappSession` gives, from a route that sits above the CRM Leads guard -
+ * because the question is about the person asking, not about a lead. HR offering to send an
+ * onboarding invite or a new joiner's login from their own account has to know this, and holds
+ * `HRM / Employee Management` rather than `SALES / CRM Leads`.
+ */
+export function getMyWhatsappSession() {
+  return apiRequest("/api/sales/whatsapp-chat/my-session");
+}
+
 // The lead goes with it so the link is recorded in that lead's activity log - it is where the
 // button was pressed, and where anyone looking for it will look.
 export function connectWhatsapp(enquiryId = "") {
@@ -78,18 +90,23 @@ export function markWhatsappThreadRead(enquiryId, phone = "") {
 }
 
 /**
- * A file from the thread, as something an <img> or <audio> can use.
+ * A file from the thread, fetched from WhatsApp the moment View or Download is pressed.
  *
- * The endpoint is behind the same login as everything else, and a bare src on a tag sends no
- * token - so the bytes are fetched with one and handed to the tag as a blob instead.
+ * The CRM keeps no copy, so this is WhatsApp's own file passed through the server; it resolves to a
+ * Blob for the caller to show or save. The endpoint is behind the same login as everything else,
+ * and a bare src on a tag sends no token - hence the fetch. A file WhatsApp no longer has rejects
+ * with the server's own sentence, which tells the user to open it on their phone.
  */
 export async function fetchWhatsappMedia(messageId) {
   const token = getAccessToken();
   const response = await fetch(`${API_URL}/api/sales/whatsapp-chat/messages/${encodeURIComponent(messageId)}/media`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
-  if (!response.ok) throw new Error("This attachment is no longer stored.");
-  return URL.createObjectURL(await response.blob());
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.message || "This file is no longer on WhatsApp. Open it on your phone.");
+  }
+  return response.blob();
 }
 
 /**

@@ -3,8 +3,11 @@ const assert = require("node:assert/strict");
 const { createDeliverableService, DEFAULT_SELECTION_LIMIT } = require("../src/modules/image-selection/deliverables/service");
 const { saveOverridesSchema } = require("../src/modules/image-selection/deliverables/validation");
 
-function fakeRepository({ deliverables = [], configs = [], definitions = [] } = {}) {
-  const state = { deliverables, configs: configs.map((item) => ({ ...item })), definitions, nextId: 1 };
+// `rootFolders` are the manual project's active root folders - its shoots - as `{ id, name }`.
+function fakeRepository({ deliverables = [], configs = [], definitions = [], rootFolders = [] } = {}) {
+  const state = { deliverables, configs: configs.map((item) => ({ ...item })), definitions, rootFolders, nextId: 1 };
+  // An item's folder relation, as the real select reads it: the folder's live name.
+  const withFolder = (item) => ({ ...item, manualShootFolder: item.manualShootFolderId ? state.rootFolders.find((row) => row.id === item.manualShootFolderId) || null : null });
   const repo = {
     state,
     transaction: async (callback) => callback(repo),
@@ -17,7 +20,9 @@ function fakeRepository({ deliverables = [], configs = [], definitions = [] } = 
     createConfig: async (data) => { const item = { id: `config-${state.nextId++}`, inactiveAt: null, createdAt: new Date(), updatedAt: new Date(), ...data }; state.configs.push(item); return item; },
     updateConfig: async (id, data) => { const item = state.configs.find((candidate) => candidate.id === id); Object.assign(item, data); return item; },
     findConfig: async (projectId, id) => state.configs.find((item) => item.id === id && item.imageSelectionProjectId === projectId) || null,
-    listManualConfigs: async (projectId) => state.configs.filter((item) => item.imageSelectionProjectId === projectId && !item.projectPostProductionAllocationId && !item.projectShootDeliverableId && !item.inactiveAt),
+    listManualConfigs: async (projectId) => state.configs.filter((item) => item.imageSelectionProjectId === projectId && !item.projectPostProductionAllocationId && !item.projectShootDeliverableId && !item.inactiveAt).map(withFolder),
+    findRootFolder: async (projectId, folderId) => state.rootFolders.find((row) => row.id === folderId) || null,
+    listRootFolders: async () => state.rootFolders,
     countSelections: async (configId) => state.selectionsByConfig?.[configId] || 0,
     // Image Selection writing back into Project Management's row, which is the whole point of the
     // shared limit: the stub mutates the same deliverable the sources are built from.
@@ -177,7 +182,7 @@ test("includes the linked ProjectShoot details with each selectable item", async
   // What the item carries: which shoot it belongs to, by id and by name.
   const details = { id: "shoot-1", shootId: "SH-001", shoot: "Wedding" };
   // The shoot itself is dated, and in the past, because that is what a shoot with selectable items
-  // is - an undated one has not happened yet and `shootDayHasPassed` holds it back before it can
+  // is - an undated one has not happened yet and `shootDayReached` holds it back before it can
   // reach this list. The date is not part of what travels onto the item, which is what the
   // assertion below pins.
   const shoot = { ...details, dateCreated: new Date("2026-01-10T00:00:00.000Z") };
@@ -286,30 +291,57 @@ test("refuses a second selection item with the same name, however it was capital
   await assert.rejects(() => service.addManualItem("manual-project", { name: " retouches ", selectionLimit: 10 }), { status: 409 });
 });
 
-// The shoot group typed alongside an item stands in for a linked project's shoot: its key
-// travels in shootId, so the Selection Items table and the client gallery group by it and
-// submission goes out one group at a time.
-test("files a typed item under the shoot group it was added to", async () => {
-  const service = serviceFor(fakeRepository());
-  await service.addManualItem("manual-project", { name: "Album", selectionLimit: 30, shootName: "Pre Wedding" });
+// A shoot is always one of the project's root folders. An item filed under a name no folder has
+// would be an orphan - no folder delete could ever reach it - so it is refused; an item under no
+// shoot at all is still a project-wide one.
+test("refuses a shoot name no folder has; an item under no shoot stays project-wide", async () => {
+  const repo = fakeRepository();
+  const service = serviceFor(repo);
+  await assert.rejects(() => service.addManualItem("manual-project", { name: "Album", selectionLimit: 30, shootName: "Pre Wedding" }), { status: 404 });
+  assert.equal(repo.state.configs.length, 0);
   const items = await service.addManualItem("manual-project", { name: "Frames", selectionLimit: 12 });
-  assert.deepEqual(items.map((item) => [item.name, item.shootId, item.shoot?.shoot ?? null]), [
-    ["Album", "manual:prewedding", "Pre Wedding"],
-    ["Frames", null, null],
-  ]);
-  // The nested shootId slot is a shoot's DBS-SID business id, which a typed group lacks.
-  assert.equal(items[0].shoot.shootId, null);
+  assert.deepEqual(items.map((item) => [item.name, item.shootId, item.shoot?.shoot ?? null]), [["Frames", null, null]]);
 });
 
-test("the same item name lives in two shoot groups, but not twice in one", async () => {
-  const service = serviceFor(fakeRepository());
-  await service.addManualItem("manual-project", { name: "Album", selectionLimit: 30, shootName: "Pre Wedding" });
-  const items = await service.addManualItem("manual-project", { name: "Album", selectionLimit: 20, shootName: "Wedding" });
+test("the same item name lives in two shoot folders, but not twice in one", async () => {
+  const service = serviceFor(fakeRepository({ rootFolders: [{ id: "f-pre", name: "Pre Wedding" }, { id: "f-wedding", name: "Wedding" }] }));
+  await service.addManualItem("manual-project", { name: "Album", selectionLimit: 30, shootFolderId: "f-pre" });
+  const items = await service.addManualItem("manual-project", { name: "Album", selectionLimit: 20, shootFolderId: "f-wedding" });
   assert.equal(items.length, 2);
   await assert.rejects(
     () => service.addManualItem("manual-project", { name: " album ", selectionLimit: 10, shootName: "pre-wedding" }),
     { status: 409 },
   );
+});
+
+/*
+ * A manual project's shoot IS one of its root folders, linked by id: an item filed under it carries
+ * `folder:<id>` as its shoot key and the folder's live name, so renaming the folder keeps the item
+ * in the same shoot under the new name - never a second shoot.
+ */
+test("files a typed item under its shoot's folder by id, and follows the folder's rename", async () => {
+  const repo = fakeRepository({ rootFolders: [{ id: "f-wedding", name: "wedding" }] });
+  const service = serviceFor(repo);
+  const items = await service.addManualItem("manual-project", { name: "Album", selectionLimit: 30, shootFolderId: "f-wedding" });
+  assert.deepEqual([items[0].shootId, items[0].shoot.shoot, items[0].shoot.folderId], ["folder:f-wedding", "wedding", "f-wedding"]);
+  assert.equal(repo.state.configs[0].manualShootFolderId, "f-wedding");
+  repo.state.rootFolders[0].name = "wedding 02";
+  const after = await service.list("manual-project");
+  assert.deepEqual([after[0].shootId, after[0].shoot.shoot, after[0].selectionLimit], ["folder:f-wedding", "wedding 02", 30]);
+});
+
+test("a shoot name that matches a root folder files the item under that folder by id", async () => {
+  const repo = fakeRepository({ rootFolders: [{ id: "f-pre", name: "pre wedding" }] });
+  const items = await serviceFor(repo).addManualItem("manual-project", { name: "Album", selectionLimit: 10, shootName: "Pre-Wedding" });
+  assert.equal(items[0].shootId, "folder:f-pre");
+  assert.equal(repo.state.configs[0].manualShootFolderId, "f-pre");
+});
+
+test("refuses a shoot folder that is not in the project, and a second item of one name in one folder", async () => {
+  const service = serviceFor(fakeRepository({ rootFolders: [{ id: "f-wedding", name: "wedding" }] }));
+  await assert.rejects(() => service.addManualItem("manual-project", { name: "Album", selectionLimit: 10, shootFolderId: "gone" }), { status: 404 });
+  await service.addManualItem("manual-project", { name: "Album", selectionLimit: 10, shootFolderId: "f-wedding" });
+  await assert.rejects(() => service.addManualItem("manual-project", { name: "album", selectionLimit: 5, shootName: "Wedding" }), { status: 409 });
 });
 
 // A linked project's items are the allocation's, and a second, typed copy would be a second answer

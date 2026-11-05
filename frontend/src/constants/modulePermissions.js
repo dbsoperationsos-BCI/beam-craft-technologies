@@ -32,6 +32,9 @@ import { MENU_GROUPS } from "./navigation.mjs";
 export const ROUTE_PERMISSIONS = [
   ["/admin/roles", { module: "ADMIN", feature: "Role Management" }],
   ["/admin/users", { module: "ADMIN", feature: "User Management" }],
+  // Read-only, and its own permission: the log says what every person did, which is a wider read
+  // than managing their accounts. The `/api/admin/activity-logs` router guards on the same pair.
+  ["/admin/activity-logs", { module: "ADMIN", feature: "User Activity Logs" }],
   ["/admin", { module: "ADMIN", feature: "User Management" }],
 
   // The HRM master data lists are read by Admin, Accounts, Assets and the employee forms as well as
@@ -51,6 +54,17 @@ export const ROUTE_PERMISSIONS = [
    * nothing else it could be confused with — `/hrm/employee-attendance` does not start with this.
    */
   ["/hrm/attendance", { module: "HRM", feature: "Attendance Approval" }],
+  /*
+   * Leave, permission and comp-off requests - raising one's own and answering the ones this login is
+   * named an approver on. Its own permission, since every screen in the menu is granted apart; the
+   * request endpoints accept it or `HRM / Employee Attendance`, so the screen never opens onto
+   * refusals. Who may *decide* a request is the approver slots on the requester's record, checked by
+   * the server per request. Above the bare `/hrm` prefix below.
+   */
+  ["/hrm/requests", { module: "HRM", feature: "Requests" }],
+  // HRM → Events: Read to see them, Read / Write to post. `backend/src/modules/hrm/events/routes.js`
+  // guards on the same pair. Above the bare `/hrm` prefix below.
+  ["/hrm/events", { module: "HRM", feature: "Events" }],
   /*
    * Tasks is its own permission and must stay above the bare `/hrm` prefix below, which would
    * otherwise claim it for Employee Management — and Tasks is meant to be held by everybody while
@@ -78,8 +92,14 @@ export const ROUTE_PERMISSIONS = [
    * by name before offering to link a sheet.
    */
   ["/hrm/interview", { module: "HRM", feature: "Interview" }],
+  // HRM → Payslip: the signed-in employee's own payslips. Above `/hrm`, like Payroll below.
+  ["/hrm/payslip", { module: "HRM", feature: "My Payslip" }],
+  // HRM → Payroll. Above `/hrm`, which would otherwise answer for it as Employee Management.
+  ["/hrm/payroll", { module: "HRM", feature: "Payroll" }],
   ["/hrm", { module: "HRM", feature: "Employee Management" }],
 
+  // Resource Management → Recycling Bin: deleted projects, restored or deleted permanently.
+  ["/asset-management/recycling-bin", { module: "ASSET", feature: "Recycling Bin" }],
   ["/asset-management/client-storage", { module: "ASSET", feature: "Client Storage" }],
   ["/asset-management/vendors", { module: "ASSET", feature: "Vendor Management" }],
   ["/asset-management/assets", { module: "ASSET", feature: "Asset Management" }],
@@ -93,10 +113,37 @@ export const ROUTE_PERMISSIONS = [
   // The two client gifts and where each has got to. Its own permission, not the projects one:
   // whoever chases a welcome gift is not necessarily somebody who may re-plan the project.
   ["/project-management/client-gifts", { module: "PROJECT", feature: "Client Gifts" }],
+  // Project Management → Feedback, its own permission from the start (migration 20261001130000) so
+  // the screen is closed to everybody not given it, however little it shows yet.
+  ["/project-management/feedback", { module: "PROJECT", feature: "Feedback" }],
   // Keep old bookmarks working while the screen moves out of Sales. Same permission as the row
   // above - a bookmark is not a second screen.
   ["/sales/crd-documents", { module: "PROJECT", feature: "CRD Documents" }],
   ["/sales/quotation", { module: "SALES", feature: "Quotation Management" }],
+  // Client Management -> Client Offers: the offers on the Home page of the clients' app. The route
+  // stays under /sales, where it began, so bookmarks and notification links keep working.
+  ["/sales/client-offers", { module: "CLIENT", feature: "Client Offers" }],
+  // Client Management -> Client Chats: the chats clients start from their app.
+  ["/sales/client-chats", { module: "CLIENT", feature: "Client Chats" }],
+  // Client Management -> Invitation Cards: the designs and songs clients make their invitations from.
+  ["/client-management/invitation-cards", { module: "CLIENT", feature: "Invitation Cards" }],
+  // Client Management -> Client Requests: what clients ask about their services and deliverables.
+  ["/client-management/client-requests", { module: "CLIENT", feature: "Client Requests" }],
+  /*
+   * The Quotation Calculator, on the same permission as the generator it hands its figures to.
+   *
+   * Not a permission of its own: pricing a quotation and raising one are the same job, and a feature
+   * key nobody has ticked reaches only a Super Admin - so a new one would have taken the calculator
+   * away from the people already using it inside the lead popup, which is where it was until it
+   * became a page of its own.
+   *
+   * **And therefore not in the sidebar.** Two menu screens may not share a permission - Role
+   * Management would have no way to grant one without the other, which `permission-catalogue-sidebar`
+   * holds the application to. So this is a route with a guard and no menu entry, like
+   * `/sales/crd-documents` above: reached from a lead's own Quotation Calculator button, which is
+   * where it was reached from when it was a dialog.
+   */
+  ["/sales/quotation-calculator", { module: "SALES", feature: "Quotation Management" }],
   /*
    * `/sales/meetings` - the studio calendar - is deliberately absent from this table.
    *
@@ -145,6 +192,9 @@ export const ROUTE_PERMISSIONS = [
   ["/project-management/pre-production", { module: "PROJECT", feature: "Pre Production" }],
   ["/project-management/post-production", { module: "PROJECT", feature: "Post Production" }],
   ["/project-management/production", { module: "PROJECT", feature: "Production" }],
+  // The week of shoots the viewer and their team are named on. Its own permission, because it is
+  // read by everybody on a shoot - Project Managers and coordinators as much as Production.
+  ["/project-management/shoot-board", { module: "PROJECT", feature: "Shoot Board" }],
   ["/project-management/projects", { module: "PROJECT", feature: "Projects" }],
 
   /*
@@ -160,17 +210,36 @@ export const ROUTE_PERMISSIONS = [
   // fall through to that module's rows: one row guards the overview, the events list and every
   // event workspace beneath it. `backend/src/modules/ai-feature/` guards on this exact pair; the
   // People tabs and the defaults panel ask for their own permissions by name inside the screen.
+  // Photo Selling's route sits under the AI Feature's prefix, beside it in the sidebar, and
+  // answers to its own permission - the one `backend/src/modules/photo-selling/` guards on. Ahead of
+  // the prefix row so the longest match wins.
+  ["/visual-curation/ai/photo-selling", { module: "IMAGE_SELECTION", feature: "Photo Selling" }],
   ["/visual-curation/ai", { module: "IMAGE_SELECTION", feature: "AI Feature" }],
   // Album Proofing is its own job with its own grant and its own API; it sits under the Image
   // Selection prefix only because that is where the studio finds it. Ahead of the prefix rows so
   // the longest match wins.
+  // Its dashboard first, so `firstPermittedRoute` lands on it as Image Selection's does; the prefix
+  // row follows to go on guarding the Projects page and both name the same permission.
+  ["/image-selection/album-proofing/dashboard", { module: "IMAGE_SELECTION", feature: "Album Proofing" }],
   ["/image-selection/album-proofing", { module: "IMAGE_SELECTION", feature: "Album Proofing" }],
+  // AI Culling, AI Editing and Signature Album, each a module of its own with a Dashboard and a
+  // Projects page, each on its own permission - the one its dashboard summary is guarded by
+  // (`backend/src/modules/image-selection/stage-dashboards/routes.js`). Dashboard first, so
+  // `firstPermittedRoute` lands on a page that exists; the prefix row guards Projects. Ahead of
+  // the /image-selection rows so the longest match wins. The Projects page also reads the project
+  // list, folders and the culling API, which stay `Project Management`'s - it asks for that itself.
+  ["/image-selection/ai-culling/dashboard", { module: "IMAGE_SELECTION", feature: "AI Culling" }],
+  ["/image-selection/ai-culling", { module: "IMAGE_SELECTION", feature: "AI Culling" }],
+  ["/image-selection/ai-editing/dashboard", { module: "IMAGE_SELECTION", feature: "AI Editing" }],
+  ["/image-selection/ai-editing", { module: "IMAGE_SELECTION", feature: "AI Editing" }],
+  ["/image-selection/signature-album/dashboard", { module: "IMAGE_SELECTION", feature: "Signature Album" }],
+  ["/image-selection/signature-album", { module: "IMAGE_SELECTION", feature: "Signature Album" }],
   ["/image-selection/dashboard", { module: "IMAGE_SELECTION", feature: "Project Management" }],
   ["/image-selection", { module: "IMAGE_SELECTION", feature: "Project Management" }],
 
   // Two Accounts screens, two permissions: keeping the cash book and deciding what the studio pays
   // out are different jobs, even though both are the accountant's.
-  ["/accounts/payment-requests", { module: "ACCOUNTS", feature: "Payment Request Approval" }],
+  ["/accounts/payment-requests", { module: "ACCOUNTS", feature: "Payment Request" }],
   ["/accounts/manager", { module: "ACCOUNTS", feature: "Cash Management" }],
   // Subscribe: the client companies onboarded for each of Beam Craft's products.
   ["/subscribe/media-studio-operations", { module: "SUBSCRIBE", feature: "Client Onboarding" }],

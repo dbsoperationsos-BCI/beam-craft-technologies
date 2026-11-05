@@ -1,5 +1,6 @@
 "use client";
 
+import { avatarOf } from "@/lib/employeeAvatar.mjs";
 import SimpleTable from "@/components/data-table/SimpleTable";
 
 import { createPortal } from "react-dom";
@@ -15,6 +16,7 @@ import CloseButton from "@/components/shared/CloseButton";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import { apiRequest } from "@/lib/apiClient";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import useFormErrors from "@/components/shared/useFormErrors";
 import { copyToClipboard } from "@/lib/clipboard";
 
 /**
@@ -78,6 +80,9 @@ export default function MeetingsDialog({ lead, onClose, onNotice }) {
   // anything reported only through onNotice is invisible while the dialog is open - which
   // made a refused schedule look like a button that does nothing.
   const [message, setMessage] = useState(null);
+  const fields = useFormErrors();
+  // A refused press says only how many boxes are red; what is wrong is under each one.
+  const shown = message || (fields.summary ? { tone: "error", text: fields.summary } : null);
   // The HRM Employee Repository, offered as guest suggestions. Guests are not limited to it -
   // a client or a supplier is typed in directly - so this only ever adds to what can be
   // entered by hand.
@@ -139,6 +144,7 @@ export default function MeetingsDialog({ lead, onClose, onNotice }) {
           // Work address first: it is the one a meeting invite belongs on.
           value: String(row.workEmailId || row.emailId || "").trim(),
           label: [row.employeeName, row.designation].filter(Boolean).join(" · ") || row.employeeId || "Employee",
+          avatar: avatarOf(row),
         })));
       })
       .catch(() => {
@@ -158,6 +164,7 @@ export default function MeetingsDialog({ lead, onClose, onNotice }) {
   );
 
   function updateForm(key, value) {
+    fields.clear(key);
     setForm((current) => ({ ...current, [key]: value }));
   }
 
@@ -174,13 +181,16 @@ export default function MeetingsDialog({ lead, onClose, onNotice }) {
 
   async function schedule() {
     if (scheduling) return;
-    if (!form.title.trim()) return report("Give the meeting a title.");
-    if (!form.date || !form.time) return report("Pick a date and a start time.");
-
+    report("");
     // The picker gives a local date and a local time; combined they are the local instant,
     // which the browser converts to UTC on the wire.
     const startAt = new Date(`${form.date}T${form.time}`);
-    if (Number.isNaN(startAt.getTime())) return report("Pick a valid date and start time.");
+    const invalidStart = form.date && form.time && Number.isNaN(startAt.getTime());
+    if (!fields.check({
+      title: form.title.trim() ? "" : "Give the meeting a title.",
+      date: !form.date ? "Pick a date." : (invalidStart ? "Pick a valid date and start time." : ""),
+      time: form.time ? "" : "Pick a start time.",
+    })) return;
 
     setScheduling(true);
     try {
@@ -202,6 +212,7 @@ export default function MeetingsDialog({ lead, onClose, onNotice }) {
     } catch (error) {
       // A Google grant problem is a state the panel can act on, not just a message.
       if (error?.data?.code) setGoogleIssue(error.data.code);
+      if (fields.fromServer(error, { startAt: "date", durationMinutes: "duration" })) return;
       report(error?.message || "Unable to schedule this meeting.");
     } finally {
       setScheduling(false);
@@ -246,24 +257,24 @@ export default function MeetingsDialog({ lead, onClose, onNotice }) {
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6">
-          {message && (
+          {shown && (
             <div
-              role={message.tone === "success" ? "status" : "alert"}
+              role={shown.tone === "success" ? "status" : "alert"}
               className={`mb-5 flex items-start gap-3 rounded-lg border px-4 py-3 text-sm ${
-                message.tone === "success"
+                shown.tone === "success"
                   ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                   : "border-rose-200 bg-rose-50 text-rose-700"
               }`}
             >
-              <span className="min-w-0 flex-1 break-words">{message.text}</span>
-              <button
+              <span className="min-w-0 flex-1 break-words">{shown.text}</span>
+              {message && <button
                 type="button"
                 onClick={() => setMessage(null)}
                 aria-label="Dismiss message"
                 className="shrink-0 text-lg leading-none opacity-70 hover:opacity-100"
               >
                 ×
-              </button>
+              </button>}
             </div>
           )}
 
@@ -284,34 +295,38 @@ export default function MeetingsDialog({ lead, onClose, onNotice }) {
             <h3 className="text-sm font-semibold text-slate-800">Schedule a meeting</h3>
             <div className="mt-3 grid items-start gap-4 md:grid-cols-3">
               <div className="md:col-span-2">
-                <TextField label="Title" required value={form.title} onChange={(event) => updateForm("title", event.target.value)} placeholder="Discovery call" />
+                <TextField label="Title" helperText="The meeting's name, as it shows on the calendar." required value={form.title} onChange={(event) => updateForm("title", event.target.value)} placeholder="Discovery call" error={fields.errors.title} />
               </div>
               <Dropdown
                 mode="input"
                 label="Duration"
+                helperText="How long the meeting runs; sets its end time."
                 ariaLabel="Duration"
                 value={form.duration}
                 onChange={(value) => updateForm("duration", value)}
                 options={DURATION_OPTIONS}
+                error={fields.errors.duration}
                 // A duration scale is ordered by length, which the alphabet would put "1 hour"
                 // ahead of "15 minutes" in.
                 sorted={false}
               />
-              <DateField label="Date" required value={form.date} onChange={(value) => updateForm("date", value)} />
-              <TimeField label="Start time" value={form.time} onChange={(event) => updateForm("time", event.target.value)} />
+              <DateField label="Date" helperText="The day the meeting takes place." required value={form.date} onChange={(value) => updateForm("date", value)} error={fields.errors.date} />
+              <TimeField label="Start time" helperText="The meeting ends after the chosen duration from this time." value={form.time} onChange={(event) => updateForm("time", event.target.value)} error={fields.errors.time} />
               <EmailChipsField
                 label="Guests"
+                helperText="Pick staff or type email addresses of people to invite to the meeting."
                 values={form.attendees}
                 onChange={(next) => updateForm("attendees", next)}
                 options={employeeOptions}
                 optionsLabel="Employees"
+                error={fields.errors.attendees}
               />
               <div className="md:col-span-3">
-                <TextField label="Description" value={form.description} onChange={(event) => updateForm("description", event.target.value)} placeholder="What is this meeting about?" />
+                <TextField label="Description" helperText="A short note on what the meeting is about." value={form.description} onChange={(event) => updateForm("description", event.target.value)} placeholder="What is this meeting about?" error={fields.errors.description} />
               </div>
             </div>
             <div className="mt-4 flex items-center justify-end gap-3">
-              <Button type="button" variant="secondary" onClick={() => setForm(emptyForm())} disabled={scheduling}>
+              <Button type="button" variant="secondary" onClick={() => { fields.clearAll(); setForm(emptyForm()); }} disabled={scheduling}>
                 Clear
               </Button>
               <Button type="button" variant="primary" onClick={() => void schedule()} disabled={scheduling || Boolean(googleIssue)}>

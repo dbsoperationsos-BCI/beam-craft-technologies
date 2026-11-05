@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { FALLBACK_BRANCH_OPTIONS, optionValues } from "../src/lib/crmOptions.js";
+import { optionValues } from "../src/lib/crmOptions.js";
 
 /*
  * Leads & Followups answers to the studio's branches, and to nothing it wrote down itself.
@@ -19,10 +19,8 @@ import { FALLBACK_BRANCH_OPTIONS, optionValues } from "../src/lib/crmOptions.js"
  * `referenceMatchers` forgives a first word when it resolves `branch_id` - a matcher quietly doing
  * the work of a list.
  *
- * Two things have to hold and neither announces itself: no screen may carry a branch list of its
- * own, and the fallback that covers the first paint must be spelled the way the `branch` table
- * spells them - otherwise the placeholder describes one studio and the answer that replaces it
- * describes another.
+ * One thing has to hold and it does not announce itself: no screen, and no stand-in for the first
+ * paint, may carry a branch list of its own - only the `branch` table names the studio's branches.
  *
  * Reads the source, the way the other CRM tests here do: there is no DOM in this suite.
  */
@@ -37,17 +35,14 @@ const HOOK = read("components", "sales", "useBranchOptions.js");
 const OPTIONS = read("lib", "crmOptions.js");
 
 /** The six the studio actually has, as `scripts`/the seed spell them. */
-const REAL = ["Erode TN", "Tiruppur TN", "Coimbatore TN", "Bangalore KA", "Hyderabad TL", "Visakhapatnam AP"];
-
-test("the fallback names branches the studio actually has", () => {
+test("no branch list is written down in the browser, not even as a stand-in", () => {
   /*
-   * It is only the first paint - the real list is fetched - but a fallback spelled the old way is
-   * worse than none: `Dropdown` shows its placeholder for a value it cannot find, so a lead would
-   * read as having no branch for as long as the request was in flight, and a save made in that
-   * moment would write a branch that matches nothing.
+   * The picker starts empty and fills from the studio's branch table. A written-down stand-in names
+   * branches the studio may not have, and a save made while it showed would file a lead against one.
    */
-  assert.deepEqual(optionValues(FALLBACK_BRANCH_OPTIONS).sort(), [...REAL].sort());
-  for (const option of FALLBACK_BRANCH_OPTIONS) assert.equal(option.value, option.label);
+  assert.ok(!OPTIONS.includes("FALLBACK_BRANCH_OPTIONS"), "crmOptions.js still writes down a branch list");
+  assert.ok(!HOOK.includes("FALLBACK_BRANCH_OPTIONS"), "useBranchOptions still starts from a written-down list");
+  assert.match(HOOK, /useState\(\[\]\)/);
 });
 
 test("the old short spellings are gone from every list in the CRM", () => {
@@ -78,7 +73,6 @@ test("no screen writes its own branch list; they all fetch the studio's", () => 
   }
   // And the hook reads the branch table through the CRM's own endpoint, not a list of its own.
   assert.match(HOOK, /getCrmBranches/);
-  assert.match(HOOK, /FALLBACK_BRANCH_OPTIONS/, "the hook has no fallback, so a failed request empties the picker");
 });
 
 test("every branch control on the CRM offers the fetched list", () => {

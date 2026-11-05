@@ -1,6 +1,7 @@
 const { createBranchesService } = require("./service");
 const { storeImage } = require("../../../services/imageStorage");
 const { createBranchSchema, updateBranchSchema } = require("./validation");
+const { describeRenamed } = require("../../../services/nameCopies");
 
 /**
  * Settings → Organization → Branches, over HTTP.
@@ -74,7 +75,10 @@ async function updateBranch(req, res) {
   const result = updateBranchSchema.safeParse(req.body);
   if (!result.success) return refuse(res, result, "Check the branch details.");
   try {
-    return res.json({ data: await service.update(id, await withStoredQrCode(result.data)) });
+    const { renamed, ...branch } = await service.update(id, await withStoredQrCode(result.data));
+    // Said rather than left to be noticed: renaming a branch rewrites it on every record filed
+    // under it, and whoever did it should hear so at the moment it happens.
+    return res.json({ data: branch, ...(renamed ? { message: `Branch renamed, and ${describeRenamed(renamed)}.` } : {}) });
   } catch (error) {
     return handleError(error, res, "save");
   }

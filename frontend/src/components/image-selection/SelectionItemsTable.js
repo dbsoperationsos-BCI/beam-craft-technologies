@@ -8,7 +8,8 @@ import OpenInFull from "@mui/icons-material/OpenInFull";
 import { useState } from "react";
 import IconButton from "@/components/shared/IconButton";
 import { PROGRESS_COLORS } from "@/lib/progressStatus.mjs";
-import { normalizedShootName, unmatchedFolderShoots } from "@/lib/shootGroups.mjs";
+import { folderShootGroup, unmatchedFolderShoots } from "@/lib/shootGroups.mjs";
+import { newSelectionItemLimit, validateSelectionLimit } from "@/lib/imageSelectionSettings.mjs";
 
 /**
  * The per-deliverable "which items can the client choose, and how many" table, grouped by the shoot
@@ -20,10 +21,10 @@ import { normalizedShootName, unmatchedFolderShoots } from "@/lib/shootGroups.mj
  *
  * `onAdd` and `onRemove` are passed only for a manually named project, which has no Post
  * Production Allocation to derive its items from. There the shoot groups are the project's root
- * folders, handed in as `folderShoots`: each root folder already is a shoot in the client
- * gallery — items are listed under the root folder matching their shoot name — so the folders the
- * studio made in the tree stand as groups here, each carrying its own add row, and a new shoot is
- * made by making its folder rather than by typing its name a second time.
+ * folders, handed in as `folderShoots` (`{ id, name }`): each root folder already is a shoot in the
+ * client gallery - an item points at its folder by id, so renaming the folder keeps the group - so
+ * the folders the studio made in the tree stand as groups here, each carrying its own add row, and a
+ * new shoot is made by making its folder rather than by typing its name a second time.
  */
 function groupByShoot(deliverables) {
   const groups = new Map();
@@ -35,18 +36,21 @@ function groupByShoot(deliverables) {
   return [...groups.values()];
 }
 
-export default function SelectionItemsTable({ deliverables, selections, selectionCounts = {}, errors = {}, onLimitChange, onToggle, onExpand, onAdd, onRemove, adding = false, dense = false, folderShoots = [] }) {
+export default function SelectionItemsTable({ deliverables, selections, selectionCounts = {}, errors = {}, onLimitChange, onToggle, onExpand, onAdd, onRemove, adding = false, dense = false, folderShoots = [], drafts: heldDrafts, onDraftsChange }) {
   const savedGroups = groupByShoot(deliverables);
-  // The per-group add-row drafts, keyed by group id.
-  const [drafts, setDrafts] = useState({});
+  // The per-group add-row drafts, keyed by group id. Held by the caller when it passes them, so
+  // Review & Share can add a typed item nobody pressed + for; otherwise kept here.
+  const [ownDrafts, setOwnDrafts] = useState({});
+  const drafts = heldDrafts ?? ownDrafts;
+  const setDrafts = onDraftsChange ?? setOwnDrafts;
   if (!deliverables.length && !onAdd)
     return <p className={`px-3 py-4 text-slate-500 ${dense ? "text-sm" : "text-xs sm:text-sm"}`}>No deliverables are available for this project.</p>;
 
-  // Root folders that no saved group answers to yet, each shown as its own empty group. Deduped
-  // against the saved list — by the shared rule ShootSelectionStatus also uses — so a folder
-  // whose first item is saved does not double its heading.
-  const folderGroups = unmatchedFolderShoots(savedGroups.map((group) => group.shoot?.shoot), folderShoots)
-    .map((name) => ({ id: `folder:${normalizedShootName(name)}`, shoot: { id: null, shootId: null, shoot: name }, items: [] }));
+  // Root folders that no saved group answers to yet, each shown as its own empty group. Matched
+  // against the saved list by folder id - the shared rule ShootSelectionStatus also uses - so a
+  // folder whose first item is saved does not double its heading, renamed or not.
+  const folderGroups = unmatchedFolderShoots(savedGroups.map((group) => group.shoot), folderShoots)
+    .map((folder) => ({ ...folderShootGroup(folder), items: [] }));
   const groups = [...savedGroups, ...folderGroups];
 
   // The remove column only exists where something can be removed, so a linked project's table keeps
@@ -58,12 +62,17 @@ export default function SelectionItemsTable({ deliverables, selections, selectio
   const limitHeight = dense ? "h-6" : "min-h-9";
 
   function draftOf(groupId) { return drafts[groupId] || { name: "", limit: "" }; }
-  function setDraft(groupId, patch) { setDrafts((current) => ({ ...current, [groupId]: { ...draftOf(groupId), ...patch } })); }
+  // A typed limit out of range is marked as it is typed; empty is fine - it means 1.
+  const draftLimitInvalid = (groupId) => String(draftOf(groupId).limit ?? "") !== "" && !validateSelectionLimit(draftOf(groupId).limit);
+  // The shoot rides with the draft so it can be added from outside the table.
+  function setDraft(group, patch) { setDrafts((current) => ({ ...current, [group.id]: { name: "", limit: "", ...current[group.id], ...patch, shootName: group.shoot?.shoot || null, shootFolderId: group.shoot?.folderId || null } })); }
   function submitNew(event, group) {
     event.preventDefault();
     const draft = draftOf(group.id);
-    if (!draft.name.trim()) return;
-    Promise.resolve(onAdd({ name: draft.name.trim(), selectionLimit: Number(draft.limit) || null, shootName: group.shoot?.shoot || null })).then((ok) => {
+    // An empty Limits box means 1; a typed number out of range is refused, as Review & Share does.
+    const selectionLimit = newSelectionItemLimit(draft.limit);
+    if (!draft.name.trim() || !validateSelectionLimit(selectionLimit)) return;
+    Promise.resolve(onAdd({ name: draft.name.trim(), selectionLimit, shootName: group.shoot?.shoot || null, shootFolderId: group.shoot?.folderId || null })).then((ok) => {
       if (ok !== false) setDrafts((current) => ({ ...current, [group.id]: { name: "", limit: "" } }));
     });
   }
@@ -135,6 +144,7 @@ export default function SelectionItemsTable({ deliverables, selections, selectio
             {onRemove && (item.projectShootDeliverableId || item.projectPostProductionAllocationId
               ? <span />
               : <IconButton size="xs" label={`Remove ${item.name}`} title="Remove" onClick={() => onRemove(item)} className="h-5 w-5 text-slate-400 hover:bg-red-50 hover:text-red-600"><Close style={{ fontSize: 12 }} /></IconButton>)}
+            {errors[item.id] && <p role="alert" className="col-span-full text-[10px] font-normal text-red-600">{errors[item.id]}</p>}
           </div>;
         })}
         {/* Every group — including one just created and still empty — carries its own add row,
@@ -143,7 +153,7 @@ export default function SelectionItemsTable({ deliverables, selections, selectio
           <form onSubmit={(event) => submitNew(event, group)} className={`grid ${columns} items-center gap-2 border-b border-slate-100 bg-slate-50/60 px-2 py-1.5 last:border-b-0 ${dense ? "" : "sm:px-3 sm:py-2"}`}>
             <input
               value={draftOf(group.id).name}
-              onChange={(event) => setDraft(group.id, { name: event.target.value })}
+              onChange={(event) => setDraft(group, { name: event.target.value })}
               maxLength={191}
               placeholder="Add a selection item"
               aria-label={`New selection item name under ${group.shoot?.shoot || "other deliverables"}`}
@@ -155,12 +165,14 @@ export default function SelectionItemsTable({ deliverables, selections, selectio
               max="100000"
               step="1"
               value={draftOf(group.id).limit}
-              onChange={(event) => setDraft(group.id, { limit: event.target.value })}
+              onChange={(event) => setDraft(group, { limit: event.target.value })}
               placeholder="Limits"
               aria-label={`Selection limit for the new item under ${group.shoot?.shoot || "other deliverables"}`}
-              className={`${limitHeight} ${rowText} w-full rounded-md border border-slate-300 bg-white px-2 outline-none placeholder:text-slate-400 [&::-webkit-inner-spin-button]:m-0 [&::-webkit-inner-spin-button]:h-5 [&::-webkit-inner-spin-button]:w-3`}
+              aria-invalid={draftLimitInvalid(group.id) ? true : undefined}
+              className={`${limitHeight} ${rowText} w-full rounded-md border ${draftLimitInvalid(group.id) ? "border-red-500" : "border-slate-300"} bg-white px-2 outline-none placeholder:text-slate-400 [&::-webkit-inner-spin-button]:m-0 [&::-webkit-inner-spin-button]:h-5 [&::-webkit-inner-spin-button]:w-3`}
             />
-            <IconButton size="xs" type="submit" label={`Add selection item under ${group.shoot?.shoot || "other deliverables"}`} title="Add" disabled={adding || !draftOf(group.id).name.trim()} className="h-5 w-5 text-blue-600 hover:bg-blue-50 disabled:opacity-40"><Add style={{ fontSize: 12 }} /></IconButton>
+            <IconButton size="xs" type="submit" label={`Add selection item under ${group.shoot?.shoot || "other deliverables"}`} title="Add" disabled={adding || !draftOf(group.id).name.trim() || draftLimitInvalid(group.id)} className="h-5 w-5 text-blue-600 hover:bg-blue-50 disabled:opacity-40"><Add style={{ fontSize: 12 }} /></IconButton>
+            {draftLimitInvalid(group.id) && <p role="alert" className="col-span-full text-[10px] font-normal text-red-600">Enter a limit between 1 and 100000, or leave it empty for 1.</p>}
           </form>
         )}
       </div>

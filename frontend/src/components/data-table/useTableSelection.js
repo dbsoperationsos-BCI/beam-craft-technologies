@@ -70,6 +70,9 @@ export default function useTableSelection({
   canSelectRow,
   requireReason = false,
   reasonLabel = "Reason",
+  // What the confirmation says under its title, where a module's delete takes more than the row
+  // itself - a quotation takes every version of its chain. Left out, the table's own sentence.
+  deleteMessage,
   onDeleted,
   showSuccess,
   showError,
@@ -179,8 +182,9 @@ export default function useTableSelection({
     plural,
     requireReason,
     reasonLabel,
+    deleteMessage,
     canSelectRow,
-  } : undefined), [canSelect, canSelectRow, deletable, deleting, noun, plural, reasonLabel, requireReason, runDelete, selectedIds]);
+  } : undefined), [canSelect, canSelectRow, deletable, deleteMessage, deleting, noun, plural, reasonLabel, requireReason, runDelete, selectedIds]);
 
   return { canSelect, selectedIds, selectedRows, selectedCount: selectedRows.length, clear, deleting, selection };
 }

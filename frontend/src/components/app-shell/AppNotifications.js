@@ -1,7 +1,6 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import IconButton from "@/components/shared/IconButton";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import { usePermissions } from "@/components/auth/PermissionsProvider";
 import useMeetingNotices from "@/components/sales/useMeetingNotices";
@@ -58,16 +57,15 @@ export default function AppNotifications({ onOpenMeetings }) {
 
   const unread = sources.unreadCount + stored.unreadCount + meetings.unreadCount;
 
-  // Nothing this reader may be told about at all: the plain bell, the same one the bar has always
-  // shown a role without the Sales permission. Neither `sources` nor `stored` is part of this test —
-  // both answer for whatever modules this reader holds, which is the server's answer rather than one
-  // this component can work out, so the bell is drawn whenever either has anything.
-  if (!canReadMeetings && sources.count === 0 && stored.items.length === 0) {
-    return <IconButton label="Notifications" size="sm" shape="circle" className="text-slate-600 hover:bg-slate-100 hover:text-slate-900 focus-visible:ring-indigo-500">
-      <BellIcon />
-    </IconButton>;
-  }
-
+  /*
+   * Always the menu, never a bare icon.
+   *
+   * With nothing to list, the bell used to be drawn as a plain button with nothing behind it - and
+   * since a notice now leaves the bell once it is read, "nothing to list" became the ordinary state:
+   * after reading everything, and in the moment before the first poll answers. Pressing it then did
+   * nothing at all, which read as the bell being broken. Now it always opens, onto the line below
+   * when there is nothing waiting.
+   */
   /*
    * Waiting on you, then tasks, then the day's meetings, under rules.
    *
@@ -78,7 +76,7 @@ export default function AppNotifications({ onOpenMeetings }) {
    */
   const halves = [sources.items, stored.items, meetings.items].filter((half) => half.length);
   const items = halves.flatMap((half, index) => (index ? [{ separator: true }, ...half] : half));
-  if (!items.length) items.push({ description: "Nothing waiting on you." });
+  if (!items.length) items.push({ description: "You're all caught up - nothing waiting on you." });
 
   const title = sources.unreadCount
     ? `Waiting on you (${sources.unreadCount})`
@@ -89,13 +87,19 @@ export default function AppNotifications({ onOpenMeetings }) {
   return (
     <OptionsMenu
       ariaLabel={unread ? `Notifications, ${unread} unread` : "Notifications"}
-      // Opening the bell is reading it, so that is where both badges clear.
-      onOpen={() => { stored.markAllRead(); meetings.markSeen(); sources.markSeen(); }}
+      /*
+       * Opening the bell clears the glance-badges of the meetings and the waiting-on-you notices.
+       * It does not mark the stored notices read any more: a read notice leaves the bell, so that
+       * would empty it on sight. Each row goes only when it is opened - there is no "Mark as read".
+       */
+      onOpen={() => { meetings.markSeen(); sources.markSeen(); }}
       title={title}
       items={items}
       // Wide enough for a task title and who set it, or a time, a title and a client name, without
       // every row wrapping.
-      menuClassName="w-80"
+      // `w-80` still leaves a margin either side of a 360px phone; from `sm` up there is room to
+      // show more of each title before it is cut.
+      menuClassName="w-80 sm:w-96"
       /*
        * And capped in height, which no other menu in the application has needed.
        *

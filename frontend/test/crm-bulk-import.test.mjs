@@ -404,7 +404,7 @@ test("the dialog is built out of Add Lead's own blocks", () => {
    * approximated - `rounded-2xl`, the `px-5 py-3` heading rule - so the two read as one form asked
    * twice rather than as two forms that resemble each other.
    */
-  assert.match(DIALOG, /<RadioGroupField label="Vertical" value=\{vertical\} onChange=\{changeVertical\} options=\{BULK_IMPORT_VERTICALS\} className="w-fit" \/>/);
+  assert.match(DIALOG, /<RadioGroupField label="Vertical"(?: helperText="[^"]*")? value=\{vertical\} onChange=\{changeVertical\} options=\{BULK_IMPORT_VERTICALS\} className="w-fit" \/>/);
   assert.match(DIALOG, /<section className="overflow-hidden rounded-2xl bg-white">/);
   assert.match(DIALOG, /<h3 className="border-b border-slate-200 px-5 py-3 text-lg font-medium text-slate-700">Client Details<\/h3>/);
   // Add Lead draws the same block through the same component, which is what makes the two read

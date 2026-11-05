@@ -1,6 +1,8 @@
 "use client";
 
+import { useLayoutEffect, useRef, useState } from "react";
 import Loader from "@/components/shared/Loader";
+import { CELL_CLIP } from "./tableLayout";
 
 /**
  * A small table: columns and rows, and nothing a `DataTable` does.
@@ -23,9 +25,14 @@ import Loader from "@/components/shared/Loader";
  *
  * `variant` is the family the list belongs to: `card` is the rounded white card the CRM's popup
  * tables and the WhatsApp Users list are drawn as, `plain` is the sticky-headed list inside the
- * two invite dialogs, and `form` is the tighter list inside a form. Each is a set of classes for
- * the parts, and `classNames` lays a caller's own over any of them - a list that has always been
- * `text-xs sm:text-sm` says so there rather than becoming a fourth variant.
+ * screening-form invite dialog and the attendance dashboard, and `form` is the tighter list inside
+ * a form. Each is a set of
+ * classes for the parts, and `classNames` lays a caller's own over any of them - a list that has
+ * always been `text-xs sm:text-sm` says so there rather than becoming a fourth variant.
+ *
+ * The onboarding invites list is not here any more: it is a register somebody works, filtered and
+ * sorted like the Employee Repository beside it, so it is a `DataTable` -
+ * `employees/OnboardingInviteTable.js`.
  *
  * A column is `{ key, label, render?, headerClassName?, cellClassName?, srOnly? }`. `render(row,
  * index)` draws the cell; without it the cell shows `row[key]`. `srOnly` names a column to a screen
@@ -98,9 +105,27 @@ export default function SimpleTable({
   const part = (name) => join(styles[name], classNames[name]);
   const colSpan = columns.length || 1;
   const keyOf = (row, index) => rowKey?.(row, index) ?? row?.id ?? index;
+  /*
+   * The wrapper's visible width. Loading and the empty message span every column, so on a table
+   * wider than its card they were centred across all of it, out of sight; held to this width and
+   * pinned to the wrapper's left edge, they stay in view however far it is scrolled across.
+   */
+  const wrapperRef = useRef(null);
+  const [visibleWidth, setVisibleWidth] = useState(0);
+  useLayoutEffect(() => {
+    const element = wrapperRef.current;
+    if (!element) return undefined;
+    const measure = () => setVisibleWidth((current) => (current === element.clientWidth ? current : element.clientWidth));
+    measure();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const inView = visibleWidth ? { width: visibleWidth } : undefined;
 
   return (
-    <div className={part("wrapper")}>
+    <div ref={wrapperRef} className={part("wrapper")}>
       <table aria-label={ariaLabel} className={part("table")}>
         <thead className={part("head")}>
           <tr className={part("headRow") || undefined}>
@@ -114,21 +139,36 @@ export default function SimpleTable({
         </thead>
         <tbody className={part("body") || undefined}>
           {loading && (
-            <tr><td colSpan={colSpan} className={classNames.loading || "px-4"}><Loader label={loadingMessage} /></td></tr>
+            <tr><td colSpan={colSpan} className="p-0"><div className={`sticky left-0 ${classNames.loading || "px-4"}`} style={inView}><Loader label={loadingMessage} /></div></td></tr>
           )}
           {!loading && rows.length === 0 && emptyMessage && (
-            <tr><td colSpan={colSpan} className={part("empty")}>{emptyMessage}</td></tr>
+            <tr><td colSpan={colSpan} className="p-0"><div className={`sticky left-0 ${part("empty")}`} style={inView}>{emptyMessage}</div></td></tr>
           )}
           {!loading && rows.map((row, index) => {
             if (renderRow) return renderRow(row, index);
             const { className: rowClassName, ...props } = rowProps?.(row, index) || {};
             return (
               <tr key={keyOf(row, index)} {...props} className={join(styles.row, classNames.row, rowClassName) || undefined}>
-                {columns.map((column) => (
-                  <td key={column.key} className={join(styles.td, classNames.td, column.cellClassName) || undefined}>
-                    {column.render ? column.render(row, index) : row?.[column.key]}
-                  </td>
-                ))}
+                {columns.map((column) => {
+                  /*
+                   * A column that says how wide it may grow clips what overflows, ending in "..."
+                   * rather than widening the table for one long value - a shoot named for several
+                   * at once, say. Opt-in, so every other table here is drawn exactly as before, and
+                   * whatever is clipped is still readable: the value goes in the cell's `title`,
+                   * the same rule `DataTable` follows (`tableLayout.js`).
+                   */
+                  const content = column.render ? column.render(row, index) : row?.[column.key];
+                  const clipped = Boolean(column.maxWidth);
+                  const full = clipped ? (column.title?.(row, index) ?? (typeof content === "string" ? content : undefined)) : undefined;
+                  return <td
+                    key={column.key}
+                    className={join(styles.td, classNames.td, column.cellClassName, clipped ? CELL_CLIP : "") || undefined}
+                    style={clipped ? { maxWidth: column.maxWidth } : undefined}
+                    title={full || undefined}
+                  >
+                    {content}
+                  </td>;
+                })}
               </tr>
             );
           })}

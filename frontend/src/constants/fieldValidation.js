@@ -43,13 +43,38 @@ export const fieldFormats = {
     pattern: /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/,
     message: "GSTIN must be 15 characters, for example 33ABCDE1234F1Z5.",
   },
+  /*
+   * The payslip's PF details, typed by HR off the employee's PF and ESI papers. A PF or EPS number is
+   * the establishment's code and the member's - TN/MAS/0012345/000/0000123 - written with or without
+   * its slashes, so only its characters are held to; UAN is twelve digits, an ESI number ten (the
+   * insurance number) or seventeen.
+   */
+  pfNumber: {
+    pattern: /^[A-Z0-9/]{5,30}$/,
+    message: "Use letters, digits and / only, for example TN/MAS/0012345/000/0000123.",
+  },
+  uan: {
+    pattern: /^\d{12}$/,
+    message: "UAN must be 12 digits.",
+  },
+  esi: {
+    pattern: /^\d{10}(\d{7})?$/,
+    message: "ESI No. must be 10 or 17 digits.",
+  },
+  upi: {
+    // The shape every UPI ID shares and no more - an address of letters, digits, dots, hyphens or
+    // underscores, "@", then a handle - so name@okaxis, 9876543210@upi and business@paytm all
+    // pass. Nothing provider-specific, and the case is left as typed: the server keeps it too.
+    pattern: /^[A-Za-z0-9._-]+@[A-Za-z0-9]+$/,
+    message: "Enter a valid UPI ID, for example name@upi.",
+  },
 };
 
 /** Phone and Aadhaar are judged on their digits, so spacing and a country code never fail them. */
 const valueFor = (kind, value) => {
   const raw = String(value ?? "").trim();
   if (kind === "phone" || kind === "aadhaar" || kind === "accountNumber") return raw.replace(/\D/g, "");
-  if (kind === "pan" || kind === "ifsc" || kind === "gstin") return raw.toUpperCase();
+  if (kind === "pan" || kind === "ifsc" || kind === "gstin" || kind === "pfNumber") return raw.toUpperCase();
   return raw;
 };
 
@@ -77,6 +102,13 @@ export const fieldFormatByName = {
   panCardNumber: "pan",
   ifscCode: "ifsc",
   accountNumber: "accountNumber",
+  pfNumber: "pfNumber",
+  uanNumber: "uan",
+  epsNumber: "pfNumber",
+  esiNumber: "esi",
+  // Edit Employee → Payslip Details → Personal Details, typed there for the payslip.
+  payslipPersonal_pan: "pan",
+  payslipPersonal_bankAccount: "accountNumber",
 };
 
 /** Every format problem in a set of values, as `[label, message]`, in the order the fields are listed. */

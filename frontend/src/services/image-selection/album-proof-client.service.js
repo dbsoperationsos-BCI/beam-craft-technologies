@@ -19,6 +19,8 @@ async function request(path, options = {}) {
   if (!response.ok) {
     const error = new Error(data?.message || `Request failed with status ${response.status}`);
     error.status = response.status;
+    // An expired link's details, for the shared expired page.
+    error.expiredLink = data?.expiredLink || null;
     error.data = data;
     throw error;
   }

@@ -24,6 +24,11 @@ import {
   taskStatusStyles,
   taskTableFields,
   taskTypeIsOther,
+  taskTab,
+  taskStatusFiltersFor,
+  rowForView,
+  tasksForStatus,
+  taskStatusCounts,
 } from "../src/constants/taskConfig.js";
 
 /*
@@ -36,12 +41,13 @@ import {
  */
 
 /** The values `backend/src/modules/hrm/tasks/service.js` stores. Kept in step by hand, so asserted. */
-const SERVER_STATUSES = ["PENDING", "IN_PROGRESS", "COMPLETED", "REASSIGNED", "CANCELLED"];
+const SERVER_STATUSES = ["PENDING", "IN_PROGRESS", "SUBMITTED", "COMPLETED", "REASSIGNED", "CANCELLED"];
 const SERVER_PRIORITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
 const SERVER_TASK_TYPES = ["Client", "Internal", "Administrative", "Follow Up", "Escalation", "Other"];
 
 test("the statuses, priorities and types are the ones the server stores", () => {
-  assert.deepEqual(TASK_STATUSES, SERVER_STATUSES);
+  // The same set; the screen orders its tabs itself (Finish & Send Back sits after Cancelled).
+  assert.deepEqual([...TASK_STATUSES].sort(), [...SERVER_STATUSES].sort());
   assert.deepEqual(TASK_PRIORITIES, SERVER_PRIORITIES);
   assert.deepEqual(TASK_TYPES, SERVER_TASK_TYPES);
 });
@@ -65,8 +71,10 @@ test("every status has a colour, keyed on the label the table cell actually rece
 test("the status filter offers All plus the statuses worth filtering by", () => {
   assert.equal(TASK_STATUS_FILTERS[0].id, ALL_STATUSES);
   assert.notEqual(ALL_STATUSES, "", "All needs a real id: it is a React key and an aria-selected test");
-  assert.deepEqual(TASK_STATUS_FILTERS.slice(1).map((filter) => filter.id), FILTERABLE_STATUSES);
-  assert.equal(TASK_STATUS_FILTERS.length, FILTERABLE_STATUSES.length + 1);
+  // Then Overdue - an overlay over the statuses, not one of them - then every status.
+  assert.equal(TASK_STATUS_FILTERS[1].id, "OVERDUE");
+  assert.deepEqual(TASK_STATUS_FILTERS.slice(2).map((filter) => filter.id), FILTERABLE_STATUSES);
+  assert.equal(TASK_STATUS_FILTERS.length, FILTERABLE_STATUSES.length + 2);
 });
 
 /*
@@ -82,7 +90,7 @@ test("every status the server can return has a tab of its own", () => {
     assert.ok(TASK_STATUS_FILTERS.some((filter) => filter.id === status), `${status} must have a tab`);
   }
   // Plus All, which is not a status.
-  assert.equal(TASK_STATUS_FILTERS.length, TASK_STATUSES.length + 1);
+  assert.equal(TASK_STATUS_FILTERS.length, TASK_STATUSES.length + 2);
 });
 
 test("every status reads and colours, so none shows as a grey blank", () => {
@@ -92,25 +100,26 @@ test("every status reads and colours, so none shows as a grey blank", () => {
   }
 });
 
-test("the bar reads All Tasks, My Tasks, Tasks Given, and only the first is gated", () => {
-  assert.deepEqual(TASK_VIEWS.map((view) => view.id), ["all", "mine", "given"]);
+test("the bar reads Dashboard, All Tasks, My Tasks, Tasks Given, and only All Tasks is gated", () => {
+  assert.deepEqual(TASK_VIEWS.map((view) => view.id), ["dashboard", "all", "mine", "given"]);
   // All Tasks is a separate permission on a separate endpoint; the tab is dropped without it.
-  assert.deepEqual(TASK_VIEWS[0].permission, { module: "HRM", feature: "All Tasks" });
-  assert.equal(TASK_VIEWS[1].permission, undefined);
-  assert.equal(TASK_VIEWS[2].permission, undefined);
+  assert.deepEqual(TASK_VIEWS[1].permission, { module: "HRM", feature: "All Tasks" });
+  for (const id of ["dashboard", "mine", "given"]) assert.equal(TASK_VIEWS.find((view) => view.id === id).permission, undefined);
 });
 
 test("the screen opens on a view every role has, not on the first tab", () => {
   // All Tasks leads the bar but most roles do not hold it: opening there would land them on a tab
   // that is not even listed for them.
-  assert.equal(DEFAULT_TASK_VIEW, "mine");
+  // The Dashboard - everybody's own figures - the way Image Selection opens.
+  assert.equal(DEFAULT_TASK_VIEW, "dashboard");
   const fallback = TASK_VIEWS.find((view) => view.id === DEFAULT_TASK_VIEW);
   assert.ok(fallback, "the default view must be one of the views");
   assert.equal(fallback.permission, undefined, "the default view must need no permission of its own");
 });
 
 test("every view says what an empty one means, so no list reads as a failure", () => {
-  for (const view of TASK_VIEWS) assert.ok(view.emptyMessage, `${view.id} has no empty message`);
+  // The Dashboard says it itself (`EmptyDashboard`); every list says it through its message.
+  for (const view of TASK_VIEWS.filter((entry) => !entry.dashboard)) assert.ok(view.emptyMessage, `${view.id} has no empty message`);
 });
 
 /*
@@ -300,4 +309,55 @@ test("a task that is not there at all is not treated as finished", () => {
   assert.equal(taskIsClosed(null), false);
   assert.equal(taskIsClosed(undefined), false);
   assert.equal(taskIsClosed({}), false);
+});
+
+test("a reassigned task is Pending for its new holder and under Reassigned only for whoever passed it on", () => {
+  const theirs = { status: "PENDING", passedOn: false };
+  const passedOn = { status: "PENDING", passedOn: true };
+  const older = { status: "REASSIGNED" };
+  assert.equal(taskTab(theirs), "PENDING");
+  assert.equal(taskTab(passedOn), "REASSIGNED");
+  assert.equal(taskTab(older), "PENDING", "one reassigned before the rule is the new holder's pending work");
+  const rows = [theirs, passedOn, older];
+  assert.deepEqual(tasksForStatus(rows, "PENDING"), [theirs, older]);
+  assert.deepEqual(tasksForStatus(rows, "REASSIGNED"), [passedOn]);
+  assert.deepEqual(taskStatusCounts(rows), { ALL: 3, OVERDUE: 0, PENDING: 2, REASSIGNED: 1 });
+});
+
+test("Finish & Send Back is a tab of its own, after Cancelled", () => {
+  const ids = TASK_STATUS_FILTERS.map((filter) => filter.id);
+  assert.equal(ids.at(-1), "SUBMITTED");
+  assert.equal(ids.at(-2), "CANCELLED");
+  assert.equal(STATUS_LABELS.SUBMITTED, "Finish & Send Back");
+});
+
+test("Finish & Send Back is Tasks Given's tab; in My Tasks work you sent back is Completed", () => {
+  assert.ok(!taskStatusFiltersFor("mine").some((filter) => filter.id === "SUBMITTED"), "My Tasks has no Finish & Send Back tab");
+  assert.ok(taskStatusFiltersFor("given").some((filter) => filter.id === "SUBMITTED"), "Tasks Given keeps it");
+  const sentBack = { status: "SUBMITTED", statusLabel: "Finish & Send Back", passedOn: false };
+  assert.equal(taskTab(sentBack, "mine"), "COMPLETED");
+  assert.equal(rowForView(sentBack, "mine").statusLabel, "Completed", "the row says what its tab says");
+  assert.equal(taskTab(sentBack, "given"), "SUBMITTED");
+  assert.equal(rowForView(sentBack, "given").statusLabel, "Finish & Send Back");
+  assert.equal(taskStatusCounts([sentBack], "mine").COMPLETED, 1);
+  // Passed on to somebody else: the row says Reassigned, as its tab does.
+  assert.equal(rowForView({ status: "IN_PROGRESS", statusLabel: "In Progress", passedOn: true }, "mine").statusLabel, "Reassigned");
+});
+
+test("the Task Dashboard's ten cards each narrow Recent Tasks to the rows behind their number", async () => {
+  const { TASK_SUMMARY_CARDS, tasksForCard, taskViewLabel } = await import("../src/lib/taskDashboard.mjs");
+  assert.equal(TASK_SUMMARY_CARDS.length, 10);
+  const rows = [{ id: 1, cards: ["myTotal", "myPending"] }, { id: 2, cards: ["givenTotal", "givenSentBack"] }];
+  assert.deepEqual(tasksForCard(rows, "givenSentBack").map((row) => row.id), [2]);
+  assert.deepEqual(tasksForCard(rows, null).map((row) => row.id), [1, 2]);
+  assert.equal(taskViewLabel("givenSentBack"), "Finish & Send Back");
+});
+
+test("the All Tasks row leads the dashboard only when the server sends its figures", async () => {
+  const { taskDashboardCards, taskViewLabel } = await import("../src/lib/taskDashboard.mjs");
+  assert.equal(taskDashboardCards({ myTotal: 1 }).length, 10, "an employee keeps their two rows");
+  const admin = taskDashboardCards({ allTotal: 5, myTotal: 1 });
+  assert.equal(admin.length, 15);
+  assert.equal(admin[0].key, "allTotal");
+  assert.equal(taskViewLabel("allOverdue"), "All Overdue");
 });

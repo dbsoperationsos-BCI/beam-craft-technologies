@@ -48,8 +48,7 @@ const WIRED = [
   ["components/admin/UserManagement.js", "/api/admin/users"],
   ["components/admin/RoleManagement.js", "/api/admin/roles"],
   ["components/contacts/ContactsPage.js", null],
-  ["components/hrm/EmployeeReferralsPage.js", null],
-  ["components/hrm/AttendanceRegisterPage.js", null],
+  ["components/hrm/EmployeeReferralsPage.js", "/api/hrm/referrals"],
   ["components/hrm/EmployeeAttendancePage.js", null],
   ["components/project-management/ClientGiftsPage.js", null],
   ["components/sales/CrdDocumentsPage.js", null],
@@ -148,7 +147,9 @@ test("a removal that needs a reason asks for one over a selection too", () => {
   for (const file of ["components/assets/VendorManagementView.js", "components/assets/ClientStorageManagementView.js"]) {
     assert.match(src(...file.split("/")), /requireReason: true/, `${file} removes records without asking why`);
   }
-  assert.match(DATA_TABLE, /confirmDisabled=\{selectionRequiresReason && !selectionReason\.trim\(\)\}/);
+  // Confirm stays pressable; pressing it with no reason marks the box rather than deleting.
+  assert.match(DATA_TABLE, /if \(selectionRequiresReason && !selectionReasonFields\.check\(\{ reason: selectionReason\.trim\(\) \? "" : "Enter a reason\." \}\)\) return;/);
+  assert.match(DATA_TABLE, /error=\{selectionReasonFields\.errors\.reason\}/);
   assert.match(HOOK, /reason \? \{ reason \} : undefined/);
 });
 
@@ -162,8 +163,8 @@ test("a table mixing records with rows it cannot act on draws boxes only on the 
   assert.match(page, /const isEmployeeRow = \(row\) => row\?\.type !== "invite"/);
   assert.match(page, /canSelectRow: isEmployeeRow/);
   // Excluded from the boxes, from the header's select-all, and from what the bar acts on.
-  assert.match(DATA_TABLE, /if \(canSelectRow && !canSelectRow\(row\.original\)\) return null;/);
-  assert.match(DATA_TABLE, /row\.depth === 0 && \(!canSelectRow \|\| canSelectRow\(row\.original\)\)/);
+  assert.match(DATA_TABLE, /if \(canSelectRow && !canSelectRow\(row\.original\)\) \{[\s\S]*?if \(!childIds\.length\) return null;/);
+  assert.match(DATA_TABLE, /const selectableIds = \(rows\) => rows\.filter\(\(row\) => !canSelectRow \|\| canSelectRow\(row\.original\)\)/);
   /*
    * Asked of the **model** rather than of a set of ids, because a paged table's selection is not a
    * set: it is "everything this stage matches, less these exceptions", and only the page can say
@@ -201,7 +202,9 @@ test("a selection's buttons are handed to the module header rather than drawn ov
 test("the buttons appear exactly as the ones they replace go, not a frame earlier", () => {
   // One state update carries both halves of the swap: the header draws the published buttons and
   // drops its own from the same render, so the row never shows both and never changes width twice.
-  assert.match(HEADER, /\{selection && !ownsSelectionActions \? null : actions\}\{selection &&/);
+  // Nebula and the ⋮ sit between the two halves in the markup; what matters is that the page's own
+  // actions and the selection's are decided by the same `selection` in the same render.
+  assert.match(HEADER, /\{selection && !ownsSelectionActions \? null : actions\}<NebulaHeaderButton \/>\{selection && !ownsSelectionActions \? null : menu\}\{selection && <TableSelectionActions/);
 });
 
 /*
@@ -281,7 +284,7 @@ test("Export writes the ticked rows through the table's own exporter, not a seco
 });
 
 test("a bulk delete is asked for once, over the whole set", () => {
-  assert.match(DATA_TABLE, /remove: \(\) => \{ setSelectionReason\(""\); setPendingSelectionDelete\(true\); \}/);
+  assert.match(DATA_TABLE, /remove: \(\) => \{ setSelectionReason\(""\); selectionReasonFields\.clearAll\(\); setPendingSelectionDelete\(true\); \}/);
   assert.match(DATA_TABLE, /onDelete: deletableSelection \? deleteSelection : undefined/);
   assert.match(DATA_TABLE, /\{pendingSelectionDelete && <ConfirmDialog/);
 });

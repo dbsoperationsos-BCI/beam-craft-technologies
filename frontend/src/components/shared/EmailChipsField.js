@@ -1,9 +1,12 @@
 "use client";
 
+import HelpTip from "./HelpTip";
 import { createPortal } from "react-dom";
 import { useEffect, useRef, useState } from "react";
 import useCloseWhenTriggerHidden from "./useCloseWhenTriggerHidden";
 import useEscapeKey from "@/components/shared/useEscapeKey";
+import EmployeeAvatar from "@/components/shared/EmployeeAvatar";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 /**
  * The module's multi-email input: each address becomes a chip inside the field, with its own
@@ -17,6 +20,13 @@ import useEscapeKey from "@/components/shared/useEscapeKey";
  * The field borrows TextField's label, height, radius and focus ring so it lines up with the
  * inputs beside it; the ring moves to the box rather than the inner input, which has no
  * border of its own.
+ *
+ * **Not only for emails.** Anything typed as a short list of free entries - a vendor's preferred
+ * languages - is the same control, so it takes the two things that make it an email field as props:
+ * `isValid`, which decides whether an entry may become a chip (and `invalidMessage`, what is said
+ * when one may not), and `separators`, what splits a typed or pasted run into entries. Both default
+ * to the email behaviour, so every existing caller is unchanged. A list of names passes separators
+ * without whitespace, or "Old English" would come out as two chips.
  */
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -24,19 +34,30 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Anything a person might separate addresses with, including a paste out of a mail client.
 const SEPARATORS = /[\s,;]+/;
 
+const isEmail = (entry) => EMAIL_PATTERN.test(entry);
+const notAnEmail = (rejected) => `${rejected.join(", ")} is not a valid email address.`;
+
 export default function EmailChipsField({
   className = "",
   disabled = false,
   label,
+  helperText = "",
   onChange,
   options = [],
   optionsLabel = "Suggestions",
   placeholder = "name@example.com",
   required = false,
   values = [],
+  isValid = isEmail,
+  invalidMessage = notAnEmail,
+  separators = SEPARATORS,
+  // The form's own problem with the field ("Add at least one attendee."); an address typed wrong
+  // says so itself and is shown first.
+  error: formError = "",
 }) {
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
+  const shownError = error || formError;
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState(null);
   const inputRef = useRef(null);
@@ -50,9 +71,7 @@ export default function EmailChipsField({
   const search = draft.trim().toLowerCase();
   const suggestions = options
     .filter((option) => !values.includes(option.value))
-    .filter((option) => !search
-      || option.label.toLowerCase().includes(search)
-      || String(option.value || "").toLowerCase().includes(search));
+    .filter((option) => matchesWordChunks(`${option.label} ${option.value || ""}`, search));
 
   // Closes the suggestions and nothing else - not the form they are being typed into.
   useEscapeKey(() => setOpen(false), open);
@@ -111,19 +130,19 @@ export default function EmailChipsField({
    * behind in the box to be corrected.
    */
   function commit(text) {
-    const candidates = String(text || "").split(SEPARATORS).map((item) => item.trim()).filter(Boolean);
+    const candidates = String(text || "").split(separators).map((item) => item.trim()).filter(Boolean);
     if (!candidates.length) return true;
 
     const accepted = [];
     const rejected = [];
     for (const candidate of candidates) {
-      if (!EMAIL_PATTERN.test(candidate)) rejected.push(candidate);
+      if (!isValid(candidate)) rejected.push(candidate);
       else if (!values.includes(candidate) && !accepted.includes(candidate)) accepted.push(candidate);
     }
 
     if (accepted.length) onChange?.([...values, ...accepted]);
     setDraft(rejected.join(" "));
-    setError(rejected.length ? `${rejected.join(", ")} is not a valid email address.` : "");
+    setError(rejected.length ? invalidMessage(rejected) : "");
     return rejected.length === 0;
   }
 
@@ -157,7 +176,7 @@ export default function EmailChipsField({
 
   return (
     <div className={`block text-xs font-semibold text-slate-600 ${className}`}>
-      <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}</span>
+      <span>{label}{required && <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span>}<HelpTip text={helperText} /></span>
       {/* Clicking anywhere in the box focuses the input, so the whole control behaves like
           the single-line fields it sits beside.
 
@@ -169,11 +188,15 @@ export default function EmailChipsField({
         ref={wrapperRef}
         onClick={() => inputRef.current?.focus()}
         className={`mt-1.5 flex max-h-[4.5rem] min-h-9 w-full flex-wrap items-center gap-1.5 overflow-y-auto rounded-lg border bg-white px-2 py-1 transition focus-within:ring-2 ${
-          error ? "border-rose-400 focus-within:border-rose-500 focus-within:ring-rose-100" : "border-slate-300 focus-within:border-blue-500 focus-within:ring-blue-100"
+          shownError ? "border-rose-400 focus-within:border-rose-500 focus-within:ring-rose-100" : "border-slate-300 focus-within:border-blue-500 focus-within:ring-blue-100"
         } ${disabled ? "cursor-not-allowed bg-slate-50" : ""}`}
       >
-        {values.map((email, index) => (
-          <span key={email} className="inline-flex max-w-full items-center gap-1 rounded-full border border-blue-200 bg-blue-50 py-0.5 pl-2 pr-1 text-xs font-medium text-blue-700">
+        {values.map((email, index) => {
+          // An address that belongs to an employee wears their face; one typed in for anybody else stays a plain chip.
+          const avatar = options.find((option) => option.value === email)?.avatar;
+          return (
+          <span key={email} className={`inline-flex max-w-full items-center gap-1 rounded-full border border-blue-200 bg-blue-50 py-0.5 ${avatar ? "pl-0.5" : "pl-2"} pr-1 text-xs font-medium text-blue-700`}>
+            {avatar && <EmployeeAvatar {...avatar} size="2xs" decorative />}
             <span className="truncate">{email}</span>
             <button
               type="button"
@@ -188,10 +211,12 @@ export default function EmailChipsField({
               ×
             </button>
           </span>
-        ))}
+          );
+        })}
         <input
           ref={inputRef}
           type="text"
+          aria-invalid={shownError ? true : undefined}
           value={draft}
           disabled={disabled}
           // Committed on blur too: a list typed but never confirmed with Enter would
@@ -206,7 +231,7 @@ export default function EmailChipsField({
           onKeyDown={handleKeyDown}
           onPaste={(event) => {
             const pasted = event.clipboardData?.getData("text") || "";
-            if (!SEPARATORS.test(pasted)) return;
+            if (!separators.test(pasted)) return;
             event.preventDefault();
             commit(pasted);
           }}
@@ -232,7 +257,7 @@ export default function EmailChipsField({
           </button>
         )}
       </div>
-      {error && <p role="alert" className="mt-1 text-xs font-normal text-rose-600">{error}</p>}
+      {shownError && <p role="alert" className="mt-1 text-xs font-normal text-rose-600">{shownError}</p>}
 
       {open && menuStyle && typeof document !== "undefined" && createPortal(
         <div
@@ -256,10 +281,13 @@ export default function EmailChipsField({
               // them would read as the person being missing from the repository.
               disabled={!option.value}
               onClick={() => addOption(option)}
-              className="block w-full px-3 py-2 text-left font-normal transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+              className={`${option.avatar ? "flex items-center gap-2" : "block"} w-full px-3 py-2 text-left font-normal transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60`}
             >
-              <span className="block truncate text-slate-700">{option.label}</span>
-              <span className="block truncate text-xs text-slate-400">{option.value || "No email on file"}</span>
+              {option.avatar && <EmployeeAvatar {...option.avatar} size="sm" decorative />}
+              <span className="block min-w-0">
+                <span className="block truncate text-slate-700">{option.label}</span>
+                <span className="block truncate text-xs text-slate-400">{option.value || "No email on file"}</span>
+              </span>
             </button>
           ))}
         </div>,

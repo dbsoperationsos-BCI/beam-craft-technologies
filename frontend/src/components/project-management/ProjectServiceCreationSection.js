@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DataTable from "@/components/data-table/DataTable";
 import Dropdown from "@/components/shared/Dropdown";
+import HelpTip from "@/components/shared/HelpTip";
 import ChevronIcon from "@/components/ui/ChevronIcon";
 import CloseIcon from "@/components/ui/CloseIcon";
 import OptionsMenu from "@/components/ui/OptionsMenu";
@@ -13,8 +14,11 @@ import { pricedSizeOptionsOf } from "@/lib/deliverablePricing.mjs";
 // A deliverable's No. of Count is a Yes or a No held as the word itself, and this reads it back
 // into the answer this table has always worked from.
 import { deliverableAnswerOn } from "@/lib/deliverableAnswers.mjs";
-import { deliverableVariantOptions } from "@/lib/deliverableBrands.mjs";
-import { pricedServiceSizeOptions } from "@/lib/servicePricing.mjs";
+import { shootDisplayName } from "@/lib/shootDisplay.mjs";
+import { rowReorderColumn } from "@/components/data-table/rowReorderColumn";
+import { deliverableIdentityKey, deliverableRowLabel, deliverableRowVariant, deliverableVariantOptions } from "@/lib/deliverableBrands.mjs";
+import { serviceTimingModes as definitionTimingModes, serviceSessionOptions } from "@/lib/servicePricing.mjs";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 const formatDate = (value) => {
   // `new Date(null)` is the epoch rather than an invalid date, so an unscheduled shoot would
@@ -34,18 +38,24 @@ function allocationServiceName(row) {
 }
 
 /*
- * What a deliverable row is called.
+ * What a deliverable row is called: the same words its picker offered it under, from the one
+ * formatter every screen uses - `deliverableRowLabel`.
  *
- * A row added from a brand's variant carries the label that variant was picked under - "Album
- * Printing - Canvera - 12x18 - 1.5 inch" - and reads as that, so the table says which of a
- * deliverable's variants is on the quotation without a column being added for the brand, the size
- * and the frame. `deliverableName` itself is left as the deliverable's own name, which is what the
- * PDF prints and what a project raised off the quotation matches its deliverables by.
- *
- * A row from anywhere else has no variant and reads exactly as it always did.
+ * A row added from a brand's variant reads as that variant - "Album Printing - Canvera - 12x18 -
+ * 1.5 inch" - so the table says which of a deliverable's variants is on the quotation or the
+ * project without a column being added for the brand, the size and the frame. A quotation row
+ * reads the label stamped when it was picked; a project row is built from the variant it saved.
+ * `deliverableName` itself is left as the deliverable's own name, which is what the automatic
+ * deliverables and Image Selection match by. A row with no variant reads by its deliverable.
  */
+// A line's name, and under it - in the warning tone - what is wrong with its price, where something is.
+function lineName(name, note) {
+  if (!note) return name;
+  return <span className="block min-w-0"><span className="block">{name}</span><span className="mt-0.5 block whitespace-normal text-xs font-medium text-amber-700">{note}</span></span>;
+}
+
 function allocationDeliverableName(row) {
-  return row.deliverableVariantLabel || row.deliverableDefinition?.name || row.deliverableName || "—";
+  return deliverableRowLabel(row, { withRemarks: true }) || "—";
 }
 
 function serviceDefinition(row) {
@@ -67,11 +77,7 @@ function deliverableDefinition(row) {
  * Falls back to the single `timingMode` for a definition saved before the list existed.
  */
 function serviceTimingModes(row) {
-  const definition = serviceDefinition(row);
-  const listed = Array.isArray(definition.timingModes) ? definition.timingModes.filter((mode) => mode && mode !== "NONE") : [];
-  if (listed.length) return listed;
-  const single = definition.timingMode;
-  return single && single !== "NONE" ? [single] : [];
+  return definitionTimingModes(serviceDefinition(row));
 }
 
 
@@ -95,7 +101,9 @@ function deliverablePhotoCountEnabled(row) {
 }
 
 function deliverablePhotoCountPlaceholder(row) {
-  const name = allocationDeliverableName(row).trim().toLocaleLowerCase();
+  // The deliverable's own name, not the line's label: "Album Printing - Canvera - 12x18" is still
+  // an album printing.
+  const name = String(row.deliverableDefinition?.name || row.deliverableName || "").trim().toLocaleLowerCase();
   return name === "album printing" || name === "album designing" ? "No.Of.Sheets" : "";
 }
 
@@ -114,17 +122,6 @@ function deliverableRemarksEnabled() {
 
 /** The two halves of the studio's session scale, spelled as the option values spell them. */
 const SESSION_TIMING_MODES = ["HALF_SESSION", "FULL_SESSION"];
-
-/*
- * The session choices this service actually offers.
- *
- * The set holds both, so a service sold only as a half session would otherwise be offered a full one
- * in the dropdown. The timing modes are the option values' own codes, so they match directly.
- */
-function sessionOptionsFor(row, options) {
-  const allowed = serviceTimingModes(row).filter((mode) => SESSION_TIMING_MODES.includes(mode));
-  return options.filter((option) => allowed.includes(option.code));
-}
 
 function activeOptionValues(optionSet) {
   return (optionSet?.values || []).filter((option) => option.isActive !== false);
@@ -204,22 +201,6 @@ function displayTiming(row) {
   return parts.length ? parts.join(", ") : (row.quantitySessionTiming || "-");
 }
 
-/**
- * The sizes a service line may be given: every size its pricing names, from whichever of the
- * studio's lists - a service sold by size - or, where the pricing names none, the one list the
- * definition is pointed at, as it always was.
- */
-function serviceSizeOptions(definition) {
-  const priced = pricedServiceSizeOptions(definition);
-  return priced.length ? priced : activeOptionValues(definition.sizeOptionSet);
-}
-
-function displaySize(row) {
-  const options = serviceSizeOptions(serviceDefinition(row));
-  if (!options.length) return "-";
-  return row.sizeOptionValue?.label || optionLabelById(options, row.sizeOptionValueId) || "-";
-}
-
 function displayServiceRemarks(row) {
   if (!remarksEnabled(row)) return "-";
   return row.remarks || "-";
@@ -246,7 +227,8 @@ function displayDeliverableSize(row) {
    * the deliverable's own size list has nothing to say about it. So it is shown as the variant
    * holds it - a video's row shows the length for the same reason - before any list is consulted.
    */
-  if (row.deliverableVariantId) return row.size || row.videoLength || "-";
+  const variant = deliverableRowVariant(row);
+  if (variant) return variant.size || variant.videoLength || "-";
   const definition = deliverableDefinition(row);
   const options = deliverableSizeOptions(definition);
   if (!options.length) return "-";
@@ -264,14 +246,15 @@ function displayDeliverableRemarks(row) {
  * The list is as wide as the field and its entries wrap, so a long name is read whole rather than
  * cut off, and it shows a screen's worth of entries before scrolling.
  */
-function SearchablePicker({ label, options, disabledIds, disabledNames, onSelect, placeholder, loading, emptyMessage, errorMessage, className = "max-w-lg" }) {
+function SearchablePicker({ label, helperText = "", options, disabledIds, disabledNames, onSelect, placeholder, loading, emptyMessage, errorMessage, className = "max-w-lg" }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const ref = useRef(null);
   const normalized = query.trim().toLocaleLowerCase();
   const availableOptions = options.filter((option) => !disabledIds.has(option.id) && !disabledNames.has(option.name.toLocaleLowerCase()));
-  const visibleOptions = availableOptions.filter((option) => !normalized || option.name.toLocaleLowerCase().includes(normalized));
+  // Word Chunk Search: every word typed, in any order.
+  const visibleOptions = availableOptions.filter((option) => matchesWordChunks(option.name, normalized));
 
   useEffect(() => {
     if (!open) return undefined;
@@ -291,7 +274,7 @@ function SearchablePicker({ label, options, disabledIds, disabledNames, onSelect
 
   return <div ref={ref} className={`relative block text-xs font-semibold text-slate-600 ${className}`}>
     <label>
-      <span>{label}</span>
+      <span>{label}<HelpTip text={helperText} /></span>
       <span className="relative mt-1.5 block">
         <input value={query} disabled={loading || Boolean(errorMessage) || !options.length} onFocus={() => setOpen(true)} onClick={() => setOpen(true)} onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); setOpen(true); }} onKeyDown={(event) => {
           if (event.key === "ArrowDown") {
@@ -435,9 +418,11 @@ function GroupedNumberCell({ segments, disabled = false }) {
   </div>;
 }
 
-function RowActions({ label, onEdit, onDelete, editing = false }) {
+// Edit, then Duplicate where the screen offers it (`onDuplicate`), then Delete - the Shoot List's order.
+function RowActions({ label, onEdit, onDuplicate, onDelete, editing = false }) {
   return <OptionsMenu ariaLabel={`Actions for ${label}`} menuZIndexClassName="z-[160]" items={[
     ...(!editing ? [{ label: "Edit", onSelect: onEdit }] : []),
+    ...(onDuplicate ? [{ label: "Duplicate", onSelect: onDuplicate }] : []),
     { label: "Delete", tone: "danger", onSelect: onDelete },
   ]} />;
 }
@@ -447,31 +432,33 @@ function DeleteRowButton({ label, disabled, onClick }) {
 }
 
 /*
- * Which services a shoot may be given.
+ * Which deliverables a shoot may be given.
  *
- * A service configured for outdoor shoots should not be offered on a studio one - that is what the
- * Shoot Type tick boxes in Project Settings decide. The settings store `STUDIO`/`OUTDOOR`; a shoot
+ * A deliverable configured for outdoor shoots should not be offered on a studio one - that is what
+ * the Shoot Type tick boxes in Project Settings decide. The settings store `STUDIO`/`OUTDOOR`; a shoot
  * stores the wording a person picked, so the two are matched here rather than either side changing
  * to suit the other.
  *
  * Nothing ticked means every shoot type, which is both the sensible default and what every service
  * saved before Shoot Type existed means. A shoot with no type set is offered everything, because
- * hiding services over a blank field would look like the catalogue had gone missing.
+ * hiding deliverables over a blank field would look like the catalogue had gone missing.
+ *
+ * Services are not narrowed this way anywhere. Choose Services offers every active service on every
+ * shoot - the Quotation Generator, Create Project and Edit Sale Details alike - and a service's own
+ * Shoot Type stays on it for pricing (`servicePriceForShoot`), not to hide it: a studio-only 360
+ * PhotoBooth is still bookable on an outdoor shoot, priced at the line the studio set.
  */
 const SHOOT_TYPE_BY_LABEL = {
   "Studio / In-House": "STUDIO",
   "Outdoor / On-Location": "OUTDOOR",
 };
 
-function servicesForShootType(definitions, shoot) {
+function deliverablesForShootType(definitions, shoot) {
   /*
-   * Services and deliverables alike: a deliverable carries the same `shootTypes` a service does,
-   * and is offered on the same rule.
-   *
    * A shoot may run in more than one place, so a service allowed for any of them is offered.
    *
    * A wedding booked as studio *and* outdoor should be able to take both the studio-only and the
-   * outdoor-only services - it genuinely does both - so this is a union rather than an intersection.
+   * outdoor-only deliverables - it genuinely does both - so this is a union rather than an intersection.
    */
   const codes = shootTypesOf(shoot).map((label) => SHOOT_TYPE_BY_LABEL[label]).filter(Boolean);
   if (!codes.length) return definitions;
@@ -481,17 +468,25 @@ function servicesForShootType(definitions, shoot) {
   });
 }
 
+/*
+ * Beside the Choose Services / Choose Deliverables picker, level with its box. The row is aligned to
+ * its top, not its bottom: under the box the picker prints a line only sometimes (loading, nothing
+ * to choose, no match, an error), and a bottom-aligned button sank by that line whenever it showed.
+ * The box always sits the picker's label below its top - `text-xs` (1rem) plus `mt-1.5` (0.375rem) -
+ * so the button is dropped by exactly that, and is the box's own height (`h-9`, the box's `min-h-9`).
+ */
 function ClearAllButton({ label, disabled, onClick }) {
-  return <button type="button" disabled={disabled} onClick={onClick} className="h-9 rounded-lg bg-blue-50 px-4 text-sm font-normal text-blue-600 transition hover:bg-blue-100 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-40">{label}</button>;
+  return <button type="button" disabled={disabled} onClick={onClick} className="h-9 shrink-0 self-start rounded-lg sm:mt-[1.375rem] bg-blue-50 px-4 text-sm font-normal text-blue-600 transition hover:bg-blue-100 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-40">{label}</button>;
 }
 
 export default function ProjectServiceCreationSection({
-  /*
-   * The shoots this caller's rows may be changed to — for a quotation, the shoots its brand quotes
-   * for. Forwarded to the list rather than read there, so the one component that knows which brand
-   * is being quoted is the one that decides.
-   */
-  shootChoices = null,
+  // Which of a shoot's two tables to show: "both", or only "services" / "deliverables" - a request
+  // for services alone (Client Requests -> Raise Request) has no deliverables to list.
+  parts = "both",
+  // The Shoot List heading and its table. A caller showing one shoot it already describes (Client
+  // Requests -> Raise Request) passes false: the table is every shoot field side by side, wider than
+  // a dialog, and would only repeat the shoot's own card below.
+  shootList = true,
   shoots,
   loading,
   loadingMasterData,
@@ -508,10 +503,10 @@ export default function ProjectServiceCreationSection({
   onClearServices,
   /*
    * Whether the Choose Deliverables picker lists a deliverable's brands and variants one by one
-   * rather than the deliverable alone. The Quotation Generator does, because a quotation line is
-   * priced and a variant is what carries a price; the project screens do not, because a shoot holds
-   * one allocation per deliverable - the server refuses a second - so listing six variants there
-   * would offer five that cannot be added.
+   * rather than the deliverable alone. Every screen that plans deliverables does: a quotation line
+   * is priced and a variant is what carries a price, and a project shoot holds one line per variant
+   * - the server refuses only the same variant twice - so the project is planned by the same
+   * brand-and-size names the quotation was sold under.
    */
   deliverableVariants = false,
   /*
@@ -521,13 +516,45 @@ export default function ProjectServiceCreationSection({
    * prices anything - so they keep the columns they have.
    */
   complimentaryColumn = false,
+  /*
+   * Whether each service line shows its Session Timing (and an hourly service's hours and
+   * minutes). The Quotation Generator and Create Project / Edit Sale Details do not: a service is
+   * priced at its one Settings price, so nothing there is decided by the session. The line still
+   * starts on its shoot's session (`defaultSessionOptionId`) and saves it, so every reader of the
+   * stored value goes on as it was. Project Management's Start Project keeps the column.
+   */
+  sessionTimingColumn = true,
   onAddDeliverable,
   onUpdateDeliverable,
   onDeleteDeliverable,
   onClearDeliverables,
-  onSaveShootEdit,
   onDeleteShoot,
   onRequestEditShoot,
+  /*
+   * Where given, the Shoot List's ⋮ offers Duplicate between Edit and Delete and hands the shoot
+   * here; the screen makes the copy in its own list, with its own ids. The Quotation Generator
+   * does; a screen that passes nothing offers no Duplicate.
+   */
+  onDuplicateShoot,
+  /*
+   * Where given, `(shootId, ids)`: each shoot's service lines - and, separately, its deliverable
+   * lines - can be put in the order the person wants, by a grip at the front of each row
+   * (`rowReorderColumn`). The ids are that shoot's lines of that kind in their new order; the screen
+   * rearranges its own list. The Quotation Generator, Create Project and Edit / Start Project (through
+   * `useProjectPlan`) pass both; a screen passing none shows no grip.
+   */
+  onReorderServices,
+  onReorderDeliverables,
+  // `(keys)`: the shoots themselves, put in order from the Shoot List (`ProjectShootList`'s `onReorder`).
+  onReorderShoots,
+  /*
+   * Where given, `(row, shoot) => note | null`: a line nothing in Settings prices on its shoot is
+   * named so under its own name - "Not priced in Settings for Outdoor / On-Location · Half Session" -
+   * because it comes to ₹0 and would otherwise look as if its shoot were not counted. The Quotation
+   * Generator passes these; a screen that prices nothing passes none.
+   */
+  serviceLineNote,
+  deliverableLineNote,
   /*
    * What the strip above the list says, where the default - "Add one or more Shoots for this
    * Project" - would be describing something this caller does not offer. Create Project sets it to
@@ -592,8 +619,9 @@ export default function ProjectServiceCreationSection({
       segments.push({ key: "durationMinutes", label: "Minutes", ariaLabel: "Duration minutes", value: row.durationMinutes ?? "", max: 59, onCommit: (value) => updateServiceCell(row, { durationMinutes: value === "" ? null : Number(value) }) });
     }
 
-    // Narrowed to what the service offers - see `sessionOptionsFor`.
-    const sessionOptions = sessionOptionsFor(row, activeOptionValues(serviceDefinition(row).timingOptionSet));
+    // Narrowed to what the service offers - see `serviceSessionOptions`, which the Quotation
+    // Generator's starting Session Timing is chosen from too, so it can only be one of these.
+    const sessionOptions = serviceSessionOptions(serviceDefinition(row));
 
     return <div className="flex flex-col gap-1">
       {sessionOptions.length > 0 && (
@@ -617,32 +645,43 @@ export default function ProjectServiceCreationSection({
   const servicesEditable = Boolean(onAddService && onUpdateService && onDeleteService);
   const deliverablesEditable = Boolean(onAddDeliverable && onUpdateDeliverable && onDeleteDeliverable);
 
+  const shootsById = useMemo(() => new Map((shoots || []).map((shoot) => [shoot.id, shoot])), [shoots]);
   const serviceColumns = useMemo(() => [
-    { id: "serviceName", header: "Services", accessorFn: allocationServiceName, sortable: false, filterable: false, width: "22%", minWidth: 170, cell: ({ row }) => allocationServiceName(row.original) },
+    ...(servicesEditable && onReorderServices ? [rowReorderColumn({
+      listOf: (row) => ({ key: row.shootId, ids: (servicesByShoot[row.shootId] || []).map((line) => line.id) }),
+      onReorder: onReorderServices,
+      labelOf: allocationServiceName,
+      disabled: busy,
+    })] : []),
+    { id: "serviceName", header: "Services", accessorFn: allocationServiceName, sortable: false, filterable: false, width: "33%", minWidth: 170, cell: ({ row }) => lineName(allocationServiceName(row.original), serviceLineNote?.(row.original, shootsById.get(row.original.shootId))) },
     { id: "quantity", header: "Quantity", accessorFn: displayQuantity, sortable: false, filterable: false, width: "9%", minWidth: 80, cell: ({ row }) => servicesEditable ? <SpreadsheetCell key={`${row.original.id}-quantity-${row.original.quantity ?? ""}`} type="number" value={row.original.quantity ?? ""} disabled={busy} onCommit={(value) => updateServiceCell(row.original, { quantity: value === "" ? 1 : Number(value) })} /> : displayQuantity(row.original) },
-    { id: "sessionTiming", header: "Session Timing", accessorFn: displayTiming, sortable: false, filterable: false, width: "18%", minWidth: 150, cell: ({ row }) => servicesEditable ? renderTimingCell(row.original) : displayTiming(row.original) },
-    { id: "size", header: "Size", accessorFn: displaySize, sortable: false, filterable: false, width: "12%", minWidth: 100, cell: ({ row }) => {
-      if (!servicesEditable) return displaySize(row.original);
-      const options = serviceSizeOptions(serviceDefinition(row.original));
-      return options.length ? <SpreadsheetSelectCell key={`${row.original.id}-size-${row.original.sizeOptionValueId || ""}`} value={row.original.sizeOptionValueId || ""} options={options} disabled={busy} onCommit={(value) => updateServiceCell(row.original, { sizeOptionValueId: value || null })} /> : "-";
-    } },
-    { id: "remarks", header: "Remarks", accessorFn: displayServiceRemarks, sortable: false, filterable: false, width: "19%", minWidth: 150, cell: ({ row }) => !servicesEditable ? displayServiceRemarks(row.original) : remarksEnabled(row.original) ? <SpreadsheetCell key={`${row.original.id}-remarks-${row.original.remarks || ""}`} value={row.original.remarks || ""} disabled={busy} onCommit={(value) => updateServiceCell(row.original, { remarks: value || null })} /> : "-" },
+    ...(sessionTimingColumn ? [{ id: "sessionTiming", header: "Session Timing", accessorFn: displayTiming, sortable: false, filterable: false, width: "18%", minWidth: 150, cell: ({ row }) => servicesEditable ? renderTimingCell(row.original) : displayTiming(row.original) }] : []),
+    /* No Size column: a service is priced at its one Settings price, so a line's size decides
+       nothing on any screen that uses this table. A size a line already holds is kept and saved
+       with it, untouched. A deliverable's Size, which is its own field, stays below. */
+    { id: "remarks", header: "Remarks", accessorFn: displayServiceRemarks, sortable: false, filterable: false, width: "28%", minWidth: 150, cell: ({ row }) => !servicesEditable ? displayServiceRemarks(row.original) : remarksEnabled(row.original) ? <SpreadsheetCell key={`${row.original.id}-remarks-${row.original.remarks || ""}`} value={row.original.remarks || ""} disabled={busy} onCommit={(value) => updateServiceCell(row.original, { remarks: value || null })} /> : "-" },
     ...(complimentaryColumn ? [{ id: "complimentary", header: "Complimentary", accessorFn: displayComplimentary, sortable: false, filterable: false, width: "12%", minWidth: 110, cell: ({ row }) => !servicesEditable || !complimentaryAllowed(row.original) ? displayComplimentary(row.original) : <SpreadsheetSelectCell key={`${row.original.id}-complimentary-${complimentaryValue(row.original)}`} value={complimentaryValue(row.original)} options={COMPLIMENTARY_OPTIONS} disabled={busy} maxWidth={110} onCommit={(value) => updateServiceCell(row.original, { complimentary: value === "true" })} /> }] : []),
     ...(servicesEditable ? [{ id: "actions", header: "", sortable: false, filterable: false, fixed: true, width: 48, minWidth: 48, cell: ({ row }) => <DeleteRowButton label={allocationServiceName(row.original)} disabled={busy} onClick={() => setConfirm({ type: "service", row: row.original })} /> }] : []),
-  ], [busy, complimentaryColumn, renderTimingCell, servicesEditable, updateServiceCell]);
+  ], [busy, complimentaryColumn, onReorderServices, renderTimingCell, serviceLineNote, servicesByShoot, servicesEditable, sessionTimingColumn, shootsById, updateServiceCell]);
 
   const deliverableColumns = useMemo(() => [
+    ...(deliverablesEditable && onReorderDeliverables ? [rowReorderColumn({
+      listOf: (row) => ({ key: row.shootId, ids: (deliverablesByShoot[row.shootId] || []).map((line) => line.id) }),
+      onReorder: onReorderDeliverables,
+      labelOf: allocationDeliverableName,
+      disabled: busy,
+    })] : []),
     // `title` so the whole of it is readable on hover: a variant carrying its Settings note - "Demo
     // Album Printing - Canvera - 12x18 - 1.5 inch - Sent flat, never rolled." - is longer than the
     // column, and a truncated line should still be able to say what it is.
-    { id: "deliverableName", header: "Deliverables", accessorFn: allocationDeliverableName, title: allocationDeliverableName, sortable: false, filterable: false, width: "27%", minWidth: 200, cell: ({ row }) => allocationDeliverableName(row.original) },
+    { id: "deliverableName", header: "Deliverables", accessorFn: allocationDeliverableName, title: allocationDeliverableName, sortable: false, filterable: false, width: "27%", minWidth: 200, cell: ({ row }) => lineName(allocationDeliverableName(row.original), deliverableLineNote?.(row.original, shootsById.get(row.original.shootId))) },
     { id: "quantity", header: "Quantity", accessorFn: (row) => row.quantity || "—", sortable: false, filterable: false, width: "9%", minWidth: 80, cell: ({ row }) => deliverablesEditable ? <SpreadsheetCell key={`${row.original.id}-quantity-${row.original.quantity ?? ""}`} type="number" value={row.original.quantity ?? ""} disabled={busy} onCommit={(value) => updateDeliverableCell(row.original, { quantity: value === "" ? 1 : Number(value) })} /> : (row.original.quantity || "—") },
     { id: "numberOfPhotos", header: "No.of.Count", accessorFn: displayDeliverablePhotos, sortable: false, filterable: false, width: "12%", minWidth: 100, cell: ({ row }) => !deliverablesEditable ? displayDeliverablePhotos(row.original) : deliverablePhotoCountEnabled(row.original) ? <SpreadsheetCell key={`${row.original.id}-photos-${row.original.numberOfPhotos ?? ""}`} type="number" placeholder={deliverablePhotoCountPlaceholder(row.original)} value={row.original.numberOfPhotos ?? ""} disabled={busy} onCommit={(value) => updateDeliverableCell(row.original, { numberOfPhotos: value === "" ? null : Number(value) })} /> : "-" },
     { id: "size", header: "Size", accessorFn: displayDeliverableSize, sortable: false, filterable: false, width: "11%", minWidth: 100, cell: ({ row }) => {
       if (!deliverablesEditable) return displayDeliverableSize(row.original);
       // A variant's size was settled when the variant was chosen; offering the deliverable's size
       // list here would let a quotation line say one size and be priced at another's.
-      if (row.original.deliverableVariantId) return displayDeliverableSize(row.original);
+      if (deliverableRowVariant(row.original)) return displayDeliverableSize(row.original);
       const definition = deliverableDefinition(row.original);
       const options = deliverableSizeOptions(definition);
       return options.length ? <SpreadsheetSelectCell key={`${row.original.id}-size-${row.original.sizeOptionValueId || ""}`} value={row.original.sizeOptionValueId || ""} options={options} disabled={busy} onCommit={(value) => updateDeliverableCell(row.original, { sizeOptionValueId: value || null })} /> : "-";
@@ -650,7 +689,7 @@ export default function ProjectServiceCreationSection({
     { id: "remarks", header: "Remarks", accessorFn: displayDeliverableRemarks, sortable: false, filterable: false, width: "19%", minWidth: 150, cell: ({ row }) => !deliverablesEditable ? displayDeliverableRemarks(row.original) : deliverableRemarksEnabled(row.original) ? <SpreadsheetCell key={`${row.original.id}-remarks-${row.original.remarks || ""}`} value={row.original.remarks || ""} disabled={busy} onCommit={(value) => updateDeliverableCell(row.original, { remarks: value || null })} /> : "-" },
     ...(complimentaryColumn ? [{ id: "complimentary", header: "Complimentary", accessorFn: displayComplimentary, sortable: false, filterable: false, width: "12%", minWidth: 110, cell: ({ row }) => !deliverablesEditable || !complimentaryAllowed(row.original) ? displayComplimentary(row.original) : <SpreadsheetSelectCell key={`${row.original.id}-complimentary-${complimentaryValue(row.original)}`} value={complimentaryValue(row.original)} options={COMPLIMENTARY_OPTIONS} disabled={busy} maxWidth={110} onCommit={(value) => updateDeliverableCell(row.original, { complimentary: value === "true" })} /> }] : []),
     ...(deliverablesEditable ? [{ id: "actions", header: "", sortable: false, filterable: false, fixed: true, width: 48, minWidth: 48, cell: ({ row }) => <DeleteRowButton label={allocationDeliverableName(row.original)} disabled={busy} onClick={() => setConfirm({ type: "deliverable", row: row.original })} /> }] : []),
-  ], [busy, complimentaryColumn, deliverablesEditable, updateDeliverableCell]);
+  ], [busy, complimentaryColumn, deliverableLineNote, deliverablesByShoot, deliverablesEditable, onReorderDeliverables, shootsById, updateDeliverableCell]);
 
   async function confirmDelete() {
     if (!confirm) return;
@@ -714,6 +753,7 @@ export default function ProjectServiceCreationSection({
       * matches its quotation. Absent rather than disabled, the way every other control the
       * situation does not allow is.
       */}
+    {shootList && <>
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-blue-50 px-4 py-3">
       <div><h3 className="font-semibold text-slate-800">Shoot List</h3><p className="text-sm text-slate-600">{shootListHint || "Add one or more Shoots for this Project"}</p></div>
       {onAddShoot && <button type="button" onClick={onAddShoot} className="min-h-10 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">+ Add Shoot</button>}
@@ -723,12 +763,14 @@ export default function ProjectServiceCreationSection({
     {shoots.length
       ? <ProjectShootList
         shoots={shoots}
-        shootChoices={shootChoices}
-        readOnly={!onSaveShootEdit || !onDeleteShoot}
-        onSaveEdit={onSaveShootEdit}
+        readOnly={!onRequestEditShoot || !onDeleteShoot}
+        onRequestEdit={onRequestEditShoot}
+        onRequestDuplicate={onDuplicateShoot}
+        onReorder={onReorderShoots}
         onRequestDelete={onDeleteShoot ? (shoot, index) => setConfirm({ type: "shoot", row: shoot, index }) : undefined}
       />
       : <p className="rounded-md border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">No shoots added yet.</p>}
+    </>}
     <div className="space-y-8 rounded-lg bg-blue-50 p-3">
       {shoots.map((shoot, shootIndex) => {
         const serviceRows = servicesByShoot[shoot.id] || [];
@@ -741,8 +783,18 @@ export default function ProjectServiceCreationSection({
          * deliverable's - otherwise choosing Canvera's 12x18 would take Canvera's 16x24 and every
          * other variant of that deliverable out of the list with it. A row from anywhere else has
          * no option id and is held by its definition, exactly as it always was.
+         *
+         * A saved project row knows its variant by what it holds, not by an option id - it keeps a
+         * snapshot of what was sold, not a link - so the options holding the same deliverable,
+         * brand and size are held too, by the same `deliverableIdentityKey` the server refuses a
+         * second line by.
          */
-        const selectedDeliverableIds = new Set(deliverableRows.map((row) => row.deliverableOptionId || row.deliverableDefinitionId).filter(Boolean));
+        const deliverableOptions = deliverableVariants ? deliverableVariantOptions(deliverablesForShootType(deliverableDefinitions, shoot), { withRemarks: true }) : deliverablesForShootType(deliverableDefinitions, shoot);
+        const heldDeliverableKeys = new Set(deliverableRows.map((row) => deliverableIdentityKey(row.deliverableDefinitionId, deliverableRowVariant(row))));
+        const selectedDeliverableIds = new Set([
+          ...deliverableRows.map((row) => row.deliverableOptionId || row.deliverableDefinitionId),
+          ...deliverableOptions.filter((option) => heldDeliverableKeys.has(deliverableIdentityKey(option.definition?.id || option.id, option.variant))).map((option) => option.id),
+        ].filter(Boolean));
         const selectedServiceNames = new Set(serviceRows.map((row) => allocationServiceName(row).toLocaleLowerCase()).filter((name) => name && name !== "—"));
         const selectedDeliverableNames = new Set(deliverableRows.map((row) => allocationDeliverableName(row).toLocaleLowerCase()).filter((name) => name && name !== "—"));
         const isCollapsed = collapsedShootIds.has(shoot.id);
@@ -751,27 +803,30 @@ export default function ProjectServiceCreationSection({
           <header className={isCollapsed ? "" : "mb-4"}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <h3 className="truncate text-xl font-semibold text-slate-800">{shoot.shoot || "Shoot"}</h3>
+                <h3 className="truncate text-xl font-semibold text-slate-800">{shootDisplayName(shoot, "Shoot")}</h3>
                 {shootMeta && <p className="mt-1 truncate text-sm text-slate-500">{shootMeta}</p>}
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 <button type="button" onClick={() => toggleShootCollapsed(shoot.id)} aria-label={isCollapsed ? `Expand ${shoot.shoot || "shoot"}` : `Collapse ${shoot.shoot || "shoot"}`} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-700"><ChevronIcon direction={isCollapsed ? "down" : "up"} size={24} /></button>
-                {onRequestEditShoot && onDeleteShoot && <RowActions label={shoot.shoot || "shoot"} onEdit={() => onRequestEditShoot(shoot, shootIndex)} onDelete={() => setConfirm({ type: "shoot", row: shoot, index: shootIndex })} />}
+                {onRequestEditShoot && onDeleteShoot && <RowActions label={shoot.shoot || "shoot"} onEdit={() => onRequestEditShoot(shoot, shootIndex)} onDuplicate={onDuplicateShoot ? () => onDuplicateShoot(shoot, shootIndex) : undefined} onDelete={() => setConfirm({ type: "shoot", row: shoot, index: shootIndex })} />}
               </div>
             </div>
           </header>
           {!isCollapsed && <div className="space-y-4">
             {/* The way rows are added and cleared, offered only where the rows may change at all.
                 On Create Project a quotation has already priced them. */}
-            {servicesEditable && <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-start">
-              <div className="w-full min-w-0 sm:max-w-lg"><SearchablePicker label="Choose Services" placeholder="Search or browse services" options={servicesForShootType(serviceDefinitions, shoot)} disabledIds={selectedServiceIds} disabledNames={selectedServiceNames} loading={loadingMasterData || busy} emptyMessage="No services available for this shoot type" errorMessage={serviceDefinitionsError} onSelect={(definition) => void addServiceAndEdit(shoot, definition)} /></div>
+            {parts !== "deliverables" && <>
+            {servicesEditable && <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-start">
+              <div className="w-full min-w-0 sm:max-w-lg"><SearchablePicker label="Choose Services" helperText="Search and pick a service to add it to this shoot." placeholder="Search or browse services" options={serviceDefinitions} disabledIds={selectedServiceIds} disabledNames={selectedServiceNames} loading={loadingMasterData || busy} emptyMessage="No services available" errorMessage={serviceDefinitionsError} onSelect={(definition) => void addServiceAndEdit(shoot, definition)} /></div>
               <ClearAllButton label="Clear all" disabled={busy || !serviceRows.length} onClick={() => setConfirm({ type: "clear-services", rows: serviceRows, shoot })} />
             </div>}
             <div className="h-auto overflow-hidden rounded-lg border border-slate-200">
               <div className="h-auto min-h-28"><DataTable columns={serviceColumns} data={serviceRows} ariaLabel={`${shoot.shoot || "Shoot"} services`} emptyMessage="No services selected." features={{ filtering: false, sorting: false, tableOptions: false }} getRowId={(row) => row.id} /></div>
             </div>
-            <div className="border-t border-dashed border-slate-200 pt-4" />
-            {deliverablesEditable && <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-start">
+            </>}
+            {parts === "both" && <div className="border-t border-dashed border-slate-200 pt-4" />}
+            {parts !== "services" && <>
+            {deliverablesEditable && <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-start">
               {/*
                 * One entry per brand and variant where the screen asked for them, and one per
                 * deliverable where it did not. The options are built from the deliverables this
@@ -779,12 +834,13 @@ export default function ProjectServiceCreationSection({
                 * brand, the size, the frame and the length, which is what makes the box's own
                 * search find "Canvera" or "12x18" without searching anything new.
                 */}
-              <div className="w-full min-w-0 sm:max-w-lg"><SearchablePicker label="Choose Deliverables" placeholder="Search or browse deliverables" options={deliverableVariants ? deliverableVariantOptions(servicesForShootType(deliverableDefinitions, shoot), { withRemarks: true }) : servicesForShootType(deliverableDefinitions, shoot)} disabledIds={selectedDeliverableIds} disabledNames={selectedDeliverableNames} loading={loadingMasterData || busy} emptyMessage="No deliverables available" errorMessage={deliverableDefinitionsError} onSelect={(option) => void addDeliverableAndEdit(shoot, option.definition || option, option.variant ? { ...option.variant, optionId: option.id, label: option.name } : null)} /></div>
+              <div className="w-full min-w-0 sm:max-w-lg"><SearchablePicker label="Choose Deliverables" helperText="Search and pick a deliverable, like an album or video, to add to this shoot." placeholder="Search or browse deliverables" options={deliverableOptions} disabledIds={selectedDeliverableIds} disabledNames={selectedDeliverableNames} loading={loadingMasterData || busy} emptyMessage="No deliverables available" errorMessage={deliverableDefinitionsError} onSelect={(option) => void addDeliverableAndEdit(shoot, option.definition || option, option.variant ? { ...option.variant, optionId: option.id, label: option.name } : null)} /></div>
               <ClearAllButton label="Clear all" disabled={busy || !deliverableRows.length} onClick={() => setConfirm({ type: "clear-deliverables", rows: deliverableRows, shoot })} />
             </div>}
             <div className="h-auto overflow-hidden rounded-lg border border-slate-200">
               <div className="h-auto min-h-28"><DataTable columns={deliverableColumns} data={deliverableRows} ariaLabel={`${shoot.shoot || "Shoot"} deliverables`} emptyMessage="No deliverables selected." features={{ filtering: false, sorting: false, tableOptions: false }} getRowId={(row) => row.id} /></div>
             </div>
+            </>}
           </div>}
         </article>;
       })}
@@ -805,7 +861,7 @@ export default function ProjectServiceCreationSection({
           <p className="mt-2">Deleting this shoot will permanently remove the client&apos;s submitted selections and all associated preview data. Original photos will remain untouched.</p>
         </div>
         <label className="block text-xs text-slate-700">
-          Type <strong>DELETE</strong> to confirm
+          Type <strong>DELETE</strong> to confirm<HelpTip text="A safeguard: the client's submitted selections on this shoot cannot be brought back." />
           <input value={ackText} onChange={(event) => setAckText(event.target.value)} autoFocus placeholder="DELETE" className="mt-1 h-9 w-full rounded-md border border-slate-300 px-2 text-sm outline-none focus:border-red-500" />
         </label>
       </div>

@@ -1,9 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useState } from "react";
-import CloseIcon from "@/components/ui/CloseIcon";
 import Button from "@/components/shared/Button";
-import IconButton from "@/components/shared/IconButton";
 
 /**
  * What a selection can be done with, drawn in the module header rather than over the page.
@@ -97,11 +95,17 @@ export function useSelectionActionsProps() {
  *
  * The count rides on each button rather than on a sentence beside them - "Delete (12)" says what
  * would happen and to how many in the width the header has, where "12 selected" needed a line of
- * its own. Export first and Delete after it, the order these tables have always shown; the cross
- * clears the selection, which on a table scrolled past its first screen is the only way back that
- * does not mean finding every tick again.
+ * its own. Export first and Delete after it, the order these tables have always shown.
+ *
+ * No × to clear the selection: the studio read it as a stray close button in the title bar. The
+ * table's own header checkbox is the way back - pressed with anything ticked, it clears the lot.
+ *
+ * `actions` is what a module itself does with a selection, drawn first - Advance Salary's Convert to
+ * Recovery: `[{ id, label, onClick, variant?, disabled?, title? }]`, secondary unless the page asks
+ * for its one primary. The page builds it with `useMemo` like the rest of what is published, and says
+ * the count in the label if it wants one.
  */
-export default function TableSelectionActions({ count, noun = "row", plural, onClear, onExport, onDelete, deleting = false, exporting = false }) {
+export default function TableSelectionActions({ count, noun = "row", plural, onExport, onDelete, actions, deleting = false, exporting = false }) {
   if (!count) return null;
 
   const many = plural || `${noun}s`;
@@ -109,14 +113,14 @@ export default function TableSelectionActions({ count, noun = "row", plural, onC
 
   return <>
     <span className="sr-only" aria-live="polite">{`${counted} ${count === 1 ? noun : many} selected`}</span>
+    {(actions || []).map((action) => <Button key={action.id} type="button" variant={action.variant || "secondary"} onClick={action.onClick} disabled={Boolean(action.disabled) || deleting || exporting} title={action.title}>
+      {action.label}
+    </Button>)}
     {onExport && <Button type="button" onClick={onExport} disabled={exporting || deleting}>
       {exporting ? "Exporting…" : `Export (${counted})`}
     </Button>}
     {onDelete && <Button type="button" variant="danger" onClick={onDelete} disabled={deleting || exporting}>
       {deleting ? "Deleting…" : `Delete (${counted})`}
     </Button>}
-    <IconButton onClick={onClear} label="Clear the selection" size="sm" shape="circle" disabled={deleting} className="text-slate-500">
-      <CloseIcon />
-    </IconButton>
   </>;
 }

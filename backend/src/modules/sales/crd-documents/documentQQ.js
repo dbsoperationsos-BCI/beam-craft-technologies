@@ -16,6 +16,7 @@ const { normalizePhoneNumber } = require("../../../services/phoneNumber");
  * fixed list the way document.js's do.
  */
 
+const { eventsSchema } = require("./events");
 const text = (max) => z.string().trim().max(max).optional().default("");
 // A date the client picks from a native date input, so it always arrives as YYYY-MM-DD or blank.
 const dateOnly = text(30);
@@ -142,6 +143,8 @@ const documentSchema = z.object({
   // The client's agreement to the terms. Required to submit, and stored as the plain fact that it
   // was ticked — `submittedAt` on the row is when.
   termsAccepted: z.boolean().optional().default(false),
+  // One event per shoot of the project, each with its own start, end and venue link (`events.js`).
+  events: eventsSchema,
 });
 
 /*

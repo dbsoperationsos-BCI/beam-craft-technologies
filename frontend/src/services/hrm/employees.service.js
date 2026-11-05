@@ -1,4 +1,5 @@
 import { apiRequest } from "@/services/api/client";
+import { downloadPdf } from "@/services/api/downloadPdf";
 
 /**
  * The employee repository, a page at a time.
@@ -8,6 +9,14 @@ import { apiRequest } from "@/services/api/client";
  * onboarding or long gone. The repository screen itself asks for everybody, because it has a tab
  * per status and a row that never arrives lands in none of them.
  */
+/**
+ * Whether the payslip carries the PF details (Settings → Template Settings): `{ details }`,
+ * `PERSONAL` or `PERSONAL_AND_PF`. For Edit Employee → Payslip Details.
+ */
+export function getPayslipDetailsSetting() {
+  return apiRequest("/api/hrm/employees/payslip-details");
+}
+
 export function getEmployees({ page = 1, pageSize = 100, active } = {}) {
   const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
   if (active !== undefined) params.set("active", String(active));
@@ -20,8 +29,9 @@ export function getEmployees({ page = 1, pageSize = 100, active } = {}) {
  * repository itself and answers only to `HRM / Employee Management`. Working employees only,
  * already ordered by name.
  */
-export function getEmployeeDirectory() {
-  return apiRequest("/api/hrm/employees/directory");
+/** Active employees for a picker. `{ forAttendance: true }`: only those the Attendance module shows. */
+export function getEmployeeDirectory({ forAttendance = false } = {}) {
+  return apiRequest(`/api/hrm/employees/directory${forAttendance ? "?for=attendance" : ""}`);
 }
 
 export function getNextEmployeeId() {
@@ -53,6 +63,25 @@ export function deleteEmployee(id) {
  */
 export function reactivateEmployee(id, reason) {
   return apiRequest(`/api/hrm/employees/${id}/reactivate`, { method: "POST", body: JSON.stringify({ reason }) });
+}
+
+/**
+ * Generate → Experience or Employment Certificate (`kind`): the certificate filled from the
+ * employee's record and `body` (`{ duties }` for experience, nothing for employment), as HTML for
+ * the preview...
+ */
+export function previewEmployeeCertificate(id, kind, body = {}) {
+  return apiRequest(`/api/hrm/employees/${id}/certificates/${kind}`, { method: "POST", body: JSON.stringify(body) });
+}
+
+/** ...and the same certificate as an A4 PDF, saved under its name and the employee's. */
+export function downloadEmployeeCertificate(id, kind, body = {}, employeeName = "employee", label = "Certificate") {
+  const name = String(employeeName).replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "employee";
+  const file = String(label).replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "Certificate";
+  return downloadPdf(`/api/hrm/employees/${id}/certificates/${kind}/pdf`, `${file}-${name}.pdf`, {
+    body,
+    fallback: "Unable to download the certificate.",
+  });
 }
 
 // Reopens a submitted onboarding under its original link and emails the candidate to edit it.
@@ -100,5 +129,19 @@ export function saveLoginCredentialsDraft(id, payload) {
   return apiRequest(`/api/hrm/employees/${id}/login-credentials-draft`, {
     method: "PUT",
     body: JSON.stringify(payload || {}),
+  });
+}
+
+/**
+ * The login just created, sent to the employee on WhatsApp from the sender's own account.
+ *
+ * The message carries the temporary password, which is readable only at the moment it is made -
+ * the server never sends one back - so the wording is the browser's and cannot be rebuilt server
+ * side. The employee's number is read off their record rather than sent from here.
+ */
+export function sendCredentialsWhatsApp(id, message) {
+  return apiRequest(`/api/hrm/employees/${encodeURIComponent(id)}/send-credentials-whatsapp`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
   });
 }

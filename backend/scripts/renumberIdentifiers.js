@@ -132,6 +132,8 @@ const PLAN = [
     column: "event_id",
     order: "`created_at` ASC, `id` ASC",
     select: "`event_id` AS `code`, `vertical`, `source_branch`",
+    // A booking imported from the old sheet keeps the sheet's Event ID; it is not the app's to renumber.
+    where: "`sheet_event_id` IS NULL",
     context: (row) => ({ vertical: row.vertical, branch: row.source_branch }),
     references: [],
   },
@@ -148,6 +150,8 @@ const PLAN = [
     from: "`project_shoot` `s` LEFT JOIN `sales_project` `p` ON `p`.`id` = `s`.`project_id`",
     orderQualified: "`s`.`date_created` ASC, `s`.`created_at` ASC, `s`.`id` ASC",
     key: "`s`.`id`",
+    // As above: an imported shoot keeps the sheet's Shoot ID.
+    whereQualified: "`s`.`sheet_shoot_id` IS NULL",
     context: (row) => ({ vertical: row.vertical, branch: row.source_branch }),
     // Every other `shoot_id` column in the database is a foreign key to `project_shoot`.`id`, not
     // this code - checked against information_schema, not remembered.
@@ -271,6 +275,15 @@ const PLAN = [
     column: "storage_id",
     order: "`created_at` ASC, `id` ASC",
     select: "`storage_id` AS `code`",
+    context: () => ({}),
+    references: [],
+  },
+  {
+    scheme: "SPEAK_UP",
+    table: "speak_up",
+    column: "speak_up_id",
+    order: "`created_at` ASC, `id` ASC",
+    select: "`speak_up_id` AS `code`",
     context: () => ({}),
     references: [],
   },

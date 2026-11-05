@@ -29,6 +29,18 @@ const readsConfiguration = checkAnyPermission([
 
 router.get("/", readsConfiguration, controller.listBrands);
 router.get("/:code/configuration", readsConfiguration, controller.getConfiguration);
+/*
+ * The brand's shoots alone - names, nothing priced - for CRM → Add Lead and the lead popup, whose
+ * Event Details rows name a shoot of the lead's own vertical. A third reader, so a third guard:
+ * somebody who works leads and has never been granted quotations may read this and only this. The
+ * list is the one `GET /:code/configuration` answers, so the generator and the lead agree.
+ */
+const readsShoots = checkAnyPermission([
+  { module: "SALES", feature: "CRM Leads", level: "READ" },
+  { module: "SALES", feature: "Quotation Management", level: "READ" },
+  { module: "SETTINGS", feature: "Quotation Settings", level: "READ" },
+]);
+router.get("/:code/shoots", readsShoots, controller.listShoots);
 
 const admin = express.Router();
 admin.use(requireModule("SETTINGS", "Quotation Settings"));

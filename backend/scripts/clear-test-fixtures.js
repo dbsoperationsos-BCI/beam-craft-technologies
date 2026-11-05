@@ -45,9 +45,24 @@ const prisma = require("../src/config/db");
 const PREFIXES = [
   "BRP-", // branch-reach-per-permission
   "TBA-", // branch-admin-permissions
+  "TBV-", // crm-bulk-vertical-move
   "TRF-", // referral-scope
   "TBO-", // branch-options
   "TCC-", // crd-document-code
+  "TCL-", // client-login
+  "TTR-", // attendance-typed-time-repair
+  "TXA-", // attendance-exclude
+  "TCP-", // client-portal
+  "TCPP-", // client-portal-payments
+  "TCPR-", // client-portal-reviews
+  "TCPW-", // client-change-password
+  "TCLO-", // client-login-otp
+  "TCPE-", // client-portal-events
+  "TCPU-", // client-push
+  "TCSR-", // crm-board-column-search
+  "TCOS-", // crm-board-occurring-statuses
+  "TOD-", // offboarding-invite-delete
+  "TCW-", // crm-board-column-worth
   "TCD-", // client-storage-follows-deleted-project
   "TCS-", // data-scope-client-storage
   "TDA-", // data-scope-accounts-tasks
@@ -56,15 +71,44 @@ const PREFIXES = [
   "TDP-", // data-scope-projects
   "TDS-", // data-scope
   "TEP-", // enquiry-picker
+  "TCO-", // client-offers
+  "TCPK-", // client-portal-package
+  "TCIV-", // client-invitations
+  "TCRQ-", // client-requests
+  "TRW-", // client-rewards
+  "TFB-", // project-feedback
   "TES-", // hrm-employee-branch-scope
   "TLC-", // data-scope-lead-children
+  "TLK-", // lead-children-keys
+  "TNC-", // name-copies-follow-rename
+  "TMR-", // employee-master-data-references
+  "TRN-", // resolved-names
   "TOT-", // password-reset-otp
   "TPC-", // data-scope-project-children
   "TQE-", // data-scope-quotations
+  "TQD-", // sales-quotation-draft
+  "TQF-", // sales-quotation-finalize
+  "TQP-", // sales-project-finalized-quotation
+  "TQL-", // sales-quotation-lifecycle
   "SAP-", // project-show-all-rows
   "LFU-", // interview-last-follow-up-stamp
   "TSB-", // onboarding-send-back-mail-failure
   "WCS-", // whatsapp-chat-stream
+  "TSU-", // speak-up
+  "TAL-", // user-activity-log
+  "TLP-", // activity-log-purge
+  "TSL-", // staff-login-closed
+  "TRJ-", // employee-rejoin-password
+  "TWP-", // whatsapp-pairing-reach
+  "TSA-", // hrm-task-super-admin-role
+  "TRH-", // attendance-request-hard-delete
+  "TPF-", // project-flow
+  "TRB-", // project-recycling-bin
+  "TBH-", // project-recycling-bin-hidden
+  "TSR-", // sale-extras-reconcile
+  "TSK-", // sale-extras-booking
+  "TSX-", // sale-extras-api
+  "TSM-", // sale-extras-money
   "TEST_", // iam.test.js branches, roles and permission scopes
   "ZZTEST-", // enquiry-picker
   "ZZREP-", // report-employee-options
@@ -80,16 +124,38 @@ const PREFIXES = [
  * them with it.
  */
 const TARGETS = [
+  // Before its sales project; deleting it cascades to its gallery publication, items and albums.
+  ["imageSelectionProject", "projectName"],
   ["projectShoot", "shootId"],
   ["projectExtraQuotation", "requestCode"],
+  // A Sale Extras revision restricts deleting its quotation, so it goes first - found by its
+  // publisher's name, which the suites stamp with their prefix.
+  ["projectSaleExtraRevision", "publishedByName"],
   ["salesQuotation", "quotationNumber"],
+  ["salesCallTranscript", "callLogId"],
+  ["salesWhatsappGroupName", "generatedName"],
   ["salesCrmMeeting", "enquiryId"],
-  ["salesCrmLead", "enquiryId"],
+  // A lead with a booking or a quotation behind it cannot be deleted (20260924150000), so the lead
+  // is swept after both of them.
   ["salesProject", "eventId"],
+  // A document raised by hand against a lead refuses that lead's deletion, so it goes first too.
+  ["salesProjectCrdDocument", "enquiryId"],
+  ["salesCrmLead", "enquiryId"],
   ["clientStorage", "storageId"],
   ["cashEntry", "entryId"],
+  // Its expense lines go with it (`onDelete: Cascade`).
+  ["paymentRequest", "requestCode"],
+  ["clientOffer", "title"],
+  // After the projects, whose invitations (`onDelete: Cascade`) hold a design by a restricting key.
+  ["invitationTemplate", "title"],
+  ["invitationSong", "title"],
   ["hrmTask", "taskCode"],
   ["hrmInterviewCandidate", "candidateCode"],
+  // Before the employee it names; its link is `onDelete: SetNull`, so this is order, not necessity.
+  ["speakUp", "title"],
+  // Leave and other requests the suites raise carry their prefix in the reason. They would go with
+  // their employee (`onDelete: Cascade`), but a request raised against a real employee would not.
+  ["attendanceRequest", "reason"],
   ["asset", "assetCode"],
   // Before the employee it names. The link is `employee_id` held as *text* rather than a foreign
   // key, so nothing at the database level would take an invite with its employee - it would simply
@@ -97,11 +163,30 @@ const TARGETS = [
   // invite for somebody who is not there.
   ["employeeOnboardingInvite", "candidateName"],
   ["employee", "employeeId"],
+  // Before the login it names; its link is `onDelete: SetNull`, so this is order, not necessity.
+  ["userActivityLog", "username"],
   ["user", "email"],
   ["role", "name"],
   ["permissionScope", "name"],
   ["branch", "code"],
+  ["vertical", "code"],
+  ["designation", "code"],
+  ["department", "code"],
+  ["skill", "code"],
+  ["language", "code"],
+  ["workLocation", "code"],
 ];
+
+/**
+ * A prefix as a literal for `startsWith`.
+ *
+ * Prisma hands `startsWith` to MySQL as `LIKE 'prefix%'` without escaping the prefix, and in a LIKE
+ * pattern `_` is any one character and `%` any run of them. So `TEST_` - iam.test.js's prefix -
+ * swept every row beginning `TEST` and one more character: a hand-made `TEST-EV-001` project, its
+ * shoots and its lead were deleted by the next `npm test`. Escaped, it matches `TEST_` and nothing
+ * else.
+ */
+const literalPrefix = (prefix) => prefix.replace(/[\\%_]/g, (character) => `\\${character}`);
 
 async function clearTestFixtures() {
   const removed = [];
@@ -113,7 +198,7 @@ async function clearTestFixtures() {
     if (!repository?.deleteMany) continue;
     try {
       const { count } = await repository.deleteMany({
-        where: { OR: PREFIXES.map((prefix) => ({ [field]: { startsWith: prefix } })) },
+        where: { OR: PREFIXES.map((prefix) => ({ [field]: { startsWith: literalPrefix(prefix) } })) },
       });
       if (count) removed.push(`${model}: ${count}`);
     } catch (error) {
@@ -124,7 +209,7 @@ async function clearTestFixtures() {
   return removed;
 }
 
-module.exports = { clearTestFixtures, PREFIXES, TARGETS };
+module.exports = { clearTestFixtures, literalPrefix, PREFIXES, TARGETS };
 
 if (require.main === module) {
   clearTestFixtures()

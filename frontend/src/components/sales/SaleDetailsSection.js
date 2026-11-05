@@ -3,11 +3,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import EnquiryCombobox from "@/components/sales/EnquiryCombobox";
 import SharedDropdown from "@/components/shared/Dropdown";
+import HelpTip from "@/components/shared/HelpTip";
 import useMenuDismiss from "@/components/shared/useMenuDismiss";
 import ChevronIcon from "@/components/ui/ChevronIcon";
-import { groupNameFieldsForEnquiry, groupNamesForEnquiry, savedGroupNameForEnquiry, savedGroupNameModeAvailable } from "@/lib/saleGroupName.mjs";
+import { GROUP_TYPES, groupNameFieldsForEnquiry, groupNamesForEnquiry, projectVerticalFor, savedGroupNameForEnquiry, savedGroupNameModeAvailable } from "@/lib/saleGroupName.mjs";
 import { getSalesQuotations, getSalesSourceBranches, searchSalesEnquiries } from "@/services/sales/projects.service";
 import useBranchRegistry from "@/components/shared/useBranchRegistry";
+import useAutoRefresh from "@/components/shared/useAutoRefresh";
+import Button from "@/components/shared/Button";
+import { isFinalizedQuotation, quotationVersionStatus, versionLabel } from "@/components/sales/quotationLinkStatus";
+import { resolveBranchName } from "@/lib/branchName";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 /*
  * What was sold: the enquiry, the group name, the quotation it converted at, the client's number
@@ -75,9 +81,9 @@ function isPhoneValid(form) {
   return /^\+\d{1,4}$/.test(form.countryCode) && /^\d{10}$/.test(form.clientMainNumber);
 }
 
-export function missingSaleFields(form) {
+export function saleFieldProblems(form) {
   /*
-   * Named as the form names them, and each one answerable on the form that asks.
+   * Each problem keyed by the box it is said under, and each one answerable on the form that asks.
    *
    * **Signed Quotation is deliberately not here.** What a project is signed for is Project
    * Management's to decide - it is answered on Projects -> Edit Project, by whoever may edit a
@@ -87,15 +93,15 @@ export function missingSaleFields(form) {
    * required fields: Signed Quotation" pointing at a box with no way into it. A booking may be
    * saved without it; the schedule below says every share works out at zero until it is set.
    */
-  const required = [["enquiryId", "Enquiry ID"], ["whatsappGroupName", "WhatsApp Group Name"], ["sourceBranch", "Source Branch"]];
-  const missing = required.filter(([key]) => !String(form[key] || "").trim()).map(([, label]) => label);
-  if (!isPhoneValid(form)) missing.push("Client Main Number");
-  return missing;
-}
-
-export function isSaleValid(form) {
-  const amount = Number(form.initialConvertedValue);
-  return missingSaleFields(form).length === 0 && Number.isFinite(amount) && amount >= 0;
+  const required = [["enquiryId", "Choose the enquiry."], ["whatsappGroupName", "Choose or enter the WhatsApp group name."], ["sourceBranch", "Choose the source branch."]];
+  const problems = Object.fromEntries(required.map(([key, message]) => [key, String(form[key] || "").trim() ? "" : message]));
+  problems.clientMainNumber = isPhoneValid(form) ? ""
+    : !/^\+\d{1,4}$/.test(form.countryCode) ? "Enter the country code, such as +91."
+      : String(form.clientMainNumber || "").trim() ? "Enter the full phone number." : "Enter the client's main number.";
+  // A reserved group name brings its own group type and vertical; a typed one must say which
+  // product this is, or the project reaches no pre production board and gets no checklist.
+  problems.groupType = !String(form.whatsappGroupNameId || "").trim() && !String(form.groupType || "").trim() ? "Choose the vertical." : "";
+  return problems;
 }
 
 /**
@@ -141,9 +147,10 @@ function normalizePhoneInput(value) {
  * back rather than typed. Grey rather than disabled - the value is the point, and a greyed-out
  * control reads as broken where a grey field reads as a value somebody else decided.
  */
-function ClientPhoneField({ countryCode, value, onCountryCodeChange, onChange, readOnly = false }) {
+function ClientPhoneField({ countryCode, value, onCountryCodeChange, onChange, readOnly = false, error = "" }) {
   const tone = readOnly ? "bg-slate-100" : "bg-white";
-  return <fieldset className="block text-[11px] font-semibold text-slate-600 sm:text-xs"><legend>Client Main Number<span aria-hidden="true" className="ml-0.5 text-rose-500">*</span></legend><div className={`mt-1.5 flex min-h-9 rounded-lg border border-slate-300 ${tone} focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100`}><input value={countryCode} readOnly={readOnly} maxLength={5} onChange={(event) => onCountryCodeChange(event.target.value.replace(/[^+\d]/g, "").replace(/(\+.*)\+/g, "$1").slice(0, 5))} inputMode="tel" aria-label="Country code" className={`w-16 shrink-0 rounded-l-lg border-r border-slate-200 bg-slate-50 px-2 text-xs font-normal outline-none sm:text-sm ${readOnly ? "cursor-default text-slate-600" : ""}`} /><input value={normalizePhoneInput(value)} readOnly={readOnly} onChange={(event) => onChange(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" aria-label="Client main number" placeholder="12345-12345" className={`min-w-0 flex-1 rounded-r-lg px-3 text-xs font-normal outline-none sm:text-sm ${readOnly ? "cursor-default bg-slate-100 text-slate-600" : ""}`} /></div>{readOnly && <p className="mt-1.5 font-normal text-slate-500">Set from the selected quotation and cannot be changed here.</p>}</fieldset>;
+  const invalid = error ? "true" : undefined;
+  return <fieldset className="block text-[11px] font-semibold text-slate-600 sm:text-xs"><legend>Client Main Number<span aria-hidden="true" className="ml-0.5 text-rose-500">*</span><HelpTip text="The client's main mobile number: country code, then the 10 digits." /></legend><div className={`mt-1.5 flex min-h-9 rounded-lg border ${error ? "border-red-500" : "border-slate-300"} ${tone} focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100`}><input value={countryCode} readOnly={readOnly} maxLength={5} onChange={(event) => onCountryCodeChange(event.target.value.replace(/[^+\d]/g, "").replace(/(\+.*)\+/g, "$1").slice(0, 5))} inputMode="tel" aria-label="Country code" aria-invalid={invalid} className={`w-16 shrink-0 rounded-l-lg border-r border-slate-200 bg-slate-50 px-2 text-xs font-normal outline-none sm:text-sm ${readOnly ? "cursor-default text-slate-600" : ""}`} /><input value={normalizePhoneInput(value)} readOnly={readOnly} onChange={(event) => onChange(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" aria-label="Client main number" aria-invalid={invalid} placeholder="12345-12345" className={`min-w-0 flex-1 rounded-r-lg px-3 text-xs font-normal outline-none sm:text-sm ${readOnly ? "cursor-default bg-slate-100 text-slate-600" : ""}`} /></div>{error && <p role="alert" className="mt-1.5 text-xs font-normal text-red-600">{error}</p>}{readOnly && <p className="mt-1.5 font-normal text-slate-500">Set from the selected quotation and cannot be changed here.</p>}</fieldset>;
 }
 
 /*
@@ -189,7 +196,7 @@ function ModeSwitch({ mode, savedDisabled = false, savedDisabledReason = "", onU
   </span>;
 }
 
-function GroupNamePicker({ mode, enquiryId, selectedId, selectedName, groupNames, isLoading, onSelect, onUseManual, onUseSaved, manualValue, onManualChange }) {
+function GroupNamePicker({ mode, enquiryId, selectedId, selectedName, groupNames, isLoading, onSelect, onUseManual, onUseSaved, manualValue, onManualChange, error = "" }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const triggerRef = useRef(null);
@@ -202,7 +209,7 @@ function GroupNamePicker({ mode, enquiryId, selectedId, selectedName, groupNames
    * still open.
    */
   const namesForEnquiry = useMemo(() => groupNamesForEnquiry(groupNames, enquiryId), [groupNames, enquiryId]);
-  const matchingNames = useMemo(() => namesForEnquiry.filter((groupName) => groupName.generatedName.toLowerCase().includes(search.trim().toLowerCase())), [namesForEnquiry, search]);
+  const matchingNames = useMemo(() => namesForEnquiry.filter((groupName) => matchesWordChunks(groupName.generatedName, search)), [namesForEnquiry, search]);
   /*
    * Why the list is empty, rather than one sentence covering three different situations. Nothing
    * here is a fault to be fixed: an enquiry can simply have had no name generated for it yet, and
@@ -227,10 +234,11 @@ function GroupNamePicker({ mode, enquiryId, selectedId, selectedName, groupNames
    */
   useMenuDismiss([triggerRef, menuRef], close, open);
   function select(groupName) { onSelect(groupName); close(); }
+  const controlClass = error ? `${CONTROL_CLASS} !border-red-500` : CONTROL_CLASS;
 
   return <div className="relative block text-[11px] font-semibold text-slate-600 sm:text-xs">
     <span className="flex flex-wrap items-center justify-between gap-2">
-      <span>WhatsApp Group Name<span aria-hidden="true" className="ml-0.5 text-rose-500">*</span></span>
+      <span>WhatsApp Group Name<span aria-hidden="true" className="ml-0.5 text-rose-500">*</span><HelpTip text="Pick the group name saved for this enquiry, or type one in." /></span>
       <ModeSwitch
         mode={mode}
         // Nothing to pick, so nothing to switch to. The rule itself is in `saleGroupName.mjs`,
@@ -247,11 +255,12 @@ function GroupNamePicker({ mode, enquiryId, selectedId, selectedName, groupNames
         value={manualValue}
         onChange={(event) => onManualChange(event.target.value)}
         aria-label="WhatsApp group name"
+        aria-invalid={error ? "true" : undefined}
         placeholder="Enter WhatsApp group name"
-        className={CONTROL_CLASS}
+        className={controlClass}
       />
       : <>
-        <button ref={triggerRef} type="button" aria-expanded={open} aria-haspopup="listbox" onClick={() => open ? close() : setOpen(true)} className={CONTROL_CLASS}>
+        <button ref={triggerRef} type="button" aria-expanded={open} aria-haspopup="listbox" data-invalid={error ? "true" : undefined} onClick={() => open ? close() : setOpen(true)} className={controlClass}>
           <span className={selectedId ? "truncate" : "truncate text-slate-400"}>{selectedName || (String(enquiryId || "").trim() ? "Select a group name saved for this enquiry" : "Choose an enquiry first")}</span>
           <ChevronIcon size={20} className="shrink-0 text-slate-500" />
         </button>
@@ -273,6 +282,7 @@ function GroupNamePicker({ mode, enquiryId, selectedId, selectedName, groupNames
           </div>
         </div>}
       </>}
+    {error && !open && <p role="alert" className="mt-1.5 text-xs font-normal text-red-600">{error}</p>}
   </div>;
 }
 
@@ -282,8 +292,12 @@ function GroupNamePicker({ mode, enquiryId, selectedId, selectedName, groupNames
  * created - every figure on this form, the quotation it was priced from and the client it is for
  * all hang off it - so re-pointing it here would move the booking to somebody else while the rest
  * of the form stayed where it was.
+ *
+ * `savedQuotationId` is the version a stored project is already booked at. It stays on offer, and
+ * selected, whether or not it is still finalized: unfinalizing a quotation never takes it off a
+ * project booked at it. Every other version is offered only while it is finalized.
  */
-export default function SaleDetailsSection({ form, setForm, groupNames = [], isLoadingGroupNames = false, initialGroupNameMode = "saved", enquiryLocked = false }) {
+export default function SaleDetailsSection({ form, setForm, groupNames = [], isLoadingGroupNames = false, initialGroupNameMode = "saved", enquiryLocked = false, savedQuotationId = "", errors = {}, onFieldChange }) {
   const [groupNameMode, setGroupNameMode] = useState(initialGroupNameMode);
   const [enquiries, setEnquiries] = useState([]);
   // What the answer said about itself: how many enquiries there are behind the page it returned.
@@ -301,12 +315,24 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
   const [enquirySearch, setEnquirySearch] = useState(() => form.enquiryId || "");
   const [quotations, setQuotations] = useState([]);
   const [isLoadingQuotations, setIsLoadingQuotations] = useState(false);
+  // Why the list could not be read, and the enquiry the list on screen was last read for - the
+  // check that takes a no-longer-finalized pick off the form trusts only an answer for this enquiry.
+  const [quotationsError, setQuotationsError] = useState("");
+  const [quotationsLoadedFor, setQuotationsLoadedFor] = useState("");
+  // The version taken off the form because it stopped being finalized, named under the field.
+  const [withdrawnQuotation, setWithdrawnQuotation] = useState("");
+  const quotationRequest = useRef(0);
   const [sourceBranches, setSourceBranches] = useState([]);
   // Bumped when Settings → Organization → Branches saves, so Source Branch offers the register as
   // it stands rather than as it was when this form opened.
   const branchRegistryRevision = useBranchRegistry();
 
-  const update = useCallback((field, value) => setForm((current) => ({ ...current, [field]: value })), [setForm]);
+  // Answering a box takes its red away (`saleFieldProblems` names the boxes).
+  const clearErrors = useCallback((...names) => names.forEach((name) => onFieldChange?.(name)), [onFieldChange]);
+  const update = useCallback((field, value) => {
+    clearErrors(field === "countryCode" ? "clientMainNumber" : field);
+    setForm((current) => ({ ...current, [field]: value }));
+  }, [clearErrors, setForm]);
 
   /*
    * The quotations raised for this enquiry, and only those.
@@ -315,24 +341,44 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
    * without an id returns the lot, and offering a stranger's quotation as the price this project
    * converted at is how a project ends up booked against somebody else's figure. The picker says
    * to choose an enquiry first instead.
+   *
+   * Only the latest request answers: picking one enquiry and then another must not let the first
+   * one's slower reply fill the list. A quiet re-read (below) keeps the list on screen while it
+   * asks, and keeps it if the asking fails.
    */
-  const loadQuotations = useCallback(async (enquiryId) => {
+  const loadQuotations = useCallback(async (enquiryId, { quiet = false } = {}) => {
     const enquiry = String(enquiryId || "").trim();
+    const request = (quotationRequest.current += 1);
     if (!enquiry) {
       setQuotations([]);
+      setQuotationsError("");
+      setQuotationsLoadedFor("");
       setIsLoadingQuotations(false);
       return;
     }
-    setIsLoadingQuotations(true);
+    if (!quiet) setIsLoadingQuotations(true);
     try {
-      const response = await getSalesQuotations({ enquiryId: enquiry });
+      const response = await getSalesQuotations({ enquiryId: enquiry, withDrafts: true });
+      if (request !== quotationRequest.current) return;
       setQuotations(Array.isArray(response?.data) ? response.data : []);
-    } catch {
+      setQuotationsError("");
+      setQuotationsLoadedFor(enquiry);
+    } catch (error) {
+      if (request !== quotationRequest.current || quiet) return;
       setQuotations([]);
+      setQuotationsLoadedFor("");
+      setQuotationsError(error?.message || "Unable to load quotations.");
     } finally {
-      setIsLoadingQuotations(false);
+      if (request === quotationRequest.current) setIsLoadingQuotations(false);
     }
   }, []);
+
+  /*
+   * Read again, quietly, when the tab comes back to the front: a quotation is finalized - or
+   * unfinalized - on the Quotations screen, usually in another tab while this form waits, so what
+   * is offered is the list as it stands now. The server checks again on save either way.
+   */
+  useAutoRefresh(({ quiet } = {}) => loadQuotations(form.enquiryId, { quiet }), { enabled: Boolean(String(form.enquiryId || "").trim()) });
 
   const searchEnquiries = useCallback(async (search) => {
     setIsLoadingEnquiries(true);
@@ -372,9 +418,18 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
     return () => window.clearTimeout(timer);
   }, [branchRegistryRevision]);
 
+  /*
+   * A Source Branch the register does not list is resolved against it rather than blanked outright:
+   * a lead converted with "Erode" or an old quotation saying "cbe" lands on the branch the register
+   * calls that today (`resolveBranchName`), and only text that names no branch - or two - is cleared
+   * for the person to choose. The register judges, so this can never invent a branch.
+   */
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setForm((current) => current.sourceBranch && sourceBranches.length && !sourceBranches.includes(current.sourceBranch) ? { ...current, sourceBranch: "" } : current);
+      setForm((current) => {
+        if (!current.sourceBranch || !sourceBranches.length || sourceBranches.includes(current.sourceBranch)) return current;
+        return { ...current, sourceBranch: resolveBranchName(current.sourceBranch, sourceBranches) };
+      });
     }, 0);
     return () => window.clearTimeout(timer);
   }, [setForm, sourceBranches]);
@@ -408,6 +463,8 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
      * having any are the same question - the one the dropdown would be filled from.
      */
     setGroupNameMode(savedForEnquiry ? "saved" : "manual");
+    clearErrors("enquiryId", ...(enquiry.clientMainNumber ? ["clientMainNumber"] : []), ...(sourceBranches.includes(enquiry.sourceBranch) ? ["sourceBranch"] : []), ...(savedForEnquiry ? ["whatsappGroupName", "groupType"] : enquiry.groupType ? ["groupType"] : []));
+    setWithdrawnQuotation("");
     setForm((current) => {
       const nextEnquiryId = enquiry.enquiryId || current.enquiryId;
       return {
@@ -417,6 +474,12 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
         // Leaving it alone was the old behaviour, and it carried the previous enquiry's
         // `whatsappGroupNameId` with it, which is the generator row the save claims.
         ...groupNameFieldsForEnquiry({ currentEnquiryId: current.enquiryId, nextEnquiryId, savedForEnquiry }),
+        /*
+         * No reserved name waiting, so the lead's own vertical is the best answer there is to the
+         * project's vertical - the studio already gave it when the lead was taken. A reserved group
+         * name chosen later still overrides it, being the more specific statement of the same fact.
+         */
+        ...(!savedForEnquiry && enquiry.groupType ? { groupType: enquiry.groupType, vertical: enquiry.vertical || projectVerticalFor({ groupType: enquiry.groupType }) } : {}),
         /*
          * A quotation belongs to the enquiry it was raised for, so moving to another enquiry gives
          * up the one that was picked - the list below is reloaded for the new enquiry and would no
@@ -435,12 +498,13 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
 
   function selectGroupName(groupName) {
     setGroupNameMode("saved");
+    clearErrors("whatsappGroupName", "groupType");
     setForm((current) => ({
       ...current,
       whatsappGroupNameId: groupName.id,
       whatsappGroupName: groupName.generatedName,
       groupType: groupName.groupType,
-      vertical: groupName.vertical,
+      vertical: projectVerticalFor(groupName),
     }));
   }
 
@@ -464,13 +528,15 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
    * often raises a further version afterwards, and until now saying so here was impossible - the
    * only version on offer was the one that had superseded the one they agreed to.
    *
-   * Newest first, which is the order the server already returns versions in - the field below
-   * passes `sorted={false}` to keep it, because the menu alphabetises by default and that would
-   * put version 01 above the version most likely to be wanted.
+   * Each quotation's versions in order, V1 first, under its quotation number - the server returns
+   * them newest first, so they are turned round here. The field passes `sorted={false}` (a list
+   * with headings is never alphabetised anyway).
    */
-  const quotationVersions = useMemo(() => quotations.flatMap((chain) => (
-    Array.isArray(chain.versions) && chain.versions.length ? chain.versions : [chain]
-  )), [quotations]);
+  const quotationChains = useMemo(() => quotations.map((chain) => ({
+    quotationNumber: chain.quotationNumber || chain.quotationId || "Quotation",
+    versions: [...(Array.isArray(chain.versions) && chain.versions.length ? chain.versions : [chain])].sort((a, b) => (Number(a.version) || 0) - (Number(b.version) || 0)),
+  })), [quotations]);
+  const quotationVersions = useMemo(() => quotationChains.flatMap((chain) => chain.versions), [quotationChains]);
 
   /*
    * Named by the version alone: "QUT039-03". The id carries the version suffix, which is what tells
@@ -482,10 +548,53 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
    * there, so repeating it in the option was saying the same number twice.
    */
   const quotationValue = (quotation) => quotation.quotationId || quotation.id || quotation.quotationNumber;
-  const quotationOptions = useMemo(() => quotationVersions.map((quotation) => ({
-    label: quotation.quotationId || quotation.quotationNumber || quotation.label || "Quotation",
-    value: quotationValue(quotation),
-  })), [quotationVersions]);
+
+  /*
+   * Every version is shown, each with its status, and only a finalized one can be chosen - read off
+   * the version's own `finalization` and `status`, never off its name or number
+   * (`quotationVersionStatus`). Unfinalized versions - drafts included - are listed disabled:
+   * the menu ignores a click on them and its arrow keys step over them. The exception is the
+   * version a stored project is already booked at, which stays selectable whatever its status (see
+   * `savedQuotationId`). The server makes the same check on save.
+   */
+  const isSelectableVersion = useCallback((quotation) => (
+    isFinalizedQuotation(quotation) || (Boolean(savedQuotationId) && quotationValue(quotation) === savedQuotationId)
+  ), [savedQuotationId]);
+  const eligibleVersions = useMemo(() => quotationVersions.filter(isSelectableVersion), [quotationVersions, isSelectableVersion]);
+  const quotationOptions = useMemo(() => quotationChains.flatMap((chain) => [
+    { heading: chain.quotationNumber },
+    ...chain.versions.map((quotation) => {
+      const selectable = isSelectableVersion(quotation);
+      return {
+        label: quotation.quotationId || quotation.quotationNumber || quotation.label || "Quotation",
+        value: quotationValue(quotation),
+        description: `${versionLabel(quotation)}${selectable && !isFinalizedQuotation(quotation) ? " · Booked at this version" : ""}`,
+        status: quotationVersionStatus(quotation),
+        disabled: !selectable,
+      };
+    }),
+  ]), [quotationChains, isSelectableVersion]);
+  const enquiryChosen = Boolean(String(form.enquiryId || "").trim());
+  const quotationsReady = enquiryChosen && quotationsLoadedFor === String(form.enquiryId || "").trim();
+
+  /*
+   * A pick that is no longer on offer is taken off the form, and said so under the field.
+   *
+   * A draft reopened, or a quotation unfinalized in another tab while this form waited, would
+   * otherwise sit in the box naming a version the save is refused for. Only once the list has been
+   * read for this enquiry - never on a list still loading or one that failed to load - and never
+   * the version a stored project is already booked at.
+   */
+  useEffect(() => {
+    const picked = form.quotationId;
+    if (!picked || !quotationsReady || picked === savedQuotationId) return undefined;
+    if (eligibleVersions.some((quotation) => quotationValue(quotation) === picked)) return undefined;
+    const timer = window.setTimeout(() => {
+      setWithdrawnQuotation(picked);
+      setForm((current) => (current.quotationId === picked ? { ...current, quotationId: "", quotationRowId: "" } : current));
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [eligibleVersions, form.quotationId, quotationsReady, savedQuotationId, setForm]);
 
   /*
    * Picking a quotation fills in what it was quoted at.
@@ -497,8 +606,14 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
    * quotation, unchanged - correcting *that* is a new version of it.
    */
   function selectQuotation(value) {
-    const quotation = quotationVersions.find((row) => quotationValue(row) === value);
+    const quotation = eligibleVersions.find((row) => quotationValue(row) === value);
+    setWithdrawnQuotation("");
     const phone = parsePhone(quotation?.clientMainNumber);
+    if (quotation?.clientMainNumber) clearErrors("clientMainNumber");
+    if (quotation?.sourceBranch && sourceBranches.includes(quotation.sourceBranch)) clearErrors("sourceBranch");
+    // The brand the quotation was made under (Dum Dum, Qua Qua or Corp) is the project's vertical.
+    const quotedGroupType = GROUP_TYPES.includes(quotation?.vertical) ? quotation.vertical : "";
+    if (quotedGroupType) clearErrors("groupType");
     setForm((current) => ({
       ...current,
       quotationId: value,
@@ -518,6 +633,12 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
       sourceBranch: quotation?.sourceBranch && sourceBranches.includes(quotation.sourceBranch)
         ? quotation.sourceBranch
         : current.sourceBranch,
+      /*
+       * Vertical, chosen for the person and still theirs to change: the quotation's own brand. Not
+       * where a reserved WhatsApp group name is attached - that name brings its vertical and is the
+       * authority on it (the server refuses a project that contradicts it), so it is left as it is.
+       */
+      ...(quotedGroupType && !current.whatsappGroupNameId ? { groupType: quotedGroupType, vertical: projectVerticalFor({ groupType: quotedGroupType }) } : {}),
     }));
   }
 
@@ -554,17 +675,27 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
    */
   return <div className="grid gap-x-6 gap-y-5 md:grid-cols-2">
     {/* `onSearch` narrows the list; `onSelect` is the only thing that settles the enquiry. */}
-    <EnquiryCombobox required readOnly={enquiryLocked} value={form.enquiryId} enquiries={enquiries} loading={isLoadingEnquiries} capped={enquiryPage.capped} total={enquiryPage.total} onSearch={setEnquirySearch} onSelect={applyEnquiry} />
-    <SharedDropdown mode="input" sorted={false} label="Select Quotation" placeholder={!String(form.enquiryId || "").trim() ? "Select an Enquiry ID first" : isLoadingQuotations ? "Loading quotations..." : quotationOptions.length ? "Select quotation" : "No quotations for this enquiry"} value={form.quotationId} onChange={selectQuotation} options={quotationOptions} disabled={isLoadingQuotations || quotationOptions.length === 0} />
-    <ClientPhoneField countryCode={form.countryCode} value={form.clientMainNumber} onCountryCodeChange={(value) => update("countryCode", value)} onChange={(value) => update("clientMainNumber", value)} readOnly={setByQuotation.clientMainNumber} />
+    <EnquiryCombobox helperText="Pick the client's enquiry this project is booked against." required readOnly={enquiryLocked} value={form.enquiryId} error={errors.enquiryId} enquiries={enquiries} loading={isLoadingEnquiries} capped={enquiryPage.capped} total={enquiryPage.total} onSearch={setEnquirySearch} onSelect={applyEnquiry} />
+    {/* Below the field, one line at a time: why the list could not be read (with a way to ask
+        again), a pick taken off because it stopped being finalized, or that there is nothing
+        finalized to book against yet. The menu still opens while every version is disabled, so
+        what exists - and what state each is in - can be seen. */}
+    <div className="min-w-0">
+      <SharedDropdown mode="input" sorted={false} label="Select Quotation" helperText="Every version of this enquiry's quotations is listed with its status. Only a finalized version can be chosen; it fills the price, number, branch and vertical." placeholder={!enquiryChosen ? "Select an Enquiry ID first" : isLoadingQuotations ? "Loading quotations..." : quotationsError ? "Quotations could not be loaded" : !quotationVersions.length ? "No quotations for this enquiry" : eligibleVersions.length ? "Select quotation" : "No finalized quotations"} value={form.quotationId} onChange={selectQuotation} options={quotationOptions} disabled={isLoadingQuotations || quotationVersions.length === 0} />
+      {enquiryChosen && !isLoadingQuotations && (quotationsError
+        ? <p role="alert" className="mt-1.5 text-xs text-red-600">Couldn&apos;t load this enquiry&apos;s quotations. <Button type="button" variant="plain" size="none" className="font-semibold underline sm:text-xs" onClick={() => void loadQuotations(form.enquiryId)}>Try again</Button></p>
+        : withdrawnQuotation
+          ? <p role="status" className="mt-1.5 text-xs text-amber-700">{withdrawnQuotation} is no longer finalized, so it was taken off this project. Choose a finalized quotation.</p>
+          : quotationsReady && !eligibleVersions.length
+            ? <p role="status" className="mt-1.5 text-xs text-slate-600">No finalized quotations available for this enquiry. Please finalize a quotation before creating a project.</p>
+            : null)}
+    </div>
+    <ClientPhoneField countryCode={form.countryCode} value={form.clientMainNumber} onCountryCodeChange={(value) => update("countryCode", value)} onChange={(value) => update("clientMainNumber", value)} readOnly={setByQuotation.clientMainNumber} error={errors.clientMainNumber} />
     {/* `readOnly` rather than `disabled` where the quotation set it: there is no menu left to open,
         so the chevron would point at nothing, and a value somebody else decided should read as a
         value rather than as a control that refuses to work. `disabled` still covers the other
         silence - no branches to choose from at all. */}
-    <div>
-      <SharedDropdown mode="input" label="Source Branch" required placeholder={sourceBranches.length ? "Select Source Branch" : "No active branches available"} value={form.sourceBranch} onChange={(value) => update("sourceBranch", value)} options={sourceBranches.map((branch) => ({ label: branch, value: branch }))} disabled={sourceBranches.length === 0} readOnly={setByQuotation.sourceBranch} />
-      {setByQuotation.sourceBranch && <p className="mt-1.5 text-[11px] font-normal text-slate-500">Set from the selected quotation and cannot be changed here.</p>}
-    </div>
+    <SharedDropdown mode="input" label="Source Branch" helperText={setByQuotation.sourceBranch ? "The branch that brought in this booking. Set from the selected quotation and cannot be changed here." : "The branch that brought in this booking."} required placeholder={sourceBranches.length ? "Select Source Branch" : "No active branches available"} value={form.sourceBranch} onChange={(value) => update("sourceBranch", value)} options={sourceBranches.map((branch) => ({ label: branch, value: branch }))} disabled={sourceBranches.length === 0} readOnly={setByQuotation.sourceBranch} error={errors.sourceBranch} />
     {/*
       * What the project converts at is not asked here any more.
       *
@@ -574,6 +705,10 @@ export default function SaleDetailsSection({ form, setForm, groupNames = [], isL
       * `selectQuotation` still fills `initialConvertedValue` from the quotation and the form still
       * sends it; only the box has moved.
       */}
-    <GroupNamePicker mode={groupNameMode} enquiryId={form.enquiryId} selectedId={form.whatsappGroupNameId} selectedName={form.whatsappGroupName} groupNames={groupNames} isLoading={isLoadingGroupNames} onSelect={selectGroupName} onUseManual={useManualGroupName} onUseSaved={useSavedGroupName} manualValue={form.whatsappGroupName} onManualChange={(value) => update("whatsappGroupName", value)} />
+    <GroupNamePicker mode={groupNameMode} enquiryId={form.enquiryId} selectedId={form.whatsappGroupNameId} selectedName={form.whatsappGroupName} groupNames={groupNames} isLoading={isLoadingGroupNames} onSelect={selectGroupName} onUseManual={useManualGroupName} onUseSaved={useSavedGroupName} manualValue={form.whatsappGroupName} onManualChange={(value) => update("whatsappGroupName", value)} error={errors.whatsappGroupName} />
+    {/* Only when no reserved name is attached: a reserved group name is the authority on the
+        product, and the server refuses an edit that contradicts it. Editing a legacy manual
+        project shows this empty and required — which is exactly how those get backfilled. */}
+    {groupNameMode === "manual" && !form.whatsappGroupNameId && <SharedDropdown mode="input" label="Vertical" helperText="The brand this project falls under, used to sort and report it." required placeholder="Select vertical" value={form.groupType} onChange={(value) => { clearErrors("groupType"); setForm((current) => ({ ...current, groupType: value, vertical: projectVerticalFor({ groupType: value }) })); }} options={GROUP_TYPES.map((groupType) => ({ label: groupType, value: groupType }))} error={errors.groupType} />}
   </div>;
 }

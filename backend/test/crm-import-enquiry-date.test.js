@@ -81,3 +81,36 @@ test('a column headed "Enquiry Date" reaches a column the database actually has'
     `an Enquiry Date heading is read into "${target[1]}", which no column stores`,
   );
 });
+
+test('"When is the Event Planned" may be words, because that is how a client answers it', () => {
+  /*
+   * It is a question the client answers in their own words on a Meta lead form, and a wedding is
+   * two days as often as one: "feb 10 th and 11 th 2027", "March 10,11 2027". The column is `TEXT`
+   * and has always held exactly that.
+   *
+   * Validating it as a single day refused the **whole row** - name, number and all - over a cell
+   * that had been answered correctly, so a sheet of new leads imported the ones who left it blank
+   * and dropped the rest. The same mistake `addedTime` was taken out of the list for.
+   */
+  const SERVICE = fs.readFileSync(
+    path.join(__dirname, "..", "src", "modules", "sales", "crm-leads", "googleSheetsService.js"),
+    "utf8",
+  );
+  const list = /const dateFields = \[([^\]]*)\]/.exec(SERVICE);
+  assert.ok(list, "the validated date fields are gone");
+  assert.doesNotMatch(list[1], /eventPlannedDate/, "a row is refused again over a free-text event date");
+  // The rest stay refused: "next week" in a follow-up column is a note in the wrong place.
+  for (const field of ["createdDate", "lastFollowUpDate", "nextFollowUpDate", "lastConvertedDate", "dateOfBirthOrEdod"]) {
+    assert.match(list[1], new RegExp(`"${field}"`), `${field} is no longer validated`);
+  }
+
+  /*
+   * And it is still folded to a day where the cell is one - through `LEAD_DATE_COLUMNS` on the way
+   * to the database, which leaves anything else exactly as written. So a real date still sorts and
+   * filters as one, and a client's own answer is kept rather than costing the studio the lead.
+   */
+  const { normalizeDateText, LEAD_DATE_COLUMNS } = require("../src/modules/sales/crm-leads/leadDates");
+  assert.ok(LEAD_DATE_COLUMNS.includes("eventPlannedDate"), "the column is no longer normalised at all");
+  assert.equal(normalizeDateText("10-Feb-2027"), "2027-02-10");
+  assert.equal(normalizeDateText("feb 10 th and 11 th 2027"), "feb 10 th and 11 th 2027");
+});

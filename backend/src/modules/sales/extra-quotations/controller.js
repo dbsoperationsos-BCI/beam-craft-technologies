@@ -1,6 +1,9 @@
+const { withUserNames } = require("../../../services/userNames");
 const { z } = require("zod");
-const { workingEmployeeStatuses } = require("../../../services/employeeOptionLists");
+const { workingEmployeeStatuses, listPhotoUrl } = require("../../../services/employeeOptionLists");
 const prisma = require("../../../config/db");
+const { DEFINITION_ORDER } = require("../../../services/definitionOrder");
+const { PICKER_PAGE, searchPicker } = require("../../../services/pickerSearch");
 const iamService = require("../../../services/iam.service");
 const { projectAccessWhere } = require("../../../services/projectScope");
 const { attachFiles, removeDroppedFiles, fileUrls, discardUploads } = require("../../../services/uploadMetadata");
@@ -33,7 +36,8 @@ const createSchema = z.object({
   projectId: z.string().trim().min(1, "Choose the project this extra is for").max(191),
   // An extra usually belongs to a shoot, but one agreed for the project as a whole has none to name.
   shootId: optionalText(191),
-  service: z.string().trim().min(1, "Choose the service being added").max(150),
+  // A service or a deliverable from Project Settings, or one named through Others - stored as its name.
+  service: z.string().trim().min(1, "Choose the service or deliverable being added").max(150),
   amount: z.coerce.number().positive("Enter an amount greater than zero").max(999_999_999),
   // Who it was added by and when. Both are asked rather than assumed: a coordinator often enters an
   // extra for the person who agreed it, and one agreed on the shoot day is typed in the morning
@@ -84,6 +88,37 @@ async function nextRequestCode(client = prisma) {
 }
 
 /**
+ * An extra already agreed, written approved in one step inside the caller's transaction.
+ *
+ * A raised request's priced items (Client Management -> Client Requests -> Raised Requests) arrive
+ * here once decided: whoever holds `CLIENT / Request Approval` set each amount there, so the extra is
+ * that decision recorded - it counts on the project's Payments at once, like any approved extra, and
+ * names the request in its remarks. `requestedById` is the employee who raised the request.
+ */
+async function recordApprovedExtra(client, { projectId, shootId = null, service, amount, remarks = null, requestedById = null, requestedByName, decidedById = null, decisionRemarks = null, createdBy = null }) {
+  const decidedAt = new Date();
+  return client.projectExtraQuotation.create({
+    data: {
+      requestCode: await nextRequestCode(client),
+      projectId,
+      shootId: shootId || null,
+      service: String(service).slice(0, 150),
+      amount: Number(amount).toFixed(2),
+      remarks,
+      requestedById,
+      requestedByName: String(requestedByName || "").slice(0, 191),
+      addedAt: decidedAt,
+      status: "APPROVED",
+      decisionRemarks,
+      decidedById,
+      decidedAt,
+      createdBy,
+    },
+    select: { id: true, requestCode: true, amount: true },
+  });
+}
+
+/**
  * One extra, flattened the way every table in the app reads its rows, with the project and shoot
  * named by the identifiers a person recognises rather than by their internal ids.
  */
@@ -123,7 +158,7 @@ async function actorFor(userId) {
 /**
  * Whether this person may decide this extra: the project's own manager, or a super admin.
  *
- * Holding `Payment Request Approval` is deliberately not enough. Approving spend and agreeing to
+ * Holding `Payment Request` is deliberately not enough. Approving spend and agreeing to
  * sell more work are different authorities, and the second belongs to whoever is running the
  * project. A super admin decides alongside them so a project whose manager has left is not stuck.
  */
@@ -159,14 +194,15 @@ async function listExtras(req, res) {
         ...mine,
         ...(parsed.data.projectId ? { projectId: parsed.data.projectId } : {}),
         ...(parsed.data.status ? { status: parsed.data.status } : {}),
-        AND: [{ project: await projectAccessWhere({ userId: req.user.id, permissions: req.permission }) }],
+        AND: [{ project: { deletedAt: null, AND: [await projectAccessWhere({ userId: req.user.id, permissions: req.permission })] } }],
       },
       orderBy: { createdAt: "desc" },
       include,
     });
     // Each row says whether this reader may decide it, so the screen can offer the buttons to the
     // manager and withhold them from the person who raised it without asking a second time.
-    return res.json({ data: data.map((extra) => ({ ...toRow(extra), canDecide: canDecide(actor, extra), raisedByMe: extra.createdBy === actor.userId })) });
+    // Who raised and who decided each extra, by name (`services/userNames`).
+    return res.json({ data: await withUserNames(data.map((extra) => ({ ...toRow(extra), canDecide: canDecide(actor, extra), raisedByMe: extra.createdBy === actor.userId }))) });
   } catch (error) { return handleError(res, error, "Unable to load extra quotations"); }
 }
 
@@ -246,7 +282,7 @@ async function updateExtra(req, res) {
   let uploads = [];
   try {
     // Held to the same line as the list: an extra on a project this reader cannot see is not found.
-    const extra = await prisma.projectExtraQuotation.findFirst({ where: { id: String(req.params.id), deletedAt: null, AND: [{ project: await projectAccessWhere({ userId: req.user.id, permissions: req.permission }) }] }, include });
+    const extra = await prisma.projectExtraQuotation.findFirst({ where: { id: String(req.params.id), deletedAt: null, AND: [{ project: { deletedAt: null, AND: [await projectAccessWhere({ userId: req.user.id, permissions: req.permission })] } }] }, include });
     if (!extra) return res.status(404).json({ message: "Extra quotation not found" });
     if (extra.status !== "PENDING") throw badRequest(`This extra quotation has already been ${extra.status.toLowerCase()} and can no longer be changed.`);
 
@@ -307,7 +343,7 @@ async function decide(req, res, status, fallback) {
   if (!parsed.success) return validationError(res, parsed.error);
   try {
     // Held to the same line as the list: an extra on a project this reader cannot see is not found.
-    const extra = await prisma.projectExtraQuotation.findFirst({ where: { id: String(req.params.id), deletedAt: null, AND: [{ project: await projectAccessWhere({ userId: req.user.id, permissions: req.permission }) }] }, include });
+    const extra = await prisma.projectExtraQuotation.findFirst({ where: { id: String(req.params.id), deletedAt: null, AND: [{ project: { deletedAt: null, AND: [await projectAccessWhere({ userId: req.user.id, permissions: req.permission })] } }] }, include });
     if (!extra) return res.status(404).json({ message: "Extra quotation not found" });
     if (extra.status !== "PENDING") throw badRequest(`This extra quotation has already been ${extra.status.toLowerCase()}.`);
 
@@ -332,7 +368,7 @@ const rejectExtra = (req, res) => decide(req, res, "REJECTED", "Unable to reject
 /** Withdrawn by whoever raised it, and only while nobody has decided it. */
 async function withdrawExtra(req, res) {
   try {
-    const extra = await prisma.projectExtraQuotation.findFirst({ where: { id: String(req.params.id), deletedAt: null, AND: [{ project: await projectAccessWhere({ userId: req.user.id, permissions: req.permission }) }] }, select: { id: true, status: true, createdBy: true, proof: true } });
+    const extra = await prisma.projectExtraQuotation.findFirst({ where: { id: String(req.params.id), deletedAt: null, AND: [{ project: { deletedAt: null, AND: [await projectAccessWhere({ userId: req.user.id, permissions: req.permission })] } }] }, select: { id: true, status: true, createdBy: true, proof: true } });
     if (!extra) return res.status(404).json({ message: "Extra quotation not found" });
     if (extra.status !== "PENDING") throw badRequest("A decided extra quotation cannot be withdrawn.");
     const actor = await actorFor(req.user.id);
@@ -344,30 +380,76 @@ async function withdrawExtra(req, res) {
   } catch (error) { return handleError(res, error, "Unable to withdraw this extra quotation"); }
 }
 
+/*
+ * The two long pickers, **searched on the server**.
+ *
+ * `options` carried every live project and shoot capped at 200, and the picker filtered that in the
+ * browser - so the cap was not a page but the limit of what an extra could be raised against, and
+ * ordered newest-first what it dropped was the oldest: a studio's imported history. 200 of 640
+ * projects and 200 of 986 shoots on the development database. See `services/pickerSearch.js`.
+ *
+ * The shoot search takes a `projectId` because this form asks for the project first and the extra
+ * belongs to one project's shoot - the form's own rule, not a cap.
+ */
+async function searchProjectOptions(req, res) {
+  try {
+    const { rows, total, capped } = await searchPicker(prisma.salesProject, {
+      search: String(req.query.search || "").trim(),
+      where: { deletedAt: null },
+      chunkIn: (chunk) => [{ eventId: { contains: chunk } }, { whatsappGroupName: { contains: chunk } }],
+      orderBy: [{ createdAt: "desc" }],
+      select: { id: true, eventId: true, whatsappGroupName: true },
+    });
+    return res.json({ data: { projects: rows.map((project) => ({ id: project.id, eventId: project.eventId, name: project.whatsappGroupName })), total, capped } });
+  } catch (error) { return handleError(res, error, "Unable to search projects"); }
+}
+
+async function searchShootOptions(req, res) {
+  const projectId = String(req.query.projectId || "").trim();
+  try {
+    const { rows, total, capped } = await searchPicker(prisma.projectShoot, {
+      search: String(req.query.search || "").trim(),
+      where: { deletedAt: null, project: { deletedAt: null }, ...(projectId ? { projectId } : {}) },
+      chunkIn: (chunk) => [
+        { shootId: { contains: chunk } },
+        { shoot: { contains: chunk } },
+        { project: { eventId: { contains: chunk } } },
+        { project: { whatsappGroupName: { contains: chunk } } },
+      ],
+      orderBy: [{ dateCreated: "desc" }, { shootId: "desc" }],
+      select: { id: true, shootId: true, shoot: true, projectId: true },
+    });
+    return res.json({ data: { shoots: rows, total, capped } });
+  } catch (error) { return handleError(res, error, "Unable to search shoots"); }
+}
+
 /** The pickers the form is drawn from: the projects, their shoots, and the studio's services. */
 async function options(req, res) {
   try {
-    const [projects, shoots, services, employees] = await Promise.all([
+    const [projects, shoots, services, deliverables, employees] = await Promise.all([
       // Every project: an extra is raised against whatever project the work was agreed for, and
       // the person raising it is often not the one running that project. The list of extras is
       // what the rule narrows.
-      prisma.salesProject.findMany({ where: { deletedAt: null }, orderBy: { createdAt: "desc" }, take: 200, select: { id: true, eventId: true, whatsappGroupName: true } }),
-      prisma.projectShoot.findMany({ where: { deletedAt: null }, orderBy: { dateCreated: "desc" }, take: 200, select: { id: true, shootId: true, shoot: true, projectId: true } }),
-      // Alphabetical, as Project Settings and the quotation calculator list them.
-      prisma.projectServiceDefinition.findMany({ where: { isActive: true }, orderBy: [{ name: "asc" }], select: { name: true } }),
+      prisma.salesProject.findMany({ where: { deletedAt: null }, orderBy: { createdAt: "desc" }, take: PICKER_PAGE, select: { id: true, eventId: true, whatsappGroupName: true } }),
+      prisma.projectShoot.findMany({ where: { deletedAt: null, project: { deletedAt: null } }, orderBy: { dateCreated: "desc" }, take: PICKER_PAGE, select: { id: true, shootId: true, shoot: true, projectId: true } }),
+      // In the order Project Settings sets, as every other list of them reads.
+      prisma.projectServiceDefinition.findMany({ where: { isActive: true }, orderBy: DEFINITION_ORDER, select: { name: true } }),
+      // An extra is as often a deliverable (another album, a frame) as a service, so both are offered.
+      prisma.projectDeliverableDefinition.findMany({ where: { isActive: true }, orderBy: DEFINITION_ORDER, select: { name: true } }),
       prisma.employee.findMany({
         where: { archivedAt: null, employmentStatus: { in: await workingEmployeeStatuses() } },
         orderBy: { employeeName: "asc" },
-        select: { id: true, employeeId: true, employeeName: true },
+        select: { id: true, employeeId: true, employeeName: true, profilePhotoUrl: true },
       }),
     ]);
     return res.json({ data: {
       projects: projects.map((project) => ({ id: project.id, eventId: project.eventId, name: project.whatsappGroupName })),
       shoots,
       services: services.map((service) => service.name),
-      employees,
+      deliverables: deliverables.map((deliverable) => deliverable.name),
+      employees: employees.map((row) => ({ ...row, profilePhotoUrl: listPhotoUrl(row.profilePhotoUrl) })),
     } });
   } catch (error) { return handleError(res, error, "Unable to load extra quotation options"); }
 }
 
-module.exports = { listExtras, createExtra, updateExtra, approveExtra, rejectExtra, withdrawExtra, options };
+module.exports = { listExtras, searchProjectOptions, searchShootOptions, createExtra, updateExtra, approveExtra, rejectExtra, withdrawExtra, options, nextRequestCode, recordApprovedExtra };

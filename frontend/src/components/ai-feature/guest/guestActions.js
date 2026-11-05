@@ -8,7 +8,16 @@ import { copyToClipboard } from "@/lib/clipboard";
  */
 
 /** The soft blue the public gallery's primary control wears, so the two public pages match. */
+/** The join card's one action, and its code step's: full width, the strongest blue on the glass. */
+export const JOIN_BUTTON = "mt-6 inline-flex min-h-13 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 text-[15px] font-semibold text-white transition hover:bg-blue-700 active:bg-blue-800 focus:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-60";
 export const PRIMARY_BUTTON = "inline-flex min-h-12 items-center justify-center gap-2 rounded-xl bg-[#7fa4fa] px-5 text-sm font-semibold text-white transition hover:bg-[#638df0] focus:outline-none focus:ring-4 focus:ring-blue-200 disabled:cursor-not-allowed disabled:opacity-50";
+/**
+ * The one column the guest page's header, content and footer all sit in: wide on a desktop, up to
+ * 1600px and centred beyond that, with a gutter that grows with the screen - 16px on a phone, 24px
+ * on a tablet, 32px on a desktop - so nothing touches the window's edge and the three line up.
+ */
+export const PAGE_CONTAINER = "mx-auto w-full max-w-[1600px] px-4 sm:px-6 lg:px-8";
+
 export const SECONDARY_BUTTON = "inline-flex min-h-12 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 focus:outline-none focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-50";
 
 export const PAGE_SIZE = 60;
@@ -47,24 +56,28 @@ export async function shareGuestLink(title) {
   return (await copyToClipboard(url)) ? "copied" : "failed";
 }
 
-/** The tabs this event's settings open, in the order they sit on the bar. */
+/**
+ * The tabs this event's settings open: My Photos only. A guest never browses the whole event - the
+ * page shows only the photos their own selfie matched, whatever an older event stored for All
+ * Photos. My Photos is open when the event shows guests their matches or offers selfie search -
+ * finding yourself happens inside it, so a guest with no selfie yet is asked for one there.
+ */
 export function guestTabsFor(meta) {
   const tabs = [];
-  if (meta?.gallery?.showAllPhotos) tabs.push({ id: "all", label: "All Photos" });
-  if (meta?.gallery?.showMyPhotos) tabs.push({ id: "mine", label: "My Photos" });
-  if (meta?.gallery?.showAllPhotos && meta?.schedule?.length) tabs.push({ id: "subEvents", label: "Sub Events" });
-  if (meta?.features?.selfieSearch) tabs.push({ id: "find", label: "Find My Photos" });
+  if (meta?.gallery?.showMyPhotos || meta?.features?.selfieSearch) tabs.push({ id: "mine", label: "My Photos" });
   return tabs;
 }
 
-/** Where a guest lands: on their own photos once a selfie is in, otherwise on the gallery. */
-export function defaultGuestTab(tabs, guest) {
-  const ids = tabs.map((tab) => tab.id);
-  if (guest?.selfieStatus === "UPLOADED" && ids.includes("mine")) return "mine";
-  if (ids.includes("all")) return "all";
-  if (ids.includes("find")) return "find";
-  return ids[0] || "mine";
+/** Where a guest lands: their own photos, the only tab there is. */
+export function defaultGuestTab(tabs) {
+  return tabs[0]?.id || "mine";
 }
+
+/** Whether the guest has every selfie the event allows (active ones - removing one frees a slot); the server refuses one more either way. */
+export const selfieLimitReached = (guest) => Boolean(guest?.selfieLimit) && (guest?.selfieUploads || 0) >= guest.selfieLimit;
+
+/** Said wherever a new selfie would be offered once the limit is used. */
+export const selfieLimitMessage = (guest) => `You have ${guest?.selfieLimit || 10} selfies. Remove one to add another.`;
 
 /** A file name stem for a saved photo: the event, then the photo's place in the list. */
 export const photoBaseName = (eventName, index) => `${eventName || "event"}-${String(index + 1).padStart(3, "0")}`;

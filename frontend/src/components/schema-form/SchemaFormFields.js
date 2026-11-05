@@ -5,6 +5,7 @@ import DateField from "@/components/shared/DateField";
 import Dropdown from "@/components/shared/Dropdown";
 import FileUploadField from "@/components/shared/FileUploadField";
 import ImageUploadField from "@/components/shared/ImageUploadField";
+import MultiSelectField from "@/components/shared/MultiSelectField";
 import PhoneField from "@/components/shared/PhoneField";
 import RadioGroupField from "@/components/shared/RadioGroupField";
 import SelectableOption from "@/components/shared/SelectableOption";
@@ -12,6 +13,7 @@ import TextAreaField from "@/components/shared/TextAreaField";
 import TextField from "@/components/shared/TextField";
 import TimeField from "@/components/shared/TimeField";
 import ToggleSwitch from "@/components/shared/ToggleSwitch";
+import PendingField from "@/components/shared/PendingField";
 
 /**
  * Turns one field description into the shared input that suits it, so a form is a list of fields
@@ -44,11 +46,29 @@ export function resolveOptions(options, values, context) {
 // through this file.
 export { isVisible, visibleFields } from "./schemaVisibility.mjs";
 
-export default function SchemaFormField({ field, values, onChange, errors, notes, context }) {
-  const { name, label: fieldLabel, type = "text", required = false, placeholder: fieldPlaceholder, options, colSpan, clears, derive, render, props: fieldProps = {} } = field;
-  // A label, placeholder or the props themselves can depend on the answers so far, which is how one
-  // reason field asks for a cancellation reason and the next for a disposal reason, and how a
-  // permanent address stops taking input once it is being copied from the current one.
+const isEmptyAnswer = (value) => value === undefined || value === null || (typeof value === "string" && !value.trim()) || (Array.isArray(value) && value.length === 0);
+
+/*
+ * `context.pendingTags`: a form whose asterisks are exactly what it counts towards being done - Pre
+ * Production's shoot form, Production's plan - tags each required field **Pending** while it is
+ * unanswered (`PendingField`), gone the moment it is filled.
+ */
+export default function SchemaFormField(props) {
+  const { field, values, context } = props;
+  const control = <SchemaFormControl {...props} />;
+  if (!context?.pendingTags || field.type === "custom") return control;
+  const required = typeof field.required === "function" ? Boolean(field.required(values, context)) : Boolean(field.required);
+  // The grid cell is the wrapper when it draws, so it takes the field's span.
+  return <PendingField pending={required && isEmptyAnswer(values?.[field.name])} className={field.colSpan === 2 || field.colSpan === "full" ? "md:col-span-2" : ""}>{control}</PendingField>;
+}
+
+function SchemaFormControl({ field, values, onChange, errors, notes, context }) {
+  const { name, label: fieldLabel, type = "text", required: fieldRequired = false, placeholder: fieldPlaceholder, options, colSpan, clears, derive, render, helperText: fieldHelper, props: fieldProps = {} } = field;
+  // A label, placeholder, the props themselves or **whether it is required** can depend on the
+  // answers so far, which is how one reason field asks for a cancellation reason and the next for a
+  // disposal reason, how a permanent address stops taking input once it is being copied from the
+  // current one, and how a production plan asks for a Travel Mode on an outdoor shoot alone.
+  const required = typeof fieldRequired === "function" ? Boolean(fieldRequired(values, context)) : fieldRequired;
   const label = typeof fieldLabel === "function" ? fieldLabel(values, context) : fieldLabel;
   const placeholder = typeof fieldPlaceholder === "function" ? fieldPlaceholder(values, context) : fieldPlaceholder;
   const props = typeof fieldProps === "function" ? fieldProps(values, context) : fieldProps;
@@ -65,7 +85,9 @@ export default function SchemaFormField({ field, values, onChange, errors, notes
    */
   const note = notes?.[name] || "";
   const className = `${colSpan === 2 || colSpan === "full" ? "md:col-span-2" : ""} ${props.className || ""}`.trim();
-  const rest = { ...props };
+  // `helperText` on the field: what to enter and what it changes, shown as the ⓘ beside its label.
+  const helperText = typeof fieldHelper === "function" ? fieldHelper(values, context) : fieldHelper;
+  const rest = { ...(helperText ? { helperText } : {}), ...props };
   delete rest.className;
 
   // An input can report a problem with what was picked alongside the value itself — an image that is
@@ -89,7 +111,9 @@ export default function SchemaFormField({ field, values, onChange, errors, notes
   // renderer the form passes in `context.renderers`, which keeps JSX out of the field lists.
   if (type === "custom") {
     const renderer = render || context?.renderers?.[name];
-    return <div className={className || undefined}>{renderer?.({ values, onChange: (next) => set(next), context, field, error })}</div>;
+    // `min-w-0`: this div is the grid cell, and a cell is as wide as its content by default - a
+    // multi-select's chips in one line pushed the whole column wider instead of scrolling inside it.
+    return <div className={`min-w-0 ${className || ""}`.trim()}>{renderer?.({ values, onChange: (next) => set(next), context, field, error })}</div>;
   }
 
   // `error` reaches every branch below. Four of them took none at all - a toggle, a checkbox, a time
@@ -137,6 +161,10 @@ export default function SchemaFormField({ field, values, onChange, errors, notes
       : [...listed, { value: stored, label: String(stored) }];
     return <Dropdown label={label} required={required} clearable={!required} error={error} value={stored} onChange={(next) => set(next)} options={selectOptions} placeholder={placeholder || "Select"} className={className} {...rest} />;
   }
+
+  // Several answers from one list, held as a list - people to name, say. Searchable, since such a list
+  // is usually long, and an option carrying `avatar` shows the person's face beside their name.
+  if (type === "multiselect") return <MultiSelectField label={label} required={required} error={error} values={Array.isArray(value) ? value : []} onChange={(next) => set(next)} options={resolveOptions(options, values, context)} placeholder={placeholder || "Select"} searchable className={className} {...rest} />;
 
   // The options are passed through rather than flattened to their labels, so a radio can store a
   // value that is not the words shown — and carry a description explaining the choice.

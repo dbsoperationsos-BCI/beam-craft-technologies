@@ -81,10 +81,8 @@ test("a reference pointing at a branch this reader cannot reach shows nothing", 
   assert.equal(shown({ assignedBranch: "Hyderabad", branchId: 5 }), "");
 });
 
-test("the fallback list, which has no ids, matches on the name alone", () => {
-  // `FALLBACK_BRANCH_OPTIONS` stands in while the first request is in flight or if it fails. Its
-  // rows carry no id, because they stand for a database with no branches: an id would point at a
-  // row that does not exist. Text that is exactly one of them still matches.
+test("an option with no id matches on the name alone", () => {
+  // Text that is exactly an option's name still matches when the option carries no id.
   const fallback = branchPicker([{ value: "Erode TN", label: "Erode TN" }]);
   assert.equal(fallback({ assignedBranch: "Erode TN", branchId: 1 }), "Erode TN");
   assert.equal(fallback({ assignedBranch: "Erode", branchId: 1 }), "");

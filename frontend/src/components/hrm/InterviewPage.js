@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ModulePageHeader from "@/components/layout/ModulePageHeader";
 import DataTable from "@/components/data-table/DataTable";
 import DataTableInfoPanel from "@/components/data-table/DataTableInfoPanel";
-import RecordViewPanel from "@/components/data-table/RecordViewPanel";
 import DataTableShell from "@/components/data-table/DataTableShell";
 import ImportDialog from "@/components/data-table/ImportDialog";
 import TableFooter from "@/components/data-table/TableFooter";
@@ -15,9 +14,13 @@ import useCompactView from "@/components/shared/useCompactView";
 import useStickyTab from "@/components/shared/useStickyTab";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import OptionsMenu from "@/components/ui/OptionsMenu";
+import KanbanBoard from "@/components/data-table/KanbanBoard";
+import { columnCount, columnNext, daysSince } from "@/lib/kanbanSummary.mjs";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import { useModuleAccess, useRouteAccess } from "@/components/auth/PermissionsProvider";
 import InterviewAddApplicationDialog from "@/components/hrm/InterviewAddApplicationDialog";
-import InterviewCandidateFormPanel from "@/components/hrm/InterviewCandidateFormPanel";
+import RecordViewPanel from "@/components/data-table/RecordViewPanel";
+import InterviewCandidatePopup from "@/components/hrm/InterviewCandidatePopup";
 import ResendApplicationFormDialog from "@/components/hrm/ResendApplicationFormDialog";
 import InterviewBulkEntryDialog from "@/components/hrm/InterviewBulkEntryDialog";
 import InterviewBulkStageDialog from "@/components/hrm/InterviewBulkStageDialog";
@@ -37,6 +40,7 @@ import { copyToClipboard } from "@/lib/clipboard";
  * which is one boolean for a stage of five thousand rather than five thousand strings, and lets a
  * row fetched later arrive already ticked.
  */
+import { toIsoDay } from "@/lib/crmLeadDates.mjs";
 import { countSelected, emptySelection, headerState, isSelected, toggleAll, toggleOne } from "@/lib/leadSelection";
 import {
   cancelApplicationInvite,
@@ -54,6 +58,7 @@ import {
 } from "@/services/hrm/interview.service";
 import {
   ALL_CANDIDATE_STATUSES,
+  CANDIDATE_STATUSES,
   CANDIDATE_STATUS_FILTERS,
   FILTERABLE_CANDIDATE_COLUMNS,
   DEFAULT_CANDIDATE_STATUS,
@@ -104,6 +109,12 @@ import {
 
 /** What the sheet integration dispatches after a link, a sync or a delete; the page re-reads on it. */
 const REFRESH_EVENT = "dbs:interview-candidates-refresh";
+// The board's trend counts a candidate by their Applied On day, or by when they were added where it is not a day.
+const appliedOn = (candidate) => {
+  const day = toIsoDay(candidate.appliedDate);
+  const time = new Date(day ? `${day}T00:00:00` : candidate.createdAt || "").getTime();
+  return Number.isNaN(time) ? null : time;
+};
 
 const emptyOptions = { interviewers: [], departments: [], positions: [], branches: [], genders: [], statuses: [], sources: [], modes: [], employmentTypes: [] };
 
@@ -133,6 +144,28 @@ function errorMessage(error, fallback) {
   if (error?.status === 401) return "Your session has expired. Please sign in again.";
   return error?.data?.message || error?.message || fallback;
 }
+
+// The candidates still being worked towards an interview. One nobody has updated for a week is
+// worth chasing - counted under its column and tagged on its own card, so the figure names who it
+// means. Measured from the last update: the record keeps no date for entering a status.
+const STILL_WORKING_STATUSES = ["Yet to Connect", "Follow Up", "Form Submission Pending", "Form Submitted"];
+const STALE_DAYS = 7;
+const interviewPassed = (candidate) => { const days = daysSince(candidate.interviewDate); return days !== null && days > 0; };
+const candidateFlag = (candidate, column) => {
+  if (STILL_WORKING_STATUSES.includes(column.value)) {
+    const days = daysSince(candidate.updatedAt);
+    return days !== null && days >= STALE_DAYS ? `Not updated ${days} days` : "";
+  }
+  // Booked for a day already gone and still not decided: the interview needs its result.
+  return column.value === "Interview Scheduled" && interviewPassed(candidate) ? "Interview date passed" : "";
+};
+const candidateColumnFigure = (rows, column) => {
+  if (STILL_WORKING_STATUSES.includes(column.value)) return columnCount(rows, (candidate) => Boolean(candidateFlag(candidate, column)), `Not updated ${STALE_DAYS}+ days`);
+  if (column.value === "Interview Scheduled") {
+    return rows.some(interviewPassed) ? columnCount(rows, interviewPassed, "Interview dates passed") : columnNext(rows, (candidate) => candidate.interviewDate, "Next interview");
+  }
+  return null;
+};
 
 export default function InterviewPage() {
   // HRM / Interview. READ reads the register; READ_WRITE is what adding, editing, importing,
@@ -165,6 +198,13 @@ export default function InterviewPage() {
    * register is exactly the wrong answer - the case `useStickyTab` was written for.
    */
   const [statusFilter, setStatusFilter] = useStickyTab("hrm-interview-status", ALL_CANDIDATE_STATUSES, CANDIDATE_STATUS_FILTERS.map((filter) => filter.id));
+  /*
+   * Table or Board. The Board stands every stage up as a column, so it reads the register across
+   * all of them - the stage tab is the table's alone, and is put away while the Board is open.
+   */
+  const [layout, setLayout] = useTableBoardLayout("hrm-interview");
+  const onBoard = layout === "board";
+  const queryStatus = onBoard ? ALL_CANDIDATE_STATUSES : statusFilter;
   const [candidates, setCandidates] = useState([]);
   /** How many the register holds at this stage, and every stage's own count - both the server's. */
   const [totalRows, setTotalRows] = useState(0);
@@ -192,6 +232,12 @@ export default function InterviewPage() {
    */
   const [addOpen, setAddOpen] = useState(false);
   const [editCandidate, setEditCandidate] = useState(null);
+  /*
+   * One way in for both gestures. A double-click and the ⋮'s Edit / Review are two gestures for the
+   * same errand - working this candidate - and two components would be two editors for one record,
+   * with two save paths that eventually disagree about a field.
+   */
+  const openCandidatePopup = useCallback((candidate) => setEditCandidate(candidate), []);
   /*
    * The studio's own decision about a candidate, opened apart from their record: the stage, the
    * interview, the follow-ups and HR's note. Its own piece of state for the reason `editCandidate`
@@ -242,20 +288,20 @@ export default function InterviewPage() {
   /** The onboarding invite being called off, held until the question about it is answered. */
   const [pendingCancelOnboarding, setPendingCancelOnboarding] = useState(null);
   /*
-   * The candidate being **read** in full, which is a different thing from the one being edited.
+   * The candidate read back in full, with no boxes - what the ⋮'s **View** opens, exactly as the
+   * Employee Repository's does.
    *
-   * Every table in the OS answers a double-click by showing the record and never by opening it for
-   * editing: a double-click is too easy to trigger by accident - a slow second click on a row
-   * somebody meant to select - for it to be the gesture that puts a live form on screen. This
-   * screen was the one that did, and it is also what the ⋮'s View opens, exactly as the Employee
-   * Repository's does.
+   * It is no longer what a double-click opens: that now opens the working popup. The two are close
+   * cousins now, since the popup's own pane also draws only the fields the candidate answered, and
+   * View is kept because it is still the cheapest thing on the menu - one press, nothing editable,
+   * nothing to close carefully.
    */
   const [viewCandidate, setViewCandidate] = useState(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   /*
-   * The screening-form dialog, and which screen it opens on: `{ mode: "list" }` from the ⋮, and
-   * `{ mode: "create", candidate }` from the row menu or the record's own Send Screening Form.
+   * The screening-form dialog, and which screen it opens on: `{ mode: "list" }` from the header's
+   * own ⋮, and `{ mode: "create", candidate }` from the record's own Send Screening Form pill.
    */
   const [inviteDialog, setInviteDialog] = useState(null);
   /*
@@ -268,9 +314,8 @@ export default function InterviewPage() {
   const [resendTarget, setResendTarget] = useState(null);
   const [resending, setResending] = useState(false);
   /*
-   * The screening forms already raised, so a **row** can act on the one belonging to its candidate
-   * rather than sending a second. Without this the row menu could only ever offer "Send" - and a
-   * candidate sitting at Form Submission Pending is precisely the row somebody wants to copy the
+   * The screening forms already raised, so a **row** can act on the one belonging to its candidate.
+   * A candidate sitting at Form Submission Pending is precisely the row somebody wants to copy the
    * link off, correct, chase or call off, which is the Employee Repository's own onboarding-pending
    * arrangement. Read once beside the register and re-read whenever a form changes.
    */
@@ -352,7 +397,7 @@ export default function InterviewPage() {
     if (append) setLoadingMore(true);
     else if (!quiet) setLoading(true);
     try {
-      const result = await getCandidates(statusQueryFor(statusFilter), { offset: append ? offset : 0, appending: append, filters: appliedFilters });
+      const result = await getCandidates(statusQueryFor(queryStatus), { offset: append ? offset : 0, appending: append, filters: appliedFilters });
       const page = Array.isArray(result?.data) ? result.data : [];
       /*
        * Appended through the updater rather than over a copy held here, and by id.
@@ -389,7 +434,7 @@ export default function InterviewPage() {
       if (append) setLoadingMore(false);
       else if (!quiet) setLoading(false);
     }
-  }, [showError, statusFilter, loadInvites, appliedFilters]);
+  }, [showError, queryStatus, loadInvites, appliedFilters]);
 
   /*
    * The table has shown everything it holds; fetch the next page unless the set is exhausted.
@@ -424,9 +469,10 @@ export default function InterviewPage() {
   /*
    * The forms raised, read quietly and never reported as a failure.
    *
-   * The register is the screen; the forms only decide which entries a row's ⋮ offers. So a refused
-   * or slow read leaves the menu offering **Send Screening Form**, which is the honest answer when
-   * nothing is known about an existing form, rather than an error over a table that is working.
+   * The register is the screen; the forms only decide which entries a row's ⋮ offers - **Copy
+   * Link**, correct or call off a form already out. So a refused or slow read leaves the menu
+   * offering none of those rather than an error over a table that is working; sending a fresh form
+   * is the popup's own pill regardless, so nothing about it depends on this read at all.
    */
 
   /*
@@ -549,6 +595,14 @@ export default function InterviewPage() {
     setAppliedFilters({});
     setStatusFilter(next);
   }, [clearSelection, setStatusFilter]);
+  // Switching between Table and Board drops the ticks and the column filters for the same reason a
+  // tab change does: the Board has neither, and a filter left behind would narrow it invisibly.
+  const changeLayout = useCallback((next) => {
+    clearSelection();
+    setColumnFilters({});
+    setAppliedFilters({});
+    setLayout(next);
+  }, [clearSelection, setLayout]);
 
   /*
    * Where each candidate stands with their screening form, which is what their ⋮ offers.
@@ -789,9 +843,325 @@ export default function InterviewPage() {
     return visibility;
   }, []);
 
+  /*
+   * A candidate's ⋮ - one list for the table row's menu and the Board card's, so the two never
+   * drift. Offered only to `canWrite`; the callers below decide that, as before.
+   */
+  const candidateActionItems = useCallback((candidate) => {
+    // Where this candidate stands with their form; see `candidateFormState` for the three answers.
+    const form = candidateFormState.get(candidate.id) || null;
+    /*
+     * A candidate waiting on their screening form has a menu of their own.
+     *
+     * At **Form Submission Pending** the row is one thing: somebody the studio is waiting on. So
+     * the entries are the things there are to do about waiting - read them, hand them the link
+     * again, correct what the form was raised on, turn them down, or call the form off - and Edit
+     * and Delete are not among them, because neither is what this row is for. Every other stage
+     * keeps the plain menu.
+     */
+    const waiting = candidate.status === FORM_PENDING_STATUS;
+    /*
+     * Turning a candidate down is offered at **every** stage, not only while a form is out.
+     *
+     * A candidate can be turned down after the form is read, after the interview, or off On Hold
+     * weeks later, and each of those was a row whose menu had no way to say so - the stage had to
+     * be changed by hand on the record. So Reject sits in both menus, just above the destructive
+     * entry in each.
+     *
+     * The one row that does not get it is one already **Rejected**, where it would move the stage
+     * to where it already is and offer an Undo back to itself.
+     */
+    const rejectable = candidate.status !== REJECTED_STATUS;
+    const rejectItem = { label: "Reject", onSelect: () => setDecision({ candidate, status: REJECTED_STATUS }) };
+    /*
+     * Booking the **first** round is the **Interview Scheduled** pill's errand now, in the popup
+     * this menu's Edit already opens - the same `forward` call the pill fires, on the same
+     * schedule dialog. A menu entry beside it would be a second way to ask for the one thing.
+     *
+     * A **next** round is not that pill's to give: the candidate is already at Interview
+     * Scheduled, so choosing that same pill again is a no-op (`chooseStatus` refuses a stage a
+     * candidate is already at), and there is no stage for "has been seen twice" to move to. So
+     * **Schedule Next Round** stays a menu entry, the one scheduling question a pill cannot ask.
+     *
+     * **Edit Schedule** stays beside it for the other reason a pill cannot help: correcting an
+     * appointment already booked - a date moved, a Meet link that changed, a mode that became a
+     * phone call - rather than booking a new one. Both appear once there is a round to act on:
+     * `scheduled` is the server's own round count, so the menu and the Round column cannot
+     * disagree about whether this candidate has been seen.
+     */
+    const scheduled = Number(candidate.interviewRound) > 0;
+    const scheduleNextItem = scheduled
+      ? { label: "Schedule Next Round", onSelect: () => setScheduleCandidate({ candidate, mode: SCHEDULE_MODES.next }) }
+      : null;
+    const editScheduleItem = scheduled
+      ? { label: "Edit Schedule", onSelect: () => setScheduleCandidate({ candidate, mode: SCHEDULE_MODES.edit }) }
+      : null;
+    /*
+     * Parking a candidate, offered wherever turning one down is and for the same reason.
+     *
+     * On Hold and Rejected are the two places a candidate stops, and only one of them could be
+     * reached from a row: somebody the studio wants to keep but cannot place yet had to be
+     * opened, edited and saved to say so, while turning the same person down was one press. That
+     * made the easier answer the harsher one, which is the wrong way round in a register worked
+     * through every morning - so both stages now sit together in every menu, at every stage, each
+     * with the Undo that restores the stage it came from.
+     *
+     * The one row that does not get it is one already **On Hold**, where it would move the stage
+     * to where it already is and offer an Undo back to itself - exactly as Rejected is left out
+     * of Reject above. A rejected candidate *is* offered it: reconsidering somebody is a thing
+     * the studio does, and parking them is how it is said.
+     */
+    const holdable = candidate.status !== ON_HOLD_STATUS;
+    /*
+     * The three decisions, each asked with its reason.
+     *
+     * They were a single click that changed the stage and recorded nothing about why: weeks later
+     * nobody could say why a candidate was parked, and "we already spoke to them and said no" was
+     * a thing the register could not tell you. Each now opens a dialog asking for a remark, which
+     * is appended to the candidate's decisions rather than written over the last one.
+     *
+     * **Selected joins them**, where the stage could previously only be reached by opening the
+     * record: the answer the whole register exists to arrive at was the one it did not offer.
+     */
+    const holdItem = { label: "Put On Hold", onSelect: () => setDecision({ candidate, status: ON_HOLD_STATUS }) };
+    /*
+     * **Chasing somebody**, which is the other half of what an untouched row is for.
+     *
+     * A candidate nobody has spoken to gets one of two things done to them: the screening form, or
+     * a call. Only the first was a stage - the second was a remark, or nothing - so the register
+     * could not tell "nobody has tried this person" from "we have called three times and they have
+     * not answered", which are the two rows that need completely different work.
+     *
+     * Offered at **Yet to Connect and at Follow Up**, and nowhere else. Those are the two stages
+     * where chasing *is* the work; everywhere further on, something has already happened that the
+     * move would undo - a form out, a conversation in the diary, an answer given - and a register
+     * that let a scheduled candidate be dropped back into the chase would lose the appointment.
+     *
+     * That a Follow Up row is offered it again is the point rather than an oversight: each press
+     * records its own day and its own reason, so three unanswered calls read as three.
+     */
+    const followable = [DEFAULT_CANDIDATE_STATUS, FOLLOW_UP_STATUS].includes(candidate.status);
+    /*
+     * **On a row already at Follow Up the entry is named for what it does there.**
+     *
+     * Everywhere else in this menu, an entry naming a stage *moves* the candidate to it, and the
+     * two that cannot are withheld: Reject is dropped from a rejected row, Put On Hold from one
+     * already held, because there each would move the stage to where it already is and offer an
+     * Undo back to itself. Read against that pattern, "Follow Up" sitting on a row that is already
+     * at Follow Up looks like exactly the no-op those two are withheld for.
+     *
+     * It is not one. Chasing somebody is the one thing here that genuinely happens more than once,
+     * and each attempt writes its own day and its own reason - so the entry has work to do on a
+     * Follow Up row and only the word was wrong. **Log Another Follow-up** says the truth: not a
+     * stage change, a second attempt recorded against the stage they are already on.
+     */
+    const chasing = candidate.status === FOLLOW_UP_STATUS;
+    const followUpItem = {
+      label: chasing ? "Log Another Follow-up" : "Follow Up",
+      onSelect: () => setDecision({ candidate, status: FOLLOW_UP_STATUS }),
+    };
+    /*
+     * A **Selected** candidate is a different row from the rest of the register.
+     *
+     * Every other stage is somewhere in a conversation; this one is finished, and the only things
+     * left to do about the person are to take them on, read them, correct them, change the answer
+     * or remove them. Taking them on is the popup's own **Onboarded** pill now, read them and
+     * correct them are View and Edit as everywhere, and change the answer or remove them are the
+     * two the menu still carries here - no screening form to send to somebody who has been offered
+     * the job, no round to schedule after the answer, no Mark Selected on a row that already is.
+     */
+    const selectedStage = candidate.status === SELECTED_STATUS;
+    // Raising, correcting or calling off an invite is `HRM / Employee Management` READ_WRITE.
+    const mayInvite = onboardingAccess.canWrite;
+    /*
+     * An **Onboarded** candidate: the invite has gone out, so the row is about that invite.
+     *
+     * The same three questions a live screening form gets asked, about the onboarding one this
+     * time - where the link is, correct what it was raised on, call it off - and then the four
+     * that are true of any row. What it deliberately does **not** offer is everything about
+     * deciding: there is no next round to schedule after somebody has been taken on, no stage to
+     * mark them at, and nothing to put on hold. Reject stays, because a studio can still be told
+     * no after the invite has gone.
+     *
+     * The three invite entries go together when there is no invite to act on - somebody moved to
+     * this stage by hand, or by a sheet - rather than sitting there refusing.
+     */
+    /*
+     * Correcting the record, offered once for the whole menu rather than written into each stage.
+     *
+     * It reads beside View because the two belong together - both are about the candidate rather
+     * than about the hiring - and having it defined here keeps the four branches to the work that
+     * is actually different between them.
+     */
+    /*
+     * **Review**, not Edit, for a candidate whose form has come back.
+     *
+     * The two words ask different things of whoever presses them. *Edit* is "something on this
+     * record is wrong"; a candidate at **Form Submitted** is not a record anybody is correcting,
+     * they are an application waiting to be **read** - and the register's whole reason for that
+     * tab is that somebody has to read it and decide. One word on the menu is what turns a row
+     * from a thing to tidy into a thing to answer.
+     *
+     * The same popup opens either way: a submission is read by reading it, and the fields are the
+     * fields. What changes is the footer - see `review` on `InterviewCandidatePopup`, whose Update
+     * is called **Save Review** on a submission.
+     */
+    const reviewing = candidate.status === FORM_SUBMITTED_STATUS;
+    const editItem = { label: reviewing ? "Review" : "Edit", onSelect: () => openCandidatePopup(candidate) };
+    const onboardedStage = candidate.status === ONBOARDED_STATUS;
+    const onboardingInvite = onboardedStage ? candidateOnboardingInvites(candidate) : null;
+    /*
+     * A **live** onboarding invite: one the candidate can still open, and one the server will
+     * still let this screen act on.
+     *
+     * `!== "Cancelled"` was too generous in both directions - it offered **Cancel Invite** on an
+     * invite already `Submitted`, which `cancelInvite` refuses with a 400, and on an `Expired`
+     * one. The two statuses that are actually live are the two the screening form's own rule
+     * names, and this now names the same pair rather than a different one.
+     */
+    const liveOnboarding = Boolean(onboardingInvite)
+      && ["Created", "Verified"].includes(onboardingInvite.status)
+      && mayInvite;
+    /*
+     * **Mark Selected, at every stage.**
+     *
+     * It used to appear only from Interview Scheduled onward, on the reasoning that nobody had
+     * spoken to a candidate before then so "Selected" was not yet an answer. The studio asked for
+     * it from **Yet to Connect**, and the reasoning does not survive the way hiring actually
+     * happens here: somebody is taken on off a referral, or off a conversation that never became
+     * a scheduled round, and the register has to be able to say so without walking the candidate
+     * through stages nobody used. Every stage moves through the same Why dialog as Reject and On
+     * Hold, so a selection made early still records the reason it was made.
+     *
+     * The one row that does not get it is one already Selected, where it would move the stage to
+     * where it already is - the same rule Reject and On Hold each keep.
+     */
+    const selectable = candidate.status !== SELECTED_STATUS;
+    const selectItem = { label: "Mark Selected", onSelect: () => setDecision({ candidate, status: SELECTED_STATUS }) };
+    return [
+      // Enabled, and it does what clicking the row does: opens the record beside the table. It
+      // was greyed while it led nowhere the row did not; now it is the first thing a menu on a
+      // row somebody is reading should offer.
+      /* Reading the candidate in full, which is the cheapest thing on this menu and the only
+         one that changes nothing. */
+      { label: "View", onSelect: () => setViewCandidate(candidate) },
+      /*
+       * **Reading and correcting, together at the top.**
+       *
+       * The two things somebody does to *the candidate* rather than to their hiring - open the
+       * record, put a mistyped number right - and they were scattered: second on one stage,
+       * fourth on another, below an invite's three entries on a third. Everything under them is
+       * about the hiring itself, in the order that stage's work happens.
+       *
+       * Offered at **every** stage. It used to be withheld in two - a row waiting on its
+       * screening form, and one at Yet to Connect that "held nothing anybody had learned yet" -
+       * and both readings were wrong about what Edit is for. A number arrives mistyped from a
+       * sheet, a name comes through in capitals, a position is filed against the wrong
+       * department: those are corrections to what *arrived*, and they are most needed exactly
+       * where nobody has touched the record yet. Withholding it there meant the one stage with
+       * the most unchecked data was the one stage that could not be put right.
+       *
+       * It still reads **Review** rather than Edit on a submitted form, which is the same entry
+       * saying what the row is for at that stage.
+       */
+      editItem,
+      ...(onboardedStage ? [
+        ...(liveOnboarding ? [
+          onboardingInvite.onboardingUrl
+            ? { label: "Copy Link", onSelect: () => void copyOnboardingLink(onboardingInvite) }
+            : { label: "Copy Link", disabled: true, title: "This invite's link cannot be rebuilt. Cancel it and send a new one to get one." },
+          { label: "Edit Invite", onSelect: () => setOnboarding({ ...candidate, editInvite: onboardingInvite }) },
+        ] : []),
+        ...(rejectable ? [rejectItem] : []),
+        ...(liveOnboarding ? [
+          { label: "Cancel Invite", tone: "danger", onSelect: () => setPendingCancelOnboarding({ invite: onboardingInvite, candidate }) },
+        ] : []),
+        { label: "Delete", tone: "danger", onSelect: () => setPendingDelete(candidate) },
+      ] : selectedStage ? [
+        /*
+         * Taking them on is the **Onboarded** pill's errand now, in the popup this menu's Edit
+         * already opens - the same `forward` call the pill fires, on the Employee Repository's
+         * own invite dialog. A menu entry beside it would be a second way to ask for the one
+         * thing, and the popup already refuses the pill wherever `mayInvite` does.
+         */
+        ...(rejectable ? [rejectItem] : []),
+        { label: "Delete", tone: "danger", onSelect: () => setPendingDelete(candidate) },
+      ] : waiting ? [
+        /*
+         * The form is out, so its link and its details are what this row is asked about. Both
+         * go when there is nothing live to act on - a stage typed straight onto a row by a
+         * sheet, say, with no form behind it - rather than sitting there refusing.
+         */
+        ...(form?.live ? [
+          form.invite.applicationUrl
+            ? { label: "Copy Link", onSelect: () => void copyInviteLink(form.invite) }
+            : { label: "Copy Link", disabled: true, title: "This form's link cannot be rebuilt. Cancel it and send a new one to get one." },
+          // The dialog's own Edit screen, opened straight onto this form. The link is kept,
+          // which is the whole point of correcting one rather than cancelling and re-sending.
+          { label: "Edit Invite", onSelect: () => setInviteDialog({ mode: "create", candidate, editInvite: form.invite }) },
+        ] : []),
+        /*
+         * Turning them down. Not red, and not behind a confirmation: a stage is a word on a row
+         * that can be moved back, and it is offered with **Undo** instead, which restores the
+         * stage it came from. Cancel Form below is the red one because a cancelled link cannot
+         * be revived - the token is stored hashed.
+         *
+         * Parking them reads first: a candidate whose form is still out can be put aside as
+         * readily as turned down, and the gentler of the two answers comes before the harsher.
+         */
+        /*
+         * **Mark Form Submitted** reads first: it is the thing that ends the waiting, and the
+         * answers a form would have carried can arrive by any route - a WhatsApp reply, an
+         * emailed CV, a phone call. Everything under it is what to do while the wait goes on.
+         */
+        { label: "Mark Form Submitted", onSelect: () => void markFormSubmitted(candidate) },
+        /*
+         * No scheduling here, and no Mark Selected.
+         *
+         * This row is one thing: somebody the studio is **waiting on**. A conversation is put in
+         * the diary after their form has been read, not before it has arrived - a round booked
+         * against answers nobody has is a round somebody has to move - and selecting them is
+         * the same mistake one stage further on. Both are on the menu the moment the form comes
+         * back. What is left is the waiting itself: hand them the link again, correct what the
+         * form was raised on, park them, turn them down, or call the form off.
+         */
+        ...(holdable ? [holdItem] : []),
+        ...(rejectable ? [rejectItem] : []),
+        ...(form?.live ? [
+          { label: "Cancel Form", tone: "danger", onSelect: () => setPendingCancelInvite({ invite: form.invite, candidate }) },
+        ] : []),
+      ] : [
+        // Every other stage: the plain menu, which is the hiring itself in the order its work
+        // happens - the screening form, the interview, then the answer.
+        /*
+         * One entry about the form, or none. A live form gets **Copy Link**; one already
+         * **submitted**, or one never asked yet, gets nothing here - sending it for the first
+         * time is the **Form Submission Pending** pill's errand now, in the popup this menu's
+         * Edit already opens, the same `forward` call the pill fires.
+         */
+        ...(form?.live ? [
+          form.invite.applicationUrl
+            ? { label: "Copy Link", onSelect: () => void copyInviteLink(form.invite) }
+            : { label: "Copy Link", disabled: true, title: "This form's link cannot be rebuilt. Cancel it and send a new one to get one." },
+        ] : []),
+        // Beside the form, because those two are the whole of what an untouched row still offers
+        // here: chase them, or open the popup to send them the form or book a round. A Follow Up
+        // row gets the same pair again.
+        ...(followable ? [followUpItem] : []),
+        ...(scheduleNextItem ? [scheduleNextItem] : []),
+        ...(editScheduleItem ? [editScheduleItem] : []),
+        // Above Delete, the way they sit above Cancel Form in the waiting menu: the stages that
+        // can be undone first, the thing that cannot be after them.
+        ...(selectable ? [selectItem] : []),
+        ...(holdable ? [holdItem] : []),
+        ...(rejectable ? [rejectItem] : []),
+        { label: "Delete", tone: "danger", onSelect: () => setPendingDelete(candidate) },
+      ]),
+    ];
+  }, [onboardingAccess.canWrite, candidateFormState, candidateOnboardingInvites, copyInviteLink, copyOnboardingLink, markFormSubmitted, openCandidatePopup]);
+
   const columns = useMemo(() => buildTableColumns({
     fields: candidateTableFields,
-    startIndex: 0,
     /*
      * The stage dots and the mode dots in one map, which is what `buildTableColumns` takes: it
      * keys a `status` cell's colour by the cell's own value, and no stage is spelled like a mode,
@@ -801,332 +1171,48 @@ export default function InterviewPage() {
     statusStyles: { ...candidateStatusStyles, ...candidateModeStyles },
     // Without `canWrite` the whole menu goes and the column with it, rather than a ⋮ that only ever
     // says "View" beside a row you can already click.
-    renderActions: canWrite ? (candidate) => {
-      // Where this candidate stands with their form; see `candidateFormState` for the three answers.
-      const form = candidateFormState.get(candidate.id) || null;
-      /*
-       * A candidate waiting on their screening form has a menu of their own.
-       *
-       * At **Form Submission Pending** the row is one thing: somebody the studio is waiting on. So
-       * the entries are the things there are to do about waiting - read them, hand them the link
-       * again, correct what the form was raised on, turn them down, or call the form off - and Edit
-       * and Delete are not among them, because neither is what this row is for. Every other stage
-       * keeps the plain menu.
-       */
-      const waiting = candidate.status === FORM_PENDING_STATUS;
-      /*
-       * Turning a candidate down is offered at **every** stage, not only while a form is out.
-       *
-       * A candidate can be turned down after the form is read, after the interview, or off On Hold
-       * weeks later, and each of those was a row whose menu had no way to say so - the stage had to
-       * be changed by hand on the record. So Reject sits in both menus, just above the destructive
-       * entry in each.
-       *
-       * The one row that does not get it is one already **Rejected**, where it would move the stage
-       * to where it already is and offer an Undo back to itself.
-       */
-      const rejectable = candidate.status !== REJECTED_STATUS;
-      const rejectItem = { label: "Reject", onSelect: () => setDecision({ candidate, status: REJECTED_STATUS }) };
-      /*
-       * Where the stage, the interview and the follow-ups are set now.
-       *
-       * They were the last section of the candidate's record, below four sections of their own
-       * answers - so the one field anybody opens a candidate to change was the furthest thing from
-       * the top of it. Offered on **every** row and in both menus, like Reject and On Hold beside
-       * it: a candidate is scheduled, rescheduled or moved a stage at any point, including while a
-       * screening form is still out. It reads first of the three, because it is the entry somebody
-       * opens this menu *to* use - the other two are answers, this is the work.
-       */
-      /*
-       * Scheduling, and what the row is actually asking for.
-       *
-       * A candidate nobody has called yet is **Schedule Interview**. One who has already been in is
-       * **Schedule Next Round** - a second conversation is a new appointment, not a correction of
-       * the first, and a menu that said "Schedule Interview" over an interview that had happened
-       * invited exactly that mistake. **Edit Schedule** is the correction, and appears only where
-       * there is something to correct: a date moved, a Meet link that changed, a mode that became a
-       * phone call.
-       *
-       * Which round they are on is the server's own count, so the menu and the Round column cannot
-       * disagree about whether this candidate has been seen.
-       */
-      const scheduled = Number(candidate.interviewRound) > 0;
-      const scheduleItem = {
-        label: scheduled ? "Schedule Next Round" : "Schedule Interview",
-        onSelect: () => setScheduleCandidate({ candidate, mode: scheduled ? SCHEDULE_MODES.next : SCHEDULE_MODES.first }),
-      };
-      const editScheduleItem = scheduled
-        ? { label: "Edit Schedule", onSelect: () => setScheduleCandidate({ candidate, mode: SCHEDULE_MODES.edit }) }
-        : null;
-      /*
-       * Parking a candidate, offered wherever turning one down is and for the same reason.
-       *
-       * On Hold and Rejected are the two places a candidate stops, and only one of them could be
-       * reached from a row: somebody the studio wants to keep but cannot place yet had to be
-       * opened, edited and saved to say so, while turning the same person down was one press. That
-       * made the easier answer the harsher one, which is the wrong way round in a register worked
-       * through every morning - so both stages now sit together in every menu, at every stage, each
-       * with the Undo that restores the stage it came from.
-       *
-       * The one row that does not get it is one already **On Hold**, where it would move the stage
-       * to where it already is and offer an Undo back to itself - exactly as Rejected is left out
-       * of Reject above. A rejected candidate *is* offered it: reconsidering somebody is a thing
-       * the studio does, and parking them is how it is said.
-       */
-      const holdable = candidate.status !== ON_HOLD_STATUS;
-      /*
-       * The three decisions, each asked with its reason.
-       *
-       * They were a single click that changed the stage and recorded nothing about why: weeks later
-       * nobody could say why a candidate was parked, and "we already spoke to them and said no" was
-       * a thing the register could not tell you. Each now opens a dialog asking for a remark, which
-       * is appended to the candidate's decisions rather than written over the last one.
-       *
-       * **Selected joins them**, where the stage could previously only be reached by opening the
-       * record: the answer the whole register exists to arrive at was the one it did not offer.
-       */
-      const holdItem = { label: "Put On Hold", onSelect: () => setDecision({ candidate, status: ON_HOLD_STATUS }) };
-      /*
-       * **Chasing somebody**, which is the other half of what an untouched row is for.
-       *
-       * A candidate nobody has spoken to gets one of two things done to them: the screening form, or
-       * a call. Only the first was a stage - the second was a remark, or nothing - so the register
-       * could not tell "nobody has tried this person" from "we have called three times and they have
-       * not answered", which are the two rows that need completely different work.
-       *
-       * Offered at **Yet to Connect and at Follow Up**, and nowhere else. Those are the two stages
-       * where chasing *is* the work; everywhere further on, something has already happened that the
-       * move would undo - a form out, a conversation in the diary, an answer given - and a register
-       * that let a scheduled candidate be dropped back into the chase would lose the appointment.
-       *
-       * That a Follow Up row is offered it again is the point rather than an oversight: each press
-       * records its own day and its own reason, so three unanswered calls read as three.
-       */
-      const followable = [DEFAULT_CANDIDATE_STATUS, FOLLOW_UP_STATUS].includes(candidate.status);
-      /*
-       * **On a row already at Follow Up the entry is named for what it does there.**
-       *
-       * Everywhere else in this menu, an entry naming a stage *moves* the candidate to it, and the
-       * two that cannot are withheld: Reject is dropped from a rejected row, Put On Hold from one
-       * already held, because there each would move the stage to where it already is and offer an
-       * Undo back to itself. Read against that pattern, "Follow Up" sitting on a row that is already
-       * at Follow Up looks like exactly the no-op those two are withheld for.
-       *
-       * It is not one. Chasing somebody is the one thing here that genuinely happens more than once,
-       * and each attempt writes its own day and its own reason - so the entry has work to do on a
-       * Follow Up row and only the word was wrong. **Log Another Follow-up** says the truth: not a
-       * stage change, a second attempt recorded against the stage they are already on.
-       */
-      const chasing = candidate.status === FOLLOW_UP_STATUS;
-      const followUpItem = {
-        label: chasing ? "Log Another Follow-up" : "Follow Up",
-        onSelect: () => setDecision({ candidate, status: FOLLOW_UP_STATUS }),
-      };
-      /*
-       * A **Selected** candidate is a different row from the rest of the register.
-       *
-       * Every other stage is somewhere in a conversation; this one is finished, and the only things
-       * left to do about the person are to take them on, read them, correct them, change the answer
-       * or remove them. So the menu is those five and nothing else - no screening form to send to
-       * somebody who has been offered the job, no round to schedule after the answer, no Mark
-       * Selected on a row that already is. A menu that still offered all of that read as a register
-       * that had not noticed it had decided.
-       */
-      const selectedStage = candidate.status === SELECTED_STATUS;
-      const onboardingItem = { label: "Send Onboarding Invite", onSelect: () => setOnboarding(candidate) };
-      // Raising, correcting or calling off an invite is `HRM / Employee Management` READ_WRITE.
-      const mayInvite = onboardingAccess.canWrite;
-      /*
-       * An **Onboarded** candidate: the invite has gone out, so the row is about that invite.
-       *
-       * The same three questions a live screening form gets asked, about the onboarding one this
-       * time - where the link is, correct what it was raised on, call it off - and then the four
-       * that are true of any row. What it deliberately does **not** offer is everything about
-       * deciding: there is no next round to schedule after somebody has been taken on, no stage to
-       * mark them at, and nothing to put on hold. Reject stays, because a studio can still be told
-       * no after the invite has gone.
-       *
-       * The three invite entries go together when there is no invite to act on - somebody moved to
-       * this stage by hand, or by a sheet - rather than sitting there refusing.
-       */
-      /*
-       * Correcting the record, offered once for the whole menu rather than written into each stage.
-       *
-       * It reads beside View because the two belong together - both are about the candidate rather
-       * than about the hiring - and having it defined here keeps the four branches to the work that
-       * is actually different between them.
-       */
-      /*
-       * **Review**, not Edit, for a candidate whose form has come back.
-       *
-       * The two words ask different things of whoever presses them. *Edit* is "something on this
-       * record is wrong"; a candidate at **Form Submitted** is not a record anybody is correcting,
-       * they are an application waiting to be **read** - and the register's whole reason for that
-       * tab is that somebody has to read it and decide. One word on the menu is what turns a row
-       * from a thing to tidy into a thing to answer.
-       *
-       * The same panel opens either way: a submission is read by reading it, and the fields are the
-       * fields. What changes is the footer - see `review` on `InterviewCandidateFormPanel`, which
-       * ends a review with the four answers it can have rather than with a save.
-       */
-      const reviewing = candidate.status === FORM_SUBMITTED_STATUS;
-      const editItem = { label: reviewing ? "Review" : "Edit", onSelect: () => setEditCandidate(candidate) };
-      const onboardedStage = candidate.status === ONBOARDED_STATUS;
-      const onboardingInvite = onboardedStage ? candidateOnboardingInvites(candidate) : null;
-      /*
-       * A **live** onboarding invite: one the candidate can still open, and one the server will
-       * still let this screen act on.
-       *
-       * `!== "Cancelled"` was too generous in both directions - it offered **Cancel Invite** on an
-       * invite already `Submitted`, which `cancelInvite` refuses with a 400, and on an `Expired`
-       * one. The two statuses that are actually live are the two the screening form's own rule
-       * names, and this now names the same pair rather than a different one.
-       */
-      const liveOnboarding = Boolean(onboardingInvite)
-        && ["Created", "Verified"].includes(onboardingInvite.status)
-        && mayInvite;
-      /*
-       * **Mark Selected, at every stage.**
-       *
-       * It used to appear only from Interview Scheduled onward, on the reasoning that nobody had
-       * spoken to a candidate before then so "Selected" was not yet an answer. The studio asked for
-       * it from **Yet to Connect**, and the reasoning does not survive the way hiring actually
-       * happens here: somebody is taken on off a referral, or off a conversation that never became
-       * a scheduled round, and the register has to be able to say so without walking the candidate
-       * through stages nobody used. Every stage moves through the same Why dialog as Reject and On
-       * Hold, so a selection made early still records the reason it was made.
-       *
-       * The one row that does not get it is one already Selected, where it would move the stage to
-       * where it already is - the same rule Reject and On Hold each keep.
-       */
-      const selectable = candidate.status !== SELECTED_STATUS;
-      const selectItem = { label: "Mark Selected", onSelect: () => setDecision({ candidate, status: SELECTED_STATUS }) };
-      return <OptionsMenu
-        ariaLabel={`Actions for ${candidate.candidateCode || "candidate"}`}
-        menuClassName="w-52"
-        items={[
-          // Enabled, and it does what clicking the row does: opens the record beside the table. It
-          // was greyed while it led nowhere the row did not; now it is the first thing a menu on a
-          // row somebody is reading should offer.
-          { label: "View", onSelect: () => setViewCandidate(candidate) },
-          /*
-           * **Reading and correcting, together at the top.**
-           *
-           * The two things somebody does to *the candidate* rather than to their hiring - open the
-           * record, put a mistyped number right - and they were scattered: second on one stage,
-           * fourth on another, below an invite's three entries on a third. Everything under them is
-           * about the hiring itself, in the order that stage's work happens.
-           *
-           * Offered at **every** stage. It used to be withheld in two - a row waiting on its
-           * screening form, and one at Yet to Connect that "held nothing anybody had learned yet" -
-           * and both readings were wrong about what Edit is for. A number arrives mistyped from a
-           * sheet, a name comes through in capitals, a position is filed against the wrong
-           * department: those are corrections to what *arrived*, and they are most needed exactly
-           * where nobody has touched the record yet. Withholding it there meant the one stage with
-           * the most unchecked data was the one stage that could not be put right.
-           *
-           * It still reads **Review** rather than Edit on a submitted form, which is the same entry
-           * saying what the row is for at that stage.
-           */
-          editItem,
-          ...(onboardedStage ? [
-            ...(liveOnboarding ? [
-              onboardingInvite.onboardingUrl
-                ? { label: "Copy Link", onSelect: () => void copyOnboardingLink(onboardingInvite) }
-                : { label: "Copy Link", disabled: true, title: "This invite's link cannot be rebuilt. Cancel it and send a new one to get one." },
-              { label: "Edit Invite", onSelect: () => setOnboarding({ ...candidate, editInvite: onboardingInvite }) },
-            ] : []),
-            ...(rejectable ? [rejectItem] : []),
-            ...(liveOnboarding ? [
-              { label: "Cancel Invite", tone: "danger", onSelect: () => setPendingCancelOnboarding({ invite: onboardingInvite, candidate }) },
-            ] : []),
-            { label: "Delete", tone: "danger", onSelect: () => setPendingDelete(candidate) },
-          ] : selectedStage ? [
-            /*
-             * Taking them on, which is what this row is now for. It opens the Employee Repository's
-             * own invite dialog rather than a second one of this module's: an onboarding invite is
-             * the repository's record and always has been, and two screens raising the same invite
-             * would be two places to fix when it changes.
-             */
-            ...(mayInvite ? [onboardingItem] : []),
-            ...(rejectable ? [rejectItem] : []),
-            { label: "Delete", tone: "danger", onSelect: () => setPendingDelete(candidate) },
-          ] : waiting ? [
-            /*
-             * The form is out, so its link and its details are what this row is asked about. Both
-             * go when there is nothing live to act on - a stage typed straight onto a row by a
-             * sheet, say, with no form behind it - rather than sitting there refusing.
-             */
-            ...(form?.live ? [
-              form.invite.applicationUrl
-                ? { label: "Copy Link", onSelect: () => void copyInviteLink(form.invite) }
-                : { label: "Copy Link", disabled: true, title: "This form's link cannot be rebuilt. Cancel it and send a new one to get one." },
-              // The dialog's own Edit screen, opened straight onto this form. The link is kept,
-              // which is the whole point of correcting one rather than cancelling and re-sending.
-              { label: "Edit Invite", onSelect: () => setInviteDialog({ mode: "create", candidate, editInvite: form.invite }) },
-            ] : []),
-            /*
-             * Turning them down. Not red, and not behind a confirmation: a stage is a word on a row
-             * that can be moved back, and it is offered with **Undo** instead, which restores the
-             * stage it came from. Cancel Form below is the red one because a cancelled link cannot
-             * be revived - the token is stored hashed.
-             *
-             * Parking them reads first: a candidate whose form is still out can be put aside as
-             * readily as turned down, and the gentler of the two answers comes before the harsher.
-             */
-            /*
-             * **Mark Form Submitted** reads first: it is the thing that ends the waiting, and the
-             * answers a form would have carried can arrive by any route - a WhatsApp reply, an
-             * emailed CV, a phone call. Everything under it is what to do while the wait goes on.
-             */
-            { label: "Mark Form Submitted", onSelect: () => void markFormSubmitted(candidate) },
-            /*
-             * No scheduling here, and no Mark Selected.
-             *
-             * This row is one thing: somebody the studio is **waiting on**. A conversation is put in
-             * the diary after their form has been read, not before it has arrived - a round booked
-             * against answers nobody has is a round somebody has to move - and selecting them is
-             * the same mistake one stage further on. Both are on the menu the moment the form comes
-             * back. What is left is the waiting itself: hand them the link again, correct what the
-             * form was raised on, park them, turn them down, or call the form off.
-             */
-            ...(holdable ? [holdItem] : []),
-            ...(rejectable ? [rejectItem] : []),
-            ...(form?.live ? [
-              { label: "Cancel Form", tone: "danger", onSelect: () => setPendingCancelInvite({ invite: form.invite, candidate }) },
-            ] : []),
-          ] : [
-            // Every other stage: the plain menu, which is the hiring itself in the order its work
-            // happens - the screening form, the interview, then the answer.
-            /*
-             * One entry about the form, or none. A live form gets **Copy Link**; one already
-             * **submitted** gets nothing, because Edit is the answer to a form that has arrived and
-             * asking again somebody who has answered is the one thing nobody wants; anything else -
-             * never asked, lapsed, called off - gets **Send Screening Form**.
-             */
-            ...(form?.live ? [
-              form.invite.applicationUrl
-                ? { label: "Copy Link", onSelect: () => void copyInviteLink(form.invite) }
-                : { label: "Copy Link", disabled: true, title: "This form's link cannot be rebuilt. Cancel it and send a new one to get one." },
-            ] : form?.submitted ? [] : [
-              { label: "Send Screening Form", onSelect: () => setInviteDialog({ mode: "create", candidate }) },
-            ]),
-            // Beside the form, because those two are the whole of what an untouched row offers: send
-            // them the form, or chase them. A Follow Up row gets the same pair again.
-            ...(followable ? [followUpItem] : []),
-            scheduleItem,
-            ...(editScheduleItem ? [editScheduleItem] : []),
-            // Above Delete, the way they sit above Cancel Form in the waiting menu: the stages that
-            // can be undone first, the thing that cannot be after them.
-            ...(selectable ? [selectItem] : []),
-            ...(holdable ? [holdItem] : []),
-            ...(rejectable ? [rejectItem] : []),
-            { label: "Delete", tone: "danger", onSelect: () => setPendingDelete(candidate) },
-          ]),
-        ]}
-      />;
-    } : undefined,
-  }), [canWrite, onboardingAccess.canWrite, candidateFormState, candidateOnboardingInvites, copyInviteLink, copyOnboardingLink, markFormSubmitted]);
+    renderActions: canWrite ? (candidate) => <OptionsMenu
+      ariaLabel={`Actions for ${candidate.candidateCode || "candidate"}`}
+      menuClassName="w-52"
+      items={candidateActionItems(candidate)}
+    /> : undefined,
+  }), [canWrite, candidateActionItems]);
+
+  /*
+   * The Board: one column per stage, in the register's own order and colours. A card opens the
+   * record, as a double-click does. Dropping one runs the row's own ⋮ entry for that move, and only
+   * where the ⋮ offers it - Follow Up, Mark Selected, Put On Hold and Reject each open the same Why
+   * dialog they always do, and Mark Form Submitted acts directly. The stages the popup's pills move
+   * a candidate to (the form, a round, onboarding) are not drop targets: those ask their own
+   * questions inside the record, which a card opens.
+   */
+  const boardColumns = useMemo(() => CANDIDATE_STATUSES.map((status) => ({ value: status, className: `${candidateStatusStyles[status] || "bg-slate-400"} text-white` })), []);
+  const boardStatusOf = useCallback((candidate) => candidate.status, []);
+  /*
+   * The board holds only the pages read so far, so each column is measured against the server's
+   * count for its status - the tab counts. Those count the whole register, so they are handed over
+   * only while no column filter narrows the board.
+   */
+  const boardTotals = useMemo(() => {
+    const filtering = Object.values(appliedFilters || {}).some((value) => (Array.isArray(value) ? value.length : String(value ?? "").trim()));
+    return filtering ? null : serverCounts;
+  }, [appliedFilters, serverCounts]);
+  const canDropCandidateAt = useCallback((candidate, to) => {
+    if (!canWrite) return false;
+    const from = candidate.status;
+    const waiting = from === FORM_PENDING_STATUS;
+    const settled = from === SELECTED_STATUS || from === ONBOARDED_STATUS;
+    if (to === FORM_SUBMITTED_STATUS) return waiting;
+    if (to === FOLLOW_UP_STATUS) return from === DEFAULT_CANDIDATE_STATUS;
+    if (to === SELECTED_STATUS) return !waiting && !settled;
+    if (to === ON_HOLD_STATUS) return !settled;
+    if (to === REJECTED_STATUS) return true;
+    return false;
+  }, [canWrite]);
+  const dropCandidate = useCallback((candidate, to) => {
+    if (to === FORM_SUBMITTED_STATUS) return void markFormSubmitted(candidate);
+    return setDecision({ candidate, status: to });
+  }, [markFormSubmitted]);
 
   const updatedText = lastUpdated ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(lastUpdated) : "—";
 
@@ -1172,8 +1258,8 @@ export default function InterviewPage() {
       const code = pendingDelete.candidateCode || "That candidate";
       setEditCandidate((current) => current?.id === pendingDelete.id ? null : current);
       // The record being read closes too, or a deleted candidate stays on screen in full.
-      setViewCandidate((current) => current?.id === pendingDelete.id ? null : current);
       setInfoCandidate((current) => current?.id === pendingDelete.id ? null : current);
+      setViewCandidate((current) => current?.id === pendingDelete.id ? null : current);
       setPendingDelete(null);
       showSuccess(`${code} deleted.`);
       await load();
@@ -1204,8 +1290,8 @@ export default function InterviewPage() {
       const response = await deleteCandidatesBulk(ids);
       const gone = new Set(response?.data?.deletedIds || ids);
       setEditCandidate((current) => current && gone.has(current.id) ? null : current);
-      setViewCandidate((current) => current && gone.has(current.id) ? null : current);
       setInfoCandidate((current) => current && gone.has(current.id) ? null : current);
+      setViewCandidate((current) => current && gone.has(current.id) ? null : current);
       setPendingBulkDelete(false);
       clearSelection();
       showSuccess(response?.message || `${gone.size} candidate${gone.size === 1 ? "" : "s"} deleted.`);
@@ -1284,7 +1370,7 @@ export default function InterviewPage() {
     <section className="flex h-full min-h-0 w-full min-w-0 flex-col">
       <ModulePageHeader
         title="Interview"
-        tabs={CANDIDATE_STATUS_FILTERS.map((filter) => ({ id: filter.id, label: filter.label, count: statusCounts[filter.id] || 0 }))}
+        tabs={onBoard ? undefined : CANDIDATE_STATUS_FILTERS.map((filter) => ({ id: filter.id, label: filter.label, count: statusCounts[filter.id] || 0 }))}
         tabValue={statusFilter}
         onTabChange={changeTab}
         tabsAriaLabel="Filter candidates by status"
@@ -1312,7 +1398,7 @@ export default function InterviewPage() {
          * Export and Clear arrive beside these two from the table itself.
          */
         ownsSelectionActions
-        actions={!canWrite ? null : canSelectCandidates && selectedCount > 0 ? <>
+        actions={!canWrite ? <TableBoardSwitch value={layout} onChange={changeLayout} /> : canSelectCandidates && selectedCount > 0 ? <>
           <Button type="button" variant="danger" onClick={() => setPendingBulkDelete(true)}>
             Delete ({selectedCount.toLocaleString()})
           </Button>
@@ -1320,22 +1406,68 @@ export default function InterviewPage() {
             Change Stage ({selectedCount.toLocaleString()})
           </Button>
         </> : <>
+          <TableBoardSwitch value={layout} onChange={changeLayout} />
           <Button type="button" variant="primary" onClick={() => setAddOpen(true)}>Add Application</Button>
-          <OptionsMenu
-            ariaLabel="More interview actions"
-            menuClassName="w-48"
-            items={[
-              { label: "Bulk Entry", onSelect: () => setBulkOpen(true) },
-              { label: "Import", onSelect: () => setImportOpen(true) },
-              { label: "View All Invites", onSelect: () => setInviteDialog({ mode: "list" }) },
-            ]}
-          />
         </>}
+        /*
+         * The ⋮ ends the row, after Nebula, in the header's own trailing slot.
+         *
+         * Gated here rather than by the header: this page owns its selection actions
+         * (`ownsSelectionActions`), so the header does not stand its actions down - and a ⋮ offering
+         * Bulk Entry beside "Delete (12)" is the wrong row of controls for what is being done.
+         */
+        menu={canWrite && !(canSelectCandidates && selectedCount > 0) && <OptionsMenu
+          ariaLabel="More interview actions"
+          menuClassName="w-48"
+          items={[
+            { label: "Bulk Entry", onSelect: () => setBulkOpen(true) },
+            { label: "Import", onSelect: () => setImportOpen(true) },
+            { label: "View All Invites", onSelect: () => setInviteDialog({ mode: "list" }) },
+          ]}
+        />}
       />
 
       <FloatingNotice notice={notice} onClose={clearNotice} />
 
-      <DataTableShell className="min-h-0 flex-1" footer={<TableFooter spread className="z-30">
+      {onBoard ? <div className="flex min-h-0 flex-1 flex-col">
+        <KanbanBoard
+          rows={candidates}
+          columns={boardColumns}
+          statusOf={boardStatusOf}
+          // Under each column, what to chase, and on each card that is counted, why: not updated for a
+          // week while still being worked, or an interview date already passed. Decided columns: none.
+          columnAmount={candidateColumnFigure}
+          cardFlag={candidateFlag}
+          dateOf={appliedOn}
+          card={{
+            title: (candidate) => candidate.name,
+            subtitle: (candidate) => [candidate.candidateCode, candidate.position].filter(Boolean).join(" · "),
+            // A status the list has no name for lands in Other; the chip says which word it holds.
+            meta: (candidate) => [
+              candidate.interviewDate ? `Interview ${String(candidate.interviewDate).slice(0, 10)}` : "",
+              candidate.statusKnown === false ? `Status not recognised: ${String(candidate.status || "").trim() || "blank"}` : "",
+            ].filter(Boolean).join(" · "),
+          }}
+          onOpen={openCandidatePopup}
+          // The card's ⋮ is the row's ⋮, and like the row's it is there only for `canWrite`.
+          cardActions={canWrite ? candidateActionItems : undefined}
+          canDropAt={canDropCandidateAt}
+          onDrop={dropCandidate}
+          loading={loading}
+          totals={boardTotals}
+          noun="candidates"
+          ariaLabel="Interview candidates board"
+        />
+        {/* The register is read a page at a time, so the Board holds what has been read so far and
+            says so - with the next page one press away, rather than columns that look complete. */}
+        <TableFooter spread className="z-30">
+          <span>Last updated: {updatedText}</span>
+          <span className="flex items-center gap-3">
+            {loadingMore ? "Loading more..." : `Showing ${candidates.length.toLocaleString()} of ${totalRows.toLocaleString()}`}
+            {!loadingMore && candidates.length < totalRows && <Button type="button" onClick={loadMore}>Load more</Button>}
+          </span>
+        </TableFooter>
+      </div> : <DataTableShell className="min-h-0 flex-1" footer={<TableFooter spread className="z-30">
         <span>Last updated: {updatedText}</span>
         {/* What is on screen against what the stage holds, so scrolling reads as progress through a
             known set rather than a number that grows out of nowhere. */}
@@ -1362,7 +1494,7 @@ export default function InterviewPage() {
               // Reading, never editing - the gesture every other table in the OS answers the same
               // way. Editing is asked for by name, from the row's ⋮, which is also where the rules
               // about who may edit what already live.
-              onRowDoubleClick={setViewCandidate}
+              onRowDoubleClick={openCandidatePopup}
               defaultColumnVisibility={defaultVisibility}
               onVisibleRowsChange={setInfiniteStats}
               ariaLabel="Interview candidates table"
@@ -1413,7 +1545,7 @@ export default function InterviewPage() {
             onToggle={toggleInfoPanel}
           />
         </div>
-      </DataTableShell>
+      </DataTableShell>}
 
       {/* Add Lead's own dialog, asked of a candidate: the six things an arriving application
           carries. Everything else is on the record, which a row opens. */}
@@ -1434,6 +1566,9 @@ export default function InterviewPage() {
          */
         // Keyed per errand, so Edit Invite after Send does not open on the other one's values.
         key={onboarding.editInvite?.id || onboarding.id}
+        // Over the candidate's form when the Onboarded pill opened it from there; a dialog from the
+        // page otherwise - the same rule the resend dialog below follows.
+        layer={editCandidate ? "dialogOverPanel" : "dialog"}
         /*
          * Correcting the invite this candidate already holds keeps its link, which is the whole
          * reason it is a correction rather than a second invite. `prefill` is for the other errand
@@ -1493,15 +1628,27 @@ export default function InterviewPage() {
         mode={scheduleCandidate.mode}
         options={options}
         canWrite={canWrite}
+        /*
+         * Over the candidate popup when that is what opened it - the popup covers the page at z-120,
+         * and a dialog on the ordinary dialog layer would be drawn under its backdrop: dimmed,
+         * unreadable and unreachable. `dialog` otherwise, opened from a row's ⋮ with nothing over the
+         * table.
+         */
+        layer={editCandidate ? "dialogOverPanel" : "dialog"}
+        // Only the dialog. The popup underneath is where the candidate was being worked, and somebody
+        // who changed their mind about booking a round has not changed their mind about the record.
         onClose={() => setScheduleCandidate(null)}
         onSaved={(saved, message) => {
           setScheduleCandidate(null);
+          // The round is booked, so the errand is finished: the popup goes too rather than sitting
+          // there showing the stage as it was before this wrote it.
+          setEditCandidate(null);
           showSuccess(message);
           void load({ quiet: true });
         }}
       />}
 
-      {editCandidate && <InterviewCandidateFormPanel
+      {editCandidate && <InterviewCandidatePopup
         candidate={editCandidate}
         options={options}
         canWrite={canWrite}
@@ -1520,6 +1667,19 @@ export default function InterviewPage() {
         formSubmitted={Boolean(candidateFormState.get(editCandidate.id)?.submitted)}
         onClose={() => setEditCandidate(null)}
         onSaved={afterSave}
+        // The popup's own refusals, in the snackbar the rest of this screen uses.
+        onError={showError}
+        /*
+         * A remark posted or a message sent: the register catches up so the row and the info panel
+         * agree with the popup, and the popup **stays**. `afterSave` closes, which is right for Update
+         * and wrong here - somebody writing down what was said on a call is not finished with the
+         * record they are writing it on, and the note is usually the reason a stage is about to move.
+         */
+        onRecordChanged={(saved, message) => {
+          if (saved && infoCandidate?.id === saved.id) setInfoCandidate(saved);
+          showSuccess(message);
+          void load({ quiet: true });
+        }}
         /*
          * Resend Form saves the record first too, so HR's own corrections are kept before the form
          * goes back - then asks the question, because this one emails a person.
@@ -1529,31 +1689,39 @@ export default function InterviewPage() {
           invite: candidateFormState.get(editCandidate.id)?.invite || null,
         })}
         /*
-         * Send Screening Form saves the record first and then opens the invite dialog on it, so
-         * the link is raised against the details somebody has just corrected and the form the
-         * candidate fills in updates that row rather than creating a second one.
+         * Send Screening Form saves the record first and then opens the invite dialog **over** the
+         * popup, so the link is raised against the details somebody has just corrected and the form
+         * the candidate fills in updates that row rather than creating a second one.
+         *
+         * The popup stays open underneath. It used to be closed here, which threw away the screen the
+         * candidate was being worked on for one step of that work: somebody who closed the invite
+         * dialog - or only wanted to see what it would ask - was back at the register needing a
+         * double-click to carry on. Sending the form closes both, from the dialog's own `onInviteSent`.
          */
-        onSendApplicationForm={async (saved) => {
-          setEditCandidate(null);
-          await load();
-          setInviteDialog({ mode: "create", candidate: saved });
-        }}
+        onSendApplicationForm={(saved) => setInviteDialog({ mode: "create", candidate: saved })}
         /*
-         * The review's forward answer: the record is saved and the schedule dialog opens on what was
-         * just saved, so the round is booked against the corrections rather than against the details
-         * last written - the same arrangement Send Screening Form above uses, for the same reason.
+         * The forward answer: the record is saved and the schedule dialog opens **over** the popup on
+         * what was just saved, so the round is booked against the corrections rather than against the
+         * details last written - the same arrangement Send Screening Form above uses, for the same
+         * reason, and like it the popup stays open underneath until the round is actually booked.
          *
          * Which errand the dialog opens on is read from the saved candidate's own round count, not
-         * from the row the panel was opened from: a review that has been sitting open while somebody
+         * from the row the popup was opened from: a popup that has been sitting open while somebody
          * else scheduled a round would otherwise book a second Round 1 over the first.
          */
-        onScheduleInterview={async (saved) => {
-          setEditCandidate(null);
-          await load();
+        onScheduleInterview={(saved) => {
           const target = saved || editCandidate;
           const alreadySeen = Number(target?.interviewRound) > 0;
           setScheduleCandidate({ candidate: target, mode: alreadySeen ? SCHEDULE_MODES.next : SCHEDULE_MODES.first });
         }}
+        /*
+         * Taking the candidate on, which is the Employee Repository's errand and not this screen's -
+         * so the popup is handed it **only** where the viewer holds `HRM / Employee Management`
+         * READ_WRITE. Without it the popup gets no handler, and the Onboarded pill is refused with a
+         * sentence rather than being a press that raises a 403 and leaves the candidate where they
+         * were.
+         */
+        onOnboard={onboardingAccess.canWrite ? ((saved) => { setOnboarding(saved || editCandidate); }) : undefined}
       />}
 
       {resendTarget && <ResendApplicationFormDialog
@@ -1619,16 +1787,21 @@ export default function InterviewPage() {
         // than on a blank one - the Employee Repository's own Edit Invite does exactly this.
         initialEditInvite={inviteDialog.editInvite || null}
         options={options}
+        // Over the candidate popup when that is what opened it - see the schedule dialog above.
+        layer={editCandidate ? "dialogOverPanel" : "dialog"}
+        // Only the dialog: the popup underneath stays exactly as it was.
         onClose={() => setInviteDialog(null)}
         /*
          * Raising, correcting or cancelling a form moves the candidate's stage, so the register is
          * re-read - and so is the list of forms, because it is what decides which entries a row's
-         * ⋮ offers. Without the second read, a form just raised leaves its row still offering
-         * "Send Screening Form" until the next reload.
+         * ⋮ offers. Without the second read, a form just raised leaves its row with no **Copy
+         * Link** to show for it until the next reload.
          */
         onInviteCreated={() => { void load(); void loadInvites(); }}
         onInviteChanged={() => { void load(); void loadInvites(); }}
-        onInviteSent={(message) => { showSuccess(message || "Screening form sent."); void load(); void loadInvites(); }}
+        // Sent is the errand finished, and the dialog closes itself - so the popup it was opened over
+        // closes with it rather than being left showing a stage this send has just moved.
+        onInviteSent={(message) => { setEditCandidate(null); showSuccess(message || "Screening form sent."); void load(); void loadInvites(); }}
         onInviteSendFailed={(reason) => { showError(`${reason}. Send the message to them yourself.`); void load(); void loadInvites(); }}
       />}
 

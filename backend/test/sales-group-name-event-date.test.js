@@ -16,7 +16,7 @@ const day = new Date("2026-10-04T00:00:00Z");
 
 test("a known date is the last segment of the name", () => {
   assert.equal(buildGeneratedName({ ...dumDum, mainEventDate: day }), "WED 1t1 Erode Arun & Priya | SM | Erode | 4-Oct-2026");
-  assert.equal(buildGeneratedName({ ...quaQua, mainEventDate: day }), "QQErode Meena | Birthday | NSM | IH | GOU | Erode | 4-Oct-2026");
+  assert.equal(buildGeneratedName({ ...quaQua, mainEventDate: day }), "QQ Erode Meena | Birthday | NSM | IH | GOU | Erode | 4-Oct-2026");
   assert.equal(buildGeneratedName({ ...corp, mainEventDate: day }), "CORP Erode Acme | Erode | 4-Oct-2026");
 });
 

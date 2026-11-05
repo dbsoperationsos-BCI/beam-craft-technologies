@@ -4,8 +4,10 @@ import { useEffect, useState } from "react";
 import Button from "@/components/shared/Button";
 import ComboBoxField from "@/components/shared/ComboBoxField";
 import DateField from "@/components/shared/DateField";
+import HelpTip from "@/components/shared/HelpTip";
 import PhoneField from "@/components/shared/PhoneField";
 import { isCompletePhoneNumber } from "@/lib/phoneNumber";
+import { markedFieldsMessage } from "@/lib/formErrors.mjs";
 import { getDuplicateCandidates } from "@/services/hrm/interview.service";
 import TextAreaField from "@/components/shared/TextAreaField";
 import TextField from "@/components/shared/TextField";
@@ -60,7 +62,7 @@ import { DEFAULT_CANDIDATE_STATUS } from "@/constants/interviewConfig";
  *   * **The candidate fills it in.** Send Screening Form, on the row's ⋮, sends them a link to
  *     their own form - which is where the studio wanted that detail to come from anyway.
  *   * **HR edits the record.** Opening a candidate gives the full form
- *     (`InterviewCandidateFormPanel`), which is where an imported or submitted application is
+ *     (`InterviewCandidatePopup`), which is where an imported or submitted application is
  *     corrected - exactly as the CRM asks little on Add Lead and everything in the lead popup.
  *
  * ── Closing asks, once there is something to lose ──
@@ -161,12 +163,23 @@ export default function InterviewAddApplicationDialog({ options = {}, onClose, o
       : "";
   };
 
-  /** What the server would refuse, and the three answers that make a candidate worth filing. */
-  const REQUIRED = [["name", "Candidate Name"], ["phone", "Contact"], ["position", "Position Applied For"]];
+  /**
+   * What the server would refuse, and the two answers that make a candidate worth filing.
+   *
+   * **Position Applied For is not one of them.** It is asked, and it is what the register files a
+   * candidate under, but it is regularly not known at the moment an application is written down - a
+   * walk-in, a number passed on by a friend of the studio, a CV in the inbox with no covering note.
+   * Refusing the row for it bought a guess typed into the field, or the candidate not being written
+   * down at all. Their own screening form still asks them, which is where the real answer comes from.
+   */
+  const REQUIRED = [["name", "Candidate Name"], ["phone", "Contact"]];
   const missing = REQUIRED.filter(([key]) => !String(form[key] ?? "").trim()).map(([, label]) => label);
   const emailProblem = form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(form.email).trim())
     ? "Enter a valid email address."
     : "";
+
+  // The line above the marked boxes - how many, since each says its own.
+  const summary = showErrors ? markedFieldsMessage(missing.length + (emailProblem ? 1 : 0)) : "";
 
   /** A field's own message, shown under it once Confirm has been pressed. */
   const problem = (key, label) => {
@@ -229,6 +242,7 @@ export default function InterviewAddApplicationDialog({ options = {}, onClose, o
                 <div className="grid gap-5 md:grid-cols-3">
                   <TextField
                     label="Candidate Name"
+                    helperText="Their full name, as it should appear on the interview register."
                     required
                     error={problem("name", "Candidate Name")}
                     value={form.name}
@@ -236,6 +250,7 @@ export default function InterviewAddApplicationDialog({ options = {}, onClose, o
                   />
                   <PhoneField
                     label="Contact"
+                    helperText="The number HR calls or messages them on; it must be new to the register."
                     field="phone"
                     required
                     error={problem("phone", "Contact")}
@@ -248,7 +263,7 @@ export default function InterviewAddApplicationDialog({ options = {}, onClose, o
                       applied for is their words. */}
                   <ComboBoxField
                     label="Position Applied For"
-                    required
+                    helperText="Pick a studio designation, or type the role they asked for."
                     error={problem("position", "Position Applied For")}
                     value={form.position}
                     onChange={(value) => update("position", value)}
@@ -262,6 +277,7 @@ export default function InterviewAddApplicationDialog({ options = {}, onClose, o
                       often has no address to give. */}
                   <TextField
                     label="Email"
+                    helperText="Where the application form is sent; can be added later if unknown."
                     error={problem("email", "Email")}
                     note={clashNote("email")}
                     value={form.email}
@@ -270,12 +286,14 @@ export default function InterviewAddApplicationDialog({ options = {}, onClose, o
                   />
                   <TextField
                     label="Experience"
+                    helperText="How much work experience they have, in your own words."
                     value={form.experience}
                     onChange={(event) => update("experience", event.target.value)}
                     placeholder="e.g. 3 years, or Fresher"
                   />
                   <ComboBoxField
                     label="Source"
+                    helperText="Where the candidate heard about us, such as a job portal or referral."
                     value={form.source}
                     onChange={(value) => update("source", value)}
                     options={sourceOptions}
@@ -290,6 +308,7 @@ export default function InterviewAddApplicationDialog({ options = {}, onClose, o
                 <div className="grid gap-5 md:grid-cols-3">
                   <DateField
                     label="Next Follow-up Date"
+                    helperText="The day to contact them next; it brings them back on the register."
                     value={form.nextFollowUpDate}
                     onChange={(value) => update("nextFollowUpDate", value)}
                   />
@@ -297,7 +316,7 @@ export default function InterviewAddApplicationDialog({ options = {}, onClose, o
                 <div className="space-y-2">
                   {/* No placeholder: the heading says what the box is for, and a sentence of
                       example text inside an empty box is one more thing to read past. */}
-                  <h4 className="text-sm font-semibold text-slate-600">Remarks</h4>
+                  <h4 className="text-sm font-semibold text-slate-600">Remarks<HelpTip text="HR's own notes on this candidate, kept on their record." /></h4>
                   <TextAreaField
                     label=""
                     rows={5}
@@ -313,9 +332,7 @@ export default function InterviewAddApplicationDialog({ options = {}, onClose, o
           {/* The server's refusal, said where the fields are rather than only in a snackbar that
               may have gone by the time somebody looks up. */}
           {error && <p role="alert" className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-normal text-red-700 sm:text-sm">{error}</p>}
-          {showErrors && missing.length > 0 && <p role="alert" className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-normal text-red-700 sm:text-sm">
-            Fill in {missing.join(", ")}.
-          </p>}
+          {summary && <p role="alert" className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-normal text-red-700 sm:text-sm">{summary}</p>}
         </div>
 
         {/* Confirm stays live and marks the empty boxes when pressed, the same as Add Lead: a list
@@ -336,7 +353,7 @@ export default function InterviewAddApplicationDialog({ options = {}, onClose, o
       message="It has not been saved. Go back and press Confirm to keep it."
       cancelLabel="Go Back"
       confirmLabel="Discard"
-      tone="danger"
+      primaryAction="cancel"
       layer="dialogOverPanel"
       onCancel={() => setConfirmingClose(false)}
       onConfirm={() => { setConfirmingClose(false); onClose?.(); }}

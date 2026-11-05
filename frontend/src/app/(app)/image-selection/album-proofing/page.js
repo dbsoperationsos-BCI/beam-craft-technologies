@@ -10,6 +10,7 @@ import ImageSelectionNavigation from "@/components/image-selection/ImageSelectio
 import ProjectActionDialog from "@/components/image-selection/ProjectActionDialog";
 import ProjectSidebar from "@/components/image-selection/ProjectSidebar";
 import ProofingStatusChip from "@/components/image-selection/album-proofing/ProofingStatusChip";
+import { albumProofingSections } from "@/lib/albumProofingDashboard.mjs";
 import { useModuleAccess, useRouteAccess } from "@/components/auth/PermissionsProvider";
 import {
   archiveAlbumProofingProject,
@@ -44,6 +45,10 @@ function AlbumProofing() {
   // Set by the floating upload dock when a reader clicks an upload started in this section. `at`
   // only makes each click a distinct URL so repeat clicks still jump back to the project.
   const requestedProjectId = searchParams.get("projectId");
+  // Set by the dashboard when a reader opens an album from its table: the project, and the album
+  // to open inside it. `?new=1` is the dashboard's New Project, which this page's form owns.
+  const requestedAlbumId = searchParams.get("albumId");
+  const requestedNew = searchParams.get("new") === "1";
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState("dateAdded");
@@ -102,6 +107,29 @@ function AlbumProofing() {
   );
   const activeProject = linkedProject || selectedProject;
 
+  // The dashboard's deep links: open the requested album once its project is in hand, and open
+  // the New Project form when asked for one. Each runs once per link, since selecting anything
+  // clears the query.
+  // Deferred a tick, this codebase's convention for state set in answer to a URL. A link to a
+  // project this list does not hold (archived, or deleted since the dashboard was read) says so
+  // rather than landing on the plain prompt as if nothing had been asked for.
+  useEffect(() => {
+    if (!requestedProjectId || isLoading) return undefined;
+    const timer = window.setTimeout(() => {
+      if (!linkedProject) { setNotice("That project is no longer in the list — it may have been archived or deleted."); return; }
+      if (requestedAlbumId) setOpenAlbumId(requestedAlbumId);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [requestedProjectId, linkedProject, requestedAlbumId, isLoading]);
+  useEffect(() => {
+    if (!requestedNew || !canWrite) return undefined;
+    const timer = window.setTimeout(() => {
+      setShowNewProject(true); setSelectedProject(null); setEditingProject(null);
+      router.replace("/image-selection/album-proofing", { scroll: false });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [requestedNew, canWrite, router]);
+
   function selectProject(project) {
     setSelectedProject(project);
     if (requestedProjectId) router.replace("/image-selection/album-proofing", { scroll: false });
@@ -149,7 +177,7 @@ function AlbumProofing() {
   return (
     // Fills the flex column AppShell provides, exactly like the Projects page beside it.
     <section className="flex min-h-0 flex-1 flex-col bg-white">
-      <ImageSelectionNavigation title="Album Proofing" sections={[]} />
+      <ImageSelectionNavigation title="Album Proofing" sections={albumProofingSections} />
 
       {/* On a phone the two rows stack and this grid scrolls; from md up the sidebar and the
           proofing pane scroll on their own, so the shell never scrolls as a page. */}
@@ -215,7 +243,7 @@ function AlbumProofing() {
                   its full proofing workspace. Album actions answer to the Album Proofing grant,
                   not to Project Management. */}
               {openAlbumId
-                ? <AlbumProofWorkspace key={openAlbumId} albumId={openAlbumId} canWrite={albumAccess.canWrite} qcCanWrite={qcAccess.canWrite} onReviewContext={setReviewContext} onBack={() => setOpenAlbumId(null)} />
+                ? <AlbumProofWorkspace key={openAlbumId} albumId={openAlbumId} canWrite={albumAccess.canWrite} qcCanWrite={qcAccess.canWrite} onReviewContext={setReviewContext} onBack={() => { setOpenAlbumId(null); if (requestedAlbumId) router.replace("/image-selection/album-proofing", { scroll: false }); }} />
                 : <AlbumsPanel key={activeProject.id} project={activeProject} canWrite={albumAccess.canWrite} onOpen={(album) => setOpenAlbumId(album.id)} />}
             </>
           ) : (

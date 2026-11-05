@@ -4,6 +4,8 @@ const { workingEmployeeStatuses } = require("../../../services/employeeOptionLis
 // restated because `EMPLOYEE_KEY_SQL` below is its mirror in SQL, and the two must agree.
 const { ensureCallLogTable, ensureCallIds, numberKey } = require("../crm-leads/callLogService");
 const { buildWhere, buildUsageWhere, dayStart, dayEnd, DURATION_BANDS, CALL_TYPES, CALL_METHODS, VERTICALS } = require("./filters");
+const { studioDaySql } = require("../../../services/studioDay");
+const { measuredTotals } = require("./signedIn");
 // Who counts as working here, from HR's own read service rather than restated - so the Employee
 // filter offers exactly the people the Employee Repository's Active tab lists. See
 // `repositoryEmployees`.
@@ -394,7 +396,7 @@ async function resolveEmployeeFilter(filters = {}, scope = null) {
    * of its own - it grants nothing (the same rows are reachable by filtering on the number itself)
    * but a field the server owns should be written only by the server.
    */
-  const { employeeNumbers: _ignored, ...rest } = filters;
+  const { employeeNumbers: _ignoredNumbers, employeeIds: _ignoredIds, ...rest } = filters;
   // A list now, however the query string wrote it - see `employeeList` in `filters.js`.
   const chosen = Array.isArray(rest.employee)
     ? rest.employee.map((value) => String(value || "").trim()).filter(Boolean)
@@ -414,12 +416,28 @@ async function resolveEmployeeFilter(filters = {}, scope = null) {
    */
   const employees = await prisma.employee.findMany({
     where: { employeeName: { in: chosen }, ...visibleEmployeeWhere(scope) },
-    select: { contactNumber: true },
+    select: { id: true, contactNumber: true },
   });
-  // One query for the whole list rather than one per name: the numbers are all matched by the same
-  // `IN`, so resolving them individually would be several round trips for one clause.
+  /*
+   * The ids first, because that is what a call actually carries.
+   *
+   * The filter bar sends a name - the repository's own spelling - and the call log holds whatever
+   * the handset is labelled in the Callyzer app, which is a different string whenever somebody has
+   * set an Employee Code and named the phone something else. So choosing a person answered "no
+   * calls" for somebody who had made hundreds. `matched_employee_id` is the answer the webhook
+   * worked out at delivery, and filtering on it is filtering on the same thing the reports now
+   * group by.
+   *
+   * The numbers are kept beside them and are nearly always empty: they are the repository's
+   * *contact* number, and the handset reports the company SIM, so the two only meet where somebody
+   * happens to be logged under their own phone.
+   */
+  const ids = [...new Set(employees.map((employee) => employee?.id).filter(Boolean))];
+  // One query for the whole list rather than one per name: they are all matched by the same `IN`,
+  // so resolving them individually would be several round trips for one clause.
   const numbers = [...new Set(employees.map((employee) => String(employee?.contactNumber || "").trim()).filter(Boolean))];
-  return numbers.length ? { ...rest, employeeNumbers: numbers } : rest;
+  if (!ids.length && !numbers.length) return rest;
+  return { ...rest, ...(ids.length ? { employeeIds: ids } : {}), ...(numbers.length ? { employeeNumbers: numbers } : {}) };
 }
 
 /**
@@ -498,7 +516,7 @@ async function summary(filters, scope = null) {
 
   // One row a day, so the page can show the shape of the range rather than one number for all of it.
   const byDay = await query(
-    `SELECT DATE(\`c\`.\`called_at\`) AS \`day\`,
+    `SELECT ${studioDaySql("\`c\`.\`called_at\`")} AS \`day\`,
             COUNT(*) AS \`calls\`,
             COUNT(DISTINCT \`c\`.\`client_number\`) AS \`clients\`,
             SUM(CASE WHEN \`c\`.\`duration_seconds\` > 0 THEN 1 ELSE 0 END) AS \`connected\`,
@@ -597,7 +615,7 @@ async function leadAnalysis(filters, scope = null) {
             MAX(\`c\`.\`enquiry_id\`) AS \`enquiryId\`,
             COALESCE(MAX(\`l\`.\`vertical\`), '') AS \`vertical\`,
             COALESCE(MAX(\`l\`.\`status\`), '') AS \`status\`,
-            COALESCE(MAX(\`l\`.\`crm\`), '') AS \`crm\`,
+            COALESCE(MAX(COALESCE((SELECT \`e\`.\`employee_name\` FROM \`employee\` AS \`e\` WHERE \`e\`.\`id\` = \`l\`.\`owner_employee_id\`), \`l\`.\`crm\`)), '') AS \`crm\`,
             COUNT(*) AS \`calls\`,
             SUM(CASE WHEN \`c\`.\`duration_seconds\` > 0 THEN 1 ELSE 0 END) AS \`connected\`,
             COALESCE(SUM(\`c\`.\`duration_seconds\`), 0) AS \`totalSeconds\`,
@@ -642,7 +660,8 @@ function unansweredReport({ direction, having }) {
               MAX(\`c\`.\`enquiry_id\`) AS \`enquiryId\`,
               COALESCE(MAX(\`l\`.\`vertical\`), '') AS \`vertical\`,
               COALESCE(MAX(\`l\`.\`status\`), '') AS \`status\`,
-              COALESCE(MAX(\`c\`.\`employee_name\`), '') AS \`employee\`,
+              // Read through the match like Call History below it; the fallback is Callyzer's label.
+              COALESCE(MAX(COALESCE(NULLIF(TRIM(\`e\`.\`employee_name\`), ''), \`c\`.\`employee_name\`)), '') AS \`employee\`,
               COUNT(*) AS \`attempts\`,
               MAX(\`c\`.\`called_at\`) AS \`lastCalledAt\`
          FROM ${CALL_LOG} ${sql}
@@ -692,7 +711,15 @@ async function callHistory(filters, scope = null) {
             \`c\`.\`enquiry_id\` AS \`enquiryId\`,
             COALESCE(NULLIF(TRIM(\`l\`.\`name\`), ''), \`c\`.\`client_name\`, '') AS \`client\`,
             COALESCE(\`c\`.\`client_number\`, '') AS \`clientNumber\`,
-            COALESCE(\`c\`.\`employee_name\`, '') AS \`employee\`,
+            /*
+             * The repository's own spelling, through the match the webhook made, and Callyzer's
+             * label where it made none - the same shape as \`client\` two lines above, which reads
+             * the lead's name and falls back to what the call carried. This showed the handset's
+             * label alone, so a phone named anything but its owner read as somebody who is not in
+             * the repository, and the Employee filter - which offers the repository's spelling -
+             * found none of those calls.
+             */
+            COALESCE(NULLIF(TRIM(\`e\`.\`employee_name\`), ''), \`c\`.\`employee_name\`, '') AS \`employee\`,
             COALESCE(\`c\`.\`call_type\`, '') AS \`callType\`,
             COALESCE(\`c\`.\`call_method\`, '') AS \`callMethod\`,
             \`c\`.\`duration_seconds\` AS \`durationSeconds\`,
@@ -850,7 +877,7 @@ async function whatsappUsage(filters, scope = null) {
      * report about WhatsApp use.
      */
     // Time with the chat panel actually open, which is what the usage column on this report means.
-    const measured = await measuredUsage({ from: clean.from, to: clean.to, context: "whatsapp" });
+    const measured = await measuredUsage({ from: clean.from, to: clean.to, context: "whatsapp", scope });
 
     const byEmployee = new Map();
     for (const row of rows) {
@@ -914,6 +941,39 @@ async function whatsappUsage(filters, scope = null) {
  * Grouped by the resolved name rather than the user id, because an activity row written before the
  * actor was linked has a name and no id, and those are the same person's work.
  */
+/**
+ * Every employee still working here - not archived, employment status one that counts as working -
+ * as Application Usage lists them: by their login's name (what usage is keyed on), or their own name
+ * where they have no login, with that login's last sign-in. Narrowed to the people this reader may
+ * see (`scope`, on the employee, their login and the employee's branch) and the employee filter.
+ * Somebody who has left, and a login with no employee behind it, are not among them.
+ */
+async function activeEmployeesForUsage(scope = null, employees = []) {
+  const statuses = await workingEmployeeStatuses();
+  if (!statuses.length) return [];
+  const nameExpr = "COALESCE(NULLIF(TRIM(`u`.`name`), ''), TRIM(`e`.`employee_name`))";
+  const clauses = ["`e`.`archived_at` IS NULL", `\`e\`.\`employment_status\` IN (${statuses.map(() => "?").join(", ")})`];
+  const params = [...statuses];
+  if (employees.length) {
+    clauses.push(`${nameExpr} IN (${employees.map(() => "?").join(", ")})`);
+    params.push(...employees);
+  }
+  if (scope) {
+    const { clause, params: scopeParams } = scope.sql({ employee: "`e`.`id`", user: "`u`.`id`", branch: "`e`.`branch_id`" });
+    clauses.push(clause);
+    params.push(...scopeParams);
+  }
+  const rows = await query(
+    `SELECT ${nameExpr} AS \`employee\`, MAX(\`u\`.\`last_login_at\`) AS \`lastLoginAt\`
+       FROM \`employee\` AS \`e\`
+       LEFT JOIN \`user\` AS \`u\` ON \`u\`.\`linked_employee_id\` = \`e\`.\`id\`
+      WHERE ${clauses.join(" AND ")}
+      GROUP BY \`employee\``,
+    params,
+  );
+  return rows.map((row) => ({ employee: String(row.employee || "").trim(), lastLoginAt: row.lastLoginAt || null })).filter((row) => row.employee);
+}
+
 async function applicationUsage(filters, scope = null) {
   const { sql, params, filters: clean, ignored } = buildUsageWhere(filters, {
     dateColumn: "`a`.`created_at`",
@@ -964,18 +1024,52 @@ async function applicationUsage(filters, scope = null) {
      * The WhatsApp report reads the "whatsapp" context to answer the narrower question of how much
      * of that time was spent in the chat, which is what that column there means.
      */
-    const measured = await measuredUsage({ from: clean.from, to: clean.to, context: "app" });
-    return {
-      filters: clean,
-      ignored,
-      rows: rows.map((row) => ({
-        ...rowNumbers(row, ["actions", "leads", "created", "updates", "statusChanges", "remarks"]),
-        ...usageFrom(measured.get(String(row.employee || "").trim())),
-        firstAt: row.firstAt ? new Date(row.firstAt).toISOString() : null,
-        lastAt: row.lastAt ? new Date(row.lastAt).toISOString() : null,
-        lastLoginAt: row.lastLoginAt ? new Date(row.lastLoginAt).toISOString() : null,
-      })),
-    };
+    /*
+     * Everybody who used the application, not only those with CRM activity.
+     *
+     * The rows above come from the CRM's activity log, so on their own they listed the sales team
+     * alone. The measured time is everybody's - every signed-in screen beats - so it is read here as
+     * a list in its own right, narrowed to the people this reader may see (`scope`) and the ones
+     * they filtered to, exactly as Work Hours lists them; somebody with time but no CRM activity
+     * gets a row with zero CRM counts.
+     */
+    const employees = Array.isArray(clean.employee) ? clean.employee : [clean.employee].filter(Boolean);
+    const measured = await measuredUsage({ from: clean.from, to: clean.to, context: "app", scope, employees });
+    const iso = (value) => (value ? new Date(value).toISOString() : null);
+    const crmRows = rows.map((row) => ({
+      ...rowNumbers(row, ["actions", "leads", "created", "updates", "statusChanges", "remarks"]),
+      ...usageFrom(measured.get(String(row.employee || "").trim())),
+      firstAt: iso(row.firstAt),
+      lastAt: iso(row.lastAt),
+      lastLoginAt: iso(row.lastLoginAt),
+    }));
+    const listed = new Set(crmRows.map((row) => String(row.employee || "").trim()));
+    const usageOnly = [...measured.entries()]
+      .filter(([employee]) => employee && !listed.has(employee))
+      .map(([employee, usage]) => ({
+        employee, actions: 0, leads: 0, created: 0, updates: 0, statusChanges: 0, remarks: 0,
+        ...usageFrom(usage),
+        firstAt: null, lastAt: null, lastLoginAt: iso(usage.lastLoginAt),
+      }))
+      .sort((a, b) => b.usageSeconds - a.usageSeconds || a.employee.localeCompare(b.employee));
+    /*
+     * Every active employee, and only them (`activeEmployeesForUsage`): those who used the
+     * application as above, and everyone else still working with a 0m row - so somebody who never
+     * opened it in the range shows rather than goes missing.
+     */
+    const active = await activeEmployeesForUsage(scope, employees);
+    const activeNames = new Set(active.map((row) => row.employee));
+    const used = [...crmRows, ...usageOnly].filter((row) => activeNames.has(String(row.employee || "").trim()));
+    const shown = new Set(used.map((row) => String(row.employee || "").trim()));
+    const notUsed = active
+      .filter((row) => !shown.has(row.employee))
+      .map((row) => ({
+        employee: row.employee, actions: 0, leads: 0, created: 0, updates: 0, statusChanges: 0, remarks: 0,
+        ...usageFrom(null),
+        firstAt: null, lastAt: null, lastLoginAt: iso(row.lastLoginAt),
+      }))
+      .sort((a, b) => a.employee.localeCompare(b.employee));
+    return { filters: clean, ignored, rows: [...used, ...notUsed] };
   } catch (error) {
     console.warn("Unable to build the application usage report:", error?.message || error);
     return { filters: clean, ignored, rows: [] };
@@ -1018,10 +1112,17 @@ function hoursMinutes(seconds) {
  * actor was linked has only a name to offer. Two logins with one name would be counted together,
  * which is the same compromise the reports already make everywhere else.
  *
- * `context` narrows it: `"whatsapp"` for time with the chat panel open, or null for the whole
- * application, which is every context added together.
+ * `context` narrows it: `"whatsapp"` for time with the chat panel open, `"app"` for the application
+ * at large. `scope` and `employees` narrow it to the people a reader may see and the ones they
+ * filtered to - needed where the measure is the list itself (Application Usage lists everybody who
+ * used the application), not only looked up by name.
+ *
+ * Answers, per name, the seconds used, the sittings, and `inactiveSeconds`: the time signed in less
+ * the time used, day by day. Signed in is read from the audit log's Login and Logout lines for the
+ * application at large only - Login-to-Logout less time in the chat panel is not a figure that
+ * means anything, so the WhatsApp context keeps the span of its own use. See `signedIn.js`.
  */
-async function measuredUsage({ from, to, context = null } = {}) {
+async function measuredUsage({ from, to, context = null, scope = null, employees = [], now = new Date() } = {}) {
   const clauses = [];
   const params = [];
   /*
@@ -1040,49 +1141,94 @@ async function measuredUsage({ from, to, context = null } = {}) {
   if (from) { clauses.push("`s`.`ended_at` >= ?"); params.push(dayStart(from)); }
   if (to) { clauses.push("`s`.`started_at` <= ?"); params.push(dayEnd(to)); }
   if (context) { clauses.push("`s`.`context` = ?"); params.push(context); }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  /*
+   * Whose time: the people this reader may see and the ones they filtered to. Built once and used
+   * by both reads below, on the `user` row each joins, so the sign-in lines are narrowed to exactly
+   * the people whose stretches are.
+   */
+  const people = [];
+  const peopleParams = [];
+  if (employees.length) {
+    people.push(`COALESCE(NULLIF(TRIM(\`u\`.\`name\`), ''), 'Unknown') IN (${employees.map(() => "?").join(", ")})`);
+    peopleParams.push(...employees);
+  }
+  if (scope) {
+    const { clause, params: scopeParams } = scope.sql({ user: "`u`.`id`", branch: "`u`.`branch_id`" });
+    people.push(clause);
+    peopleParams.push(...scopeParams);
+  }
+  const where = [...clauses, ...people];
 
   try {
-    const rows = await query(
+    const dayRows = await query(
       /*
        * Active seconds, and the span they are spread across, per person per day.
        *
-       * The span is what makes an inactive figure possible. A stretch ends when somebody stops
-       * touching anything for the usage timeout, and the next one begins when they come back, so
-       * the gaps *between* a day's stretches are exactly the time they were signed in and idle.
-       * Span minus active is those gaps.
+       * A day is the unit somebody actually works in - the studio's day, midnight to midnight in
+       * Asia/Kolkata, which `studioDaySql` reads off the stored UTC column. `DATE()` of the column
+       * itself filed anything before 05:30 under the day before and ran every day from half past
+       * five. The days are added up in `measuredTotals`, not here: taken across a whole month the
+       * span would run from the first morning to the last evening and count every night and
+       * weekend as inactive time.
        *
-       * Grouped by day first and then summed, which is the part that has to be right: taken across
-       * a whole month the span would run from the first morning to the last evening and count every
-       * night and weekend as inactive time. A day is the unit somebody actually works in.
+       * The span - first stretch to last - is the fallback for a day with no sign-in line to read
+       * the signed-in time from. Per login as well as per name, so the sign-in lines below can be
+       * matched to the person they belong to before the names are merged.
        */
-      `SELECT \`employee\`, SUM(\`seconds\`) AS \`seconds\`, SUM(\`sessions\`) AS \`sessions\`,
-              SUM(\`spanSeconds\`) AS \`spanSeconds\`
-         FROM (
-           SELECT COALESCE(NULLIF(TRIM(\`u\`.\`name\`), ''), 'Unknown') AS \`employee\`,
-                  DATE(\`s\`.\`started_at\`) AS \`day\`,
-                  SUM(TIMESTAMPDIFF(SECOND, \`s\`.\`started_at\`, \`s\`.\`ended_at\`)) AS \`seconds\`,
-                  COUNT(*) AS \`sessions\`,
-                  TIMESTAMPDIFF(SECOND, MIN(\`s\`.\`started_at\`), MAX(\`s\`.\`ended_at\`)) AS \`spanSeconds\`
-             FROM \`app_usage_session\` AS \`s\`
-             JOIN \`user\` AS \`u\` ON \`u\`.\`id\` = \`s\`.\`user_id\`
-             ${where}
-            GROUP BY \`employee\`, \`day\`
-         ) AS \`daily\`
-        GROUP BY \`employee\``,
-      params,
+      `SELECT COALESCE(NULLIF(TRIM(\`u\`.\`name\`), ''), 'Unknown') AS \`employee\`,
+              ${studioDaySql("\`s\`.\`started_at\`")} AS \`day\`,
+              SUM(TIMESTAMPDIFF(SECOND, \`s\`.\`started_at\`, \`s\`.\`ended_at\`)) AS \`seconds\`,
+              COUNT(*) AS \`sessions\`,
+              TIMESTAMPDIFF(SECOND, MIN(\`s\`.\`started_at\`), MAX(\`s\`.\`ended_at\`)) AS \`spanSeconds\`,
+              MAX(\`u\`.\`last_login_at\`) AS \`lastLoginAt\`
+         FROM \`app_usage_session\` AS \`s\`
+         JOIN \`user\` AS \`u\` ON \`u\`.\`id\` = \`s\`.\`user_id\`
+        ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+        GROUP BY \`employee\`, \`u\`.\`id\`, \`day\``,
+      [...params, ...peopleParams],
     );
-    return new Map(rows.map((row) => [String(row.employee || "").trim(), {
-      seconds: num(row.seconds),
-      sessions: num(row.sessions),
-      inactiveSeconds: Math.max(0, num(row.spanSeconds) - num(row.seconds)),
-    }]));
+    const authRows = context === "whatsapp" ? [] : await signInLines({ from, to, people, peopleParams });
+    return measuredTotals({ dayRows, authRows, now });
   } catch (error) {
     // A studio that has not run the application since this was added has no rows, and an older
     // database may not have the table at all. Either way the rest of the report is still worth
     // showing - the usage column reads zero rather than the page failing.
     console.warn("Unable to read measured usage:", error?.message || error);
     return new Map();
+  }
+}
+
+/**
+ * The sign-in and sign-out lines in the range, for the people the report is about.
+ *
+ * Inactive Time Track reads "signed in" from these: a `Login` line opens a session and a `Logout`
+ * line closes it, and a session nobody closed runs to the end of the studio day - the rule is in
+ * `signedIn.js`. The lines are the audit log's (`user_activity_log`, written by the sign-in and
+ * sign-out handlers), bounded on the same studio days as the stretches.
+ *
+ * Nothing rather than a failure where the log is not there to read: a database from before the
+ * audit log has no table, and a day past the log's retention has no lines - either way every day
+ * falls back to the span of its own use, which is what the figure was before there was a log.
+ */
+async function signInLines({ from, to, people = [], peopleParams = [] } = {}) {
+  const clauses = ["`l`.`module` = 'Auth'", "`l`.`action` IN ('Login', 'Logout')", "`l`.`status_code` = 200", ...people];
+  const params = [...peopleParams];
+  if (from) { clauses.push("`l`.`created_at` >= ?"); params.push(dayStart(from)); }
+  if (to) { clauses.push("`l`.`created_at` <= ?"); params.push(dayEnd(to)); }
+  try {
+    return await query(
+      `SELECT COALESCE(NULLIF(TRIM(\`u\`.\`name\`), ''), 'Unknown') AS \`employee\`,
+              \`l\`.\`action\` AS \`action\`,
+              \`l\`.\`created_at\` AS \`at\`
+         FROM \`user_activity_log\` AS \`l\`
+         JOIN \`user\` AS \`u\` ON \`u\`.\`id\` = \`l\`.\`user_id\`
+        WHERE ${clauses.join(" AND ")}
+        ORDER BY \`l\`.\`created_at\``,
+      params,
+    );
+  } catch (error) {
+    console.warn("Unable to read the sign-in lines for the usage report:", error?.message || error);
+    return [];
   }
 }
 
@@ -1111,8 +1257,9 @@ function usageFrom(measured) {
     usageSeconds: seconds,
     usageSessions: num(measured?.sessions),
     usage: hoursMinutes(seconds),
-    // Time signed in and idle: the gaps between a day's stretches of use, summed. Zero for
-    // somebody who worked in one unbroken sitting, and zero when there is nothing measured yet.
+    // Time signed in and idle: the day's signed-in time (Login to Logout, or to the end of the
+    // studio day) less the time actually used, summed over the days - see `signedIn.js`. Zero when
+    // there is nothing measured yet.
     inactiveSeconds: num(measured?.inactiveSeconds),
     inactive: hoursMinutes(num(measured?.inactiveSeconds)),
   };
@@ -1172,7 +1319,7 @@ async function callHoursByDay({ from, to, employee }, scope = null) {
   try {
     return await query(
       `SELECT ${staff.nameExpr} AS \`employee\`,
-              DATE(\`c\`.\`called_at\`) AS \`day\`,
+              ${studioDaySql("\`c\`.\`called_at\`")} AS \`day\`,
               COALESCE(SUM(\`c\`.\`duration_seconds\`), 0) AS \`callSeconds\`,
               COUNT(*) AS \`calls\`,
               MIN(\`c\`.\`called_at\`) AS \`firstAt\`,
@@ -1333,7 +1480,7 @@ async function workHours(filters, scope = null) {
   try {
     const rows = await query(
       `SELECT COALESCE(NULLIF(TRIM(\`u\`.\`name\`), ''), 'Unknown') AS \`employee\`,
-              DATE(\`s\`.\`started_at\`) AS \`day\`,
+              ${studioDaySql("\`s\`.\`started_at\`")} AS \`day\`,
               SUM(TIMESTAMPDIFF(SECOND, \`s\`.\`started_at\`, \`s\`.\`ended_at\`)) AS \`workedSeconds\`,
               COUNT(*) AS \`sittings\`,
               MIN(\`s\`.\`started_at\`) AS \`firstAt\`,
@@ -1475,6 +1622,8 @@ module.exports = {
   REPORTS, reportOptions, repositoryEmployees, resolveEmployeeFilter, duration,
   summary, employeeAnalysis, leadAnalysis, neverAttended, notPickedUp, callHistory,
   whatsappUsage, applicationUsage, workHours,
+  // The measured-time read behind both usage reports, exported for the tests that stub the database.
+  measuredUsage,
   // Who a call may be attributed to. Exported for the tests, which hold the label and the test to
   // each other - the two have to name the same people or a row appears under a name it excludes.
   staffIdentity, staffCallSql,

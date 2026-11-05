@@ -9,7 +9,7 @@ import { calculatorTotals, deliverableDetailLabel, linesCost, serviceLineLabel }
 
 const services = [
   { id: "s1", name: "Booth", lines: [
-    { id: "s1:0", shootType: "Studio / In-House", timing: "Full Session", duration: "10-12 Hours (Full)", size: "", price: 9000 },
+    { id: "s1:0", shootType: "Studio / In-House", timing: "Full Session", duration: "8-10 Hours (Full)", size: "", price: 9000 },
     { id: "s1:1", shootType: "Studio / In-House", timing: "Hours / Minutes", duration: "3 hours", size: "55 inch", price: 2800 },
   ] },
   { id: "s3", name: "Unpriced", lines: [{ id: "s3:flat", shootType: "", timing: "", duration: "", size: "", price: null }] },
@@ -20,7 +20,7 @@ const deliverables = [
 ];
 
 test("a line and a deliverable read as the words Settings gave them", () => {
-  assert.equal(serviceLineLabel(services[0].lines[0]), "Studio / In-House · Full Session · 10-12 Hours (Full)");
+  assert.equal(serviceLineLabel(services[0].lines[0]), "Studio / In-House · Full Session · 8-10 Hours (Full)");
   assert.equal(serviceLineLabel(services[0].lines[1]), "Studio / In-House · Hours / Minutes · 3 hours · 55 inch");
   assert.equal(serviceLineLabel(services[1].lines[0]), "");
   assert.equal(deliverableDetailLabel(deliverables[0]), "Canvera · 12x18 · 1.5 inch");
@@ -35,13 +35,13 @@ test("every quantity counts at its own price, and an unpriced row counts nothing
   assert.equal(linesCost({ services, deliverables, serviceQuantities: { "s1:0": "x" } }), 0);
 });
 
-test("the total is base package plus extras plus the lines, less the discount, held to 0..100", () => {
+test("the total is base package plus extras plus the lines, less the discount, held to 0..15", () => {
   const totals = calculatorTotals({ services, deliverables, serviceQuantities: { "s1:0": 1 }, deliverableQuantities: { d1: 1 }, basePackagePrice: "10,000", extras: "500", discountPercent: "10" });
   assert.equal(totals.lines, 10200);
   assert.equal(totals.serviceCost, 20700);
   assert.equal(totals.discount, 10);
   assert.equal(totals.totalCost, 18630);
-  assert.equal(calculatorTotals({ services: [], deliverables: [], basePackagePrice: "100", extras: "", discountPercent: "250" }).totalCost, 0);
+  assert.equal(calculatorTotals({ services: [], deliverables: [], basePackagePrice: "100", extras: "", discountPercent: "250" }).totalCost, 85);
   assert.equal(calculatorTotals({ services: [], deliverables: [], basePackagePrice: "", extras: "", discountPercent: "abc" }).discount, 0);
 });
 

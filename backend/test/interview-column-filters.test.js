@@ -47,7 +47,9 @@ test("several ticked values are an `in`, one typed value is a `contains`", () =>
     { in: ["Photographer", "Editor"] },
   );
   // A free-text column is typed into rather than picked from, so a fragment is meant to match.
-  assert.deepEqual(candidateWhere({ filters: { name: "ram" } }).name, { contains: "ram" });
+  assert.deepEqual(candidateWhere({ filters: { name: "ram" } }).AND, [{ name: { contains: "ram" } }]);
+  // Word Chunk Search: every word typed, in any order - "kumar ram" finds "Ram Kumar".
+  assert.deepEqual(candidateWhere({ filters: { name: "kumar ram" } }).AND, [{ name: { contains: "kumar" } }, { name: { contains: "ram" } }]);
 });
 
 test("an empty filter is no filter at all", () => {

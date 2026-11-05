@@ -29,6 +29,11 @@ const CLOSE = {
   connectionClosed: 428,
   /** The pairing was revoked, from the phone. The credentials are dead. */
   loggedOut: 401,
+  /**
+   * WhatsApp refused this login ("Connection Failure"): the saved credentials are no longer accepted,
+   * or the number itself is restricted. Either way, presenting them again cannot succeed.
+   */
+  forbidden: 403,
   /** Another client took the session. Ours is no longer the live one. */
   connectionReplaced: 440,
   /** WhatsApp did not answer in time. Almost always transient. */
@@ -55,7 +60,7 @@ function backoffMs(attempt) {
  * Returns one action and nothing else, so the caller cannot accidentally do two:
  *
  * - `retry-without-history` — WhatsApp refused the backfill; come back asking for less.
- * - `clear-credentials`     — logged out; the pairing is gone and keeping it would loop.
+ * - `clear-credentials`     — logged out, or the saved login refused (403); keeping it would loop.
  * - `stop`                  — nothing to retry, or retried enough. Says why.
  * - `reconnect`             — come back, after `delayMs`.
  *
@@ -79,6 +84,19 @@ function decideOnClose({
     return {
       action: "clear-credentials",
       error: "WhatsApp was logged out. Scan the code again to reconnect.",
+    };
+  }
+
+  /*
+   * Refused outright. It used to fall through to the retries below, so a session whose saved login
+   * WhatsApp no longer accepts was presented six more times - each one exactly the behaviour that
+   * gets a number flagged - and a later Connect resumed the same dead credentials and was refused
+   * again, so no fresh QR ever came. Clearing them is what lets the next Connect pair from scratch.
+   */
+  if (statusCode === CLOSE.forbidden) {
+    return {
+      action: "clear-credentials",
+      error: "WhatsApp refused the saved login (403). Press Connect for a new code. If this happens again, check WhatsApp on the phone - the number may be restricted.",
     };
   }
 

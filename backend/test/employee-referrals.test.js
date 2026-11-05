@@ -218,3 +218,168 @@ test("a referral with an instalment already paid refuses to be removed", async (
   );
   assert.deepEqual(calls.deleted, []);
 });
+
+/* ----------------------------------------------------- paid through payroll, and who is still here */
+
+const { referralBonusDueIn, settleReferralBonus, STOPPED } = require("../src/modules/hrm/referrals/service");
+
+const WORKING = ["Active", "Probation"];
+const active = { employmentStatus: "Active", archivedAt: null };
+const left = { employmentStatus: "Resigned", archivedAt: null };
+const instalment = (overrides = {}) => ({ id: 1, status: "Pending", dueOn: new Date("2026-07-12T00:00:00Z"), amount: 3000, ...overrides });
+const madeFor = (referred, payouts) => ({ referralId: "DBS-REF-000001", referred, payouts });
+
+test("a referral instalment reaches payroll in its due month, and only while both are still here", () => {
+  /*
+   * The bonus is paid as the referrer's Referral Bonus on the month the instalment falls due. Both
+   * people have to be working: the referrer because the money is theirs and there is nobody to pay
+   * once they have gone, and the hire they introduced because the bonus is for that person staying.
+   */
+  const referrals = [madeFor(active, [instalment()])];
+  const due = referralBonusDueIn(2026, 7, referrals, { referrer: active, working: WORKING });
+  assert.deepEqual([due.amount, due.referralIds, due.payoutIds], [3000, ["DBS-REF-000001"], [1]]);
+  // Not in any other month, whatever is outstanding.
+  assert.equal(referralBonusDueIn(2026, 8, referrals, { referrer: active, working: WORKING }).amount, 0);
+  // The referrer has left: nobody to pay.
+  assert.equal(referralBonusDueIn(2026, 7, referrals, { referrer: left, working: WORKING }).amount, 0);
+  // The hire has left: the bonus was for them staying.
+  assert.equal(referralBonusDueIn(2026, 7, [madeFor(left, [instalment()])], { referrer: active, working: WORKING }).amount, 0);
+  // An archived employee is never working, whatever their status says.
+  assert.equal(referralBonusDueIn(2026, 7, referrals, { referrer: { ...active, archivedAt: new Date() }, working: WORKING }).amount, 0);
+  // Already paid, or called off: not due again. This is what stops a corrected month paying twice.
+  for (const status of ["Paid", "Cancelled"]) {
+    assert.equal(referralBonusDueIn(2026, 7, [madeFor(active, [instalment({ status })])], { referrer: active, working: WORKING }).amount, 0);
+  }
+  // Two instalments of two referrals in one month add up, and each referral is named once.
+  const both = [madeFor(active, [instalment(), instalment({ id: 2, amount: 2000 })])];
+  const sum = referralBonusDueIn(2026, 7, both, { referrer: active, working: WORKING });
+  assert.deepEqual([sum.amount, sum.referralIds, sum.payoutIds], [5000, ["DBS-REF-000001"], [1, 2]]);
+});
+
+test("paying the month records the instalment paid, against the row that paid it", async () => {
+  // The register has no Mark paid of its own: money recordable in two places can be handed over
+  // twice. The `status: "Pending"` in the where is what makes paying a corrected month harmless, and
+  // the row's id is what lets the month find its own instalments again.
+  const asked = [];
+  const tx = { employeeReferralPayout: { updateMany: async (args) => { asked.push(args); return { count: 1 }; } } };
+  const paidOn = new Date("2026-07-31T00:00:00Z");
+  assert.equal(await settleReferralBonus(tx, [1, 2], { paidOn, userId: 7, payrollEntryId: 55 }), 1);
+  assert.deepEqual(asked[0].where, { id: { in: [1, 2] }, status: "Pending" });
+  assert.deepEqual(asked[0].data, { status: "Paid", paidOn, paidByUserId: 7, payrollEntryId: 55 });
+  // Nothing due, nothing asked: a month with no referral bonus writes nothing at all.
+  assert.equal(await settleReferralBonus(tx, [], {}), 0);
+  assert.equal(asked.length, 1);
+});
+
+test("a month set back to Pending owes its instalments again - and only the ones it paid", async () => {
+  /*
+   * The other half. Without it, reopening a paid month left its instalments Paid while the next
+   * Refresh recomputed the row's figure from what was still Pending - nothing - so the month lost
+   * the bonus it had paid and re-paying it settled nothing: the studio was quietly short.
+   */
+  const { unsettleReferralBonus } = require("../src/modules/hrm/referrals/service");
+  const asked = [];
+  const tx = { employeeReferralPayout: { updateMany: async (args) => { asked.push(args); return { count: 2 }; } } };
+  assert.equal(await unsettleReferralBonus(tx, 55), 2);
+  assert.deepEqual(asked[0].where, { payrollEntryId: 55, status: "Paid" });
+  assert.deepEqual(asked[0].data, { status: "Pending", paidOn: null, paidByUserId: null, payrollEntryId: null });
+  // No row, nothing asked.
+  assert.equal(await unsettleReferralBonus(tx, null), 0);
+  assert.equal(asked.length, 1);
+});
+
+test("a paid month still knows what it paid, and does not offer to pay it again", () => {
+  /*
+   * `entryId` is the row asking. An instalment it has already settled still counts towards the
+   * figure - so a paid month reads the amount it paid and names its Referral IDs - but it is not
+   * among the ids to settle, because paying a month again must not move a date already set.
+   */
+  const paid = instalment({ status: "Paid", payrollEntryId: 55 });
+  const referrals = [madeFor(active, [paid])];
+  const mine = referralBonusDueIn(2026, 7, referrals, { referrer: active, working: WORKING, entryId: 55 });
+  assert.deepEqual([mine.amount, mine.referralIds, mine.payoutIds], [3000, ["DBS-REF-000001"], []]);
+  // Another month's row asking sees nothing: it is not its instalment to count or to settle.
+  assert.equal(referralBonusDueIn(2026, 7, referrals, { referrer: active, working: WORKING, entryId: 56 }).amount, 0);
+  // And a month being generated, which has no row yet, reads only what is still to pay.
+  assert.equal(referralBonusDueIn(2026, 7, referrals, { referrer: active, working: WORKING }).amount, 0);
+});
+
+test("Stopped is worked out, never stored", () => {
+  // It is not one of the statuses anything may write - the register reads the employee's own status
+  // every time instead, so nobody has to remember to write it when somebody is relieved, and
+  // somebody who rejoins is simply due again.
+  const { PAYOUT_STATUSES } = require("../src/modules/hrm/referrals/service");
+  assert.equal(STOPPED, "Stopped");
+  assert.ok(!PAYOUT_STATUSES.includes(STOPPED));
+});
+
+test("the six cases: who is still here decides whether a referral shows, and where", async () => {
+  /*
+   * The studio's own list, in its words. A referral is between two people and **either** of them
+   * leaving ends the instalments still to come: the hire, because the bonus is for them staying, and
+   * the referrer, because the money is theirs and there is nobody to pay once they have gone.
+   *
+   *   1. both stay the whole way        -> both instalments paid, **Settled**
+   *   2. one left before the 1st        -> **off the register**: no payment was ever made
+   *   3. one left after the 1st         -> **Settled** on what was paid
+   *   4. both left before the 1st       -> off the register
+   *   5. both left after the 1st        -> Settled
+   *   6. both still here, one paid      -> **Outstanding**: not settled until the last instalment is
+   */
+  const service = require("../src/modules/hrm/referrals/service");
+  const { applyLeavers } = service._internals;
+  const { STOPPED_REASONS } = service;
+  const paid = { id: 1, monthOffset: 3, dueOn: new Date("2026-07-12T00:00:00Z"), amount: 3000, status: "Paid", paidOn: new Date("2026-07-31T00:00:00Z"), remarks: null };
+  const unpaid = { id: 2, monthOffset: 6, dueOn: new Date("2026-10-12T00:00:00Z"), amount: 3000, status: "Pending", paidOn: null, remarks: null };
+  const hire = (status) => ({ employmentStatus: status, archivedAt: null, employeeName: "Vikram", employeeId: "DBS-EMP-004" });
+  const referral = (referrerStatus, referredStatus, payouts) => ({
+    id: 1, referralId: "DBS-REF-000001", referrerEmployeeId: 9, referrerName: "Asha", referredEmployeeId: 4,
+    referredOn: new Date("2026-04-12T00:00:00Z"), remarks: null,
+    referrer: { employmentStatus: referrerStatus, archivedAt: null }, referred: hire(referredStatus), payouts,
+  });
+  const shown = (rows) => rows.map((row) => [row.payouts.map((payout) => payout.status), row.total, row.stoppedReason]);
+
+  // 1. Both stayed and both instalments were paid: nothing stopped, and it is settled by being paid.
+  assert.deepEqual(shown(applyLeavers([referral("Active", "Active", [paid, { ...unpaid, status: "Paid" }])], WORKING)),
+    [[["Paid", "Paid"], 6000, null]]);
+
+  // 2. One left before the first payment, either one: off the register, since nothing was ever paid.
+  for (const [referrer, referred] of [["Active", "Resigned"], ["Resigned", "Active"]]) {
+    assert.deepEqual(applyLeavers([referral(referrer, referred, [{ ...paid, status: "Pending", paidOn: null }, unpaid])], WORKING), []);
+  }
+
+  // 3. One left after the first and before the second: it stays, settled on what was paid, and the
+  // screen can say which of the two it was.
+  assert.deepEqual(shown(applyLeavers([referral("Active", "Resigned", [paid, unpaid])], WORKING)),
+    [[["Paid", STOPPED], 3000, STOPPED_REASONS.REFERRED]]);
+  assert.deepEqual(shown(applyLeavers([referral("Resigned", "Active", [paid, unpaid])], WORKING)),
+    [[["Paid", STOPPED], 3000, STOPPED_REASONS.REFERRER]]);
+
+  // 4. Both left before the first: off the register.
+  assert.deepEqual(applyLeavers([referral("Resigned", "Resigned", [{ ...paid, status: "Pending", paidOn: null }, unpaid])], WORKING), []);
+
+  // 5. Both left after the first: settled, and named as both.
+  assert.deepEqual(shown(applyLeavers([referral("Resigned", "Resigned", [paid, unpaid])], WORKING)),
+    [[["Paid", STOPPED], 3000, STOPPED_REASONS.BOTH]]);
+
+  // 6. Both still here with one instalment paid: still owed, so it must not read as settled.
+  const half = applyLeavers([referral("Active", "Active", [paid, unpaid])], WORKING);
+  assert.deepEqual(shown(half), [[["Paid", "Pending"], 6000, null]]);
+  // The register's one word for the row, which is what the Settled tab reads (`referralPayouts.js`).
+  assert.ok(half[0].payouts.some((payout) => payout.status === "Pending"), "Outstanding, not Settled");
+
+  // A referrer deleted from the repository - only the name kept beside the cleared id - reads as
+  // left: there is no employee to pay it to.
+  assert.deepEqual(shown(applyLeavers([{ ...referral("Active", "Active", [paid, unpaid]), referrer: null }], WORKING)),
+    [[["Paid", STOPPED], 3000, STOPPED_REASONS.REFERRER]]);
+});
+
+test("the register's status filter takes only a status something is stored as", () => {
+  // `Stopped` is worked out on the way out, so asking the database for it would answer nothing; an
+  // unknown word narrows nothing rather than emptying the register.
+  const service = require("../src/modules/hrm/referrals/service");
+  const source = require("node:fs").readFileSync(require("node:path").join(__dirname, "../src/modules/hrm/referrals/service.js"), "utf8");
+  assert.match(source, /const wanted = PAYOUT_STATUSES\.includes\(status\) \? status : "";/);
+  assert.match(source, /\.\.\.\(wanted \? \[\{ payouts: \{ some: \{ status: wanted \} \} \}\] : \[\]\)/);
+  assert.ok(!service.PAYOUT_STATUSES.includes(service.STOPPED));
+});

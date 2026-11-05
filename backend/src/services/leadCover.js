@@ -1,6 +1,7 @@
 const prisma = require("../config/db");
 const { workingEmployeeStatuses } = require("./employeeOptionLists");
 const { buildChain, availableCover } = require("./alternativeChain");
+const { studioCalendarDay } = require("./studioTime");
 
 /**
  * Who a lead goes to when the person it was meant for is not here.
@@ -15,10 +16,17 @@ const { buildChain, availableCover } = require("./alternativeChain");
  * module, and worth reading before changing anything here.
  */
 
-/** Midnight today, the granularity leave is approved at. */
+/**
+ * Today, the granularity leave is approved at - the **studio's** day, as midnight UTC on that date,
+ * which is how the `@db.Date` leave columns hold a day.
+ *
+ * It was the server's own local midnight. On a machine set to India that reaches MySQL as 18:30 UTC
+ * the day before, so "the leave starts on or before today" was false on the leave's first day - a
+ * one-day leave was never seen, and the absent person kept receiving leads. On a server left on UTC
+ * the day turned at 05:30 in the studio instead of midnight. `studioCalendarDay` is right on both.
+ */
 function startOfToday() {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return studioCalendarDay();
 }
 
 /**
@@ -45,7 +53,8 @@ async function loadCoverContext() {
       },
     }),
     prisma.attendanceRequest.findMany({
-      where: { status: "APPROVED", type: "LEAVE", fromDate: { lte: today }, toDate: { gte: today } },
+      // A comp-off is a day away like a leave, so the cover picks up that person's leads the same way.
+      where: { status: "APPROVED", type: { in: ["LEAVE", "COMP_OFF"] }, fromDate: { lte: today }, toDate: { gte: today } },
       select: { employeeId: true },
     }),
     workingEmployeeStatuses(),

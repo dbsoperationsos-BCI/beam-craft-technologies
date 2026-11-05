@@ -91,7 +91,8 @@ test("the bare link is still offered when the invite email could not be sent", (
 
 test("the message is editable, because it is going into WhatsApp", () => {
   // Somebody will want to change a word before sending, and selecting text by hand has to work
-  // where the clipboard API does not. Editing changes what is copied and nothing about the record.
+  // where the clipboard API does not. Editing changes what is copied and nothing about the record -
+  // and is published to the dialog, whose footer Send WhatsApp sends what is on screen.
   assert.match(SHAREABLE, /<textarea/);
-  assert.match(SHAREABLE, /onChange=\{\(event\) => \{ setText\(event\.target\.value\); setCopied\(false\); \}\}/);
+  assert.match(SHAREABLE, /onChange=\{\(event\) => \{ setText\(event\.target\.value\); setCopied\(false\); onTextChange\?\.\(event\.target\.value\); \}\}/);
 });

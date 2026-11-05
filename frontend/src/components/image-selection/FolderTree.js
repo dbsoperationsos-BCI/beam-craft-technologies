@@ -16,7 +16,7 @@ function FolderMenu({ folder, onAction, panelRef }) {
   return <div ref={panelRef} role="menu" aria-label={`Actions for ${folder.name}`} className="absolute right-1 top-7 z-30 w-40 rounded-md border border-slate-200 bg-white py-1 shadow-lg">
     {!folder.parentId && <button type="button" role="menuitem" onClick={() => onAction("create", folder)} className="block w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50">Add Sub Folder</button>}
     {!folder.projectShootId && <>
-      <button type="button" role="menuitem" onClick={() => onAction("rename", folder)} className="block w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50">Edit</button>
+      <button type="button" role="menuitem" onClick={() => onAction("rename", folder)} className="block w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50">Rename</button>
       <button type="button" role="menuitem" onClick={() => onAction("delete", folder)} className="block w-full px-3 py-2 text-left text-xs text-red-600 hover:bg-red-50">Delete</button>
     </>}
   </div>;
@@ -35,9 +35,9 @@ function Branch({ folder, selectedId, expandedIds, menuFolderId, onToggle, onSel
       {/* Every entry in this menu creates, renames or deletes a folder, so a viewer holding READ
           alone gets no menu rather than one that opens onto refusals. Expanding and selecting a
           folder stay - they are how the tree is read. */}
-      {/* The ⋮ appears on hover (or keyboard focus) and stays while its menu is open — the
-          desktop folder tree's exact behavior, so the rows read clean until pointed at. */}
-      {canWrite && <button type="button" ref={menuFolderId === folder.id ? triggerRef : null} aria-label={`Folder actions for ${folder.name}`} aria-expanded={menuFolderId === folder.id} onClick={() => onOpenMenu(menuFolderId === folder.id ? null : folder.id)} className={`mr-1 h-6 w-6 items-center justify-center rounded text-slate-500 hover:bg-slate-200/70 ${menuFolderId === folder.id ? "inline-flex" : "hidden group-focus-within:inline-flex group-hover:inline-flex"}`}><MoreVert style={{ fontSize: 15 }} aria-hidden="true" /></button>}
+      {/* The ⋮ - Rename and Delete - is always shown, not only on hover, so a folder's actions are
+          plain to see (and reachable by touch); the desktop folder tree does the same. */}
+      {canWrite && <button type="button" ref={menuFolderId === folder.id ? triggerRef : null} aria-label={`Folder actions for ${folder.name}`} aria-expanded={menuFolderId === folder.id} onClick={() => onOpenMenu(menuFolderId === folder.id ? null : folder.id)} className="mr-1 inline-flex h-6 w-6 items-center justify-center rounded text-slate-500 hover:bg-slate-200/70"><MoreVert style={{ fontSize: 15 }} aria-hidden="true" /></button>}
       {menuFolderId === folder.id && <FolderMenu folder={folder} onAction={onAction} panelRef={menuRef} />}
     </div>
     {expanded && hasChildren && <ul>{folder.children.map((child) => <Branch key={child.id} folder={child} selectedId={selectedId} expandedIds={expandedIds} menuFolderId={menuFolderId} onToggle={onToggle} onSelect={onSelect} onOpenMenu={onOpenMenu} onAction={onAction} depth={depth + 1} canWrite={canWrite} menuRef={menuRef} triggerRef={triggerRef} />)}</ul>}

@@ -26,6 +26,8 @@ const { mayEditProject, mayDeleteProject } = require("../src/modules/sales/proje
 const STAMP = String(Date.now()).slice(-6);
 const tag = (name) => `SAP-${STAMP}-${name}`;
 const F = {};
+// A project is keyed to its lead (20260924150000), so every enquiry a fixture names gets one.
+const leadFor = (enquiryId) => prisma.salesCrmLead.upsert({ where: { enquiryId }, create: { enquiryId, name: enquiryId }, update: {} });
 const cleanups = [];
 
 /**
@@ -85,12 +87,12 @@ before(async () => {
   F.dumDum = await prisma.vertical.findFirst({ where: { code: "DUM_DUM" }, select: { id: true } });
   invalidate();
 
-  const project = (name, branch, people = {}) => prisma.salesProject.create({ data: {
+  const project = async (name, branch, people = {}) => { await leadFor(tag(`enq-${name}`)); return prisma.salesProject.create({ data: {
     enquiryId: tag(`enq-${name}`), eventId: tag(name), whatsappGroupName: `WED ${name}`, clientMainNumber: "+919876543210",
     sourceBranch: branch ? branch.name : "Unknown", branchId: branch ? branch.id : null,
     vertical: "WED", verticalId: F.dumDum.id, deliverables: "[]", initialConvertedValue: 0, crmName: "Test",
     ...people,
-  } });
+  } }); };
 
   // One per branch, none of them naming the people who will ask - so anything they see, they see
   // through the permission rather than through their own name.
@@ -101,6 +103,8 @@ before(async () => {
   await project("staffed", F.br3, { projectManagerEmployeeId: F.pm.id, preProductionCoordinatorEmployeeId: F.coord.id, creativeManagerEmployeeId: F.creative.id, postProductionCoordinatorEmployeeId: F.postCoord.id });
   // A booking whose branch text matched nothing, so it belongs to no branch at all.
   await project("no-branch", null);
+  // Pushed before the projects so it runs after them: a lead with a booking cannot be deleted.
+  cleanups.push(() => prisma.salesCrmLead.deleteMany({ where: { enquiryId: { startsWith: `SAP-${STAMP}` } } }));
   cleanups.push(() => prisma.salesProject.deleteMany({ where: { eventId: { startsWith: `SAP-${STAMP}` } } }));
 });
 

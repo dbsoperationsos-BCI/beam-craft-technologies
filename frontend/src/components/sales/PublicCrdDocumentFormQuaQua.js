@@ -8,6 +8,9 @@ import RadioGroupField from "@/components/shared/RadioGroupField";
 import SchemaFormSection from "@/components/schema-form/SchemaFormSection";
 import { savePublicCrdDocument, submitPublicCrdDocument } from "@/services/sales/public-crd-document.service";
 import {
+  CrdDocumentFooter,
+  CrdDocumentHeader,
+  CrdFooterButton,
   CrdSectionRail,
   Field,
   Notice,
@@ -17,8 +20,15 @@ import {
   filled,
   parseReferenceRows,
   validHttpUrl,
+  mergeSavedDocument,
+  CrdEventsFields,
+  CrdTermsAgreement,
+  scrollToFirstMissing,
+  holdRail,
+  railHeld,
+  sectionInView,
+  FILL_MANDATORY,
 } from "./crdDocumentShared";
-import { DocumentLogo } from "@/components/shared/AppLogo";
 
 /**
  * The Qua Qua Customer Identification Document, as the client fills it in from the link Sales sends.
@@ -95,6 +105,7 @@ const BIRTHDAYS_REQUIRED_BY_CATEGORY = {
 // born, "Mother Date of Birth" everywhere else. The Jotform's own wording, reproduced as-is.
 const MOTHER_DATE_LABEL_BY_CATEGORY = { baby: "Mother's Birthday", maternity: "Mother Date of Birth", combo: "Mother Date of Birth" };
 
+
 // Ticked, not filled in — a checkbox is answered by being true, and `false` is a perfectly good
 // string, so it cannot go through the same emptiness test as the text fields. Special Notes, the
 // uploaded files and the reference link are all optional.
@@ -106,6 +117,8 @@ const emptyDocument = {
   expectedDeliveryDate: "", childBirthdayOrExpectedDeliveryDate: "",
   specialNotes: "", photoReferenceLinks: "", videoReferenceLinks: "", otherReferenceLinks: "",
   referenceFiles: [], referenceLink: "", termsAccepted: false,
+  // One per shoot of the project, built by the server (`crd-documents/events.js`).
+  events: [],
 };
 
 function identificationMissing(document) {
@@ -154,49 +167,51 @@ function IdentificationFields({ document, set, invalid }) {
         the same reason: it is what Sales already knows, not something the client is being asked.
         Never required, so it cannot block a submission, and a document raised before its project
         exists shows an empty box rather than a made-up id. */}
-    <Field label="Event ID" readOnly value={document.eventId} onChange={set("eventId")} />
+    <Field label="Event ID" readOnly value={document.eventId} onChange={set("eventId")} helperText="The studio's reference for this booking, shown for checking." />
     {/* The studio's name for this booking, prefilled from the project and read back rather than
         asked - the same treatment it has on the Dum Dum document. It used to ask the client to type
         the exact name of their WhatsApp group, which made the project's name depend on a stranger
         spelling it the same way Sales had; the project already carries it, so it is shown to be
         checked instead. Read-only means it cannot be required - see `IDENTIFICATION_REQUIRED`. */}
-    <Field label="WhatsApp Group Name" readOnly value={document.whatsappGroupName} onChange={set("whatsappGroupName")} />
-    <Field label="Name" required value={document.firstName} onChange={set("firstName")} invalid={invalid("firstName")} />
+    <Field label="WhatsApp Group Name" readOnly value={document.whatsappGroupName} onChange={set("whatsappGroupName")} helperText="The name of this booking's WhatsApp group, shown for checking." />
+    <Field label="Name" required value={document.firstName} onChange={set("firstName")} invalid={invalid("firstName")} helperText="Your name as the studio should address you." />
     {/* The shared picker, so the country code is chosen rather than typed — it stores
         `+<dial code> <national number>`, which is the one shape every phone number in the app is
-        held in. It draws no helper line of its own, so this one sits under it. */}
-    <div>
-      <PhoneField
-        label="Phone Number"
-        field="phoneNumber"
-        required
-        value={document.phoneNumber}
-        onChange={(_field, value) => set("phoneNumber")(value)}
-        error={invalid("phoneNumber") ? "Phone Number is required." : ""}
-      />
-      <p className="mt-1.5 text-[11px] font-normal text-slate-500 sm:text-xs">WhatsApp is preferable.</p>
-    </div>
+        held in. */}
+    <PhoneField
+      label="Phone Number"
+      helperText="A number the studio can reach you on about the shoot. WhatsApp is preferable."
+      field="phoneNumber"
+      required
+      value={document.phoneNumber}
+      onChange={(_field, value) => set("phoneNumber")(value)}
+      error={invalid("phoneNumber") ? "Phone Number is required." : ""}
+    />
     <RadioGroupField
       className="md:col-span-2"
       label="Shoot Type"
       required
+      helperText="Decides which names and dates the Birthdays step asks for."
       layout="column"
       value={document.shootType}
       onChange={set("shootType")}
       options={SHOOT_TYPE_OPTIONS}
       controlClassName="px-0 py-1"
+      error={invalid("shootType") ? "Choose the Shoot Type." : ""}
     />
     <RadioGroupField
       className="md:col-span-2"
       label="Branch"
       required
+      helperText="The studio branch your shoot is booked with."
       layout="column"
       value={document.branch}
       onChange={set("branch")}
       options={BRANCH_OPTIONS}
       controlClassName="px-0 py-1"
+      error={invalid("branch") ? "Choose the Branch." : ""}
     />
-    <Field label="Referred By" value={document.referredBy} onChange={set("referredBy")} />
+    <Field label="Referred By" value={document.referredBy} onChange={set("referredBy")} helperText="Who told you about the studio, if anyone." />
   </div>;
 }
 
@@ -208,46 +223,38 @@ function BirthdaysFields({ document, set, invalid, category }) {
   const dateError = (field) => (invalid(field) ? "This date is required." : "");
   return <div className="grid gap-4 md:grid-cols-2">
     {category === "baby" && <>
-      <Field label="Baby Name" required value={document.babyName} onChange={set("babyName")} invalid={invalid("babyName")} />
+      <Field label="Baby Name" required value={document.babyName} onChange={set("babyName")} invalid={invalid("babyName")} helperText="Your baby's name as the studio should use it." />
       {/* `restriction="future"` disables days after today: somebody already born cannot have been
           born tomorrow. The delivery date below is the mirror of it. */}
-      <DateField label="Baby Date of Birth" required restriction="future" value={document.babyDateOfBirth} onChange={set("babyDateOfBirth")} error={dateError("babyDateOfBirth")} />
+      <DateField label="Baby Date of Birth" required restriction="future" helperText="Your baby's date of birth; days after today cannot be chosen." value={document.babyDateOfBirth} onChange={set("babyDateOfBirth")} error={dateError("babyDateOfBirth")} />
     </>}
-    <Field label="Mother's Name" required value={document.motherName} onChange={set("motherName")} invalid={invalid("motherName")} />
-    <DateField label={motherDateLabel} required restriction="future" value={document.motherDateOfBirth} onChange={set("motherDateOfBirth")} error={dateError("motherDateOfBirth")} />
-    <Field label="Father's Name" required value={document.fatherName} onChange={set("fatherName")} invalid={invalid("fatherName")} />
-    <DateField label="Father's Birthday" required restriction="future" value={document.fatherBirthday} onChange={set("fatherBirthday")} error={dateError("fatherBirthday")} />
-    {category === "maternity" && <DateField label="Expected Delivery Date" required restriction="past" value={document.expectedDeliveryDate} onChange={set("expectedDeliveryDate")} error={dateError("expectedDeliveryDate")} />}
+    <Field label="Mother's Name" required value={document.motherName} onChange={set("motherName")} invalid={invalid("motherName")} helperText="The mother's name as the studio should use it." />
+    <DateField label={motherDateLabel} required restriction="future" helperText="The mother's date of birth; days after today cannot be chosen." value={document.motherDateOfBirth} onChange={set("motherDateOfBirth")} error={dateError("motherDateOfBirth")} />
+    <Field label="Father's Name" required value={document.fatherName} onChange={set("fatherName")} invalid={invalid("fatherName")} helperText="The father's name as the studio should use it." />
+    <DateField label="Father's Birthday" required restriction="future" helperText="The father's date of birth; days after today cannot be chosen." value={document.fatherBirthday} onChange={set("fatherBirthday")} error={dateError("fatherBirthday")} />
+    {category === "maternity" && <DateField label="Expected Delivery Date" required restriction="past" helperText="The date the baby is due; past days cannot be chosen." value={document.expectedDeliveryDate} onChange={set("expectedDeliveryDate")} error={dateError("expectedDeliveryDate")} />}
     {/* Unrestricted on purpose: a Combo or Other booking covers a child already born and one still
         expected, and this one field answers for both. */}
-    {category === "combo" && <DateField label="Child Birthday / Expected Delivery Date" required value={document.childBirthdayOrExpectedDeliveryDate} onChange={set("childBirthdayOrExpectedDeliveryDate")} error={dateError("childBirthdayOrExpectedDeliveryDate")} />}
+    {category === "combo" && <DateField label="Child Birthday / Expected Delivery Date" required helperText="The child's birthday, or the due date if not yet born." value={document.childBirthdayOrExpectedDeliveryDate} onChange={set("childBirthdayOrExpectedDeliveryDate")} error={dateError("childBirthdayOrExpectedDeliveryDate")} />}
   </div>;
 }
 
 function ReferencesFields({ document, set, showErrors, termsText }) {
   const termsInvalid = showErrors && document.termsAccepted !== true;
   return <div className="grid gap-5">
-    <Field label="Any Special Notes?" className="max-w-md" value={document.specialNotes} onChange={set("specialNotes")} />
+    <Field label="Any Special Notes?" className="max-w-md" value={document.specialNotes} onChange={set("specialNotes")} helperText="Anything the studio should know before your shoot." />
 
     <PhotoReferenceImages value={document.photoReferenceLinks} onChange={set("photoReferenceLinks")} />
-    <ReferenceLinks label="Video Reference Links" value={document.videoReferenceLinks} onChange={set("videoReferenceLinks")} />
-    <ReferenceLinks label="Other Reference Links" value={document.otherReferenceLinks} onChange={set("otherReferenceLinks")} />
+    <ReferenceLinks label="Video Reference Links" helperText="Links to videos in a style you like, each with a short note." value={document.videoReferenceLinks} onChange={set("videoReferenceLinks")} />
+    <ReferenceLinks label="Other Reference Links" helperText="Any other links that show what you want, each with a short note." value={document.otherReferenceLinks} onChange={set("otherReferenceLinks")} />
 
     <div>
       {/* Scrolls inside its own box rather than making the page long — the same shape the
           onboarding policy agreement and the Dum Dum document use. */}
-      <div className="h-60 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs leading-6 text-slate-700 shadow-inner sm:h-72 sm:p-5 sm:text-sm">
+      <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-700 shadow-inner sm:h-72 sm:overflow-y-auto sm:p-5">
         <p className="whitespace-pre-line">{termsText}</p>
       </div>
-      <label className={`mt-4 flex items-start gap-3 text-sm font-medium ${termsInvalid ? "text-rose-800" : "text-slate-700"}`}>
-        <input
-          type="checkbox"
-          checked={document.termsAccepted === true}
-          onChange={(event) => set("termsAccepted")(event.target.checked)}
-          className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600"
-        />
-        <span>By clicking the submit button, I agree to terms &amp; conditions. <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span></span>
-      </label>
+      <CrdTermsAgreement checked={document.termsAccepted === true} onChange={set("termsAccepted")} invalid={termsInvalid} />
     </div>
   </div>;
 }
@@ -287,20 +294,20 @@ export default function PublicCrdDocumentFormQuaQua({ token, initialContext }) {
   }, [identificationDone]);
   const mainRef = useRef(null);
 
+  // A section picked on the rail holds its highlight while the form scrolls to it.
+  const railHold = useRef({ picking: false, timer: null });
+
   function scrollToSection(id) {
+    holdRail(railHold.current);
     mainRef.current?.querySelector(`#${CSS.escape(id)}`)?.scrollIntoView({ block: "start", behavior: "smooth" });
   }
 
   // Keeps the rail's highlight in step while scrolling through the combined Birthdays/References
   // page — the same threshold the Dum Dum document's own rail uses.
   function updateActiveSectionFromScroll() {
-    const container = mainRef.current;
-    if (!container || activeSection === "identification") return;
-    const positions = ["birthdays", "references"]
-      .map((id) => ({ id, top: container.querySelector(`#${CSS.escape(id)}`)?.getBoundingClientRect().top ?? Infinity }))
-      .filter((item) => Number.isFinite(item.top));
-    const current = positions.reduce((best, item) => (item.top <= 180 && item.top > best.top ? item : best), { id: positions[0]?.id || "birthdays", top: -Infinity });
-    if (current.id !== activeSection) setActiveSection(current.id);
+    if (activeSection === "identification" || railHeld(railHold.current)) return;
+    const current = sectionInView(mainRef.current, ["birthdays", "references"]);
+    if (current && current !== activeSection) setActiveSection(current);
   }
 
   // A returning client whose first outstanding section is References lands scrolled to it rather
@@ -319,8 +326,10 @@ export default function PublicCrdDocumentFormQuaQua({ token, initialContext }) {
     try {
       const response = await savePublicCrdDocument(token, current);
       const stored = response?.data?.document ? { ...emptyDocument, ...response.data.document } : current;
-      lastSavedRef.current = JSON.stringify(stored);
-      setDocument(stored);
+      // What is on screen is kept where the server only trimmed it (`mergeSavedDocument`), and is
+      // counted as saved, so the next autosave is not set off by a space the server will trim again.
+      lastSavedRef.current = JSON.stringify(mergeSavedDocument(current, current, stored));
+      setDocument((latest) => mergeSavedDocument(latest, current, stored));
       if (announce) showSuccess("Saved. You can close this page and pick up from the same link.");
     } catch (error) {
       showError(error.message || "We couldn't save just now. Your answers are still here — we'll try again as you carry on.");
@@ -341,7 +350,8 @@ export default function PublicCrdDocumentFormQuaQua({ token, initialContext }) {
   function goNext(sectionMissing, nextSection) {
     if (sectionMissing.length) {
       setShowErrors(true);
-      showNotice(`Not ready yet — ${sectionMissing.length} required ${sectionMissing.length === 1 ? "answer" : "answers"} still to go on this page. They're marked in red.`, "error");
+      showNotice(FILL_MANDATORY, "error");
+      scrollToFirstMissing(mainRef.current);
       return;
     }
     setShowErrors(false);
@@ -369,8 +379,8 @@ export default function PublicCrdDocumentFormQuaQua({ token, initialContext }) {
       setShowErrors(true);
       const target = firstIncompleteSection(document);
       setActiveSection(target);
-      if (target !== "identification") window.setTimeout(() => scrollToSection(target), 0);
-      showNotice(`Not ready to submit yet — ${missing.length} required ${missing.length === 1 ? "answer" : "answers"} still to go. They're marked in red.`, "error");
+      showNotice(FILL_MANDATORY, "error");
+      scrollToFirstMissing(mainRef.current);
       return;
     }
     setSubmitting(true);
@@ -388,22 +398,7 @@ export default function PublicCrdDocumentFormQuaQua({ token, initialContext }) {
   if (submitted) return <PublicLayout><Notice title="Thank you — your document has been submitted." tone="green">Our team has received your details and will be in touch. You can close this page.</Notice></PublicLayout>;
 
   return <PublicLayout>
-    <header className="sticky top-0 z-50 shrink-0 border-b border-slate-200 bg-white shadow-sm">
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 pb-[10px] pt-3 sm:px-6 lg:pl-0">
-        <div className="flex min-w-0 items-center gap-4">
-          <div className="relative hidden h-11 w-64 shrink-0 lg:block">
-            {/* The logo this document was issued under, from its own record rather than today's
-                Settings - the same mark the client saw when the link reached them. */}
-            <DocumentLogo variant="crd" src={initialContext?.logoUrl} priority className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" />
-          </div>
-          <DocumentLogo variant="document" src={initialContext?.logoUrl} priority className="shrink-0 lg:hidden" />
-          <div className="min-w-0">
-            <h1 className="text-base font-semibold text-slate-900 sm:text-xl">QQ - Customer Identification Document</h1>
-            {initialContext?.eventId && <p className="mt-0.5 text-xs text-slate-600 sm:text-sm">{initialContext.eventId}</p>}
-          </div>
-        </div>
-      </div>
-    </header>
+    <CrdDocumentHeader title="QQ - Customer Identification Document" eventId={initialContext?.eventId} logoUrl={initialContext?.logoUrl} />
 
     <FloatingNotice notice={notice} onClose={clearNotice} />
 
@@ -411,9 +406,15 @@ export default function PublicCrdDocumentFormQuaQua({ token, initialContext }) {
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <CrdSectionRail sections={SECTIONS} activeId={activeSection} onSelect={selectSection} lockedIds={lockedIds} />
         <main ref={mainRef} onScroll={updateActiveSectionFromScroll} className="min-w-0 flex-1 overflow-y-auto overscroll-contain">
-          {activeSection === "identification" ? <SchemaFormSection id="identification" title="Identification">
-            <IdentificationFields document={document} set={set} invalid={invalid} />
-          </SchemaFormSection> : <>
+          {activeSection === "identification" ? <>
+            <SchemaFormSection id="identification" title="Identification">
+              <IdentificationFields document={document} set={set} invalid={invalid} />
+            </SchemaFormSection>
+            {/* One event per shoot of the project - its dates and venue - on the same page. */}
+            {(document.events || []).length > 0 && <SchemaFormSection id="events" title="Events">
+              <CrdEventsFields events={document.events} onChange={set("events")} />
+            </SchemaFormSection>}
+          </> : <>
             <SchemaFormSection id="birthdays" title="Don't Miss Special Offers on Your Birthdays">
               <BirthdaysFields document={document} set={set} invalid={invalid} category={category} />
             </SchemaFormSection>
@@ -425,32 +426,22 @@ export default function PublicCrdDocumentFormQuaQua({ token, initialContext }) {
         </main>
       </div>
 
-      <div className="shrink-0 border-t border-slate-200 bg-white px-4 py-3 sm:flex sm:items-center sm:justify-end sm:gap-3 sm:px-6">
-        <div className="mb-3 min-w-[10rem] text-sm sm:mb-0 sm:mr-auto sm:w-56">
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-medium text-slate-600">Completion</span>
-            <span className="font-semibold text-slate-900">{completion}%</span>
-          </div>
-          <div role="progressbar" aria-valuenow={completion} aria-valuemin={0} aria-valuemax={100} aria-label="Document completion" className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-200">
-            <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${completion}%` }} />
-          </div>
-        </div>
-        <div className="grid gap-2 sm:flex sm:gap-3">
-          {activeSection === "identification" ? <button type="button" disabled={saving || submitting} onClick={() => goNext(identificationMissing(document), "birthdays")} className="min-h-11 rounded-md bg-blue-600 px-6 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">
-            Next
-          </button> : <>
-            <button type="button" disabled={saving || submitting} onClick={() => selectSection("identification")} className="min-h-11 rounded-md border border-slate-300 bg-white px-6 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">
-              Back
-            </button>
-            <button type="button" disabled={saving || submitting} onClick={() => void saveDocument(document, { announce: true })} className="min-h-11 rounded-md border border-slate-300 bg-white px-6 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">
-              {saving ? "Saving…" : "Save Draft"}
-            </button>
-            <button type="submit" disabled={saving || submitting} className="min-h-11 rounded-md bg-blue-600 px-6 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">
-              {submitting ? "Submitting…" : "Submit document"}
-            </button>
-          </>}
-        </div>
-      </div>
+      <CrdDocumentFooter completion={completion}>
+        {activeSection === "identification" ? <CrdFooterButton type="button" variant="primary" disabled={saving || submitting} onClick={() => goNext(identificationMissing(document), "birthdays")}>
+          Next
+        </CrdFooterButton> : <>
+          <CrdFooterButton type="button" variant="secondary" disabled={saving || submitting} onClick={() => selectSection("identification")}>
+            Back
+          </CrdFooterButton>
+          <CrdFooterButton type="button" variant="secondary" disabled={saving || submitting} onClick={() => void saveDocument(document, { announce: true })}>
+            {saving ? "Saving…" : "Save Draft"}
+          </CrdFooterButton>
+          <CrdFooterButton type="submit" variant="primary" disabled={saving || submitting}>
+            {/* Three to a row on a phone: the short word there, the full one with room for it. */}
+            {submitting ? "Submitting…" : <><span className="sm:hidden">Submit</span><span className="hidden sm:inline">Submit document</span></>}
+          </CrdFooterButton>
+        </>}
+      </CrdDocumentFooter>
     </form>
   </PublicLayout>;
 }

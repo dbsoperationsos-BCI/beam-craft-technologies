@@ -7,6 +7,7 @@ import { shootOptions } from "@/components/project-management/AddShootDialog";
 import ComboBoxField from "@/components/shared/ComboBoxField";
 import DateField from "@/components/shared/DateField";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
+import HelpTip from "@/components/shared/HelpTip";
 import ImageUploadField from "@/components/shared/ImageUploadField";
 import PhoneField from "@/components/shared/PhoneField";
 import MultiSelectField from "@/components/shared/MultiSelectField";
@@ -14,8 +15,7 @@ import SchemaFormSection from "@/components/schema-form/SchemaFormSection";
 import SharedTextField from "@/components/shared/TextField";
 import CloseIcon from "@/components/ui/CloseIcon";
 import { savePublicCrdDocument, submitPublicCrdDocument } from "@/services/sales/public-crd-document.service";
-import { CrdSectionRail, Field, Notice, PublicLayout, SectionHeading, digitsOnly, filled as sharedFilled, validHttpUrl } from "./crdDocumentShared";
-import { DocumentLogo } from "@/components/shared/AppLogo";
+import { CrdDocumentFooter, CrdDocumentHeader, CrdEventsFields, CrdFooterButton, CrdSectionRail, CrdTermsAgreement, FILL_MANDATORY, Field, holdRail, railHeld, scrollToFirstMissing, sectionInView, Notice, PublicLayout, SectionHeading, digitsOnly, filled as sharedFilled, mergeSavedDocument, validHttpUrl } from "./crdDocumentShared";
 
 /**
  * The Dum Dum Customer Identification Document, as the client fills it in from the link Sales sends.
@@ -108,7 +108,7 @@ const requiredSide = ["firstName", "nameToBeUsedInProject", "instaId", "dateOfBi
 // No event on a side: one wedding has one start, one end and one venue, so they are asked once on
 // the common block below. A document saved under the old shape is lifted onto it by the server.
 const emptySide = { firstName: "", nickname: "", nameToBeUsedInProject: "", instaId: "", dateOfBirth: "", photo: "", contactNumber: "", streetAddress: "", city: "", state: "", postalCode: "", familyImages: [], familyDetails: [] };
-const emptyCommon = { eventId: "", whatsappGroupName: "", eventType: "", pointOfContactName: "", pointOfContactPhone: "", referredBy: "", eventStartAt: "", eventEndAt: "", eventAddressLink: "", helpWith: [], photoReferenceLinks: "", videoReferenceLinks: "", otherReferenceLinks: "", termsAccepted: false };
+const emptyCommon = { eventId: "", whatsappGroupName: "", eventType: "", pointOfContactName: "", pointOfContactPhone: "", referredBy: "", eventStartAt: "", eventEndAt: "", eventAddressLink: "", events: [], helpWith: [], photoReferenceLinks: "", videoReferenceLinks: "", otherReferenceLinks: "", termsAccepted: false };
 const emptyDocument = { common: emptyCommon, groom: { ...emptySide }, bride: { ...emptySide } };
 
 const filled = sharedFilled;
@@ -117,21 +117,6 @@ const MAX_FAMILY_IMAGES = 10;
 const MAX_FAMILY_MEMBERS = 20;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_REFERENCE_IMAGES = 100;
-
-/**
- * What to say when Submit is pressed on an unfinished document.
- *
- * It names how much is left and where it is rather than simply refusing: the document is long and
- * spread over two tabs, so "something is missing" is not an instruction anyone can act on.
- */
-function incompleteMessage(missing, sideLabel) {
-  if (missing.length === 1 && missing[0] === "common.termsAccepted") {
-    return "Almost done — please agree to the terms & conditions to submit.";
-  }
-  const noun = missing.length === 1 ? "answer" : "answers";
-  const where = sideLabel ? ` We've opened the ${sideLabel} tab, where the first one is.` : "";
-  return `Not ready to submit yet — ${missing.length} required ${noun} still to go. They're marked in red.${where}`;
-}
 
 function missingRequired(document) {
   const missing = [];
@@ -216,7 +201,7 @@ function PhotoReferenceImages({ value, onChange }) {
   }
 
   return <div className="block text-[11px] font-semibold text-slate-600 sm:text-xs">
-    <span>Photo Reference Links</span>
+    <span>Photo Reference Links<HelpTip text="Add photos in a style you like, so the team sees what you want." /></span>
     <div className="mt-1.5 flex flex-wrap items-center gap-3">
       {images.map((source, index) => <div key={`${index}-${String(source).slice(-24)}`} className="relative">
         <Image src={source} alt={`Photo reference ${index + 1}`} width={80} height={80} unoptimized className="h-20 w-20 rounded-lg border border-slate-200 object-cover" />
@@ -237,7 +222,7 @@ function PhotoReferenceImages({ value, onChange }) {
     </div>
     {error && <p className="mt-1.5 font-normal text-red-600">{error}</p>}
     <label className="mt-3 block max-w-xl text-[11px] font-semibold text-slate-600 sm:text-xs">
-      <span>Remarks</span>
+      <span>Remarks<HelpTip text="What you like about these photos, for the team to follow." /></span>
       <textarea
         value={remark}
         onChange={(event) => commit(images, event.target.value)}
@@ -250,7 +235,7 @@ function PhotoReferenceImages({ value, onChange }) {
   </div>;
 }
 
-function ReferenceLinks({ label, value, onChange }) {
+function ReferenceLinks({ label, helperText = "", value, onChange }) {
   const rows = referenceRowsForEdit(value, { allowImages: false });
   const hasInvalidLink = rows.some((row) => row.link && !validHttpUrl(row.link));
 
@@ -269,7 +254,7 @@ function ReferenceLinks({ label, value, onChange }) {
 
   return <div className="block text-[11px] font-semibold text-slate-600 sm:text-xs">
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-      <span>{label}</span>
+      <span>{label}<HelpTip text={`${helperText ? `${helperText} ` : ""}Add a link with a remark. A new row appears automatically.`} /></span>
     </div>
     <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
       <div className="hidden border-b border-slate-200 bg-white px-5 py-4 text-sm font-semibold text-slate-600 sm:grid sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.5rem]">
@@ -315,7 +300,7 @@ function ReferenceLinks({ label, value, onChange }) {
         </div>;
       })}
     </div>
-    <p className={`mt-1.5 font-normal ${hasInvalidLink ? "text-red-600" : "text-slate-500"}`}>{hasInvalidLink ? "Only working http or https links are accepted." : "Add a link with a remark. A new row appears automatically."}</p>
+    {hasInvalidLink && <p role="alert" className="mt-1.5 font-normal text-red-600">Only working http or https links are accepted.</p>}
   </div>;
 }
 
@@ -361,7 +346,7 @@ function FamilyDetails({ rows, onChange, disabled }) {
   const canAdd = rowComplete(list[lastIndex]) && list.length < MAX_FAMILY_MEMBERS;
 
   return <div>
-    <span className="block text-[11px] font-semibold text-slate-600 sm:text-xs">Family Details</span>
+    <span className="block text-[11px] font-semibold text-slate-600 sm:text-xs">Family Details<HelpTip text="Each family member's name and how they are related to you." /></span>
     <div className="mt-1.5 space-y-2">
       {/*
         * The last column is a stated width rather than `auto`.
@@ -383,7 +368,7 @@ function FamilyDetails({ rows, onChange, disabled }) {
             disabled={disabled || !canAdd}
             title={canAdd ? undefined : "Enter a name and relationship first"}
             onClick={() => onChange([...list, { name: "", relationship: "" }])}
-            className="min-h-9 whitespace-nowrap rounded-md border border-blue-300 bg-blue-50 px-3 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+            className="min-h-11 whitespace-nowrap rounded-md border border-blue-300 bg-blue-50 px-3 text-sm font-medium text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-9 sm:text-xs"
           >
             + Add Member
           </button>
@@ -434,7 +419,7 @@ function FamilyImages({ values, onChange, disabled }) {
   }
 
   return <div className="block text-[11px] font-semibold text-slate-600 sm:text-xs">
-    <span>Close Family Relatives Images</span>
+    <span>Close Family Relatives Images<HelpTip text="Photos of close family, so the team can recognise them at the event." /></span>
     <div className="mt-1.5 flex flex-wrap items-center gap-3">
       {values.map((source, index) => <div key={`${index}-${String(source).slice(-24)}`} className="relative">
         <Image src={source} alt={`Family relative ${index + 1}`} width={80} height={80} unoptimized className="h-20 w-20 rounded-lg border border-slate-200 object-cover" />
@@ -468,30 +453,28 @@ function SideFields({ label, values, onChange, showErrors }) {
   return <div className="space-y-8">
     <section>
       <div className="grid gap-4 md:grid-cols-2">
-        <Field label="First Name" required value={values.firstName} onChange={set("firstName")} invalid={invalid("firstName")} />
+        <Field label="First Name" required value={values.firstName} onChange={set("firstName")} invalid={invalid("firstName")} helperText="Your first name as it should appear in our records." />
 
         <Field label="Nickname" value={values.nickname} onChange={set("nickname")} helperText="This will be used in Designs and Wherever Required in the Project." />
         <Field label="Name to be Used In Project" required value={values.nameToBeUsedInProject} onChange={set("nameToBeUsedInProject")} invalid={invalid("nameToBeUsedInProject")} helperText="This will be used in Designs and Wherever Required In The Project." />
         <Field label="Insta ID" required value={values.instaId} onChange={set("instaId")} invalid={invalid("instaId")} helperText="This will be used for Tagging Purpose." />
         {/* `restriction="future"` disables days after today — nobody was born tomorrow. */}
-        <DateField label="Date Of Birth" required restriction="future" value={values.dateOfBirth} onChange={set("dateOfBirth")} error={invalid("dateOfBirth") ? "Date Of Birth is required." : ""} />
-        {/* The shared picker, so the country code is chosen rather than typed. It draws no helper
-            line of its own, so this one sits under it. */}
-        <div>
-          <PhoneField
-            label="Contact Number"
-            field="contactNumber"
-            required
-            value={values.contactNumber}
-            onChange={(_field, value) => set("contactNumber")(value)}
-            error={invalid("contactNumber") ? "Contact Number is required." : ""}
-          />
-          <p className="mt-1.5 text-[11px] font-normal text-slate-500 sm:text-xs">WhatsApp is preferable.</p>
-        </div>
+        <DateField label="Date Of Birth" required restriction="future" helperText="Your date of birth; days after today cannot be chosen." value={values.dateOfBirth} onChange={set("dateOfBirth")} error={invalid("dateOfBirth") ? "Date Of Birth is required." : ""} />
+        {/* The shared picker, so the country code is chosen rather than typed. */}
+        <PhoneField
+          label="Contact Number"
+          helperText="A number the studio can reach you on about the shoot. WhatsApp is preferable."
+          field="contactNumber"
+          required
+          value={values.contactNumber}
+          onChange={(_field, value) => set("contactNumber")(value)}
+          error={invalid("contactNumber") ? "Contact Number is required." : ""}
+        />
         <div className="md:col-span-2">
           <ImageUploadField
             label="Upload Your Photo/Selfie"
             required
+            helperText="A clear, recent photo of you for the studio's team."
             value={values.photo || null}
             onChange={(value, error) => { setPhotoError(error || ""); set("photo")(value || ""); }}
             error={photoError || (invalid("photo") ? "A photo is required." : "")}
@@ -503,10 +486,10 @@ function SideFields({ label, values, onChange, showErrors }) {
     <section>
       <SectionHeading title="Shipping Address" />
       <div className="grid gap-4 md:grid-cols-2">
-        <Field className="md:col-span-2" label="Street Address" required value={values.streetAddress} onChange={set("streetAddress")} invalid={invalid("streetAddress")} />
-        <Field label="City" required value={values.city} onChange={set("city")} invalid={invalid("city")} />
-        <Field label="State" required value={values.state} onChange={set("state")} invalid={invalid("state")} />
-        <Field label="Postal / Zip Code" required inputMode="numeric" maxLength={10} value={values.postalCode} onChange={(value) => set("postalCode")(digitsOnly(value, 10))} invalid={invalid("postalCode")} />
+        <Field className="md:col-span-2" label="Street Address" required value={values.streetAddress} onChange={set("streetAddress")} invalid={invalid("streetAddress")} helperText="House, street and area where anything from the studio is shipped." />
+        <Field label="City" required value={values.city} onChange={set("city")} invalid={invalid("city")} helperText="The city of your shipping address." />
+        <Field label="State" required value={values.state} onChange={set("state")} invalid={invalid("state")} helperText="The state of your shipping address." />
+        <Field label="Postal / Zip Code" required inputMode="numeric" maxLength={10} value={values.postalCode} onChange={(value) => set("postalCode")(digitsOnly(value, 10))} invalid={invalid("postalCode")} helperText="Digits only, up to 10, for your shipping address." />
       </div>
     </section>
 
@@ -543,6 +526,8 @@ export default function PublicCrdDocumentFormDumDum({ token, initialContext }) {
     return { eventStartAt: prefilled.has("eventStartAt"), eventEndAt: prefilled.has("eventEndAt") };
   });
   const [activeSection, setActiveSection] = useState("event-details");
+  // The project's shoots, as events; none on a document raised before its project had any.
+  const hasEvents = (document.common.events || []).length > 0;
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -561,17 +546,16 @@ export default function PublicCrdDocumentFormDumDum({ token, initialContext }) {
 
   const setCommon = (field) => (value) => setDocument((current) => ({ ...current, common: { ...current.common, [field]: value } }));
   const setSide = (side) => (values) => setDocument((current) => ({ ...current, [side]: values }));
+  // A section picked on the rail holds its highlight while the form scrolls to it.
+  const railHold = useRef({ picking: false, timer: null });
   const updateActiveSectionFromScroll = () => {
-    const container = documentRef.current;
-    if (!container) return;
-    const sectionsOnScreen = schemaSections
-      .map(([id]) => ({ id, top: container.querySelector(`#${CSS.escape(id)}`)?.getBoundingClientRect().top ?? Infinity }))
-      .filter((item) => Number.isFinite(item.top));
-    const current = sectionsOnScreen.reduce((best, item) => (item.top <= 180 && item.top > best.top ? item : best), { id: sectionsOnScreen[0]?.id || "event-details", top: -Infinity });
-    if (current.id !== activeSection) setActiveSection(current.id);
+    if (railHeld(railHold.current)) return;
+    const current = sectionInView(documentRef.current, schemaSections.map(([id]) => id));
+    if (current && current !== activeSection) setActiveSection(current);
   };
   const selectSection = (sectionId) => {
     setActiveSection(sectionId);
+    holdRail(railHold.current);
     documentRef.current?.querySelector(`#${CSS.escape(sectionId)}`)?.scrollIntoView({ block: "start", behavior: "smooth" });
   };
 
@@ -590,8 +574,10 @@ export default function PublicCrdDocumentFormDumDum({ token, initialContext }) {
       // The server hands back what it stored — image links in place of the data the browser sent —
       // so the form keeps working from stored links rather than re-uploading on the next save.
       const stored = response?.data?.document ? { ...emptyDocument, ...response.data.document } : current;
-      lastSavedRef.current = JSON.stringify(stored);
-      setDocument(stored);
+      // What is on screen is kept where the server only trimmed it (`mergeSavedDocument`), and is
+      // counted as saved, so the next autosave is not set off by a space the server will trim again.
+      lastSavedRef.current = JSON.stringify(mergeSavedDocument(current, current, stored));
+      setDocument((latest) => mergeSavedDocument(latest, current, stored));
       setSavedAt(new Date());
       if (announce) showSuccess("Saved. You can close this page and pick up from the same link.");
     } catch (error) {
@@ -638,10 +624,9 @@ export default function PublicCrdDocumentFormDumDum({ token, initialContext }) {
        */
       const targetId = firstMissingSide ? `${firstMissingSide.id}-details` : "terms-conditions";
       setActiveSection(targetId);
-      window.setTimeout(() => {
-        documentRef.current?.querySelector(`#${CSS.escape(targetId)}`)?.scrollIntoView({ block: "start", behavior: "smooth" });
-      }, 0);
-      showNotice(incompleteMessage(missing, firstMissingSide?.label), "error");
+      // Straight to the first field marked red, rather than the top of its section.
+      scrollToFirstMissing(documentRef.current);
+      showNotice(FILL_MANDATORY, "error");
       return;
     }
     setSubmitting(true);
@@ -668,24 +653,7 @@ export default function PublicCrdDocumentFormDumDum({ token, initialContext }) {
   const termsInvalid = showErrors && document.common?.termsAccepted !== true;
 
   return <PublicLayout>
-    <header className="sticky top-0 z-50 shrink-0 border-b border-slate-200 bg-white shadow-sm">
-      {/* `unoptimized` because the file is an SVG, which the image optimizer will not process
-          without being told to allow it — and it needs no resizing anyway. */}
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-4 pb-[10px] pt-3 sm:px-6 lg:pl-0">
-        <div className="flex min-w-0 items-center gap-4">
-          <div className="relative hidden h-11 w-64 shrink-0 lg:block">
-            {/* The logo this document was issued under, from its own record rather than today's
-                Settings - the same mark the client saw when the link reached them. */}
-            <DocumentLogo variant="crd" src={initialContext?.logoUrl} priority className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2" />
-          </div>
-          <DocumentLogo variant="document" src={initialContext?.logoUrl} priority className="shrink-0 lg:hidden" />
-          <div className="min-w-0">
-            <h1 className="text-base font-semibold text-slate-900 sm:text-xl">Customer Identification Document</h1>
-            {initialContext?.eventId && <p className="mt-0.5 text-xs text-slate-600 sm:text-sm">{initialContext.eventId}</p>}
-          </div>
-        </div>
-      </div>
-    </header>
+    <CrdDocumentHeader title="Customer Identification Document" eventId={initialContext?.eventId} logoUrl={initialContext?.logoUrl} />
 
     <FloatingNotice notice={notice} onClose={clearNotice} />
 
@@ -722,43 +690,48 @@ export default function PublicCrdDocumentFormDumDum({ token, initialContext }) {
                   full-width boxes that pushed everything the client is actually asked further
                   down. Read-only like the rest of the block: what Sales knows, shown to be
                   checked. */}
-              <Field label="Event ID" readOnly value={document.common.eventId} onChange={setCommon("eventId")} />
-              <Field label="WhatsApp Group Name" readOnly value={document.common.whatsappGroupName} onChange={setCommon("whatsappGroupName")} />
+              <Field label="Event ID" readOnly value={document.common.eventId} onChange={setCommon("eventId")} helperText="The studio's reference for this booking, shown for checking." />
+              <Field label="WhatsApp Group Name" readOnly value={document.common.whatsappGroupName} onChange={setCommon("whatsappGroupName")} helperText="The name of this booking's WhatsApp group, shown for checking." />
               {/* The same control the studio sees, so the two views of this document read alike -
                   inert here, and without the chevron that would open a list nobody can choose from. */}
               <ComboBoxField
                 label="Event Type"
                 readOnly
+                helperText="The kind of shoot booked, as the studio recorded it."
                 value={document.common.eventType}
                 onChange={(value) => setCommon("eventType")(value)}
                 options={shootOptions}
               />
-              <Field label="Referred By" readOnly value={document.common.referredBy} onChange={setCommon("referredBy")} />
+              <Field label="Referred By" readOnly value={document.common.referredBy} onChange={setCommon("referredBy")} helperText="Who referred you to the studio, as recorded at booking." />
               {/* The event itself, asked once. It used to be four questions on each of the Groom
                   and Bride tabs, which is two answers to each of them about one wedding.
                   Each date is read-back where the studio has answered it and the client's to fill
                   in where it has not - a booking taken before the venue was settled leaves these
                   blank, and the client is the one who can say. Decided from the document as it
                   loaded, never from the live value: see `eventDatesFromStudio`. */}
-              <DateField label="Event Start Date & Time" withTime readOnly={eventDatesFromStudio.eventStartAt} placeholder="Select date and time" value={document.common.eventStartAt} onChange={setCommon("eventStartAt")} />
-              <DateField label="Event End Date & Time" withTime readOnly={eventDatesFromStudio.eventEndAt} placeholder="Select date and time" value={document.common.eventEndAt} onChange={setCommon("eventEndAt")} />
+              {/* With shoots on the project, each is its own event below; a document with none
+                  (raised before the project) asks the one event here, as it always did. */}
+              {!hasEvents && <DateField label="Event Start Date & Time" helperText="When your event begins; the studio may have filled it in." withTime readOnly={eventDatesFromStudio.eventStartAt} placeholder="Select date and time" value={document.common.eventStartAt} onChange={setCommon("eventStartAt")} />}
+              {!hasEvents && <DateField label="Event End Date & Time" helperText="When your event ends; the studio may have filled it in." withTime readOnly={eventDatesFromStudio.eventEndAt} placeholder="Select date and time" value={document.common.eventEndAt} onChange={setCommon("eventEndAt")} />}
               {/* The point of contact is the client's to give, not the studio's to state.
                   Prefilled from the lead where there is one, and editable either way: the person
                   the studio should call about this wedding is exactly the sort of thing the booking
                   gets wrong, and the client is the one who knows. */}
               <PhoneField
                 label="Point of Contact Phone Number"
+                helperText="The number the studio should call about this event."
                 field="pointOfContactPhone"
                 value={document.common.pointOfContactPhone}
                 onChange={(_field, value) => setCommon("pointOfContactPhone")(value)}
               />
-              <Field label="Point Of Contact Name" value={document.common.pointOfContactName} onChange={setCommon("pointOfContactName")} />
+              <Field label="Point Of Contact Name" value={document.common.pointOfContactName} onChange={setCommon("pointOfContactName")} helperText="The person the studio should speak to about this event." />
               {/* The venue's map link, which the studio very often does not have and the client
                   always does. */}
-              <Field className="md:col-span-2" label="Event Address Link" type="url" value={document.common.eventAddressLink} onChange={setCommon("eventAddressLink")} helperText="A Google Maps link to the venue." />
+              {!hasEvents && <Field className="md:col-span-2" label="Event Address Link" type="url" value={document.common.eventAddressLink} onChange={setCommon("eventAddressLink")} helperText="A Google Maps link to the venue." />}
               <MultiSelectField
                 className="md:col-span-2"
                 label="Help us to know what other things we can help you with?"
+                helperText="Other services you would like the studio's help with."
                 readOnly
                 options={helpWithOptions}
                 values={document.common.helpWith || []}
@@ -766,6 +739,8 @@ export default function PublicCrdDocumentFormDumDum({ token, initialContext }) {
                 placeholder="Select anything you would like help with"
               />
             </div>
+            {/* One event per shoot of the project, each with its own dates and venue. */}
+            {hasEvents && <div className="mt-6"><CrdEventsFields events={document.common.events} onChange={setCommon("events")} /></div>}
           </SchemaFormSection>
 
           <SchemaFormSection id="groom-details" title="Groom Details">
@@ -779,49 +754,30 @@ export default function PublicCrdDocumentFormDumDum({ token, initialContext }) {
           <SchemaFormSection id="reference-links" title="Reference photos and Links">
             <div className="grid gap-5">
               <PhotoReferenceImages value={document.common.photoReferenceLinks} onChange={setCommon("photoReferenceLinks")} />
-              <ReferenceLinks label="Video Reference Links" value={document.common.videoReferenceLinks} onChange={setCommon("videoReferenceLinks")} />
-              <ReferenceLinks label="Other Reference Links" value={document.common.otherReferenceLinks} onChange={setCommon("otherReferenceLinks")} />
+              <ReferenceLinks label="Video Reference Links" helperText="Links to videos in a style you like, each with a short note." value={document.common.videoReferenceLinks} onChange={setCommon("videoReferenceLinks")} />
+              <ReferenceLinks label="Other Reference Links" helperText="Any other links that show what you want, each with a short note." value={document.common.otherReferenceLinks} onChange={setCommon("otherReferenceLinks")} />
             </div>
           </SchemaFormSection>
 
           <SchemaFormSection id="terms-conditions" title="Terms & Conditions">
             {/* Scrolls inside its own box rather than making the page long — the same shape the
                 onboarding policy agreement uses. */}
-            <div className="h-60 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs leading-6 text-slate-700 shadow-inner sm:h-72 sm:p-5 sm:text-sm">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-700 shadow-inner sm:h-72 sm:overflow-y-auto sm:p-5">
               <p className="whitespace-pre-line">{initialContext?.termsText}</p>
             </div>
-            <label className={`mt-4 flex items-start gap-3 text-sm font-medium ${termsInvalid ? "text-rose-800" : "text-slate-700"}`}>
-              <input
-                type="checkbox"
-                checked={document.common.termsAccepted === true}
-                onChange={(event) => setCommon("termsAccepted")(event.target.checked)}
-                className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600"
-              />
-              <span>By clicking the submit button, I agree to terms &amp; conditions. <span aria-hidden="true" className="ml-0.5 text-rose-500">*</span></span>
-            </label>
+            <CrdTermsAgreement checked={document.common.termsAccepted === true} onChange={setCommon("termsAccepted")} invalid={termsInvalid} />
           </SchemaFormSection>
         </main>
       </div>
 
-      <div className="shrink-0 border-t border-slate-200 bg-white px-4 py-3 sm:flex sm:items-center sm:justify-end sm:gap-3 sm:px-6">
-        <div className="mb-3 min-w-[10rem] text-sm sm:mb-0 sm:mr-auto sm:w-56">
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-medium text-slate-600">Completion</span>
-            <span className="font-semibold text-slate-900">{completion}%</span>
-          </div>
-          <div role="progressbar" aria-valuenow={completion} aria-valuemin={0} aria-valuemax={100} aria-label="Document completion" className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-200">
-            <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${completion}%` }} />
-          </div>
-        </div>
-        <div className="grid gap-2 sm:flex sm:gap-3">
-          <button type="button" disabled={saving || submitting} onClick={() => void saveDocument(document, { announce: true })} className="min-h-11 rounded-md border border-slate-300 bg-white px-6 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">
-            {saving ? "Saving…" : "Save Draft"}
-          </button>
-          <button type="submit" disabled={saving || submitting} className="min-h-11 rounded-md bg-blue-600 px-6 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">
-            {submitting ? "Submitting…" : "Submit document"}
-          </button>
-        </div>
-      </div>
+      <CrdDocumentFooter completion={completion}>
+        <CrdFooterButton type="button" variant="secondary" disabled={saving || submitting} onClick={() => void saveDocument(document, { announce: true })}>
+          {saving ? "Saving…" : "Save Draft"}
+        </CrdFooterButton>
+        <CrdFooterButton type="submit" variant="primary" disabled={saving || submitting}>
+          {submitting ? "Submitting…" : "Submit document"}
+        </CrdFooterButton>
+      </CrdDocumentFooter>
     </form>
   </PublicLayout>;
 }

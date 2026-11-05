@@ -1,6 +1,8 @@
 const { z } = require("zod");
 const multer = require("multer");
 const service = require("./service");
+const { dashboardQuerySchema } = require("../../../services/dashboardRange");
+const { taskDashboard } = require("./dashboard");
 
 /**
  * Validation, status codes, and nothing else - the lifecycle itself is `service.js`.
@@ -94,6 +96,8 @@ const reassignSchema = z.object({
   reason: trimmed(1000),
 });
 const cancelSchema = z.object({ reason: z.string().trim().max(1000).optional().nullable() });
+// Revoking may name who it goes to next; left out, it comes back to whoever assigned it.
+const revokeSchema = cancelSchema.extend({ assignedToUserId: z.coerce.number().int().positive().optional().nullable() });
 
 function fail(res, error, fallback) {
   if (error?.status) return res.status(error.status).json({ message: error.message });
@@ -178,6 +182,17 @@ async function listGiven(req, res) {
 }
 
 /** All Tasks: the whole studio's list, behind `HRM / All Tasks` on the route. */
+/** The Dashboard: the reader's own tasks as figures, over the range picked. */
+async function dashboard(req, res) {
+  const parsed = dashboardQuerySchema.safeParse(req.query || {});
+  if (!parsed.success) return res.status(400).json({ message: "Choose a range the dashboard offers." });
+  try {
+    return res.json({ data: await taskDashboard({ userId: req.user.id, range: parsed.data.range, canSeeAll: Boolean(req.canSeeAll) }) });
+  } catch (error) {
+    return fail(res, error, "Unable to load the task dashboard.");
+  }
+}
+
 async function listAll(req, res) {
   try {
     return res.json({ data: await service.listTasks({ scope: "all", userId: req.user.id, role: req.user.role, status: String(req.query.status || "").trim() }) });
@@ -247,6 +262,26 @@ async function startTask(req, res) {
   }
 }
 
+/**
+ * A feedback issue answered by its holder: `{ outcome: "Issues sorted" | "Rejected", remarks }` - a
+ * remark required for Rejected. Only on a task that is a feedback issue, and only by its holder; the
+ * service decides both, as it does for every other verb.
+ */
+async function resolveFeedbackTask(req, res) {
+  const id = taskId(req, res);
+  if (!id) return undefined;
+  const body = req.body || {};
+  try {
+    return res.json({ data: await service.transition(id, "resolve", req.user, {
+      canSeeAll: Boolean(req.canSeeAll),
+      outcome: typeof body.outcome === "string" ? body.outcome : null,
+      remarks: typeof body.remarks === "string" ? body.remarks : null,
+    }) });
+  } catch (error) {
+    return fail(res, error, "Unable to answer that feedback issue.");
+  }
+}
+
 async function completeTask(req, res) {
   const id = taskId(req, res);
   if (!id) return undefined;
@@ -290,6 +325,34 @@ async function cancelTask(req, res) {
     return res.json({ data: await service.transition(id, "cancel", req.user, { reason: parsed.data.reason || null, canSeeAll: Boolean(req.canSeeAll) }) });
   } catch (error) {
     return fail(res, error, "Unable to cancel that task.");
+  }
+}
+
+/** Mark as Completed, by whoever assigned the task - only once it has been finished and sent back. */
+async function approveTask(req, res) {
+  const id = taskId(req, res);
+  if (!id) return undefined;
+  try {
+    return res.json({ data: await service.transition(id, "approve", req.user, { canSeeAll: Boolean(req.canSeeAll) }) });
+  } catch (error) {
+    return fail(res, error, "Unable to mark that task as completed.");
+  }
+}
+
+/** Revoking: whoever assigned the task takes it back, optionally reassigning it to someone. */
+async function revokeTask(req, res) {
+  const id = taskId(req, res);
+  if (!id) return undefined;
+  const parsed = revokeSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ message: "Validation failed.", errors: parsed.error.flatten() });
+  try {
+    return res.json({ data: await service.transition(id, "revoke", req.user, {
+      reason: parsed.data.reason || null,
+      assignToUserId: parsed.data.assignedToUserId || null,
+      canSeeAll: Boolean(req.canSeeAll),
+    }) });
+  } catch (error) {
+    return fail(res, error, "Unable to revoke that task.");
   }
 }
 
@@ -375,4 +438,5 @@ async function deleteAttachment(req, res) {
   }
 }
 
-module.exports = { createSchema, updateSchema, options, listMine, listGiven, listAll, getTask, createTask, updateTask, startTask, completeTask, reassignTask, cancelTask, deleteTask, deleteTaskRecord, uploadSingle, addAttachment, downloadAttachment, deleteAttachment };
+module.exports = {
+  dashboard, resolveFeedbackTask, createSchema, updateSchema, options, listMine, listGiven, listAll, getTask, createTask, updateTask, startTask, completeTask, approveTask, revokeTask, reassignTask, cancelTask, deleteTask, deleteTaskRecord, uploadSingle, addAttachment, downloadAttachment, deleteAttachment };

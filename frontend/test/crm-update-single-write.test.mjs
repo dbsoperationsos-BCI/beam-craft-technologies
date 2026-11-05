@@ -50,7 +50,7 @@ test("committing a note as part of an update never posts it on its own", () => {
    * so the flag is read during the commit and cleared straight after - a `finally`, so a throw
    * inside the commit cannot leave every later remark silently unposted.
    */
-  const body = functionBody("  function attemptSave(closeAfter, advanceAfter, forcedStatus)");
+  const body = functionBody("  function attemptSave(closeAfter, advanceAfter, forcedStatus, moveConfirmed = false)");
   assert.match(body, /skipRemarkPostRef\.current = true;/, "the update posts its note separately again");
   assert.match(body, /} finally \{\s*\n\s*skipRemarkPostRef\.current = false;/, "the guard is not cleared in a finally");
   assert.match(body, /committedEntries = commitRemarkRef\.current\?\.\(\) \|\| null;/);
@@ -65,7 +65,7 @@ test("a note committed for a save that was refused is still written", () => {
    * actually happening.
    */
   const body = PAGE.slice(PAGE.indexOf("async function saveWithCommittedNote("), PAGE.indexOf("\n  }\n", PAGE.indexOf("async function saveWithCommittedNote(")));
-  assert.match(body, /const saved = await onSave\(closeAfter, advanceAfter, forcedStatus, committedEntries\);/);
+  assert.match(body, /const saved = await onSave\(moving \? false : closeAfter, moving \? false : advanceAfter, forcedStatus, committedEntries\);/);
   assert.match(body, /if \(saved === false && committedEntries\) onUpdateRemarks\?\.\(committedEntries, \{ post: true \}\);/);
   // And the hosts have to hand that answer back rather than discarding the promise.
   assert.doesNotMatch(PAGE, /onSave=\{\([^)]*\) => void save/, "a host discards whether its save succeeded");

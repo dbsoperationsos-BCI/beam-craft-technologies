@@ -114,10 +114,20 @@ test("every route that writes to one project's plan is behind the guard", () => 
   const planWrites = routes.split("\n")
     .filter((line) => /^router\.(post|patch|put|delete)\("\/projects\/:id/.test(line))
     .filter((line) => line.includes("plansAProject"));
-  assert.equal(planWrites.length, 12, "the plan's write routes are not the twelve this rule was mounted on");
+  // All carry the pair inline - the remark left after updating a stage from the Status tab, the
+  // two that put a shoot's lines in order and the one that puts the shoots themselves in order
+  // (`PUT /projects/:id/shoots/order`) among them, and the two that take a service or deliverable off or
+  // put it back from its Sale Extras line (`/sale-extras/:extraId/remove`, `/restore`), which change the
+  // same rows Service Creation does - eighteen in all. The schedule's - the Schedule Payment save -
+  // carries them inside `editsASchedule`, which lets `SALES / Booking Edit` through as well: a
+  // schedule is agreed when the sale is.
+  assert.equal(planWrites.length, 18, "the plan's write routes are not the eighteen this rule was mounted on");
   for (const line of planWrites) {
     assert.match(line, /editsAStartedProject/, `unguarded write: ${line.trim()}`);
   }
+  const scheduleGuard = routes.slice(routes.indexOf("const editsASchedule ="), routes.indexOf("router.put(\"/projects/:id/payment-schedule\""));
+  assert.match(routes, /router\.put\("\/projects\/:id\/payment-schedule", editsASchedule,/, "the schedule save is on the composed guard");
+  assert.match(scheduleGuard, /plansAProject\(req, res, \(error\) => \(error \? next\(error\) : editsAStartedProject\(req, res, next\)\)\)/, "which still asks the plan's pair");
 });
 
 test("the refusal says who may, so somebody refused knows where to go", () => {

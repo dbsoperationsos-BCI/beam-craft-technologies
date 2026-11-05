@@ -1,11 +1,17 @@
 "use client";
 
-import { useEffect } from "react";
+import HelpTip from "@/components/shared/HelpTip";
+import { useEffect, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import IconButton from "@/components/shared/IconButton";
 import useEscapeKey from "@/components/shared/useEscapeKey";
 import useFocusTrap from "@/components/shared/useFocusTrap";
 import CloseIcon from "@/components/ui/CloseIcon";
 import { layers } from "@/constants/layers";
+
+// False on the server, true in the browser - asked without a render of its own, as SchemaFormPanel asks.
+const neverChanges = () => () => {};
+const useMounted = () => useSyncExternalStore(neverChanges, () => true, () => false);
 
 const sizes = {
   xs: "max-w-xs",
@@ -44,6 +50,8 @@ const heights = {
 export default function Dialog({
   title,
   description,
+  // The description as the ⓘ beside the title rather than a paragraph under it (Settings).
+  descriptionAsTip = false,
   onClose,
   footer,
   headerActions,
@@ -61,10 +69,27 @@ export default function Dialog({
   // different intents even when the destination is the same.
   onBack,
   backAriaLabel,
+  // What the back control draws; a dialog may pass an icon of its own. Without one it stays "←".
+  backIcon,
+  // A small mark before the title - the product a dialog is about, say. Decorative: the title names
+  // the dialog, so the mark is hidden from screen readers.
+  icon,
+  // Footer buttons side by side on a phone too, instead of stacked. Only for a footer of two short
+  // buttons (ConfirmDialog's Cancel / Confirm); a longer one stays stacked so it fits at 360px.
+  footerInline = false,
 }) {
   // A dialog that collects something is the form itself, so its footer buttons submit it the way
   // they would anywhere else.
   const Card = onSubmit ? "form" : "section";
+  const mounted = useMounted();
+  /*
+   * A form dialog is drawn straight into <body>. Opened from inside another form - Settings is one,
+   * and so is every SchemaFormPanel - it would otherwise be a <form> inside a <form>, which HTML does
+   * not allow and React reports as a hydration error. React still bubbles events up the component
+   * tree through a portal, so its submit stops here: Enter in this dialog never submits the form
+   * that opened it.
+   */
+  const submit = onSubmit ? (event) => { event.stopPropagation(); onSubmit(event); } : undefined;
   /*
    * Escape closes it, unless something is on top of it or it is busy.
    *
@@ -98,7 +123,7 @@ export default function Dialog({
     return () => { document.body.style.overflow = previousOverflow; };
   }, []);
 
-  return <div
+  const dialog = <div
     // Dismissed by pressing the backdrop itself, never by a drag that started inside the dialog and
     // happened to end out here.
     onMouseDown={(event) => { if (event.currentTarget === event.target && !busy) onClose?.(); }}
@@ -106,18 +131,22 @@ export default function Dialog({
   >
     <Card
       ref={dialogRef}
-      onSubmit={onSubmit}
+      onSubmit={submit}
+      // The form says what is wrong under each box (`useFormErrors`); the browser's own bubble
+      // would answer first, in its own words, for one field at a time.
+      noValidate={onSubmit ? true : undefined}
       role="dialog"
       aria-modal="true"
       aria-label={title}
       className={`flex ${heights[height] || heights.auto} max-h-[calc(100dvh-1.5rem)] w-full ${sizes[size] || sizes.sm} flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl`}
     >
       <header className="flex shrink-0 items-start justify-between gap-3 px-5 pt-5 sm:px-6">
-        <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
-          {onBack && <IconButton onClick={onBack} disabled={busy} label={backAriaLabel || "Back"} size="sm" className="text-slate-500 hover:bg-slate-50 hover:text-slate-700">←</IconButton>}
+        <div className={`flex min-w-0 gap-1.5 sm:gap-2 ${icon ? "items-start sm:gap-3" : "items-center"}`}>
+          {onBack && <IconButton onClick={onBack} disabled={busy} label={backAriaLabel || "Back"} size="sm" className="text-slate-500 hover:bg-slate-50 hover:text-slate-700">{backIcon || "←"}</IconButton>}
+          {icon && <span aria-hidden="true" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600 ring-1 ring-inset ring-blue-100">{icon}</span>}
           <div className="min-w-0">
-            <h2 className="text-base font-semibold text-slate-900 sm:text-lg">{title}</h2>
-            {description && <p className="mt-1.5 text-xs leading-5 text-slate-600 sm:text-sm sm:leading-6">{description}</p>}
+            <h2 className="flex items-center text-base font-semibold text-slate-900 sm:text-lg">{title}{descriptionAsTip && <HelpTip text={description} />}</h2>
+            {description && !descriptionAsTip && <p className="mt-1.5 text-xs leading-5 text-slate-600 sm:text-sm sm:leading-6">{description}</p>}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -135,7 +164,9 @@ export default function Dialog({
       {/* Stays put while the body scrolls under it — a search box for a long list, say. */}
       {toolbar && <div className="shrink-0 border-b border-slate-200 px-5 py-3 sm:px-6">{toolbar}</div>}
       {children !== undefined && <div className={`min-h-0 flex-1 overflow-y-auto px-5 pt-4 ${footer ? "" : "pb-5"} sm:px-6 ${bodyClassName}`}>{children}</div>}
-      {footer && <footer className="flex shrink-0 flex-col-reverse gap-3 px-5 py-5 sm:flex-row sm:justify-end sm:px-6">{footer}</footer>}
+      {footer && <footer className={`flex shrink-0 gap-3 px-5 py-5 sm:justify-end sm:px-6 ${footerInline ? "flex-row" : "flex-col-reverse sm:flex-row"}`}>{footer}</footer>}
     </Card>
   </div>;
+  if (!onSubmit) return dialog;
+  return mounted ? createPortal(dialog, document.body) : null;
 }

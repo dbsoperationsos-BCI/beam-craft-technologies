@@ -1,12 +1,51 @@
 const prisma = require("../../../config/db");
+const { SHOOT_DATE_ASC } = require("../../../services/shootOrder");
 const { listAllMeetings } = require("../../sales/crm-meetings/service");
 const { projectAccessWhere } = require("../../../services/projectScope");
+const { PRODUCTION_TEAM_SELECT, productionTeam } = require("../../../services/productionTeam");
 /*
  * A holiday is a day, and `attendance_holiday.holiday_date` is a `@db.Date`, so the window it is
  * queried with has to be a day too. `calendarDay` is attendance's, because attendance is where the
  * only correct reading of these columns is written — see `hrm/attendance/attendanceRules.js`.
  */
-const { calendarDay } = require("../../hrm/attendance/attendanceRules");
+const { calendarDay, eachDateInRange, localIsoDate } = require("../../hrm/attendance/attendanceRules");
+const hrmAttendance = require("../../hrm/attendance/service");
+const { loadHolidays, scopeOf, appliesToBranch, branchForUser, scopeLabel } = require("../../../services/holidayCalendar");
+const calendarBlocks = require("../blocks/service");
+// Whose shoot it is, answered once: the project's roles, the coordinator, the team and the crew.
+const { boardWhere } = require("../../project-management/shoot-board/read");
+
+/**
+ * The shoots a production team member is on **themselves**, for the calendar: its Production
+ * Coordinator, its Production Team or a service's crew - or its project's Production Manager or
+ * Project Manager, who run its shoots. Not the project's other roles (a Creative Manager is not on
+ * the shoot day) and not the shoots of the people reporting to them, which the Shoot Board's
+ * `boardWhere` does add: the calendar is the person's own diary. Somebody whose `boardWhere` is the
+ * whole board (a Super Admin, Show All Projects) still sees every shoot. Null - no shoots - for a
+ * login with no employee behind it.
+ */
+async function ownShootsWhere(userId) {
+  const board = await boardWhere(userId);
+  if (!board || !Object.keys(board).length) return board;
+  const account = await prisma.user.findUnique({ where: { id: Number(userId) || 0 }, select: { linkedEmployeeId: true } });
+  const me = account?.linkedEmployeeId || null;
+  if (!me) return null;
+  return {
+    OR: [
+      { project: { productionManagerEmployeeId: me } },
+      { project: { projectManagerEmployeeId: me } },
+      { production: { productionCoordinatorEmployeeId: me } },
+      { production: { teamMembers: { some: { employeeId: me } } } },
+      { production: { serviceCrew: { some: { employeeId: me } } } },
+    ],
+  };
+}
+const { boardsForProjects } = require("../../../services/projectBoards");
+
+/** The day statuses the calendar shows a person - every one that was not simply on time. */
+const ATTENDANCE_SHOWN = ["Absent", "On leave", "Comp off", "Late", "Half day", "Early exit"];
+/** At most this many days of attendance at once - a quarter, more than any calendar view spans. */
+const ATTENDANCE_MAX_DAYS = 92;
 /*
  * An interview is set for a day and an hour that are kept as **text** - `interview_date` and
  * `interview_time` are VarChar columns, filled by hand, by a CSV or by a linked Google Sheet - so
@@ -42,7 +81,7 @@ const { toIsoDay, toClockTime } = require("../../sales/crm-leads/leadDates");
  * and the browser decides which local day that falls on - which is what `dayKey` on the client
  * already does for it.
  *
- * A shoot and a project's main event are a **day**: the studio wrote down a date, and how long the
+ * A shoot is a **day**: the studio wrote down a date, and how long the
  * shoot runs is a duration rather than a clock time. Those carry `day` as a plain `YYYY-MM-DD`
  * string, taken from the stored date without going near a timezone. Handing the browser
  * `2026-09-01T00:00:00Z` instead would put a 1 September shoot on 31 August for anybody west of
@@ -96,7 +135,7 @@ const projectOwner = (project) => text(project?.projectManager) || text(project?
 
 
 /**
- * The three things the studio schedules, and who may see each.
+ * The things the studio schedules or holds, and who may see each.
  *
  * `module` / `feature` is the permission the owning module's own API enforces, checked again here:
  * being able to open the calendar is not being able to read Project Management, so a source the
@@ -124,25 +163,28 @@ const SOURCES = [
      */
     key: "holiday",
     always: true,
-    async load({ from, to }) {
-      const holidayDate = {};
-      if (from) holidayDate.gte = calendarDay(from);
-      if (to) holidayDate.lte = calendarDay(to);
-      const holidays = await prisma.attendanceHoliday.findMany({
-        where: Object.keys(holidayDate).length ? { holidayDate } : {},
-        orderBy: { holidayDate: "asc" },
-      });
-      return holidays.map((holiday) => ({
+    async load({ from, to, viewer }) {
+      /*
+       * The viewer's own holidays: the studio's, and their branch's - never a holiday declared for
+       * another branch alone, which is that branch's day off and not this person's. Which branch is
+       * theirs is `branchForUser`: their employee record's, else their login's, else none - and a
+       * person with none sees the studio-wide holidays only. Still `always` - no permission gates
+       * it, since nothing here is anybody's record - but no longer the whole list for everybody.
+       */
+      const [holidays, branchId] = await Promise.all([
+        loadHolidays({ from, to }),
+        branchForUser(viewer?.userId),
+      ]);
+      return holidays.filter((holiday) => appliesToBranch(scopeOf(holiday), branchId)).map((holiday) => ({
         id: `holiday:${holiday.id}`,
         kind: "holiday",
         title: text(holiday.name) || "Holiday",
         /*
-         * No reference, no subject, no owner. A holiday belongs to nobody and refers to nothing:
-         * the name *is* the whole entry, and the details panel draws only the fields that have a
-         * value, so it reads as the day and what it is called rather than as a booking with most
-         * of its fields empty.
+         * Whose it is stands where a booking's reference does, so the cell reads "Diwali · All
+         * branches" or "Pongal · Madurai": a holiday belongs to nobody and refers to nothing, and
+         * the one thing worth saying beside its name is which branches are shut.
          */
-        reference: "",
+        reference: scopeLabel(holiday),
         day: dayOf(holiday.holidayDate),
         startAt: null,
         endAt: null,
@@ -150,6 +192,39 @@ const SOURCES = [
         owner: "",
         subject: "",
         meta: {},
+      }));
+    },
+  },
+  {
+    /*
+     * ── The periods a branch's hours are blocked ──────────────────────────────────────────────
+     *
+     * Calendar → a day's ⋮ → Block Period. Read through the blocks module, so the branches a viewer
+     * sees blocked are the ones `SALES / Block Period` reaches for them - the same answer the
+     * blocks API gives. A day and two clock times kept as text, never an instant.
+     */
+    key: "block",
+    module: "SALES",
+    feature: "Block Period",
+    async load({ from, to, viewer }) {
+      const blocks = await calendarBlocks.listBlocks({
+        userId: viewer?.userId,
+        from: from ? dayOf(calendarDay(from)) : null,
+        to: to ? dayOf(calendarDay(to)) : null,
+      });
+      return blocks.map((block) => ({
+        branchId: block.branchId,
+        id: `block:${block.id}`,
+        kind: "block",
+        title: block.reason,
+        reference: "",
+        day: block.date,
+        startAt: null,
+        endAt: null,
+        location: "",
+        owner: block.createdBy,
+        subject: "",
+        meta: { blockId: block.id, startTime: block.startTime, endTime: block.endTime },
       }));
     },
   },
@@ -162,7 +237,12 @@ const SOURCES = [
       // calendar must not have a second opinion about what a meeting is or which lead it is with -
       // nor about whose meetings they are, which is why the viewer travels with the window.
       const meetings = await listAllMeetings({ from, to, includeCancelled: false, reader: { userId: viewer?.userId, permissions } });
+      // The branch is the lead's: read once for every enquiry on the page.
+      const enquiryIds = [...new Set(meetings.map((meeting) => meeting.enquiryId).filter(Boolean))];
+      const leads = enquiryIds.length ? await prisma.salesCrmLead.findMany({ where: { enquiryId: { in: enquiryIds } }, select: { enquiryId: true, branchId: true } }) : [];
+      const leadBranch = new Map(leads.map((lead) => [lead.enquiryId, lead.branchId]));
       return meetings.map((meeting) => ({
+        branchId: leadBranch.get(meeting.enquiryId) ?? null,
         id: `meeting:${meeting.id}`,
         kind: "meeting",
         title: text(meeting.title) || "Untitled meeting",
@@ -180,31 +260,87 @@ const SOURCES = [
     },
   },
   {
+    /*
+     * ── The studio's shoots ───────────────────────────────────────────────────────────────────
+     *
+     * **Who sees which shoots, by what they hold.** The studio's rule, in three readings:
+     *
+     *   - **Projects, Pre Production or Bookings & Converted** - the permissions that are about the
+     *     studio's work as a whole - see every shoot. Where the cameras are going on Saturday is
+     *     the question those screens exist to answer.
+     *   - **Production alone** sees the shoots they are **named on**, and no others: a shooter's
+     *     calendar is their roster, and the rest of the studio's diary is not theirs to read.
+     *   - **Neither** sees no shoots at all. The calendar still carries their own things - the
+     *     holidays, their attendance, their meetings - but somebody with no part in a shoot has no
+     *     reason to be told about it.
+     *
+     * `always` was the previous answer, on the grounds that a driver or somebody in accounts should
+     * be able to see that a team was out. The studio's own decision is the one above.
+     *
+     * "Named on" is the person's own shoots (`ownShootsWhere`): its coordinator, its team, a
+     * service's crew, or its project's Production Manager or Project Manager - not the project's
+     * other roles, and not their reports' shoots, which the Shoot Board's wider `boardWhere` adds.
+     * The calendar is their own diary.
+     *
+     * **Seeing is not opening.** The window a shoot opens into is still the owning module's, and
+     * answers to its own permission; the calendar sends what decides that (`productionShootId`,
+     * and the project's Event ID) and the screen offers nothing it would be refused.
+     */
     key: "shoot",
     anyOf: [
       { module: "PROJECT", feature: "Projects" },
       { module: "PROJECT", feature: "Pre Production" },
+      { module: "SALES", feature: "Sales Manager" },
       { module: "PROJECT", feature: "Production" },
     ],
-    async load({ from, to, viewer, permissions }) {
+    async load({ from, to, viewer, can }) {
+      /*
+       * The wide three first: holding any of them is the whole board, with no narrowing. Only a
+       * viewer who holds none of them - Production and nothing else - is narrowed to their own, and
+       * `boardWhere` answering `null` (a login with no employee behind it) means no shoots rather
+       * than every shoot.
+       */
+      const wide = await Promise.all([
+        can({ module: "PROJECT", feature: "Projects" }),
+        can({ module: "PROJECT", feature: "Pre Production" }),
+        can({ module: "SALES", feature: "Sales Manager" }),
+      ]);
+      let named = {};
+      if (!wide.some(Boolean)) {
+        named = await ownShootsWhere(viewer?.userId);
+        if (!named) return [];
+      }
       const dateCreated = {};
       if (from) dateCreated.gte = from;
       if (to) dateCreated.lte = to;
-      // A shoot belongs to its project, so the calendar shows the shoots of the projects this
-      // viewer may read - the same rows the project boards would give them, on a different page.
       const shoots = await prisma.projectShoot.findMany({
-        where: { deletedAt: null, project: await projectAccessWhere({ userId: viewer?.userId, permissions }), ...(Object.keys(dateCreated).length ? { dateCreated } : {}) },
+        // Neither a deleted shoot nor one of a deleted project, and - for a Production-only viewer -
+        // only the shoots they are named on (`named`, which is `{}` for the wider permissions).
+        where: { deletedAt: null, project: { deletedAt: null }, ...named, ...(Object.keys(dateCreated).length ? { dateCreated } : {}) },
         include: {
           project: {
             select: {
               eventId: true, whatsappGroupName: true, whatsappGroupNameId: true,
-              projectManager: true, preProductionCoordinator: true, crmName: true, vertical: true,
+              projectManager: true, preProductionCoordinator: true, crmName: true, vertical: true, branchId: true,
+              projectStatus: true, preProductionStatus: true,
             },
           },
+          // Which board the shoot is being worked on now - see `shootStage`.
+          preProduction: { select: { id: true } },
+          /*
+           * The plan's own date, and who is going. The window this opens into is the Shoot Board's
+           * card, which says the Production Coordinator, the Production Team and each service's
+           * people - and said none of them here, because the calendar never read them.
+           * `PRODUCTION_TEAM_SELECT` is the Shoot Board's own, so the two cannot come to differ.
+           */
+          production: { select: { id: true, planSubmittedAt: true, ...PRODUCTION_TEAM_SELECT({ select: { employeeName: true } }) } },
         },
-        orderBy: [{ dateCreated: "asc" }],
+        orderBy: [{ dateCreated: SHOOT_DATE_ASC }],
       });
+      // The boards each shoot's project is on, for the card's ⋮ Navigate to - the rule every board's own uses.
+      const boardsOf = await boardsForProjects(shoots.map((shoot) => shoot.projectId));
       return shoots.map((shoot) => ({
+        branchId: shoot.project?.branchId ?? null,
         id: `shoot:${shoot.id}`,
         kind: "shoot",
         title: text(shoot.shoot) || "Shoot",
@@ -216,10 +352,13 @@ const SOURCES = [
         endAt: null,
         location: shootLocation(shoot),
         owner: projectOwner(shoot.project),
+        // What the Production panel opens on, for a viewer who holds `PROJECT / Production`; null
+        // where production has not been raised, and then there is nothing to open.
+        productionShootId: shoot.production?.id ?? null,
         subject: text(shoot.project?.eventId),
         meta: {
           // The raw timing fields, so the client can label them with `formatSessionTiming` - the
-          // one place that knows "2h 0m" and "10-12 Hours (Full)".
+          // one place that knows "2h 0m" and "8-10 Hours (Full)".
           sessionTiming: text(shoot.sessionTiming),
           sessionTimings: shoot.sessionTimings || null,
           sessionDurationHours: shoot.sessionDurationHours ?? null,
@@ -228,43 +367,18 @@ const SOURCES = [
           eventEndTime: text(shoot.eventEndTime),
           isMainEvent: Boolean(shoot.isMainEvent),
           shootType: text(shoot.shootType),
+          // The project's name - its WhatsApp group name, as every staff screen names it - for the
+          // Shoot Board's shoot window the calendar opens.
+          projectName: text(shoot.project?.whatsappGroupName),
+          // The shoot's own id, which both boards open a shoot by, and the board it is on now.
+          shootRecordId: shoot.id,
+          stage: shootStage(shoot),
+          boards: boardsOf.get(shoot.projectId) || [],
+          // Whether this shoot has its own Pre Production form - the card's ⋮ Update offers it then.
+          hasPreProduction: Boolean(shoot.preProduction),
+          // Who is going, as the Shoot Board words it. Null where no production has been raised.
+          ...productionTeam(shoot.production),
         },
-      }));
-    },
-  },
-  {
-    key: "project",
-    anyOf: [
-      { module: "SALES", feature: "Sales Manager" },
-      { module: "PROJECT", feature: "Projects" },
-    ],
-    async load({ from, to, viewer, permissions }) {
-      const mainEventDate = { not: null };
-      if (from) mainEventDate.gte = from;
-      if (to) mainEventDate.lte = to;
-      const projects = await prisma.salesProject.findMany({
-        where: { deletedAt: null, mainEventDate, AND: [await projectAccessWhere({ userId: viewer?.userId, permissions })] },
-        select: {
-          id: true, eventId: true, mainEventDate: true, whatsappGroupName: true, whatsappGroupNameId: true,
-          projectManager: true, preProductionCoordinator: true, crmName: true, vertical: true,
-        },
-        orderBy: [{ mainEventDate: "asc" }],
-      });
-      // The client's name lives on the reserved WhatsApp group name rather than on the project,
-      // which is why `projectClientNames` exists; the same fallback is applied here.
-      const names = await clientNamesFor(projects);
-      return projects.map((project) => ({
-        id: `project:${project.id}`,
-        kind: "project",
-        title: names.get(project.whatsappGroupNameId) || text(project.whatsappGroupName) || "Main event",
-        reference: text(project.eventId),
-        day: dayOf(project.mainEventDate),
-        startAt: null,
-        endAt: null,
-        location: "",
-        owner: projectOwner(project),
-        subject: text(project.eventId),
-        meta: { mainEvent: true },
       }));
     },
   },
@@ -309,7 +423,7 @@ const SOURCES = [
       const candidates = await prisma.hrmInterviewCandidate.findMany({
         where: { deletedAt: null, interviewDate: { not: null } },
         select: {
-          id: true, candidateCode: true, name: true, position: true, department: true, branch: true,
+          id: true, candidateCode: true, name: true, position: true, department: true, branch: true, branchId: true,
           status: true, interviewer: true, interviewDate: true, interviewTime: true, interviewMode: true,
           meetLink: true, phone: true, email: true,
         },
@@ -324,6 +438,7 @@ const SOURCES = [
         if (fromDay && day < fromDay) continue;
         if (toDay && day > toDay) continue;
         entries.push({
+          branchId: candidate.branchId ?? null,
           id: `interview:${candidate.id}`,
           kind: "interview",
           // The candidate. An interview is read by who is coming in, the way a meeting is read by
@@ -354,13 +469,145 @@ const SOURCES = [
       return entries;
     },
   },
+  {
+    /*
+     * The signed-in person's own attendance, as the HRM register reads it: every day that was not
+     * simply on time - Absent, On leave, Comp off, Late, Half day, Early exit - as a chip on that day.
+     *
+     * Answers to `HRM / Employee Attendance`, the whole of the guard on the person's own Attendance
+     * page, so a role the studio has turned attendance off for does not get it back through the
+     * calendar. Never anybody else's: the employee is the viewer's own linked one, read from the
+     * signed-in user and nothing in the request. A login with no employee behind it has no register,
+     * and so no days here.
+     *
+     * Read from `attendanceDays`, the reader the person's own Attendance page, the register and payroll
+     * all agree through, so the calendar cannot have a second opinion about how a day went. Up to
+     * today only - a day still to come has no attendance - and at most a quarter at a time.
+     */
+    key: "attendance",
+    module: "HRM",
+    feature: "Employee Attendance",
+    async load({ from, to, viewer }) {
+      if (!viewer?.userId) return [];
+      const user = await prisma.user.findUnique({ where: { id: viewer.userId }, select: { name: true, linkedEmployeeId: true } });
+      const employeeId = user?.linkedEmployeeId;
+      if (!employeeId) return [];
+      const today = calendarDay(new Date());
+      const end = to && calendarDay(to) < today ? calendarDay(to) : today;
+      const earliest = new Date(end.getTime() - (ATTENDANCE_MAX_DAYS - 1) * 86400000);
+      const start = from && calendarDay(from) > earliest ? calendarDay(from) : earliest;
+      if (start > end) return [];
+      const [{ days }, compOffs] = await Promise.all([
+        hrmAttendance.attendanceDays(employeeId, start, end),
+        prisma.attendanceRequest.findMany({
+          where: { employeeId, type: "COMP_OFF", status: "APPROVED", fromDate: { lte: end }, toDate: { gte: start } },
+          select: { fromDate: true, toDate: true },
+        }),
+      ]);
+      // A comp-off reads as On leave in the register; the calendar says which kind of day off it was.
+      const compOffDays = new Set(compOffs.flatMap((request) => eachDateInRange(request.fromDate, request.toDate)));
+      return days
+        .map((day) => ({ day, label: day.status === "On leave" && compOffDays.has(day.date) ? "Comp off" : day.status }))
+        .filter(({ label }) => ATTENDANCE_SHOWN.includes(label))
+        .map(({ day, label }) => ({
+          id: `attendance:${day.date}`,
+          kind: "attendance",
+          title: label,
+          reference: "",
+          day: day.date,
+          startAt: null,
+          endAt: null,
+          location: "",
+          owner: text(user.name),
+          subject: "",
+          meta: { status: label, workedMinutes: day.minutes || 0, loginAt: day.loginAt, logoutAt: day.logoutAt, source: "register" },
+        }));
+    },
+  },
+  {
+    /*
+     * Everybody's absences, for an administrator: one entry per day per status - "Absent" and "On
+     * leave" - naming the people in `meta.people`, so a month of a studio of two hundred reads as a
+     * count in each day rather than a wall of names. Worked out by `tallyRange`, the reader the
+     * attendance Dashboard and register agree through, so the names here are the register's.
+     *
+     * Absent only up to today - a day still to come cannot be missed yet - where approved leave is
+     * shown ahead too. At most a quarter at a time, as My Attendance.
+     *
+     * It names HRM / Employee Attendance like My Attendance, and also needs an administrator
+     * (`administrator`): the same people the attendance Dashboard is open to, since this is the
+     * studio's whole roster across a range.
+     */
+    key: "teamAttendance",
+    module: "HRM",
+    feature: "Employee Attendance",
+    administrator: true,
+    async load({ from, to }) {
+      const today = calendarDay(new Date());
+      const end = to ? calendarDay(to) : today;
+      const earliest = new Date(end.getTime() - (ATTENDANCE_MAX_DAYS - 1) * 86400000);
+      const start = from && calendarDay(from) > earliest ? calendarDay(from) : earliest;
+      if (start > end) return [];
+      const { byDay } = await hrmAttendance.tallyRange(start, end, { withTimeOff: false, withPeople: true });
+      const todayIso = localIsoDate(today);
+      const entries = [];
+      /*
+       * **One entry a day**, not one per status.
+       *
+       * A day with two absences and three on leave drew two chips, and a day in a busy month drew
+       * them under the shoots and the meetings until the cell was a list of counts nobody could
+       * take in. The day now carries one chip - "Attendance · 5" - and the pop-up behind it says
+       * which five: Absent first, then On leave, each under its own heading.
+       *
+       * Every person carries the status they are counted under, so the list view still reads one
+       * row per person per day and the branch filter can rebuild the counts after narrowing them.
+       */
+      for (const day of byDay) {
+        const groups = [
+          ["Absent", day.date <= todayIso ? day.absentPeople : []],
+          ["On leave", day.onLeavePeople],
+        ].filter(([, people]) => people?.length);
+        if (!groups.length) continue;
+        const people = groups.flatMap(([status, list]) => list.map((person) => ({ ...person, status })));
+        entries.push({
+          id: `teamAttendance:${day.date}`,
+          kind: "teamAttendance",
+          title: `Attendance · ${people.length}`,
+          reference: "",
+          day: day.date,
+          startAt: null,
+          endAt: null,
+          location: "",
+          owner: "",
+          subject: "",
+          meta: {
+            // The one status, where the day holds only one - which is what colours the chip. A
+            // mixed day has no single answer and takes the neutral colour instead.
+            status: groups.length === 1 ? groups[0][0] : null,
+            count: people.length,
+            groups: groups.map(([status, list]) => ({ status, count: list.length })),
+            people,
+          },
+        });
+      }
+      return entries;
+    },
+  },
 ];
 
-async function clientNamesFor(projects) {
-  const ids = [...new Set(projects.map((project) => project.whatsappGroupNameId).filter(Boolean))];
-  if (!ids.length) return new Map();
-  const groups = await prisma.salesWhatsappGroupName.findMany({ where: { id: { in: ids } }, select: { id: true, clientName: true } });
-  return new Map(groups.map((group) => [group.id, text(group.clientName)]));
+/**
+ * The board a shoot is worked on now, for the calendar to open its form there:
+ *   "production"      its production plan is submitted, or the project's Pre Production is set
+ *                     Planned by hand - the same test the project's stage view finishes Pre
+ *                     Production by - and it has a production record to open;
+ *   "pre-production"  otherwise, once the project has started and the shoot has its row there;
+ *   "projects"        a project not started yet, which has neither - its record in Projects.
+ */
+function shootStage(shoot) {
+  const started = shoot.project?.projectStatus && shoot.project.projectStatus !== "Yet to Start";
+  if (started && shoot.production && (shoot.production.planSubmittedAt || shoot.project?.preProductionStatus === "PLANNED")) return "production";
+  if (started && shoot.preProduction) return "pre-production";
+  return "projects";
 }
 
 /**
@@ -375,9 +622,11 @@ async function clientNamesFor(projects) {
  * showing a day with nothing on it. A calendar that silently drops a shoot is worse than one that
  * admits it could not read them.
  */
-async function listSchedule({ can, viewer = null, from = null, to = null } = {}) {
+async function listSchedule({ can, viewer = null, from = null, to = null, isAdministrator = false } = {}) {
   const permitted = [];
   for (const source of SOURCES) {
+    // A source for administrators only needs that as well as its permission.
+    if (source.administrator && !isAdministrator) continue;
     /*
      * A source everybody sees the whole of.
      *
@@ -411,7 +660,24 @@ async function listSchedule({ can, viewer = null, from = null, to = null } = {})
     }
   });
 
-  return { entries, kinds: permitted.map((source) => source.key), unavailable };
+  return { entries: await withBranches(entries), kinds: permitted.map((source) => source.key), unavailable };
 }
 
-module.exports = { listSchedule, SOURCES };
+/**
+ * Each entry's branch as `{ id, name }` - the lead's for a meeting, the project's for a shoot, the
+ * candidate's for an interview - or `null` where it has none: a holiday is the whole
+ * studio's, and attendance is the viewer's own. Named in one read, so the page can filter by branch
+ * without a branch list of its own - the branches offered are the ones these entries are in, which
+ * are already only what this viewer may see.
+ */
+async function withBranches(entries) {
+  const ids = [...new Set(entries.map((entry) => entry.branchId).filter((id) => Number.isInteger(id)))];
+  const branches = ids.length ? await prisma.branch.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [];
+  const names = new Map(branches.map((branch) => [branch.id, branch.name]));
+  return entries.map(({ branchId, ...entry }) => ({
+    ...entry,
+    branch: Number.isInteger(branchId) && names.has(branchId) ? { id: branchId, name: names.get(branchId) } : null,
+  }));
+}
+
+module.exports = { listSchedule, SOURCES, shootStage };

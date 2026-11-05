@@ -3,9 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import Button from "@/components/shared/Button";
 import Loader from "@/components/shared/Loader";
+import useFormErrors from "@/components/shared/useFormErrors";
 import Dialog from "@/components/ui/Dialog";
 import { linkProjectWhatsappGroup, listProjectWhatsappGroups } from "@/services/image-selection/image-selection.service";
 import { WhatsAppPairingCode, useImageSelectionWhatsappSession } from "./WhatsAppPairing";
+import { matchesWordChunks } from "@/lib/wordChunks.mjs";
 
 /*
  * Which WhatsApp group this project is.
@@ -28,6 +30,7 @@ export default function WhatsAppGroupLinkDialog({ project, canWrite = true, onCl
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const fields = useFormErrors();
 
   // Asked for once the link is up - and again if it drops and comes back, since `connected`
   // flips with it. The suggestion only fills an empty choice: a group the reader already picked,
@@ -53,13 +56,17 @@ export default function WhatsAppGroupLinkDialog({ project, canWrite = true, onCl
 
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return (groups || []).filter((group) => !needle || (group.subject || "").toLowerCase().includes(needle));
+    return (groups || []).filter((group) => matchesWordChunks(group.subject, needle));
   }, [groups, query]);
   const chosen = (groups || []).find((group) => group.jid === selected) || null;
-  const canLink = canWrite && connected && Boolean(chosen) && !chosen.linkedProjectId && selected !== project.whatsappGroupJid;
+  // Why the chosen row cannot be linked, said under the list; "" when it can.
+  const choiceProblem = !chosen ? "Choose the project's WhatsApp group."
+    : chosen.linkedProjectId ? `That group is linked to ${chosen.linkedProjectName}. Choose another.`
+      : selected === project.whatsappGroupJid ? "This group is linked already. Choose another to change it." : "";
 
   async function link() {
-    if (!canLink) return;
+    if (!canWrite || !connected || groups === null) return;
+    if (!fields.check({ group: choiceProblem })) return;
     setBusy(true);
     setError("");
     try {
@@ -95,7 +102,7 @@ export default function WhatsAppGroupLinkDialog({ project, canWrite = true, onCl
       footer={<>
         <Button type="button" onClick={onClose} disabled={busy} className="max-sm:flex-1">Cancel</Button>
         {canWrite && connected && (
-          <Button type="button" variant="primary" onClick={link} disabled={!canLink || busy} className="max-sm:flex-1">
+          <Button type="button" variant="primary" onClick={link} disabled={busy || groups === null} className="max-sm:flex-1">
             {busy ? "Linking..." : "Link Group"}
           </Button>
         )}
@@ -106,7 +113,7 @@ export default function WhatsAppGroupLinkDialog({ project, canWrite = true, onCl
       ) : groups === null ? (
         <Loader label="Reading your groups..." size="sm" inline />
       ) : (
-        <div role="radiogroup" aria-label="WhatsApp groups" className="-mx-1">
+        <div role="radiogroup" aria-label="WhatsApp groups" aria-invalid={fields.errors.group ? true : undefined} className="-mx-1">
           {shown.length === 0 && (
             <p className="px-1 py-2 text-sm text-slate-500">
               {groups.length ? "No group matches that search." : "Your WhatsApp is not in any group."}
@@ -127,7 +134,7 @@ export default function WhatsAppGroupLinkDialog({ project, canWrite = true, onCl
                   value={group.jid}
                   checked={picked}
                   disabled={taken || !canWrite}
-                  onChange={() => setSelected(group.jid)}
+                  onChange={() => { fields.clear("group"); setSelected(group.jid); }}
                   className="mt-1 h-4 w-4 shrink-0"
                 />
                 <span className="min-w-0 flex-1">
@@ -144,6 +151,7 @@ export default function WhatsAppGroupLinkDialog({ project, canWrite = true, onCl
           })}
         </div>
       )}
+      {fields.errors.group && <p role="alert" className="mt-1.5 text-xs font-normal text-red-600">{fields.errors.group}</p>}
       {error && <p role="alert" className="mt-3 text-xs leading-5 text-red-600">{error}</p>}
     </Dialog>
   );

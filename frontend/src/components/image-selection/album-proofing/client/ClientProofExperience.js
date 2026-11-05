@@ -1,5 +1,7 @@
 "use client";
 
+import ExpiredClientLink from "@/components/shared/ExpiredClientLink";
+import { expiredLinkFrom } from "@/lib/expiredLink.mjs";
 import { useCallback, useEffect, useState } from "react";
 import {
   clearProofSession, getProof, getProofMeta, getStoredProofSession, storeProofSession, verifyProofPin,
@@ -16,6 +18,8 @@ export default function ClientProofExperience({ token }) {
   const [sessionToken, setSessionToken] = useState(null);
   const [screen, setScreen] = useState("loading");
   const [error, setError] = useState("");
+  // An expired link's details - checked before the PIN screen, so a lapsed link never asks for one.
+  const [expiredLink, setExpiredLink] = useState(null);
 
   useEffect(() => {
     let active = true;
@@ -36,7 +40,7 @@ export default function ClientProofExperience({ token }) {
         }
         setScreen("gate");
       } catch (loadError) {
-        if (active) { setError(loadError.message || "This album proof is not available."); setScreen("error"); }
+        if (active) { setExpiredLink(expiredLinkFrom(loadError)); setError(loadError.message || "This album proof is not available."); setScreen("error"); }
       }
     })();
     return () => { active = false; };
@@ -50,6 +54,7 @@ export default function ClientProofExperience({ token }) {
   }, [token]);
 
   if (screen === "loading") return <main className="flex min-h-dvh items-center justify-center bg-slate-50 p-6"><p className="text-sm text-slate-500">Loading your album proof...</p></main>;
+  if (screen === "error" && expiredLink) return <ExpiredClientLink {...expiredLink} />;
   if (screen === "error") return <main className="flex min-h-dvh items-center justify-center bg-slate-50 p-6"><p className="max-w-sm text-center text-sm text-slate-600">{error}</p></main>;
   if (screen === "gate") return <ClientPinGate meta={meta} onVerify={handlePin} />;
   return <ClientProofViewer token={token} sessionToken={sessionToken} meta={meta} />;

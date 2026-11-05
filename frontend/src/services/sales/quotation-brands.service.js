@@ -27,6 +27,16 @@ export function getQuotationBrandConfiguration(code, { fresh = false } = {}) {
   return promise;
 }
 
+/**
+ * The brand's shoots alone - what CRM → Add Lead and the lead popup offer on each Event Details
+ * row, for the lead's own vertical. Not cached: the form reads it when it opens, so a shoot added
+ * in Settings is offered by the next lead without a reload, and a vertical switched on the form
+ * reads that vertical's list. Readable with CRM Leads alone, unlike the configuration above.
+ */
+export function getQuotationBrandShoots(code) {
+  return apiRequest(`/api/sales/quotation-brands/${encodeURIComponent(String(code || "").trim())}/shoots`);
+}
+
 export function forgetQuotationBrandConfiguration(code) {
   if (code) configurationCache.delete(String(code).trim());
   else configurationCache.clear();

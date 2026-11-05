@@ -1,20 +1,18 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import Add from "@mui/icons-material/Add";
-import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import ImageSelectionNavigation from "@/components/image-selection/ImageSelectionNavigation";
 import { useRouteAccess } from "@/components/auth/PermissionsProvider";
 import Button from "@/components/shared/Button";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
-import IconButton from "@/components/shared/IconButton";
-import Dropdown from "@/components/shared/Dropdown";
-import { getImageSelectionDashboard } from "@/services/image-selection/image-selection.service";
-import { DEFAULT_RANGE, RANGE_OPTIONS, periodPhrase, previousPhrase, projectsHref } from "@/lib/imageSelectionDashboard.mjs";
-import { CardState } from "@/components/shared/DashboardCard";
+import { openProjectHref, periodPhrase, previousPhrase, projectsHref } from "@/lib/imageSelectionDashboard.mjs";
+import { CardState, EmptyDashboard } from "@/components/shared/DashboardCard";
+import DashboardRangeBar from "@/components/shared/DashboardRangeBar";
 import DashboardRecentProjects from "./DashboardRecentProjects";
 import { SelectionProgressCard, StorageCard, SummaryCards } from "./DashboardCards";
+import useImageSelectionDashboard from "./useImageSelectionDashboard";
 
 /**
  * Image Selection → Dashboard.
@@ -32,64 +30,27 @@ import { SelectionProgressCard, StorageCard, SummaryCards } from "./DashboardCar
  * table at the foot of the page; a row of that
  * table (or of the progress list) is the one thing that opens the Projects workspace.
  *
+ * There is no Refresh button: the page keeps itself current (`useAutoRefresh`) — quietly, keeping
+ * what is on screen — when the tab comes back to the front, when the network comes back, when an
+ * upload from this browser lands, and once a minute while it is in front. The desktop app keeps a
+ * Refresh button beside the same policy, because it holds state the server cannot push.
+ *
  * IMAGE_SELECTION / Project Management governs the route: READ sees the dashboard, and only
  * READ_WRITE is offered New Project.
  */
-
-/** A studio with no projects at all: the one message and the one thing to do next. */
-function EmptyDashboard({ canWrite, onCreate }) {
-  return <section className="flex min-h-72 items-center justify-center rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-    <div className="max-w-md text-center">
-      <h2 className="text-base font-semibold text-slate-800">No image selection projects yet</h2>
-      <p className="mt-1 text-xs text-slate-500">{canWrite ? "Create a project, add its photos and publish the gallery — the dashboard fills in from there." : "The dashboard fills in once a project is created."}</p>
-      {canWrite && <Button type="button" variant="primary" size="sm" className="mt-4 gap-1" onClick={onCreate}><Add style={{ fontSize: 16 }} />New Project</Button>}
-    </div>
-  </section>;
-}
 
 export default function ImageSelectionDashboardPage() {
   const { canWrite } = useRouteAccess();
   const router = useRouter();
   const { notice, showError, clearNotice } = useNotice();
-  const [range, setRange] = useState(DEFAULT_RANGE);
+  const { range, setRange, data, loading, error, now, load } = useImageSelectionDashboard({ onRefreshError: showError });
   // Which card is pressed — what the Recent Projects table is narrowed to. Null is every project.
   // It lives here because the cards press it and the table reads it.
   const [view, setView] = useState(null);
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  // "12 mins ago" is measured from when the numbers were read, not from when the tab was last looked at.
-  const [now, setNow] = useState(() => new Date());
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const response = await getImageSelectionDashboard({ range });
-      setData(response?.data || null);
-      setNow(new Date());
-    } catch (caught) {
-      const message = caught?.message || "Unable to load the dashboard.";
-      // A refresh that fails keeps the numbers already on screen and says so; a first load has
-      // nothing to keep, so the page itself carries the message.
-      setError(message);
-      if (data) showError(message);
-    } finally {
-      setLoading(false);
-    }
-    // `data` is read only to decide where the message goes; re-creating the loader on every
-    // response would re-run the effect below and load twice.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range, showError]);
-
-  // Deferred a tick, which is this codebase's convention for a first load: a fetch started
-  // straight from an effect body counts as state set during that effect.
-  useEffect(() => {
-    const timer = setTimeout(() => void load(), 0);
-    return () => clearTimeout(timer);
-  }, [load]);
 
   const openProject = (row) => router.push(projectsHref({ projectId: row.id }));
+  // The table's rows open on their shoot while the table is showing Yet to Download.
+  const openRecentProject = (row) => router.push(openProjectHref(row, view));
   const createProject = () => router.push(projectsHref({ create: true }));
   // The one line that says what the range is doing to the page: which point the arrows measure
   // from, and what the range itself added.
@@ -104,12 +65,9 @@ export default function ImageSelectionDashboardPage() {
   const twoColumns = "grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]";
 
   return <section className="flex min-h-0 flex-1 flex-col bg-white">
-    {/* The header keeps what acts on the page — Refresh and New Project. The range is a filter on
-        what the page shows, so it sits with the figures it changes, at the top of the workspace. */}
-    <ImageSelectionNavigation actions={<>
-      <IconButton label="Refresh dashboard" size="sm" onClick={load} disabled={loading} className="text-slate-600 hover:bg-slate-100"><RefreshRounded fontSize="small" aria-hidden="true" className={loading ? "animate-spin" : ""} /></IconButton>
-      {canWrite && <Button type="button" variant="primary" size="sm" className="gap-1 whitespace-nowrap" onClick={createProject}><Add style={{ fontSize: 16 }} />New Project</Button>}
-    </>} />
+    {/* The header keeps what acts on the page — New Project. The range is a filter on what the
+        page shows, so it sits with the figures it changes, at the top of the workspace. */}
+    <ImageSelectionNavigation actions={canWrite ? <Button type="button" variant="primary" size="sm" className="gap-1 whitespace-nowrap" onClick={createProject}><Add style={{ fontSize: 16 }} />New Project</Button> : null} />
 
     <FloatingNotice notice={notice} onClose={clearNotice} />
 
@@ -120,30 +78,18 @@ export default function ImageSelectionDashboardPage() {
       {error && !data
         ? <CardState error={error} onRetry={load} />
         : isEmpty
-          ? <EmptyDashboard canWrite={canWrite} onCreate={createProject} />
+          ? <EmptyDashboard title="No image selection projects yet" message={canWrite ? "Create a project, add its photos and publish the gallery — the dashboard fills in from there." : "The dashboard fills in once a project is created."} action={canWrite && <Button type="button" variant="primary" size="sm" className="mt-4 gap-1" onClick={createProject}><Add style={{ fontSize: 16 }} />New Project</Button>} />
           : <>
             {/* The workspace's own top row: what the page is showing on the left, the range that
-                scopes the period figures on the right. On a phone the two stack and the range
-                stays at the right, above the line that explains it. */}
-            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-              <p className="order-2 min-w-0 text-[11px] text-slate-500 sm:order-1">{caption}</p>
-              {/* The shared dropdown in its field mode, not its `switch` mode. A switch carries a
-                  160px floor paired to its menu, which left a hand of empty box beside a word as
-                  short as "Lifetime" - invisible on the white header this used to sit in, and not
-                  on the tinted canvas. A field sizes its menu to the trigger instead, so the box
-                  can hug its content and the two still line up. The width lives here rather than
-                  on the control, so the box does not resize as the selection changes. */}
-              <div className="order-1 w-32 shrink-0 self-end sm:order-2 sm:self-auto">
-                <Dropdown ariaLabel="Date range" className="dashboard-range-picker" mode="input" options={RANGE_OPTIONS} value={range} onChange={setRange} sorted={false} />
-              </div>
-            </div>
+                scopes the period figures on the right. */}
+            <DashboardRangeBar caption={caption} range={range} onRangeChange={setRange} />
             <SummaryCards summary={data?.summary} trend={data?.trend} rangeKey={data?.range?.key || range} loading={loading} view={view} onViewChange={setView} />
             {/* Recent Projects sits directly under the cards, because that is what a card *does*:
                 pressing one narrows this table, and a filter whose result is a screen further down
                 is a filter nobody sees work. The two panels that follow are read on their own and
                 are not filtered by anything above them, so they take the space below it. */}
             <div className="mt-3">
-              <DashboardRecentProjects rows={data?.recentProjects || []} view={view} onClearView={() => setView(null)} loading={loading} error={!data ? error : ""} onRetry={load} onOpen={openProject} now={now} />
+              <DashboardRecentProjects rows={data?.recentProjects || []} view={view} onClearView={() => setView(null)} loading={loading} error={!data ? error : ""} onRetry={load} onOpen={openRecentProject} now={now} />
             </div>
             <div className={`mt-3 ${twoColumns}`}>
               <SelectionProgressCard rows={data?.selectionProgress || []} loading={loading} error={!data ? error : ""} onRetry={load} onOpen={openProject} now={now} />

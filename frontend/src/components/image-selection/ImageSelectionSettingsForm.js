@@ -1,9 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import SchemaFormPanel from "@/components/schema-form/SchemaFormPanel";
-import ProcessingSettingsField from "./ProcessingSettingsField";
+import CompressionSettingsSection from "./compression/CompressionSettingsSection";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import useUnsavedGuard from "@/components/shared/useUnsavedGuard";
 import TargetDownloadPathField from "./TargetDownloadPathField";
+import SignatureAlbumSettingsField from "./SignatureAlbumSettingsField";
+import CullingTrainingConsentField from "./CullingTrainingConsentField";
 import { imageSelectionSettingsSections } from "@/constants/formPanelConfig";
 import { getImageSelectionSettings, saveImageSelectionSettings } from "@/services/image-selection/image-selection.service";
 
@@ -14,7 +18,7 @@ import { getImageSelectionSettings, saveImageSelectionSettings } from "@/service
  * is reachable from anywhere in the module. A single project's own settings — its validity toggles,
  * its per-item limits — live in the Selection Settings rail beside the workspace.
  *
- * The panel edits Downloads and this computer's Processing choices. Gallery link validity, the
+ * The panel edits Downloads and the studio's Processing / Compression presets. Gallery link validity, the
  * default selection limit and the studio's Global Name and Logo are part of the same record and the
  * API expects the whole of it, so they are read here and written back exactly as they were found —
  * a save changes what the form asked for and nothing else. The validity and the limit stay
@@ -38,6 +42,15 @@ const formState = (settings) => ({
 });
 
 export default function ImageSelectionSettingsForm({ onClose, onSaved }) {
+  // The Signature Album defaults save by their own button, so the panel's Save never writes them:
+  // closing the panel - X, Cancel, Escape, or after Save Settings - asks first while any are unsaved.
+  // A ref, so a keystroke there does not redraw the whole panel.
+  const albumDefaultsDirty = useRef(false);
+  const leave = useUnsavedGuard(() => albumDefaultsDirty.current, {
+    title: "Signature Album defaults not saved",
+    message: "The Signature Album defaults you changed have not been saved. Go back and use Save Signature Album Defaults to keep them.",
+  });
+  const close = () => leave.guard(() => onClose?.());
   const [values, setValues] = useState(null);
   const [errors, setErrors] = useState({});
   const [error, setError] = useState("");
@@ -105,7 +118,7 @@ export default function ImageSelectionSettingsForm({ onClose, onSaved }) {
       // was sent, so a second save does not re-upload the same image.
       if (response?.data) setValues(formState(response.data));
       onSaved?.(response?.data);
-      onClose?.();
+      close();
     } catch (failure) {
       setError(failure.message || "Unable to save Image Selection settings.");
     } finally {
@@ -119,11 +132,18 @@ export default function ImageSelectionSettingsForm({ onClose, onSaved }) {
   // belong to it and not to the field that draws it.
   const renderers = useMemo(() => ({
     targetDownloadPath: () => <TargetDownloadPathField />,
-    // Browser-local like the download path: it draws and saves itself, submit never touches it.
-    processingSettings: () => <ProcessingSettingsField />,
+    // The studio's compression presets, one card per Virtual Curation module: their own record
+    // and their own endpoint, each change saved as it is made - submit never touches them.
+    processingSettings: () => <CompressionSettingsSection />,
+    // The Signature Album defaults: their own record, saved by their own button.
+    signatureAlbumSettings: () => <SignatureAlbumSettingsField onDirtyChange={(dirty) => { albumDefaultsDirty.current = dirty; }} />,
+    // The studio's culling-training consent: its own record, saved as the switch moves.
+    cullingTrainingSettings: () => <CullingTrainingConsentField />,
   }), []);
 
-  return <SchemaFormPanel
+  return <>
+  <ConfirmDialog {...leave.confirmProps} layer="confirmOverDialog" />
+  <SchemaFormPanel
     title="Settings"
     description="Applies to every Image Selection project. A single project's own settings stay in its Selection Settings panel."
     sections={imageSelectionSettingsSections}
@@ -133,7 +153,7 @@ export default function ImageSelectionSettingsForm({ onClose, onSaved }) {
     context={{ renderers }}
     sidebarAriaLabel="Image Selection settings sections"
     closeAriaLabel="Close Image Selection settings"
-    onClose={onClose}
+    onClose={close}
     onSubmit={submit}
     error={error}
     saving={saving}
@@ -141,5 +161,6 @@ export default function ImageSelectionSettingsForm({ onClose, onSaved }) {
     savingLabel="Saving..."
     loading={loading}
     loadingLabel="Loading Image Selection settings..."
-  />;
+  />
+  </>;
 }

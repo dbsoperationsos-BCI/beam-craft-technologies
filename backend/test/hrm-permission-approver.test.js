@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { credentialUpdateSchema, credentialDraftSchema } = require("../src/modules/hrm/employees/controller");
-const { approverIdsOf } = require("../src/modules/hrm/attendance/service");
+const { approversFor } = require("../src/modules/hrm/attendance/approvals");
 
 /*
  * Who decides a permission - an hour or two out of a single day.
@@ -12,9 +12,9 @@ const { approverIdsOf } = require("../src/modules/hrm/attendance/service");
  * approver may themselves be one of them. A permission is settled the same morning it is asked for,
  * so the studio names one person for it and there is nobody to escalate to.
  *
- * The slot starts empty on every record that existed before it, which is the case this file spends
- * most of its assertions on: the fallback to the leave approvers is what stops a field added on a
- * Friday from stalling every permission request in the studio.
+ * The same one person decides an attendance regularization, and nobody else decides either: with
+ * the slot empty neither can be raised. An on-duty and an outside-location request still fall to the
+ * leave approvers when it is empty.
  */
 
 const CONTROLLER = fs.readFileSync(path.join(__dirname, "..", "src", "modules", "hrm", "employees", "controller.js"), "utf8");
@@ -28,26 +28,35 @@ const withApprovers = (extra) => ({
   ...extra,
 });
 
-test("a permission goes to the one person named for it", () => {
+test("a permission and an attendance regularization go to the one person named for them", () => {
   const employee = withApprovers({ permissionApproverEmployeeId: 20 });
-  assert.deepEqual(approverIdsOf(employee, "PERMISSION"), [20]);
-  // And only a permission. A leave and an on-duty keep the queue of three, in slot order.
-  assert.deepEqual(approverIdsOf(employee, "LEAVE"), [11, 12, 13]);
-  assert.deepEqual(approverIdsOf(employee, "ON_DUTY"), [11, 12, 13]);
-  // No type at all is the leave answer rather than an empty list: a caller that has not said which
-  // request it is asking about must not be told nobody can decide it.
-  assert.deepEqual(approverIdsOf(employee), [11, 12, 13]);
+  assert.deepEqual(approversFor(employee, "PERMISSION"), [20]);
+  assert.deepEqual(approversFor(employee, "INCORRECT_LOGIN"), [20]);
+  // A leave and a comp-off keep the queue of three, in slot order.
+  assert.deepEqual(approversFor(employee, "LEAVE"), [11, 12, 13]);
+  assert.deepEqual(approversFor(employee, "COMP_OFF"), [11, 12, 13]);
 });
 
-test("with the slot empty a permission falls to the leave approvers", () => {
-  /*
-   * Every record starts here - the column is added NULL - so this is not an edge case, it is the
-   * studio on the morning this ships. Without it a permission could be decided by nobody but an
-   * Attendance Approval holder.
-   */
+test("with the slot empty a permission and a regularization have nobody - no fallback to the leave approvers", () => {
   for (const empty of [null, undefined, 0, ""]) {
-    assert.deepEqual(approverIdsOf(withApprovers({ permissionApproverEmployeeId: empty }), "PERMISSION"), [11, 12, 13]);
+    const employee = withApprovers({ permissionApproverEmployeeId: empty });
+    assert.deepEqual(approversFor(employee, "PERMISSION"), [], "a permission is the Permission Approver's alone");
+    assert.deepEqual(approversFor(employee, "INCORRECT_LOGIN"), [], "a regularization is the Permission Approver's alone");
+    // An on-duty and an outside-location request still fall to the leave approvers.
+    assert.deepEqual(approversFor(employee, "ON_DUTY"), [11, 12, 13]);
+    assert.deepEqual(approversFor(employee, "OUTSIDE_LOCATION"), [11, 12, 13]);
   }
+});
+
+test("raising one with nobody to decide it is refused, and says to set the Permission Approver", () => {
+  const ATTENDANCE = fs.readFileSync(path.join(__dirname, "..", "src", "modules", "hrm", "attendance", "controller.js"), "utf8");
+  // A regularization names its own approver first, then the Permission Approver standing in.
+  assert.match(ATTENDANCE, /throw badRequest\(type === "INCORRECT_LOGIN"\s+\? "No Attendance Regularization Approver is set on your employee record, nor a Permission Approver to stand in\. Ask HR to set your Attendance Regularization Approver\."/);
+  assert.match(ATTENDANCE, /: service\.needsPermissionApprover\(type\)\s+\? "No Permission Approver is set on your employee record, and only they can decide this request\. Ask HR to set your Permission Approver\."/);
+  // Editing asks the same question of the same helper: an edit asks the approvers of today, so one
+  // whose approvers have since been cleared is refused rather than left answerable by nobody.
+  // And Log out late, which asks who answers an Extra Time before it writes the logout.
+  assert.equal((ATTENDANCE.match(/assertApproversExist\(/g) || []).length, 4, "raising, editing, logging out late, and the helper itself");
 });
 
 test("the queue a permission approver is shown is the one they may decide", () => {
@@ -86,13 +95,13 @@ test("the field is accepted, stored and read back", () => {
   assert.equal(parsed.success, true);
   // A string from the form, a number in the record - the same crossing every other id here makes.
   assert.equal(parsed.data.permissionApproverEmployeeId, 9);
-  // Cleared deliberately, which is the studio saying "the leave approvers decide again".
+  // Cleared deliberately - the studio taking the Permission Approver away.
   assert.equal(credentialUpdateSchema.safeParse({ roleIds: [], permissionApproverEmployeeId: null }).data.permissionApproverEmployeeId, null);
   // Written where the leave approvers are written, and handed back to the form that opens on it.
   assert.equal((CONTROLLER.match(/permissionApproverEmployeeId,\n/g) || []).length, 2, "the two credential paths no longer both store it");
   assert.match(CONTROLLER, /permissionApproverEmployeeId: employee\.permissionApproverEmployeeId \?\? null/, "the form is not told what is stored");
   // One column, indexed the way the three beside it are - the approver's queue asks for it on load.
-  assert.match(SCHEMA, /permissionApproverEmployeeId Int\?\s+@map\("permission_approver_employee_id"\)/);
+  assert.match(SCHEMA, /permissionApproverEmployeeId\s+Int\?\s+@map\("permission_approver_employee_id"\)/);
   assert.match(SCHEMA, /@@index\(\[permissionApproverEmployeeId\]\)/);
 });
 
@@ -112,8 +121,20 @@ test("the draft keeps every answer the page holds, including the two it used to 
   assert.equal(parsed.success, true, "the draft page cannot be saved as it stands");
   assert.equal(parsed.data.permissionApproverEmployeeId, 9);
   assert.equal(parsed.data.whatsappAllowed, true);
-  // Blank is a real answer here - the form's "The leave approvers decide" - and must round-trip.
+  // Blank is a real answer here - the form's "Not set" - and must round-trip.
   assert.equal(credentialDraftSchema.safeParse({ permissionApproverEmployeeId: "" }).data.permissionApproverEmployeeId, "");
   // Still not a place to park arbitrary JSON on an employee.
   assert.equal(credentialDraftSchema.safeParse({ somethingElse: 1 }).success, false);
+});
+
+test("the Attendance Regularization Approver is one colleague, taken on every path that sets approvers", () => {
+  const CONTROLLER = fs.readFileSync(path.join(__dirname, "..", "src", "modules", "hrm", "employees", "controller.js"), "utf8");
+  // On the employee edit, on making login credentials and on changing them, and in the draft.
+  assert.equal((CONTROLLER.match(/regularizationApproverEmployeeId: nullableEmployeeRef/g) || []).length, 3);
+  assert.match(CONTROLLER, /regularizationApproverEmployeeId: z\.union\(\[z\.coerce\.number\(\)\.int\(\)\.positive\(\), z\.literal\(""\), z\.null\(\)\]\)\.optional\(\)/);
+  // Nobody approves their own regularization, and the person must still be on the repository.
+  assert.match(CONTROLLER, /An employee cannot approve their own attendance regularization requests\./);
+  assert.equal((CONTROLLER.match(/\.\.\.leaveApproverIds, permissionApproverEmployeeId, regularizationApproverEmployeeId\]\.filter\(Boolean\)/g) || []).length, 2);
+  // Read back with the rest of the record's approvers.
+  assert.match(CONTROLLER, /regularizationApproverEmployeeId: employee\.regularizationApproverEmployeeId \?\? null,/);
 });

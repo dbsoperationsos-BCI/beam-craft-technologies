@@ -33,8 +33,10 @@ export const tableLayoutKey = (slug) => `table:${slug}`;
  * A fixed column - the row's expand chevron, its own ⋮ actions - never moves, so its slot in the
  * table's own column list is left alone here and only the columns around it are put in the order
  * last dragged. One the stored order does not name - added to the table since the reader last
- * arranged it - lands after the ones it does name, rather than at the front of a layout chosen on
- * purpose or being silently dropped.
+ * arranged it - lands right after its neighbour in the table's own order (the column it follows
+ * there), or after everything where it has none, rather than at the front of a layout chosen on
+ * purpose or being silently dropped. Beside its neighbour, a column added under a group heading -
+ * Payroll's extra Earnings and Deductions - stays under it rather than splitting the band.
  */
 export function weaveColumnOrder(tableColumns, storedOrder) {
   const baseIds = tableColumns.map((column) => column.id);
@@ -47,8 +49,12 @@ export function weaveColumnOrder(tableColumns, storedOrder) {
   // read by the same browser; it can now, because the order arrives from the server and may have
   // been saved by an older release or left in a stale cache.
   const known = [...new Set(storedOrder.filter((id) => draggableIds.includes(id)))];
-  const missing = draggableIds.filter((id) => !known.includes(id));
-  const ordered = [...known, ...missing];
+  const ordered = [...known];
+  for (const id of draggableIds.filter((entry) => !known.includes(entry))) {
+    const before = draggableIds.slice(0, draggableIds.indexOf(id)).reverse().find((other) => ordered.includes(other));
+    if (before) ordered.splice(ordered.indexOf(before) + 1, 0, id);
+    else ordered.push(id);
+  }
   let cursor = 0;
   return baseIds.map((id) => fixedIds.has(id) ? id : ordered[cursor++]);
 }
@@ -117,6 +123,8 @@ export const LEADING_COLUMN_IDS = [SELECT_COLUMN_ID, EXPAND_COLUMN_ID];
  * row it selects is the same fault with a bulk delete behind it. They are frozen *with* the first
  * column rather than *as* it.
  *
+ * The tick box alone is pinned even with nothing frozen; see the note inside.
+ *
  * Structural leading columns are counted from the front and stop at the first real one - see
  * `LEADING_COLUMN_IDS` - so a table with neither is unaffected, a table with both counts both, and
  * this stays correct if another ever leads.
@@ -124,7 +132,14 @@ export const LEADING_COLUMN_IDS = [SELECT_COLUMN_ID, EXPAND_COLUMN_ID];
 export function effectiveFreezeCount(columns, freezeCount) {
   const total = Array.isArray(columns) ? columns.length : 0;
   const wanted = Math.max(0, Number(freezeCount) || 0);
-  if (!wanted || !total) return 0;
+  if (!total) return 0;
+  /*
+   * The tick box is pinned **whatever the reader froze** - nothing included. It is the row's own
+   * control, and a box that scrolls off with a wide table leaves the selection out of reach. This is
+   * separate from Freeze Columns: that setting still counts only the data columns, and with nothing
+   * frozen nothing else is pinned - not even the chevron behind the box.
+   */
+  if (!wanted) return columns[0]?.id === SELECT_COLUMN_ID ? 1 : 0;
   let leading = 0;
   while (leading < total && LEADING_COLUMN_IDS.includes(columns[leading]?.id)) leading += 1;
   return Math.min(wanted + leading, total);
@@ -153,6 +168,18 @@ export function effectiveFreezeCount(columns, freezeCount) {
  * `title`.
  */
 export const CELL_CLIP = "overflow-hidden text-ellipsis whitespace-nowrap";
+
+/*
+ * How wide a column of names may grow before its cells start ellipsising.
+ *
+ * A table sizes its columns to their contents, so one long value widens the column for every row:
+ * a shoot named for several at once - "Haldi + Mehandi + Reception" - pushed the columns beside it
+ * off the screen. Capped, the long one ends in "..." and the short ones are untouched; the whole
+ * value is in the cell's `title`, so it is still readable where it matters.
+ *
+ * Only the columns that carry a name take it. A date or a status has a length of its own.
+ */
+export const NAME_COLUMN_MAX_WIDTH = 280;
 
 /*
  * A heading is clipped the same way but never ellipsised: it is a label the reader already knows,
