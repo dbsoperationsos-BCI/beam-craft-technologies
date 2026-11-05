@@ -22,7 +22,9 @@ test("the service posts to the team's site-key route", () => {
 
 test("the manual site key is on a set-up client's row, beside Reset password, inside the write-only menu", () => {
   assert.match(PAGE, /row\.client\?\.activatedAt \? \[\s*\{ label: "Reset password"[\s\S]{0,400}\{ label: "Manual site key \(other server\)", onSelect: \(\) => setKeyingRow\(row\) \}/);
-  assert.match(PAGE, /renderActions: \(row\) => \(canWrite \?/);
+  // Client Details' full menu needs write access; a product page offers Delete only.
+  assert.match(PAGE, /: canWrite \? <OptionsMenu/);
+  assert.match(PAGE, /renderActions: \(row\) => \(product \? \(canDelete \?/);
 });
 
 test("the key is shown once, as the .env lines, marked for the server and not the client", () => {

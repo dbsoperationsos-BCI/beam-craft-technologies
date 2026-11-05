@@ -44,6 +44,9 @@ Every code change adds an entry here, in the same commit or PR as the code. This
   [DEPLOYMENT-WORKFLOW.md](project-state/DEPLOYMENT-WORKFLOW.md) describe DBS and no longer apply here.
 
 ### Changed
+- **SUBSCRIBE product pages can select and delete clients.** Media Studio Operations and SAAS
+  Application Managing get the tick boxes with Select all and Delete, and a ⋮ → Delete on each row,
+  for anyone who may change client onboarding. Setting up and editing stay in Client Details.
 - **The Account Manager product is called "SAAS Application Managing".** Sidebar (SUBSCRIBE), its page
   title, and the Product choice in Edit / Set up account. The stored key stays `ACCOUNT_MANAGER`, so
   existing clients are unchanged.

@@ -50,6 +50,9 @@ function SubscriptionClientsScreen({ product = null }) {
   // Every change is made in HRM -> Client Details; a product's page under SUBSCRIBE only shows its clients.
   const { canWrite: canWriteRoute } = useRouteAccess();
   const canWrite = canWriteRoute && !product;
+  // A product's page is a list of that product's live clients: select and delete work there too;
+  // every other change (set up, edit, reset) is made in Client Management → Client Details.
+  const canDelete = canWriteRoute;
   const { density } = useCompactView();
   const { notice, showNotice, showSuccess, showError, clearNotice } = useNotice();
   const [invites, setInvites] = useState([]);
@@ -120,7 +123,7 @@ function SubscriptionClientsScreen({ product = null }) {
     rows: shown,
     noun: "client",
     plural: "clients",
-    canDelete: canWrite,
+    canDelete,
     showSuccess,
     showError,
     onDeleted: () => load(),
@@ -204,7 +207,9 @@ function SubscriptionClientsScreen({ product = null }) {
     fields,
     startIndex: 0,
     statusStyles: clientStatusStyles,
-    renderActions: (row) => (canWrite ? <OptionsMenu ariaLabel={`Actions for ${row.companyName || "client"}`} items={[
+    renderActions: (row) => (product ? (canDelete ? <OptionsMenu ariaLabel={`Actions for ${row.companyName || "client"}`} items={[
+      { label: "Delete", tone: "danger", onSelect: () => setDeletingRow(row) },
+    ]} /> : null) : canWrite ? <OptionsMenu ariaLabel={`Actions for ${row.companyName || "client"}`} items={[
       ...(row.state === "Submitted" ? [{ label: row.client?.activatedAt ? "Edit subscription" : "Set up account", onSelect: () => setSubscriptionRow(row) }] : []),
       ...(row.client?.activatedAt ? [
         { label: "Reset password", onSelect: () => setResettingRow(row) },
@@ -219,7 +224,7 @@ function SubscriptionClientsScreen({ product = null }) {
       { label: "Edit", onSelect: () => setEditingRow(row) },
       { label: "Delete", tone: "danger", onSelect: () => setDeletingRow(row) },
     ]} /> : null),
-  }), [canWrite, fields, setEditingRow, setSubscriptionRow]);
+  }), [canDelete, canWrite, fields, product, setEditingRow, setSubscriptionRow]);
 
   const updatedText = lastUpdated ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(lastUpdated) : "—";
 
@@ -261,7 +266,7 @@ function SubscriptionClientsScreen({ product = null }) {
               columnResize: true,
               frozenColumns: { count: freezeCount, onChange: setFreezeCount },
               infiniteScroll: { pageSize: 50 },
-              selection: product ? undefined : bulk.selection,
+              selection: canDelete ? bulk.selection : undefined,
               csvExport: { enabled: true, fileName: `${(product || "all").toLowerCase()}-clients`, onResult: (exported) => showNotice(exported ? "Clients CSV export downloaded." : "No rows available to export.") },
             }}
           />
@@ -321,7 +326,7 @@ function SubscriptionClientsScreen({ product = null }) {
     {editingRow && <ClientInviteDialog row={editingRow} onClose={() => setEditingRow(null)} onSaved={() => { setEditingRow(null); showSuccess("Client details saved."); void load(); }} />}
     {deletingRow && <ConfirmDialog
       title="Delete client"
-      message={`Delete ${deletingRow.companyName || "this client"}? Their details and onboarding link are removed for good.`}
+      message={`Delete ${deletingRow.companyName || "this client"}? Their details, subscription and onboarding link are removed for good${deletingRow.client?.subdomain ? `, and ${deletingRow.client.subdomain}.beamcraft.tech can no longer read its plan from Beam Craft` : ""}.`}
       confirmLabel="Delete"
       busyLabel="Deleting..."
       loading={deleteBusy}
