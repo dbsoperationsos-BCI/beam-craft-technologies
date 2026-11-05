@@ -1,0 +1,4 @@
+ALTER TABLE `ProjectShoot`
+  ADD COLUMN `foodTakenCareBy` VARCHAR(20) NOT NULL DEFAULT 'Studio',
+  ADD COLUMN `accommodation` VARCHAR(20) NOT NULL DEFAULT 'Studio',
+  ADD COLUMN `travel` VARCHAR(20) NOT NULL DEFAULT 'Studio';

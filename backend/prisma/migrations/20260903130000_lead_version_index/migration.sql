@@ -1,0 +1,12 @@
+-- An index for the question every open browser tab asks every four seconds.
+--
+-- The board polls `GET /api/sales/crm-leads/version` to notice when lead data has changed, and that
+-- endpoint runs `SELECT COUNT(*), MAX(updated_at) ... WHERE deleted_at IS NULL`. With no index
+-- covering both columns that is a full scan: 3,450 ms at 500,000 leads - *per poll, per tab*. Five
+-- people signed in was five full scans of the lead table every four seconds, which is why the whole
+-- application felt slow rather than just the CRM board. With this index the same query is 248 ms,
+-- and `getCrmLeadVersion` now also caches its answer briefly so a room full of people costs one
+-- query rather than one each.
+--
+-- Narrow and covering: both columns the query reads are in it, so it never touches a row.
+CREATE INDEX `sales_crm_lead_version_idx` ON `sales_crm_lead` (`deleted_at`, `updated_at`);

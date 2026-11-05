@@ -1,0 +1,16 @@
+-- Who may use the application without WhatsApp linked.
+--
+-- Every account that is not an administrator must have WhatsApp paired before it may use the
+-- application: a CRM working leads with the one channel the client answers on disconnected is the
+-- fault this exists to stop, and a reminder that can be dismissed is one people learn to dismiss
+-- unread. Super Admins and roles carrying the Administrator tick are never held, so there is always
+-- somebody who can get in and put things right.
+--
+-- This column is the release valve for everybody else. A person whose phone is lost, broken or
+-- simply cannot pair is let through by ticking it in Login Credentials -> WhatsApp - no deploy, no
+-- code change, and it names one person rather than lifting the rule for the studio.
+--
+-- `FALSE` for every account that already exists, which means the rule applies to all of them the
+-- moment this ships. That is the intent; the studio-wide WhatsApp switch in Settings is what lifts
+-- it for everyone at once if it ever has to be.
+ALTER TABLE `user` ADD COLUMN `whatsapp_exempt` BOOLEAN NOT NULL DEFAULT FALSE;

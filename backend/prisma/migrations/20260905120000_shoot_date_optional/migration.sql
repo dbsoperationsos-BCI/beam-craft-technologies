@@ -1,0 +1,14 @@
+-- A shoot may now be added before its date is fixed.
+--
+-- A wedding is regularly sold months before the family settles the reception date, and the Add Shoot
+-- form had no way to say so: Date was required, so somebody either invented one or left the shoot
+-- off the project until it was known. The form now asks "Shoot Date Known" first and only asks for
+-- a date when the answer is yes.
+--
+-- Dropping NOT NULL only. Every existing shoot keeps the date it has, and nothing is backfilled -
+-- there is no row that needs to become undated.
+--
+-- What a null means here is "not scheduled yet", and the readers that care were changed with it:
+-- the Image Selection gate treats an undated shoot as one that has not happened, so its folders and
+-- selection items stay closed rather than opening the moment the shoot is created.
+ALTER TABLE `project_shoot` MODIFY COLUMN `date_created` DATETIME(3) NULL;

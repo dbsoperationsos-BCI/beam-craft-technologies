@@ -1,0 +1,145 @@
+/*
+ * The public home page (`/`): its palette, and the few effects Tailwind has no utility for.
+ *
+ * The palette is defined on `.root` only - the page's outermost element - so the `mk-*` utilities in
+ * `app/globals.css` resolve here and nowhere else. Values are HSL triples, read through `hsl()` by
+ * those utilities.
+ */
+.root {
+  --mk-background: 0 0% 100%;
+  --mk-foreground: 224 47% 11%;
+  --mk-card: 0 0% 100%;
+  --mk-primary: 0 84% 51%;
+  --mk-primary-foreground: 0 0% 100%;
+  --mk-secondary: 210 40% 96%;
+  --mk-muted-foreground: 215 16% 47%;
+  --mk-border: 214 32% 91%;
+  --mk-destructive: 0 72% 51%;
+  --mk-gold: 24 90% 56%;
+
+  font-family: var(--font-mk-sans);
+  background-color: hsl(var(--mk-background));
+  color: hsl(var(--mk-foreground));
+  overflow-x: clip;
+  -webkit-font-smoothing: antialiased;
+  scroll-behavior: smooth;
+}
+
+/* The red-to-orange underline under "Intelligence" in the hero. */
+.beamUnderline {
+  background-image: linear-gradient(90deg, hsl(var(--mk-primary) / 0.95), hsl(var(--mk-gold) / 0.95));
+  background-repeat: no-repeat;
+  background-size: 100% 0.14em;
+  background-position: 0 92%;
+}
+
+.heroGrid {
+  background-image:
+    linear-gradient(hsl(var(--mk-primary) / 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, hsl(var(--mk-primary) / 0.07) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, black 30%, transparent 75%);
+}
+
+.beamGlow {
+  background: radial-gradient(ellipse 60% 50% at 50% 0%, hsl(var(--mk-primary) / 0.12), transparent 70%);
+}
+
+.cardElev {
+  box-shadow: 0 1px 2px hsl(224 47% 11% / 0.04), 0 8px 24px -12px hsl(224 47% 11% / 0.08);
+}
+
+.highlightedTier {
+  box-shadow: 0 0 60px -20px hsl(var(--mk-primary) / 0.35);
+}
+
+/* A light sweep across the dashboard mockup. */
+@keyframes scanX {
+  0% { transform: translateX(-100%); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateX(250%); opacity: 0; }
+}
+
+.techScan {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.techScan::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, hsl(var(--mk-primary) / 0.06), transparent);
+  animation: scanX 6s ease-in-out infinite;
+}
+
+@keyframes nodePulse {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.4); }
+}
+
+.techNode {
+  animation: nodePulse 2.4s ease-in-out infinite;
+}
+
+@keyframes marqueeX {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.marquee {
+  animation: marqueeX 32s linear infinite;
+}
+
+@keyframes floatSlow {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+.floatSlow {
+  animation: floatSlow 7s ease-in-out infinite;
+}
+
+/* The mockup rising into place, then its bars growing one after another. */
+@keyframes mockupRise {
+  from { opacity: 0; transform: perspective(1200px) translateY(40px) rotateX(12deg); }
+  to { opacity: 1; transform: perspective(1200px) translateY(0) rotateX(0); }
+}
+
+.mockupRise {
+  animation: mockupRise 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.35s both;
+}
+
+@keyframes barGrow {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+
+.bar {
+  transform-origin: bottom;
+  animation: barGrow 0.7s ease-out both;
+}
+
+/* `Reveal`: content fades up the first time it scrolls into view. */
+.reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 0.6s cubic-bezier(0.22, 1, 0.36, 1), transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.revealed {
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root { scroll-behavior: auto; }
+  .marquee, .techScan::after, .techNode, .floatSlow, .mockupRise, .bar { animation: none; }
+  .reveal { opacity: 1; transform: none; transition: none; }
+}

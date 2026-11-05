@@ -1,0 +1,1268 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  /* Heights of the fixed chrome, so pages that size themselves against the viewport subtract a
+     value that follows the bar instead of a hard-coded rem that drifts when the bar is restyled.
+     --app-topbar-h is AppTopbar's h-12; --is-nav-h is the ModulePageHeader top row's min-h-12. */
+  --app-topbar-h: 3rem;
+  --is-nav-h: 3rem;
+}
+
+/*
+ * Checkboxes and radios, drawn here rather than left to the browser.
+ *
+ * Preflight resets `border: 0 solid` on every element, and Safari paints a checkbox or radio from
+ * exactly that border and background. With no border there was no ring to see: the control was a
+ * hairline ghost, and a radio that had been chosen looked no different from one that had not — the
+ * choice a viewer had just made appeared to vanish, which is how this was reported. The components
+ * had asked for the ring and been given half of it: `border-slate-300` on the shared Checkbox sets
+ * a border *colour*, and the width it needed was zero.
+ *
+ * Restoring the width would only have moved the problem — the two engines then paint two different
+ * controls from the same rule, and it would still be the platform deciding. These rules take the
+ * control off the platform: `appearance: none`, and every part of it drawn from the three
+ * `--control-*` values below, so a tick is the same tick in Safari and in Chrome and the dark tiers
+ * restate the colours without touching the shape.
+ *
+ * They sit in `@layer base` so that a utility class still wins — `sr-only`, which is the only thing
+ * keeping the toggle switch's real input off the screen, and any `h-*`/`w-*` on a control meant to
+ * be another size.
+ */
+@layer base {
+  input[type="checkbox"],
+  input[type="radio"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 1rem;
+    height: 1rem;
+    border: 1px solid var(--control-line, #94a3b8);
+    background-color: var(--control-bg, #ffffff);
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+    cursor: pointer;
+    vertical-align: middle;
+    transition: background-color 120ms ease-out, border-color 120ms ease-out;
+  }
+
+  input[type="checkbox"] { border-radius: 0.25rem; }
+  input[type="radio"] { border-radius: 9999px; }
+
+  /* Checked and mixed are the same filled box. Only the mark drawn on it differs. */
+  input[type="checkbox"]:checked,
+  input[type="checkbox"]:indeterminate,
+  input[type="radio"]:checked {
+    border-color: var(--control-accent, #2563eb);
+    background-color: var(--control-accent, #2563eb);
+  }
+
+  input[type="checkbox"]:checked {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3e%3cpath d='M3.5 8.4l3 3 6-6' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3e%3c/svg%3e");
+  }
+
+  /* The mixed state a select-all shows when only some rows are picked. */
+  input[type="checkbox"]:indeterminate {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3e%3cpath d='M4 8h8' stroke='%23fff' stroke-width='2' stroke-linecap='round'/%3e%3c/svg%3e");
+  }
+
+  /* The radio's dot is drawn, not fetched: one gradient, nothing to encode and no second mark. */
+  input[type="radio"]:checked {
+    background-image: radial-gradient(circle at center, #ffffff 0 3px, transparent 3px);
+  }
+
+  input[type="checkbox"]:disabled,
+  input[type="radio"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  input[type="checkbox"]:focus-visible,
+  input[type="radio"]:focus-visible {
+    outline: 2px solid var(--control-accent, #2563eb);
+    outline-offset: 2px;
+  }
+}
+
+/* @theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: Arial, Helvetica, sans-serif;
+  --font-montserrat: "Montserrat", Arial, Helvetica, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, monospace;
+} */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-montserrat), Arial, Helvetica, sans-serif;
+  --font-serif: var(--font-montserrat), Georgia, "Times New Roman", Times, serif;
+  --font-mono: "SFMono-Regular", Consolas, monospace;
+}
+
+/*
+ * The public home page's palette and type, as `mk-*` utilities (`bg-mk-primary/10`, `font-mk-display`).
+ *
+ * Prefixed so they can never collide with the application's own colours, and resolved from variables
+ * that only `components/marketing/marketing.module.css` defines - on the home page's root element and
+ * nowhere else. Outside that element these utilities resolve to nothing, so they cannot leak into a
+ * signed-in screen. The home page is light only: it sets its own ground, so the theme tiers below do
+ * not repaint it.
+ */
+@theme inline {
+  --color-mk-background: hsl(var(--mk-background));
+  --color-mk-foreground: hsl(var(--mk-foreground));
+  --color-mk-card: hsl(var(--mk-card));
+  --color-mk-primary: hsl(var(--mk-primary));
+  --color-mk-primary-foreground: hsl(var(--mk-primary-foreground));
+  --color-mk-secondary: hsl(var(--mk-secondary));
+  --color-mk-muted-foreground: hsl(var(--mk-muted-foreground));
+  --color-mk-border: hsl(var(--mk-border));
+  --color-mk-destructive: hsl(var(--mk-destructive));
+  --color-mk-gold: hsl(var(--mk-gold));
+  --font-mk-sans: var(--mk-font-sans), Arial, Helvetica, sans-serif;
+  --font-mk-display: var(--mk-font-display), var(--mk-font-sans), Arial, sans-serif;
+}
+
+/*
+ * The operating system does not get a vote.
+ *
+ * `body` paints itself from `--background` / `--foreground`, and this rule redefined both from the
+ * viewer's OS appearance setting - so the same page looked different on different machines. On a
+ * computer set to dark, Light Mode painted the page near-black while every card stayed white: the
+ * app appeared broken to anyone whose system differed from the author's, which is why it "only
+ * worked on one machine". The two dark tiers happened to escape it by overriding `body`
+ * themselves; Light Mode had no such override and took the full force of it.
+ *
+ * The app has its own three-tier picker, and that choice is the only thing that may decide this.
+ * Each tier names its own pair below. This is kept for the one case where no choice can have been
+ * read - markup rendered before the layout writes `data-theme`, such as a framework error page.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+@keyframes crm-drawer-up {
+  from {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.crm-drawer-enter {
+  animation: crm-drawer-up 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/*
+ * The same drawer, arriving from the side.
+ *
+ * Nebula's panel is docked to the right edge on a wide screen, so it comes in from the right; on a
+ * phone it spans the width from the bottom and uses `crm-drawer-enter` above instead. Same duration
+ * and same curve as the CRM's own drawer, because two panels in one application should not move at
+ * different speeds.
+ */
+@keyframes nebula-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/*
+ * One class, two directions, chosen by width rather than by the component.
+ *
+ * The panel is a bottom sheet on a phone and a right-hand drawer above `sm`, so it has to arrive
+ * from a different edge at each size. Expressing that as a Tailwind arbitrary-value animation inside
+ * a `sm:` variant works until somebody looks at it; a media query is what this actually is.
+ */
+.nebula-drawer-enter {
+  animation: crm-drawer-up 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (min-width: 640px) {
+  .nebula-drawer-enter {
+    animation: nebula-drawer-in 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  /* Stated rather than inherited from `:root`, so a machine set to dark cannot repaint it. */
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+[data-theme="enhanced-dark"] {
+  color-scheme: dark;
+  --background: #020617;
+  --foreground: #e2e8f0;
+}
+
+[data-theme="enhanced-dark"] body {
+  background: #020617;
+  color: #e2e8f0;
+}
+
+[data-theme="enhanced-dark"] .app-topbar {
+  border-color: #334155;
+  background: rgba(15, 23, 42, 0.96);
+  color: #e2e8f0;
+}
+
+/* Settings used to start below the app header, leaving it and the sidebar the only live-looking part
+   of the page, which is what these rules dimmed. It is a `SchemaFormPanel` now and draws the same
+   backdrop over the whole window as every other form panel, so nothing is left needing dimming. */
+
+[data-theme="enhanced-dark"] .app-topbar .text-slate-900,
+[data-theme="enhanced-dark"] .app-topbar .text-slate-700,
+[data-theme="enhanced-dark"] .app-topbar .text-slate-600 {
+  color: #e2e8f0;
+}
+
+[data-theme="enhanced-dark"] .app-topbar .theme-toggle {
+  background: #1e293b;
+  color: #e2e8f0;
+}
+
+[data-theme="enhanced-dark"] .app-topbar .crm-user-button {
+  border: 1px solid transparent;
+  background-color: transparent !important;
+  color: #e2e8f0 !important;
+}
+
+[data-theme="enhanced-dark"] .app-topbar .crm-user-button:hover,
+[data-theme="enhanced-dark"] .app-topbar .crm-user-button:focus,
+[data-theme="enhanced-dark"] .app-topbar .crm-user-button:active {
+  border-color: #3b82f6;
+  background-color: #1e293b !important;
+  color: #93c5fd !important;
+}
+
+[data-theme="enhanced-dark"] .app-topbar .hover\:bg-slate-100:hover {
+  background-color: #1e293b;
+  color: #60a5fa;
+}
+
+[data-theme="enhanced-dark"] .app-shell {
+  background: #020617;
+  color: #e2e8f0;
+  --employee-table-header: #0f172a;
+  --employee-table-cell: #111827;
+  --employee-table-selected: #1e3a5f;
+  --employee-table-divider: #475569;
+  --employee-table-subrow: #1b2436;
+  --employee-table-subrow-hover: #223049;
+}
+
+:root {
+  --employee-table-header: #f8fafc;
+  --employee-table-cell: #ffffff;
+  --employee-table-selected: #eff6ff;
+  --employee-table-divider: #cbd5e1;
+  --employee-table-subrow: #eef2f7;
+  --employee-table-subrow-hover: #e2e8f0;
+}
+
+[data-theme="enhanced-dark"] .app-shell .bg-white {
+  background-color: #111827;
+}
+
+[data-theme="enhanced-dark"] .app-shell .bg-white\/95 {
+  background-color: rgba(15, 23, 42, 0.96);
+}
+
+[data-theme="enhanced-dark"] .app-shell .bg-slate-50,
+[data-theme="enhanced-dark"] .app-shell .bg-slate-100,
+[data-theme="enhanced-dark"] .app-shell .bg-gray-100 {
+  background-color: #0f172a;
+}
+
+[data-theme="enhanced-dark"] .app-shell .bg-slate-200 {
+  background-color: #1e293b;
+}
+
+[data-theme="enhanced-dark"] .app-shell .bg-blue-50 {
+  background-color: #1e3a5f;
+}
+
+[data-theme="enhanced-dark"] .app-shell .text-slate-950,
+[data-theme="enhanced-dark"] .app-shell .text-slate-900,
+[data-theme="enhanced-dark"] .app-shell .text-slate-800,
+[data-theme="enhanced-dark"] .app-shell .text-slate-700,
+[data-theme="enhanced-dark"] .app-shell .text-slate-600 {
+  color: #e2e8f0;
+}
+
+[data-theme="enhanced-dark"] .app-shell .text-slate-500,
+[data-theme="enhanced-dark"] .app-shell .text-slate-400 {
+  color: #94a3b8;
+}
+
+[data-theme="enhanced-dark"] .app-shell .border-slate-100,
+[data-theme="enhanced-dark"] .app-shell .border-slate-200,
+[data-theme="enhanced-dark"] .app-shell .border-slate-300,
+[data-theme="enhanced-dark"] .app-shell .border-gray-200,
+[data-theme="enhanced-dark"] .app-shell .border-gray-300 {
+  border-color: #334155;
+}
+
+[data-theme="enhanced-dark"] .app-shell input:not([type="checkbox"], [type="radio"]),
+[data-theme="enhanced-dark"] .app-shell select,
+[data-theme="enhanced-dark"] .app-shell textarea {
+  border-color: #475569;
+  /* Transparent, not a fill of its own - see the note on the global input rule. */
+  background-color: transparent;
+  color: #f1f5f9;
+}
+
+[data-theme="enhanced-dark"] .app-shell input::placeholder,
+[data-theme="enhanced-dark"] .app-shell textarea::placeholder {
+  color: #64748b;
+}
+
+[data-theme="enhanced-dark"] .app-shell .hover\:bg-slate-50:hover,
+[data-theme="enhanced-dark"] .app-shell .hover\:bg-slate-100:hover,
+[data-theme="enhanced-dark"] .app-shell .hover\:bg-slate-200:hover {
+  background-color: #1e293b;
+  color: #93c5fd;
+}
+
+[data-theme="enhanced-dark"] .app-shell .hover\:bg-blue-50:hover,
+[data-theme="enhanced-dark"] .app-shell .hover\:bg-blue-100:hover {
+  background-color: #172554;
+  color: #93c5fd;
+}
+
+[data-theme="enhanced-dark"] .app-shell table tbody tr:hover {
+  background-color: #1e293b;
+}
+
+[data-theme="enhanced-dark"] .app-sidebar {
+  border-color: #334155;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+/* The studio logo is dark artwork, usually on a white ground. Both dark themes sink the top bar,
+   and a white chip behind the logo read as a sticker on the bar. Instead the image is inverted
+   (its white ground becomes black, its dark artwork light) with the hue turned back so the
+   colours keep their family, and blended with `screen`, under which black is the bar itself: the
+   ground disappears and only the artwork stays, light, on the dark bar. A logo with a transparent
+   ground comes out the same way. Light themes leave the image exactly as uploaded.
+
+   The fallback mark is exempt: it already ships a file lettered for a dark ground, so inverting it
+   would turn that white lettering black and hide it on the bar it was drawn for. */
+[data-theme="dark"] .app-topbar .app-logo img:not(.studio-logo-fallback),
+[data-theme="enhanced-dark"] .app-topbar .app-logo img:not(.studio-logo-fallback) {
+  filter: invert(1) hue-rotate(180deg);
+  mix-blend-mode: screen;
+}
+
+[data-theme="enhanced-dark"] .app-sidebar .text-slate-900,
+[data-theme="enhanced-dark"] .app-sidebar .text-slate-700,
+[data-theme="enhanced-dark"] .app-sidebar .text-slate-600,
+[data-theme="enhanced-dark"] .app-sidebar .text-slate-500 {
+  color: #cbd5e1;
+}
+
+[data-theme="enhanced-dark"] .app-sidebar .border-slate-100,
+[data-theme="enhanced-dark"] .app-sidebar .border-slate-200 {
+  border-color: #334155;
+}
+
+[data-theme="enhanced-dark"] .app-sidebar .hover\:bg-slate-50:hover,
+[data-theme="enhanced-dark"] .app-sidebar .hover\:bg-slate-100:hover {
+  background-color: #1e293b;
+  color: #60a5fa;
+}
+
+[data-theme="enhanced-dark"] .crm-page {
+  background: #0f172a;
+  color: #cbd5e1;
+}
+
+[data-theme="enhanced-dark"] .crm-page .bg-white {
+  background-color: #111827;
+}
+
+[data-theme="enhanced-dark"] .crm-page .bg-\[\#f2f2f2\] {
+  background-color: #0f172a;
+}
+
+[data-theme="enhanced-dark"] .crm-page .bg-\[\#f3f3f3\] {
+  background-color: #0f172a;
+}
+
+[data-theme="enhanced-dark"] .crm-page .text-slate-900,
+[data-theme="enhanced-dark"] .crm-page .text-slate-800,
+[data-theme="enhanced-dark"] .crm-page .text-slate-700,
+[data-theme="enhanced-dark"] .crm-page .text-slate-600 {
+  color: #e2e8f0;
+}
+
+[data-theme="enhanced-dark"] .crm-page .text-slate-500 {
+  color: #94a3b8;
+}
+
+[data-theme="enhanced-dark"] .crm-page .border-slate-100,
+[data-theme="enhanced-dark"] .crm-page .border-slate-200,
+[data-theme="enhanced-dark"] .crm-page .border-slate-300 {
+  border-color: #334155;
+}
+
+[data-theme="enhanced-dark"] .crm-page input:not([type="checkbox"], [type="radio"]),
+[data-theme="enhanced-dark"] .crm-page select,
+[data-theme="enhanced-dark"] .crm-page textarea {
+  border-color: #475569;
+  /* Transparent, not a fill of its own - see the note on the global input rule. */
+  background-color: transparent;
+  color: #f1f5f9;
+}
+
+[data-theme="enhanced-dark"] .crm-page tr.bg-white {
+  background-color: #111827;
+}
+
+[data-theme="enhanced-dark"] .crm-page tr.bg-white:hover {
+  background-color: #1e3a5f;
+}
+
+[data-theme="enhanced-dark"] .crm-page .bg-\[\#c9dcfa\] {
+  background-color: #1e3a5f;
+}
+
+[data-theme="enhanced-dark"] .crm-page .hover\:bg-slate-50:hover,
+[data-theme="enhanced-dark"] .crm-page .hover\:bg-slate-100:hover,
+[data-theme="enhanced-dark"] .crm-page .hover\:bg-slate-200:hover,
+[data-theme="enhanced-dark"] .crm-page .hover\:bg-slate-300:hover {
+  background-color: #1e293b;
+  color: #60a5fa;
+}
+
+[data-theme="enhanced-dark"] .crm-page .hover\:bg-blue-50:hover,
+[data-theme="enhanced-dark"] .crm-page .hover\:bg-blue-100:hover {
+  background-color: #172554;
+  color: #93c5fd;
+}
+
+[data-theme="enhanced-dark"] .crm-page .crm-import-button {
+  border: 1px solid #3b82f6;
+  background-color: #1e3a5f;
+  color: #93c5fd;
+}
+
+[data-theme="enhanced-dark"] .crm-page .crm-import-button:hover,
+[data-theme="enhanced-dark"] .crm-page .crm-import-button:focus-within {
+  background-color: #172554;
+  color: #bfdbfe;
+}
+
+[data-theme="enhanced-dark"] .crm-page .crm-board-option {
+  background-color: #0f172a !important;
+  color: #e2e8f0 !important;
+}
+
+[data-theme="enhanced-dark"] .crm-page .crm-board-option[aria-selected="true"] {
+  color: #60a5fa !important;
+}
+
+[data-theme="enhanced-dark"] .crm-page .crm-board-option:hover,
+[data-theme="enhanced-dark"] .crm-page .crm-board-option:focus,
+[data-theme="enhanced-dark"] .crm-page .crm-board-option:active {
+  background-color: #1e293b !important;
+  color: #93c5fd !important;
+}
+
+[data-theme="enhanced-dark"] .app-topbar button:focus-visible,
+[data-theme="enhanced-dark"] .app-sidebar button:focus-visible,
+[data-theme="enhanced-dark"] .app-sidebar a:focus-visible,
+[data-theme="enhanced-dark"] .crm-page button:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crm-drawer-enter,
+  .nebula-drawer-enter {
+    animation: none;
+  }
+}
+
+body {
+  min-height: 100dvh;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-montserrat), Arial, Helvetica, sans-serif;
+}
+
+/* The snackbar rises from the bottom edge rather than appearing in place, so a message that
+   arrives while the page is being read is noticed without covering anything abruptly. */
+@keyframes snackbar-rise {
+  from {
+    opacity: 0;
+    transform: translateY(1.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-snackbar-rise {
+  animation: snackbar-rise 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-snackbar-rise {
+    animation: none;
+  }
+}
+
+/* Keep icon-only controls in page headers visually compact. */
+.module-page-header-actions button[aria-label]:not([aria-haspopup]) {
+  width: 2.25rem !important;
+  min-width: 2.25rem !important;
+  height: 2.25rem !important;
+  min-height: 2.25rem !important;
+  font-size: 1rem;
+}
+
+/* A table's selection buttons are the header's own children too - handed over as props and rendered
+   here rather than portalled into a wrapper - so this one rule sizes every button in the row, and a
+   title bar cannot change height as rows are ticked. See `TableSelectionActions`. */
+.module-page-header-actions > button {
+  height: 2.25rem !important;
+  min-height: 2.25rem !important;
+  padding-block: 0.375rem !important;
+  padding-inline: 0.75rem !important;
+}
+
+.module-page-header-actions > select {
+  height: 2.25rem !important;
+  min-height: 2.25rem !important;
+  padding-block: 0.375rem !important;
+}
+
+/* Employee Repository uses TanStack's compact table markup. Keep its heading
+   labels aligned with the global title-case table standard. */
+.border-separate thead.uppercase {
+  color: #475569;
+  font-weight: 700;
+  text-transform: none;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Appearance
+ *
+ * Three tiers, all keyed on `[data-theme]` on the document element, which is what lets the whole
+ * app change without a single component being edited: the shared controls keep their Tailwind
+ * classes and these rules remap what those classes paint.
+ *
+ * The dark rules above this block reach the shell, the sidebar and the CRM page. Everything below
+ * extends that to the two places those selectors cannot reach - surfaces portalled to <body>,
+ * which is every dropdown menu, dialog and snackbar in the app - and adds the middle tier.
+ * ------------------------------------------------------------------------------------------- */
+
+/* The palette each tier paints with, so the rules below read as intent rather than as hex codes
+   and the two dark tiers differ by these values alone. */
+[data-theme="enhanced-dark"] {
+  --surface: #111827;
+  --surface-sunken: #0f172a;
+  --surface-raised: #1e293b;
+  --page: #020617;
+  --line: #334155;
+  --ink: #e2e8f0;
+  --ink-muted: #94a3b8;
+  --accent-surface: #1e3a5f;
+  /* The accent as text. Blue-700 is meant for a pale background; on the band above it needs to be
+     the light end of the ramp or the selected row reads as unlit. */
+  --accent-ink: #93c5fd;
+  /* Declared on the tier itself, not only on `.app-shell`: DataTable's sticky header reads this
+     inline, and a table rendered outside the shell was left with the light fallback. */
+  --employee-table-header: #0f172a;
+  --employee-table-cell: #111827;
+  --employee-table-selected: #1e3a5f;
+  --employee-table-divider: #475569;
+  --employee-table-subrow: #1b2436;
+  --employee-table-subrow-hover: #223049;
+  /* Status tints, dark enough to sit under the app's text and still read as their own colour. */
+  --tint-good: #052e1c;
+  --tint-good-ink: #6ee7b7;
+  --tint-warn: #3a2a06;
+  --tint-warn-ink: #fcd34d;
+  --tint-bad: #3f1418;
+  --tint-bad-ink: #fca5a5;
+}
+
+/* Panels lifted off a dim ground rather than a black screen - which is what most people reading a
+   table of leads all day actually want when they ask for dark mode. */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #131c2e;
+  --foreground: #e8edf5;
+  --surface: #1e293b;
+  --surface-sunken: #172033;
+  --surface-raised: #273449;
+  --page: #131c2e;
+  --line: #3b4a63;
+  --ink: #e8edf5;
+  --ink-muted: #a3b0c4;
+  --accent-surface: #24405f;
+  --accent-ink: #9ec5fe;
+  --employee-table-header: #172033;
+  --employee-table-cell: #1e293b;
+  --employee-table-selected: #24405f;
+  --employee-table-divider: #3b4a63;
+  --employee-table-subrow: #223146;
+  --employee-table-subrow-hover: #2a3b52;
+  --tint-good: #0d3327;
+  --tint-good-ink: #6ee7b7;
+  --tint-warn: #402f0c;
+  --tint-warn-ink: #fcd34d;
+  --tint-bad: #45191d;
+  --tint-bad-ink: #fca5a5;
+}
+
+[data-theme="dark"] body {
+  background: var(--page);
+  color: var(--ink);
+}
+
+/* The middle tier reuses the dark rules by repeating their selectors against its own variables.
+   Written out rather than shared with `:is()` so each tier can be read on its own. */
+[data-theme="dark"] .app-topbar {
+  border-color: var(--line);
+  background: rgba(30, 41, 59, 0.96);
+  color: var(--ink);
+}
+
+[data-theme="dark"] .app-shell,
+[data-theme="dark"] .crm-page {
+  background: var(--page);
+  color: var(--ink);
+  --employee-table-header: var(--surface-sunken);
+  --employee-table-cell: var(--surface);
+  --employee-table-selected: var(--accent-surface);
+  --employee-table-divider: var(--line);
+  --employee-table-subrow: var(--surface-sunken);
+  --employee-table-subrow-hover: var(--surface-sunken);
+}
+
+[data-theme="dark"] .app-sidebar {
+  border-color: var(--line);
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+
+[data-theme="dark"] .app-shell .bg-white,
+[data-theme="dark"] .app-shell tr.bg-white {
+  background-color: var(--surface);
+}
+
+[data-theme="dark"] .app-shell .bg-slate-50,
+[data-theme="dark"] .app-shell .bg-slate-100,
+[data-theme="dark"] .app-shell .bg-gray-100 {
+  background-color: var(--surface-sunken);
+}
+
+[data-theme="dark"] .app-shell .bg-slate-200 {
+  background-color: var(--surface-raised);
+}
+
+[data-theme="dark"] .app-shell .bg-blue-50 {
+  background-color: var(--accent-surface);
+}
+
+[data-theme="dark"] .app-shell .text-slate-950,
+[data-theme="dark"] .app-shell .text-slate-900,
+[data-theme="dark"] .app-shell .text-slate-800,
+[data-theme="dark"] .app-shell .text-slate-700,
+[data-theme="dark"] .app-shell .text-slate-600,
+[data-theme="dark"] .app-sidebar .text-slate-900,
+[data-theme="dark"] .app-sidebar .text-slate-700,
+[data-theme="dark"] .app-sidebar .text-slate-600,
+[data-theme="dark"] .app-topbar .text-slate-900,
+[data-theme="dark"] .app-topbar .text-slate-700,
+[data-theme="dark"] .app-topbar .text-slate-600 {
+  color: var(--ink);
+}
+
+[data-theme="dark"] .app-shell .text-slate-500,
+[data-theme="dark"] .app-shell .text-slate-400,
+[data-theme="dark"] .app-sidebar .text-slate-500 {
+  color: var(--ink-muted);
+}
+
+[data-theme="dark"] .app-shell .border-slate-100,
+[data-theme="dark"] .app-shell .border-slate-200,
+[data-theme="dark"] .app-shell .border-slate-300,
+[data-theme="dark"] .app-shell .border-gray-200,
+[data-theme="dark"] .app-shell .border-gray-300,
+[data-theme="dark"] .app-sidebar .border-slate-100,
+[data-theme="dark"] .app-sidebar .border-slate-200 {
+  border-color: var(--line);
+}
+
+/* The account pill draws its box only under the pointer or on focus. Its hairline is a hover
+   variant, which the rules above do not reach, so it is given the theme line colour here. */
+[data-theme="dark"] .app-topbar .crm-user-button:hover,
+[data-theme="dark"] .app-topbar .crm-user-button:focus-visible {
+  border-color: var(--line);
+}
+
+[data-theme="dark"] .app-shell input:not([type="checkbox"], [type="radio"]),
+[data-theme="dark"] .app-shell select,
+[data-theme="dark"] .app-shell textarea {
+  border-color: var(--line);
+  background-color: transparent;
+  color: var(--ink);
+}
+
+[data-theme="dark"] .app-shell input::placeholder,
+[data-theme="dark"] .app-shell textarea::placeholder {
+  color: var(--ink-muted);
+}
+
+[data-theme="dark"] .app-shell .hover\:bg-slate-50:hover,
+[data-theme="dark"] .app-shell .hover\:bg-slate-100:hover,
+[data-theme="dark"] .app-shell .hover\:bg-slate-200:hover,
+[data-theme="dark"] .app-topbar .hover\:bg-slate-100:hover,
+[data-theme="dark"] .app-sidebar .hover\:bg-slate-50:hover,
+[data-theme="dark"] .app-sidebar .hover\:bg-slate-100:hover,
+[data-theme="dark"] .app-shell table tbody tr:hover {
+  background-color: var(--surface-raised);
+}
+
+/*
+ * Portalled surfaces.
+ *
+ * Menus, dialogs, the snackbar and the full-screen form panels are rendered into <body>, outside
+ * `.app-shell` entirely - so every selector above misses them, and a dark page would open a white
+ * dialog.
+ *
+ * Matched on the role where a surface declares one, and on `.themed-surface` where it does not.
+ * The role alone was not enough: the lead popup, both Settings overlays and three floating menus
+ * are portalled `<div>`s with no role at all, so a dark CRM opened a fully light lead popup. Those
+ * carry the class instead - a marker whose only job is to be found from here, so a new portal can
+ * opt in without inventing an ARIA role it does not mean.
+ *
+ * `:is()` holds the surface list so it is written once; the two tiers stay written out separately,
+ * so each can still be read on its own.
+ */
+[data-theme="enhanced-dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface),
+[data-theme="dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) {
+  color: var(--ink);
+}
+
+/* The panel itself when the class sits on the surface, and anything white inside it. The popup's
+   own ground is an arbitrary hex rather than a Tailwind name, so it is listed by that value. */
+[data-theme="enhanced-dark"] :is([role="listbox"], [role="menu"], .themed-surface).bg-white,
+[data-theme="enhanced-dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) .bg-white,
+[data-theme="dark"] :is([role="listbox"], [role="menu"], .themed-surface).bg-white,
+[data-theme="dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) .bg-white {
+  background-color: var(--surface);
+}
+
+[data-theme="enhanced-dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) :is(.bg-slate-50, .bg-slate-100, .bg-gray-100),
+[data-theme="enhanced-dark"] .themed-surface.bg-\[\#f4f4f4\],
+[data-theme="enhanced-dark"] :is([role="dialog"], .themed-surface) .bg-\[\#f4f4f4\],
+[data-theme="dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) :is(.bg-slate-50, .bg-slate-100, .bg-gray-100),
+[data-theme="dark"] .themed-surface.bg-\[\#f4f4f4\],
+[data-theme="dark"] :is([role="dialog"], .themed-surface) .bg-\[\#f4f4f4\] {
+  background-color: var(--surface-sunken);
+}
+
+/* The lead popup's tab strip and its dividers sit on slate-200/300 to read as raised on white;
+   on a dark ground they need the raised tone instead or they disappear into the panel. */
+[data-theme="enhanced-dark"] :is([role="dialog"], .themed-surface) :is(.bg-slate-200, .bg-slate-300),
+[data-theme="dark"] :is([role="dialog"], .themed-surface) :is(.bg-slate-200, .bg-slate-300) {
+  background-color: var(--line);
+}
+
+/*
+ * The chosen row in a menu, and every other pale-blue "this one" marker.
+ *
+ * `[role="listbox"]` belongs here as much as the dialogs do: the appearance picker marks its
+ * current mode with `bg-blue-50 text-blue-700`, and left out of this rule the selected row was the
+ * one white band across an otherwise dark menu.
+ */
+[data-theme="enhanced-dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) .bg-blue-50,
+[data-theme="dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) .bg-blue-50 {
+  background-color: var(--accent-surface);
+}
+
+/* Blue-700 is a dark blue - legible on a pale blue band, invisible on the dark one that replaces
+   it. Lifted to the tint that reads as the same accent against a dark ground.
+   
+   The 800 and 900 shades belong here just as much, and were the gap that left Nebula AI's own
+   messages unreadable: a sent message is `bg-blue-50 text-blue-900`, so the band was correctly
+   darkened while the words on it stayed navy - a bubble of invisible text. Anything darker than
+   700 is even less legible on that ground, not more, so the whole dark end is lifted together. */
+[data-theme="enhanced-dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) :is(.text-blue-950, .text-blue-900, .text-blue-800, .text-blue-700, .text-blue-600, .text-indigo-900, .text-indigo-800),
+[data-theme="dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) :is(.text-blue-950, .text-blue-900, .text-blue-800, .text-blue-700, .text-blue-600, .text-indigo-900, .text-indigo-800) {
+  color: var(--accent-ink);
+}
+
+[data-theme="enhanced-dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) :is(.text-slate-950, .text-slate-900, .text-slate-800, .text-slate-700, .text-slate-600),
+[data-theme="dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) :is(.text-slate-950, .text-slate-900, .text-slate-800, .text-slate-700, .text-slate-600) {
+  color: var(--ink);
+}
+
+/* Deliberately dimmer than the tone above: these are the labels, hints and placeholders that are
+   meant to sit back from the text they describe, and flattening them to one colour loses that. */
+[data-theme="enhanced-dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) :is(.text-slate-500, .text-slate-400, .text-slate-300),
+[data-theme="dark"] :is([role="dialog"], [role="listbox"], [role="menu"], .themed-surface) :is(.text-slate-500, .text-slate-400, .text-slate-300) {
+  color: var(--ink-muted);
+}
+
+[data-theme="enhanced-dark"] :is([role="dialog"], .themed-surface) :is(.border-slate-100, .border-slate-200, .border-slate-300, .border-gray-200, .border-gray-300),
+[data-theme="enhanced-dark"] :is([role="listbox"], [role="menu"], .themed-surface),
+[data-theme="dark"] :is([role="dialog"], .themed-surface) :is(.border-slate-100, .border-slate-200, .border-slate-300, .border-gray-200, .border-gray-300),
+[data-theme="dark"] :is([role="listbox"], [role="menu"], .themed-surface) {
+  border-color: var(--line);
+}
+
+[data-theme="enhanced-dark"] :is([role="dialog"], .themed-surface) :is(input:not([type="checkbox"], [type="radio"]), select, textarea),
+[data-theme="dark"] :is([role="dialog"], .themed-surface) :is(input:not([type="checkbox"], [type="radio"]), select, textarea) {
+  border-color: var(--line);
+  background-color: transparent;
+  color: var(--ink);
+}
+
+[data-theme="enhanced-dark"] :is([role="dialog"], .themed-surface) :is(input, textarea)::placeholder,
+[data-theme="dark"] :is([role="dialog"], .themed-surface) :is(input, textarea)::placeholder {
+  color: var(--ink-muted);
+}
+
+[data-theme="enhanced-dark"] :is([role="listbox"], [role="menu"], .themed-surface) :is(.hover\:bg-slate-50, .hover\:bg-slate-100, .hover\:bg-blue-50):hover,
+[data-theme="dark"] :is([role="listbox"], [role="menu"], .themed-surface) :is(.hover\:bg-slate-50, .hover\:bg-slate-100, .hover\:bg-blue-50):hover {
+  background-color: var(--surface-raised);
+}
+
+/*
+ * Nebula AI's thread, on a dark ground.
+ *
+ * Two surfaces the general rules get wrong here, both for the same reason: they map a pale tone to
+ * a *sunken* one, which is right for a well inside a dialog and wrong for something that is meant
+ * to sit on top of the panel.
+ *
+ *   * a reply is `bg-slate-50`, which became the sunken tone - within a shade of the drawer behind
+ *     it, so the answer read as loose text rather than as a bubble;
+ *   * the composer is `bg-white`, which became the panel's own surface - so the box being typed
+ *     into was exactly the colour of the drawer around it and read as no box at all.
+ *
+ * Both are lifted instead. `--surface-raised` is the tone this palette already keeps for "on top
+ * of the panel", so the thread reads the way a conversation should in either dark tier.
+ */
+[data-theme="enhanced-dark"] .nebula-bubble,
+[data-theme="dark"] .nebula-bubble {
+  background-color: var(--surface-raised);
+  color: var(--ink);
+}
+
+[data-theme="enhanced-dark"] .nebula-composer,
+[data-theme="dark"] .nebula-composer {
+  background-color: var(--surface-raised);
+  border-color: var(--line);
+}
+
+/* The line being typed, and the hint before anything is. Inputs inside a themed surface are made
+   transparent by the rule above, which is right on a dialog's own ground and leaves this one
+   correct on the lifted box too - only the text tones need saying. */
+[data-theme="enhanced-dark"] .nebula-composer :is(input, textarea),
+[data-theme="dark"] .nebula-composer :is(input, textarea) {
+  color: var(--ink);
+}
+
+[data-theme="enhanced-dark"] .nebula-composer :is(input, textarea)::placeholder,
+[data-theme="dark"] .nebula-composer :is(input, textarea)::placeholder {
+  color: var(--ink-muted);
+}
+
+/* The appearance picker itself, so the trigger sits on the bar rather than glowing white on it. */
+[data-theme="enhanced-dark"] .app-topbar .theme-toggle,
+[data-theme="dark"] .app-topbar .theme-toggle {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * The whole app, not a list of places in it.
+ *
+ * Everything above this reaches a named scope - `.app-shell`, `.crm-page`, `.app-sidebar`, a
+ * portal with an ARIA role. That was the mistake: a scope has to be remembered, and the ones that
+ * were not left whole screens light. Settings opened as a white sheet in every module, because the
+ * panel's own `bg-white` sits on the element that carries `role="dialog"` and every rule above
+ * repaints a dialog's *children*. The selected lead row was `bg-[#eff6ff]`, an arbitrary hex no
+ * rule named, so it stayed near-white with pale text on it and could not be read at all.
+ *
+ * These rules are scoped to nothing but the theme. Any element anywhere that paints itself with a
+ * light Tailwind surface is repainted, which is what makes a new page or a new module dark without
+ * anyone remembering to add it here. The scoped rules above still win on specificity where they
+ * apply, and set the same values - they are kept so the places that needed a particular treatment
+ * keep it.
+ *
+ * Deliberately not touched: anything already carrying a colour of its own. A blue button, a status
+ * pill, a red error - those are the same on any ground and the palette below never names them.
+ * ------------------------------------------------------------------------------------------- */
+
+/* Panels and cards - the ground a screen's content sits on. */
+[data-theme="enhanced-dark"] :is(.bg-white, tr.bg-white, .bg-white\/95, .bg-white\/90),
+[data-theme="dark"] :is(.bg-white, tr.bg-white, .bg-white\/95, .bg-white\/90) {
+  background-color: var(--surface);
+}
+
+/* One step back from a panel: table headers, toolbars, the page behind the cards. The arbitrary
+   hexes are the CRM's own greys, which no Tailwind name covers. */
+[data-theme="enhanced-dark"] :is(.bg-slate-50, .bg-slate-100, .bg-gray-50, .bg-gray-100, .bg-neutral-50, .bg-neutral-100, .bg-\[\#f2f2f2\], .bg-\[\#f3f3f3\], .bg-\[\#f4f4f4\], .bg-\[\#f8fafc\]),
+[data-theme="dark"] :is(.bg-slate-50, .bg-slate-100, .bg-gray-50, .bg-gray-100, .bg-neutral-50, .bg-neutral-100, .bg-\[\#f2f2f2\], .bg-\[\#f3f3f3\], .bg-\[\#f4f4f4\], .bg-\[\#f8fafc\]) {
+  background-color: var(--surface-sunken);
+}
+
+/* Dividers, tracks and the disabled fills that read as "greyed out" on white. */
+[data-theme="enhanced-dark"] :is(.bg-slate-200, .bg-slate-300, .bg-gray-200, .bg-gray-300, .bg-\[\#c3c7ce\]),
+[data-theme="dark"] :is(.bg-slate-200, .bg-slate-300, .bg-gray-200, .bg-gray-300, .bg-\[\#c3c7ce\]) {
+  background-color: var(--line);
+}
+
+/*
+ * A switch that is on stays blue in the dark themes.
+ *
+ * The track carries both `bg-slate-300` for its off state and `peer-checked:bg-blue-600` for its on
+ * state, and the rule just above repaints every `.bg-slate-300` as a divider. Both selectors weigh
+ * the same - an attribute and a class each - so the later one won, and every switch in the
+ * application read as off however it was set. On is not a divider, so it says so at a weight the
+ * generic rule cannot match.
+ *
+ * Off is deliberately left to that rule: a track the colour of a divider is exactly right for a
+ * switch that is not on.
+ */
+[data-theme="enhanced-dark"] .peer:checked ~ .toggle-track,
+[data-theme="dark"] .peer:checked ~ .toggle-track {
+  background-color: #2563eb;
+}
+
+/* "This one" - the selected row, the current tab, the chosen option. `#eff6ff` is the selected
+   lead row in CRM and in Meetings; `#e8eefb` and `#c9dcfa` are the same idea elsewhere. */
+[data-theme="enhanced-dark"] :is(.bg-blue-50, .bg-blue-100, .bg-indigo-50, .bg-sky-50, .bg-\[\#eff6ff\], .bg-\[\#e8eefb\], .bg-\[\#c9dcfa\]),
+[data-theme="dark"] :is(.bg-blue-50, .bg-blue-100, .bg-indigo-50, .bg-sky-50, .bg-\[\#eff6ff\], .bg-\[\#e8eefb\], .bg-\[\#c9dcfa\]) {
+  background-color: var(--accent-surface);
+}
+
+[data-theme="enhanced-dark"] :is(.text-slate-950, .text-slate-900, .text-slate-800, .text-slate-700, .text-slate-600, .text-gray-900, .text-gray-800, .text-gray-700, .text-black),
+[data-theme="dark"] :is(.text-slate-950, .text-slate-900, .text-slate-800, .text-slate-700, .text-slate-600, .text-gray-900, .text-gray-800, .text-gray-700, .text-black) {
+  color: var(--ink);
+}
+
+/* Kept a step quieter than the tone above: labels, hints, placeholders and empty-state lines are
+   meant to sit back from what they describe, and flattening everything to one colour loses that. */
+[data-theme="enhanced-dark"] :is(.text-slate-500, .text-slate-400, .text-slate-300, .text-gray-500, .text-gray-400),
+[data-theme="dark"] :is(.text-slate-500, .text-slate-400, .text-slate-300, .text-gray-500, .text-gray-400) {
+  color: var(--ink-muted);
+}
+
+/* Blue-600/700 are chosen to sit on a pale background. On a dark one they need the light end of
+   the ramp - this is the active tab, the chosen menu row, a link, and the calendar's own meeting
+   chips. The 800 and 900 shades are listed with them: they are used the same way, on the same pale
+   blue, and are darker still - so leaving them out left exactly the text that needed lifting most
+   sitting unlit on a lifted band. */
+[data-theme="enhanced-dark"] :is(.text-blue-950, .text-blue-900, .text-blue-800, .text-blue-700, .text-blue-600, .text-indigo-900, .text-indigo-800, .text-indigo-700, .text-indigo-600),
+[data-theme="dark"] :is(.text-blue-950, .text-blue-900, .text-blue-800, .text-blue-700, .text-blue-600, .text-indigo-900, .text-indigo-800, .text-indigo-700, .text-indigo-600) {
+  color: var(--accent-ink);
+}
+
+[data-theme="enhanced-dark"] :is(.border-slate-100, .border-slate-200, .border-slate-300, .border-gray-100, .border-gray-200, .border-gray-300, .divide-slate-100, .divide-slate-200),
+[data-theme="dark"] :is(.border-slate-100, .border-slate-200, .border-slate-300, .border-gray-100, .border-gray-200, .border-gray-300, .divide-slate-100, .divide-slate-200) {
+  border-color: var(--line);
+}
+
+/*
+ * Tailwind draws the rule between divided rows on the children, not the parent, so the class above
+ * does not reach it.
+ *
+ * `> *`, not `> * + *`. The utility colours `> :not(:last-child)` - every row but the last - and
+ * `* + *` is every row but the *first*, so the two disagree on exactly one element: the first
+ * row's own divider kept the near-white slate-100 and drew one bright line across an otherwise
+ * dark table. Colouring every child leaves no row out, whichever edge the utility chose.
+ */
+[data-theme="enhanced-dark"] :is(.divide-slate-50, .divide-slate-100, .divide-slate-200, .divide-gray-100, .divide-gray-200) > *,
+[data-theme="dark"] :is(.divide-slate-50, .divide-slate-100, .divide-slate-200, .divide-gray-100, .divide-gray-200) > * {
+  border-color: var(--line);
+}
+
+/*
+ * A field takes the colour of whatever it sits on.
+ *
+ * These used to be filled with `--surface-raised`, a tone lighter than a panel, so that a field
+ * would stand out. It does the opposite inside a composed control: the phone field, the searchable
+ * dropdown and the combobox each wrap their `<input>` in a bordered box that paints itself, and
+ * the lighter input then showed as a second rectangle floating inside the first - a box within a
+ * box that appears in none of these designs.
+ *
+ * Transparent is also what the light theme does: a white input on a white card, told apart by its
+ * border and nothing else. The border and the placeholder carry the affordance; the fill never
+ * did.
+ *
+ * A checkbox or radio is excluded here and in the four rules like it above. They are not fields
+ * with a fill and a placeholder — they are drawn at the top of this file, and their *checked* state
+ * is a fill, so a rule that made every input transparent erased it on a dark page.
+ */
+[data-theme="enhanced-dark"] :is(input:not([type="checkbox"], [type="radio"]), select, textarea),
+[data-theme="dark"] :is(input:not([type="checkbox"], [type="radio"]), select, textarea) {
+  border-color: var(--line);
+  background-color: transparent;
+  color: var(--ink);
+}
+
+/* The two dark tiers restate what the controls at the top of this file are drawn from: a box with
+   no fill of its own, the tier's own line colour, and the lighter blue the rest of the dark UI is
+   checked in. Left alone a control is a white box on a dark row, which is what the lead table's
+   select-all looked like. */
+[data-theme="enhanced-dark"] :is(input[type="checkbox"], input[type="radio"]),
+[data-theme="dark"] :is(input[type="checkbox"], input[type="radio"]) {
+  --control-bg: transparent;
+  --control-line: var(--line, #475569);
+  --control-accent: #3b82f6;
+}
+
+[data-theme="enhanced-dark"] :is(input, textarea)::placeholder,
+[data-theme="dark"] :is(input, textarea)::placeholder {
+  color: var(--ink-muted);
+}
+
+[data-theme="enhanced-dark"] :is(.hover\:bg-slate-50, .hover\:bg-slate-100, .hover\:bg-slate-200, .hover\:bg-slate-300, .hover\:bg-gray-50, .hover\:bg-gray-100):hover,
+[data-theme="dark"] :is(.hover\:bg-slate-50, .hover\:bg-slate-100, .hover\:bg-slate-200, .hover\:bg-slate-300, .hover\:bg-gray-50, .hover\:bg-gray-100):hover {
+  background-color: var(--surface-raised);
+}
+
+[data-theme="enhanced-dark"] :is(.hover\:bg-blue-50, .hover\:bg-blue-100, .hover\:bg-indigo-50):hover,
+[data-theme="dark"] :is(.hover\:bg-blue-50, .hover\:bg-blue-100, .hover\:bg-indigo-50):hover {
+  background-color: var(--accent-surface);
+}
+
+/*
+ * Success, warning and error keep their colour.
+ *
+ * These tints are chosen to sit under dark text on white. Left alone they stay pastel on a dark
+ * page - a pale green banner glowing out of a dark screen - so each is replaced by a dark tint of
+ * the same hue with its text lifted to match. Remapping them to the neutral surface would have
+ * been easier and would have thrown away the one thing they are for: saying at a glance whether
+ * something went well or badly.
+ */
+[data-theme="enhanced-dark"] :is(.bg-emerald-50, .bg-green-50, .bg-teal-50),
+[data-theme="dark"] :is(.bg-emerald-50, .bg-green-50, .bg-teal-50) {
+  background-color: var(--tint-good);
+}
+
+[data-theme="enhanced-dark"] :is(.text-emerald-900, .text-emerald-800, .text-emerald-700, .text-emerald-600, .text-green-900, .text-green-800, .text-green-700, .text-teal-900, .text-teal-800),
+[data-theme="dark"] :is(.text-emerald-900, .text-emerald-800, .text-emerald-700, .text-emerald-600, .text-green-900, .text-green-800, .text-green-700, .text-teal-900, .text-teal-800) {
+  color: var(--tint-good-ink);
+}
+
+[data-theme="enhanced-dark"] :is(.bg-amber-50, .bg-yellow-50, .bg-orange-50),
+[data-theme="dark"] :is(.bg-amber-50, .bg-yellow-50, .bg-orange-50) {
+  background-color: var(--tint-warn);
+}
+
+[data-theme="enhanced-dark"] :is(.text-amber-900, .text-amber-800, .text-amber-700, .text-amber-600, .text-yellow-900, .text-yellow-800, .text-orange-900, .text-orange-800, .text-orange-700),
+[data-theme="dark"] :is(.text-amber-900, .text-amber-800, .text-amber-700, .text-amber-600, .text-yellow-900, .text-yellow-800, .text-orange-900, .text-orange-800, .text-orange-700) {
+  color: var(--tint-warn-ink);
+}
+
+[data-theme="enhanced-dark"] :is(.bg-red-50, .bg-rose-50),
+[data-theme="dark"] :is(.bg-red-50, .bg-rose-50) {
+  background-color: var(--tint-bad);
+}
+
+[data-theme="enhanced-dark"] :is(.text-red-900, .text-red-800, .text-red-700, .text-red-600, .text-rose-900, .text-rose-800, .text-rose-700, .text-rose-600),
+[data-theme="dark"] :is(.text-red-900, .text-red-800, .text-red-700, .text-red-600, .text-rose-900, .text-rose-800, .text-rose-700, .text-rose-600) {
+  color: var(--tint-bad-ink);
+}
+
+[data-theme="enhanced-dark"] :is(.border-emerald-200, .border-green-200, .border-amber-200, .border-yellow-200, .border-red-200, .border-rose-200),
+[data-theme="dark"] :is(.border-emerald-200, .border-green-200, .border-amber-200, .border-yellow-200, .border-red-200, .border-rose-200) {
+  border-color: var(--line);
+}
+
+/*
+ * The same surfaces again, written with an opacity modifier.
+ *
+ * `bg-slate-50/60` is a different class from `bg-slate-50` as far as CSS is concerned, so the
+ * rules above miss it entirely and those panels stayed light on a dark page. The translucency is
+ * dropped rather than reproduced: it exists to let a white card show faintly through another white
+ * card, and against a dark ground the same trick only makes the panel muddy.
+ */
+[data-theme="enhanced-dark"] :is(.bg-slate-50\/60, .bg-slate-50\/40, .bg-slate-100\/60, .bg-white\/60, .bg-white\/50),
+[data-theme="dark"] :is(.bg-slate-50\/60, .bg-slate-50\/40, .bg-slate-100\/60, .bg-white\/60, .bg-white\/50) {
+  background-color: var(--surface-sunken);
+}
+
+[data-theme="enhanced-dark"] :is(.bg-slate-200\/70, .bg-slate-200\/60),
+[data-theme="dark"] :is(.bg-slate-200\/70, .bg-slate-200\/60) {
+  background-color: var(--line);
+}
+
+[data-theme="enhanced-dark"] :is(.bg-blue-50\/60, .bg-blue-50\/40, .bg-blue-200, .bg-indigo-100, .bg-sky-100),
+[data-theme="dark"] :is(.bg-blue-50\/60, .bg-blue-50\/40, .bg-blue-200, .bg-indigo-100, .bg-sky-100) {
+  background-color: var(--accent-surface);
+}
+
+/* Tinted borders - a blue-edged callout, a card outlined to match its own fill. */
+[data-theme="enhanced-dark"] :is(.border-blue-100, .border-blue-200, .border-indigo-100, .border-indigo-200, .border-slate-200\/80, .border-slate-100\/80),
+[data-theme="dark"] :is(.border-blue-100, .border-blue-200, .border-indigo-100, .border-indigo-200, .border-slate-200\/80, .border-slate-100\/80) {
+  border-color: var(--line);
+}
+
+/* The white a ring is offset against, which on a dark page draws a bright halo round a focused
+   control rather than separating it from its background. */
+[data-theme="enhanced-dark"] :is(.ring-white, .ring-offset-white),
+[data-theme="dark"] :is(.ring-white, .ring-offset-white) {
+  --tw-ring-color: var(--surface);
+  --tw-ring-offset-color: var(--surface);
+}
+
+/*
+ * The theme swap itself, unanimated.
+ *
+ * Nearly every control here carries a `transition` for its hover state, so changing the palette
+ * set hundreds of colour animations running at once and the page washed slowly from one theme to
+ * the other. `applyTheme` puts this class on for the swap and takes it off on the next frame, so
+ * the theme lands in a single repaint and hover keeps its animation afterwards.
+ */
+html.theme-switching,
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
+  animation-duration: 0s !important;
+  animation-delay: 0s !important;
+}
+
+/*
+ * The "you may not touch this" pointer.
+ *
+ * `cursor: not-allowed` draws the platform's own answer, which on macOS and Windows is the ordinary
+ * arrow with a small badge beside it - the arrow reads as "you can click", and the badge is easy to
+ * miss. This is the symbol on its own, hotspot at its centre, so what is under the pointer is the
+ * refusal rather than a pointer wearing one.
+ *
+ * The glyph is Material UI's `Block`, the same one the app would draw as an icon, at 18px in
+ * slate-500. Grey rather than red because it marks something that is not yours to change, which is
+ * a state rather than an error. The white underlay is what keeps it legible where the row behind it
+ * is also grey.
+ *
+ * `not-allowed` stays as the fallback for anything that cannot load the image. Registered with
+ * `@utility` rather than as a plain class so it can be used through a variant - Tailwind cannot
+ * build `[&_button:disabled]:cursor-restricted` out of a class it does not know about. `cursor`
+ * inherits, so the span a switch draws itself with picks this up from the label without help.
+ */
+@utility cursor-restricted {
+  cursor: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2218%22%20height%3D%2218%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M12%202C6.48%202%202%206.48%202%2012s4.48%2010%2010%2010%2010-4.48%2010-10S17.52%202%2012%202M4%2012c0-4.42%203.58-8%208-8%201.85%200%203.55.63%204.9%201.69L5.69%2016.9C4.63%2015.55%204%2013.85%204%2012m8%208c-1.85%200-3.55-.63-4.9-1.69L18.31%207.1C19.37%208.45%2020%2010.15%2020%2012c0%204.42-3.58%208-8%208%22%20fill%3D%22none%22%20stroke%3D%22%23ffffff%22%20stroke-width%3D%223%22%20stroke-linejoin%3D%22round%22%20opacity%3D%220.9%22%2F%3E%3Cpath%20d%3D%22M12%202C6.48%202%202%206.48%202%2012s4.48%2010%2010%2010%2010-4.48%2010-10S17.52%202%2012%202M4%2012c0-4.42%203.58-8%208-8%201.85%200%203.55.63%204.9%201.69L5.69%2016.9C4.63%2015.55%204%2013.85%204%2012m8%208c-1.85%200-3.55-.63-4.9-1.69L18.31%207.1C19.37%208.45%2020%2010.15%2020%2012c0%204.42-3.58%208-8%208%22%20fill%3D%22%2364748b%22%2F%3E%3C%2Fsvg%3E") 9 9, not-allowed;
+}
+
+/*
+ * A row opened out from the row above it — a quotation's earlier versions under the version that
+ * stands today.
+ *
+ * Tinted rather than left white, because a sub-row drawn exactly like a record is indistinguishable
+ * from one: opening a chain would look like the register had grown. The sticky columns paint their
+ * own background inline and read the same token, so the tint does not stop at the ⋮ column.
+ */
+.data-table-subrow {
+  background-color: var(--employee-table-subrow, #eef2f7);
+}
+
+.data-table-subrow:hover {
+  background-color: var(--employee-table-subrow-hover, #e2e8f0);
+}
+/* Progress chips (lib/progressStatus.mjs) carry their status color as `--progress-color`; how a
+   chip looks is decided here, per theme. Light mode: the color as text on a 10% tint of itself.
+   Both dark themes lift the text toward white and deepen the tint, so a bronze or blue that reads
+   on white does not sink into a dark rail. */
+.progress-chip {
+  color: var(--progress-color);
+  background-color: color-mix(in srgb, var(--progress-color) 10%, transparent);
+}
+
+[data-theme="dark"] .progress-chip,
+[data-theme="enhanced-dark"] .progress-chip {
+  color: color-mix(in srgb, var(--progress-color) 45%, white);
+  background-color: color-mix(in srgb, var(--progress-color) 28%, transparent);
+}
+
+/* The fallback mark (components/shared/BrandFallbackLogo.js) ships two files - black lettering
+   drawn for a light ground, white lettering drawn for a dark one - and puts both in the document
+   so the choice can be made here, from the `data-theme` the server already wrote on <html>. The
+   right one is painted on the first frame with no JavaScript, and it follows the appearance
+   picker the moment it changes. Swap the two class names below to reverse the pairing.
+
+   Each rule only ever HIDES the file that does not suit the theme, and neither ever sets
+   `display` back on. That is deliberate: forcing it would outrank a caller's own `lg:hidden` and
+   show a mark that is meant to be hidden at that width.
+
+   The light rule is written as "not either dark theme" rather than as `[data-theme="light"]`, so
+   that every state which is not one of the two dark ones hides the dark-lettered file: the
+   attribute absent, the attribute empty, or a value nobody has taught this stylesheet about. Under
+   the old pair, any of those hid *neither* file and both marks were painted at once — the studio
+   photographed exactly that, a solid wordmark with a ghost of the other stacked under it, on a page
+   whose render had failed. A logo is not worth a second failure mode, so the two rules between them
+   now cover every possible state of the attribute rather than the four that were expected. */
+html:not([data-theme="dark"]):not([data-theme="enhanced-dark"]) .studio-logo-fallback-dark {
+  display: none;
+}
+
+[data-theme="dark"] .studio-logo-fallback-light,
+[data-theme="enhanced-dark"] .studio-logo-fallback-light {
+  display: none;
+}
+
+/* The Image Selection dashboard's ground.
+
+   That page is a wall of cards, and a wall of white cards on a white page reads as one sheet with
+   lines drawn on it. A tint behind them is what makes each card a card: the panels lift, and the
+   gaps between them become space rather than more page.
+
+   Named here rather than written as a Tailwind class on the page, because the ground has to stay
+   *behind* the cards in all three appearances and no single utility does that. `.bg-blue-50` is
+   repainted to a mid navy inside `.app-shell` in both dark themes - lighter than the panels that
+   sit on it - which would have turned the depth inside out the moment anybody switched theme. So
+   each theme names its own value, and each one is a step below the surface the cards are painted
+   with (`--surface` in Dark, `#111827` in Enhanced Dark). */
+.dashboard-canvas {
+  background-color: #eff6ff;
+}
+
+[data-theme="dark"] .app-shell .dashboard-canvas {
+  background-color: var(--surface-sunken);
+}
+
+[data-theme="enhanced-dark"] .app-shell .dashboard-canvas {
+  background-color: #020617;
+}
+
+/* The dashboard's range picker is the shared Dropdown in its field mode, but with no label above
+   it: the field carries a `mt-1.5` meant to clear one, and with nothing there that margin is just
+   the control sitting low in its row. Zeroed here rather than by giving the control a prop of its
+   own, because every other field in the application does want that margin. */
+.dashboard-range-picker > button {
+  margin-top: 0;
+}

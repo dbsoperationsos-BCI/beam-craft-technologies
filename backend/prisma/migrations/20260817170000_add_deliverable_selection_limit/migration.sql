@@ -1,0 +1,11 @@
+-- How many photos the client may pick for one Post Production Allocation deliverable.
+--
+-- Deliberately its own column rather than a reuse of `quantity`. `quantity` is how much of the
+-- deliverable was ordered — five calendars stays five calendars whatever the client picks — so
+-- letting Image Selection edit the selection limit through `quantity` would have changed the order.
+--
+-- This is the one place the number lives. Post Production Allocation writes it, the Selection Items
+-- table in Image Selection writes it, and neither keeps a copy, so a change in either screen is
+-- immediately what the other reads. Null means never set, and the limit falls back to `quantity` and
+-- then to the studio-wide default — which is exactly how every row allocated before now behaves.
+ALTER TABLE `ProjectShootDeliverable` ADD COLUMN `selectionLimit` INT NULL;

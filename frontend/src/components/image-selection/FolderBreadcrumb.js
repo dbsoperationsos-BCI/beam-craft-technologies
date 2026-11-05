@@ -1,0 +1,3 @@
+export default function FolderBreadcrumb({ projectName, path, onNavigate }) {
+  return <nav aria-label="Folder breadcrumb" className="flex min-w-0 items-center gap-1 text-xs text-slate-500"><button type="button" onClick={() => onNavigate(null)} className="max-w-44 truncate hover:text-blue-600">{projectName}</button>{path.map((folder, index) => <span key={folder.id} className="flex min-w-0 items-center gap-1"><span aria-hidden="true">/</span><button type="button" onClick={() => onNavigate(folder)} className={`max-w-40 truncate hover:text-blue-600 ${index === path.length - 1 ? "font-medium text-slate-800" : ""}`}>{folder.name}</button></span>)}</nav>;
+}

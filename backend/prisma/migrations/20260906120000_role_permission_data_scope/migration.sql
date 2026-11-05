@@ -1,0 +1,31 @@
+-- A data scope on every permission grant, beside its access level.
+--
+-- `access_level` answers "may you open this screen" - DISABLED, READ or READ_WRITE. Nothing on a
+-- grant answered "whose rows do you get": IAM.md is honest that most modules show every record in
+-- the studio to anyone who may open them, because the only narrowing that existed was a branch
+-- filter that works on two tables and an ownership rule hand-written into four screens.
+--
+-- `data_scope` is that second answer, chosen per grant so one role can be ALL on Tasks and TEAM on
+-- Payment Requests:
+--
+--   ALL     every record                          - today's behaviour, the default
+--   BRANCH  records in the branches the user reaches
+--   TEAM    records they own, plus everyone below them in the org chart, at any depth
+--   SELF    records they own
+--
+-- Where two roles grant the same permission the widest scope wins (ALL > BRANCH > TEAM > SELF),
+-- the way `_mergeMostPermissive` already keeps the strongest access level; a DISABLED grant gives
+-- nothing here and its scope is ignored, as its level already is.
+--
+-- Additive, and read by nothing yet: every existing grant becomes ALL, which is exactly what it was.
+-- The resolver that turns a scope into a `where` fragment arrives with the next stage, and screens
+-- and AI tools adopt it module by module after that. Until a module does, its grants' scope is
+-- recorded and displayed but has no effect - see docs/project-state/DATA-SCOPE.md.
+--
+-- A VARCHAR checked by the application rather than a MySQL ENUM, matching `access_level` on the
+-- same row: adding a value is then a code change, not an ALTER of a table every request reads.
+--
+-- Cost: adding a column with a default is a metadata change in InnoDB. Instant at any size.
+
+ALTER TABLE `role_permission`
+  ADD COLUMN `data_scope` VARCHAR(20) NOT NULL DEFAULT 'ALL' AFTER `access_level`;

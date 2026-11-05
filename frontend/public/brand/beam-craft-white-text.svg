@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_1" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 4320 946.8">
+  <!-- Generator: Adobe Illustrator 29.8.2, SVG Export Plug-In . SVG Version: 2.1.1 Build 3)  -->
+  <defs>
+    <style>
+      .st0 {
+        fill: none;
+        stroke: #1b1710;
+        stroke-miterlimit: 10;
+        stroke-width: 20px;
+      }
+
+      .st1 {
+        fill: #d32027;
+      }
+
+      .st2 {
+        fill: #fff;
+      }
+
+      .st2, .st3 {
+        font-family: Arial-BoldMT, 'Arial MT', Arial, Helvetica, sans-serif;
+        font-size: 627.5px;
+        font-weight: 700;
+      }
+    </style>
+  </defs>
+  <text class="st3" transform="translate(86.1 672.6)"><tspan x="0" y="0">BEAM CRAFT</tspan></text>
+  <text class="st2" transform="translate(86.1 672.6)"><tspan x="0" y="0">BEAM CRAFT</tspan></text>
+  <polygon class="st1" points="2058.3 293.3 2058.3 612.3 2345.2 452.8 2058.3 293.3"/>
+  <polygon class="st0" points="2058.3 293.3 2058.3 612.3 2345.2 452.8 2058.3 293.3"/>
+</svg>

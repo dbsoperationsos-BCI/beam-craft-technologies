@@ -1,0 +1,10 @@
+# The AI Feature's face engine (backend/src/modules/ai-feature/face-engine/face_engine.py).
+# Open-source only: InsightFace's SCRFD detector and ArcFace recogniser, fetched from the Hugging
+# Face Hub (public-data/insightface) on first run. CPU inference; no GPU needed.
+#
+#   python3 -m pip install -r backend/requirements-face.txt
+insightface>=0.7.3
+onnxruntime>=1.17
+opencv-python-headless>=4.9
+huggingface_hub>=0.23
+numpy>=1.26

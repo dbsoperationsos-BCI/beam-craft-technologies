@@ -1,0 +1,71 @@
+/*
+ * Every word the public home page prints, carried over from the BeamCraft marketing site
+ * (`home-page/apps/web/src/lib/content.js`). That site could override it from its PocketBase CMS;
+ * this application has no CMS, so the copy lives here and is edited here.
+ */
+
+export const HERO = {
+  eyebrow: "Customized next-gen applications",
+  subtitle:
+    "BeamCraft designs and builds tailored AI-native applications for executive teams — turning operational complexity into software that thinks ahead, so CEOs and Operations Directors can move faster with confidence.",
+  primaryCta: "Start Free Trial",
+  secondaryCta: "Request Demo / Quote",
+};
+
+export const STATS = [
+  { value: 140, suffix: "+", label: "Custom applications delivered" },
+  { value: 99.9, suffix: "%", label: "Platform uptime, trailing 12 months", decimals: 1 },
+  { value: 32, suffix: "%", label: "Average operational cost reduction" },
+  { value: 18, suffix: " days", label: "Median time from brief to launch" },
+];
+
+export const FEATURES = [
+  { title: "Intelligence built in, not bolted on", description: "Every BeamCraft application ships with decision-grade AI at its core — forecasting, anomaly detection, and recommendations tuned to your operating model." },
+  { title: "Crafted around your workflows", description: "No forced templates. We map how your teams actually work, then craft software that fits — from board-level dashboards to floor-level automation." },
+  { title: "Executive visibility, real time", description: "Live operational metrics, usage analytics, and cost transparency give leadership a single source of truth across every deployment." },
+  { title: "Usage-based economics", description: "Pay for what you run, not seats you don't use. Scale up for peak season, scale down when you're done — your invoice follows your reality." },
+  { title: "Enterprise-grade by default", description: "SSO, audit trails, role-based access, and data residency options come standard on enterprise engagements — security review friendly." },
+  { title: "A partner, not a vendor", description: "Dedicated solutions engineers stay with you after launch, iterating on your application as your strategy evolves." },
+];
+
+export const STEPS = [
+  { title: "Discover", description: "A working session with your leadership team to map the operational bottleneck worth solving first — and the metric that proves it worked." },
+  { title: "Craft", description: "Our engineers build your application in weekly increments. You review working software every Friday, not slideware every quarter." },
+  { title: "Scale", description: "Launch to your teams with usage-based pricing that grows only when your usage does. Expand to the next workflow when you're ready." },
+];
+
+export const PRICING = [
+  { name: "Trial", price: "Free", period: "14 days", description: "Self-serve evaluation of the BeamCraft platform with a sample workspace.", features: ["Full platform access for 14 days", "Sample data workspace", "Community support", "No credit card required"], cta: "Start Free Trial", highlighted: false },
+  { name: "Growth", price: "Usage-based", period: "from $0.004 / operation", description: "For teams running live applications. Your bill tracks your actual usage.", features: ["Everything in Trial", "Unlimited applications", "Real-time usage analytics", "Priority support", "Monthly usage reports"], cta: "Start Free Trial", highlighted: true },
+  { name: "Enterprise", price: "Custom", period: "annual agreement", description: "Custom-built applications, dedicated engineering, and procurement-ready terms.", features: ["Dedicated solutions engineer", "SSO, audit logs, data residency", "Custom SLA and security review", "Volume-based pricing"], cta: "Request Demo / Quote", highlighted: false },
+];
+
+export const TESTIMONIALS = [
+  { quote: "BeamCraft replaced three disconnected tools with one application built around how our operations actually run. Our weekly planning meeting went from two hours to twenty minutes.", name: "Elena Marsh", role: "Chief Operating Officer", company: "Northgate Logistics" },
+  { quote: "The usage-based model was the deciding factor. We scaled from a pilot in one region to twelve markets without a single pricing renegotiation.", name: "David Okafor", role: "Chief Executive Officer", company: "Meridian Foods Group" },
+  { quote: "Working software every Friday. That cadence changed how our board thinks about technology investment — we see progress, not promises.", name: "Priya Raman", role: "VP of Operations", company: "Halcyon Manufacturing" },
+];
+
+export const MARQUEE_WORDS = ["Forecasting", "Anomaly Detection", "Workflow Automation", "Executive Dashboards", "Usage Analytics", "Decision Intelligence", "Realtime Operations", "Custom AI Models"];
+
+export const CONTACT = {
+  phone: "+91 8149549549",
+  phoneHref: "tel:+918149549549",
+  email: "hello@beamcraft.tech",
+  website: "beamcraft.tech",
+};
+
+/*
+ * Where the trial, demo and quote buttons go. The marketing site had its own signup, demo and quote
+ * forms (backed by PocketBase); this application has none of them, so they lead to the contact
+ * section at the foot of the page. Sign in is the only way into the application itself.
+ */
+export const CONTACT_HREF = "#contact";
+export const SIGN_IN_HREF = "/login";
+
+export const NAV = [
+  { label: "Features", href: "#features" },
+  { label: "How it works", href: "#how" },
+  { label: "Pricing", href: "#pricing" },
+  { label: "Customers", href: "#testimonials" },
+];

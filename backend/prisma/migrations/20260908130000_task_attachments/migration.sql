@@ -1,0 +1,20 @@
+-- Files handed over with a task.
+--
+-- One column on the task rather than a table beside it. What is stored is a list of small records —
+-- an id unique within the task, the file's name, its object key, its type and size, and who added
+-- it when — never the bytes: `storage_key` names a private object in R2, read only through the
+-- authenticated endpoint that streams it, so there is no public URL to a studio file and nothing
+-- heavy travelling with a read of the task.
+--
+--   [{"id":1,"name":"brief.pdf","storageKey":"hrm/tasks/TSK-000042/files/…",
+--     "mimeType":"application/pdf","size":18422,
+--     "uploadedByUserId":7,"uploadedByName":"Priya S.","createdAt":"2026-09-08T09:12:00.000Z"}]
+--
+-- The two things a column loses against a table, and what answers them: an id has to be minted
+-- rather than auto-incremented, so the service takes `max(id) + 1` within the task; and a list is
+-- rewritten whole rather than one row at a time, so every write locks the task row first
+-- (`SELECT … FOR UPDATE`) and two people removing different files cannot overwrite each other.
+--
+-- NULL rather than an empty array for a task with no files, because that is what every task raised
+-- before this column existed honestly has.
+ALTER TABLE `hrm_task` ADD COLUMN `attachments` JSON NULL;

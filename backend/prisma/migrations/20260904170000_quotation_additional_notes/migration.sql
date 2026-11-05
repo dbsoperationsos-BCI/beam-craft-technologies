@@ -1,0 +1,12 @@
+-- Free text the salesperson adds to one quotation version, printed on the client's copy.
+--
+-- Everything a quotation says today is either a service, a deliverable or a figure. What it could
+-- not say was the thing agreed on the phone - an inclusion thrown in, a caveat about a date - so
+-- that either went unwritten or was pushed into a service remark, where the client reads it as a
+-- footnote under a line item rather than as a note about the quotation.
+--
+-- TEXT rather than VARCHAR: this is prose, and the 500-character venue column next to it is the
+-- shape that would have to be revisited the first time somebody wrote a paragraph. Nullable with
+-- no backfill - a null reads as "no note", which is what every existing version is, and the
+-- client's copy prints nothing rather than an empty heading.
+ALTER TABLE `sales_quotation` ADD COLUMN `additional_notes` TEXT NULL;

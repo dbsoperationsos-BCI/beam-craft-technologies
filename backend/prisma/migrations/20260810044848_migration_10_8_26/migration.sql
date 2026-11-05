@@ -1,0 +1,5 @@
+-- DropIndex on SalesWhatsappGroupName_status_createdAt_idx was here. Three migrations dropped
+-- that index independently - 20260729191846_sync_local_dev_db, this one, and
+-- 20260812150000_add_image_selection - and MySQL has no DROP INDEX IF EXISTS, so whichever ran
+-- second failed with error 1091. The earlier-dated migration owns it, matching the note already
+-- left in 20260812150000_add_image_selection. This migration is intentionally a no-op.

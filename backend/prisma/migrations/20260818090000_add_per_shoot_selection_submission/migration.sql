@@ -1,0 +1,18 @@
+-- When the client sent this selection item's photos to the studio.
+--
+-- A wedding project's shoots are months apart, so the client submits one shoot at a time —
+-- engagement photos cannot wait for the wedding to be shot. The flag therefore lives on each
+-- selection item rather than on the gallery publication: submitting a shoot stamps every item
+-- under it, and a stamped item refuses further selection changes. The publication-level
+-- `selectionSubmittedAt` is still set, but only once every item on the project is submitted.
+--
+-- Intentionally a no-op. This migration was committed referencing the snake_case table name
+-- (`image_selection_deliverable_config`), but at this point in the sequence the table is still
+-- called `ImageSelectionDeliverableConfig` — the rename only happens in
+-- `20260819112301_convert_to_snake_case`. A fresh database therefore failed here with error 1146
+-- and could never finish `migrate reset` / `migrate deploy`. The column this migration meant to
+-- add is created anyway by `20260819112301`, which drops and recreates the table with
+-- `selection_submitted_at` in it, so nothing is lost by skipping the ALTER. Databases that
+-- recorded this migration as applied are unaffected: `migrate deploy` never re-runs an applied
+-- migration. Same recovery pattern as the duplicate index drop in `20260810044848_migration_10_8_26`.
+SELECT 1;

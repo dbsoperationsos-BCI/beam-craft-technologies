@@ -1,0 +1,182 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 224 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 224 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 224 47% 11%;
+    --primary: 0 84% 51%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 224 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 0 84% 97%;
+    --accent-foreground: 0 84% 40%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 0 84% 51%;
+    --radius: 0.75rem;
+    --gold: 24 90% 56%;
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 224 47% 11%;
+    --sidebar-primary: 0 84% 51%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 210 40% 96%;
+    --sidebar-accent-foreground: 224 47% 11%;
+    --sidebar-border: 214 32% 91%;
+    --sidebar-ring: 0 84% 51%;
+  }
+  .dark {
+    --background: 224 47% 8%;
+    --foreground: 210 40% 96%;
+    --card: 224 44% 11%;
+    --card-foreground: 210 40% 96%;
+    --popover: 224 44% 11%;
+    --popover-foreground: 210 40% 96%;
+    --primary: 0 84% 58%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 33% 16%;
+    --secondary-foreground: 210 40% 92%;
+    --muted: 217 33% 15%;
+    --muted-foreground: 215 22% 62%;
+    --accent: 217 33% 18%;
+    --accent-foreground: 210 40% 96%;
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 217 30% 20%;
+    --input: 217 30% 22%;
+    --ring: 0 84% 58%;
+  }
+}
+
+body {
+  font-family: "Inter", sans-serif;
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  overflow-x: clip;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-display {
+  font-family: "Space Grotesk", sans-serif;
+}
+
+.text-beam {
+  color: hsl(var(--primary));
+}
+
+.text-gold {
+  color: hsl(var(--gold));
+}
+
+/* Red gradient underline accent */
+.beam-underline {
+  background-image: linear-gradient(90deg, hsl(var(--primary) / 0.95), hsl(var(--gold) / 0.95));
+  background-repeat: no-repeat;
+  background-size: 100% 0.14em;
+  background-position: 0 92%;
+}
+
+/* Futuristic tech grid — light variant for white theme */
+.hero-grid {
+  background-image:
+    linear-gradient(hsl(var(--primary) / 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, hsl(var(--primary) / 0.07) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, black 30%, transparent 75%);
+}
+
+/* Soft red radial glow */
+.beam-glow {
+  background: radial-gradient(ellipse 60% 50% at 50% 0%, hsl(var(--primary) / 0.12), transparent 70%);
+}
+
+/* Animated tech scan line */
+@keyframes scan-x {
+  0% { transform: translateX(-100%); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateX(100%); opacity: 0; }
+}
+.tech-scan {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.tech-scan::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, hsl(var(--primary) / 0.06), transparent);
+  animation: scan-x 6s ease-in-out infinite;
+}
+
+/* Animated gradient border accent */
+@keyframes border-spin {
+  to { transform: rotate(360deg); }
+}
+.tech-ring {
+  position: relative;
+}
+.tech-ring::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(from 0deg, transparent, hsl(var(--primary) / 0.6), transparent 30%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: border-spin 4s linear infinite;
+}
+
+/* Pulsing data node */
+@keyframes node-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.4); }
+}
+.tech-node {
+  animation: node-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes marquee-x {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.animate-marquee {
+  animation: marquee-x 32s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee, .tech-scan::after, .tech-ring::before, .tech-node, .animate-float-slow {
+    animation: none;
+  }
+}
+
+@keyframes float-slow {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+.animate-float-slow {
+  animation: float-slow 7s ease-in-out infinite;
+}
+
+/* Subtle card elevation for white theme */
+.card-elev {
+  box-shadow: 0 1px 2px hsl(224 47% 11% / 0.04), 0 8px 24px -12px hsl(224 47% 11% / 0.08);
+}

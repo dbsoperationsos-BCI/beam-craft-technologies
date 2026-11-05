@@ -1,0 +1,14 @@
+-- A correction can now be painted on the spread, not only pinned to a point or circled.
+--
+-- The drawing is part of the correction: the studio has to see the exact line the client drew,
+-- weeks later, on the same spread. It is stored as JSON - an array of strokes, each a colour and a
+-- list of `[x, y]` points in the same normalized 0..1 coordinates the pin already uses, so a
+-- drawing lands on the same part of the photograph at every pane size and zoom level.
+--
+-- Nullable, because most corrections are not painted: a pin keeps `path_normalized` NULL and reads
+-- exactly as it did. Nothing is backfilled and no existing row changes.
+--
+-- TEXT rather than JSON: MySQL's JSON type buys validation this schema does not want here - the
+-- shape is agreed in one place (`frontend/src/lib/proofPaint.mjs`) and enforced by the API before
+-- anything is written, and the caps there keep a drawing well inside TEXT's 64KB.
+ALTER TABLE `album_proof_correction` ADD COLUMN `path_normalized` TEXT NULL;

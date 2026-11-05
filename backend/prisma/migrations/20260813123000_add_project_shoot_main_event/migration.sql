@@ -1,0 +1,2 @@
+ALTER TABLE `ProjectShoot`
+  ADD COLUMN `isMainEvent` BOOLEAN NOT NULL DEFAULT false;

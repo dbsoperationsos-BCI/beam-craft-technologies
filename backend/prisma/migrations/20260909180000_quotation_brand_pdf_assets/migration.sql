@@ -1,0 +1,12 @@
+-- The pictures and the timeline a brand's quotation prints.
+--
+-- The redesigned client-facing quotation carries a cover photograph, a decorative background, the
+-- India map beside the Journey & Legacy timeline, an infrastructure collage per branch and a
+-- Thank You photograph. None of them may be files in the code: each brand uploads its own from
+-- Settings -> Quotation Settings -> PDF Content, and this column holds their stored URLs, the
+-- collage groups and the timeline entries as one JSON object. Null means "nothing uploaded yet",
+-- which the page prints without pictures rather than with broken ones.
+--
+-- Additive and nullable: nothing else changes, and every version already raised keeps the snapshot
+-- it was raised with.
+ALTER TABLE `sales_quotation_brand` ADD COLUMN `pdf_assets` JSON NULL;

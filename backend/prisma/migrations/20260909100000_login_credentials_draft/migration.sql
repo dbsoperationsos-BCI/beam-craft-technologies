@@ -1,0 +1,27 @@
+-- The Login Credentials page of onboarding, half-filled and put down.
+--
+-- Creating a login is one screen's worth of decisions — the username and login address, the roles,
+-- the branch, who covers for this person while they are away — and it was routinely interrupted.
+-- None of it belonged anywhere until the account existed, so closing the panel threw all of it
+-- away and the next person started from nothing.
+--
+-- One column on the employee rather than a table beside it, for the reason the task attachments
+-- are one: it is a single record belonging to a single row, read and rewritten whole, and never
+-- queried across employees.
+--
+--   {"username":"john.smith","email":"john.smi@dontblinkstudioz.com",
+--    "temporaryPassword":"…","branchId":3,"roleIds":["role_ops"],
+--    "alternative1EmployeeId":12,"alternative2EmployeeId":null,
+--    "leaveApproverIds":[8,9],"savedAt":"2026-09-09T09:12:00.000Z"}
+--
+-- **What it is not.** No `User` row, no email sent, no access granted. It is what somebody had
+-- chosen when they stopped, and it is cleared the moment the account is actually created — an
+-- account and a draft of that account are two answers to one question, and only one of them can
+-- be the true one.
+--
+-- **Why it is read and written under `ADMIN / User Management` write rather than the HRM
+-- permission the rest of this row answers to:** it carries the password the account will start on.
+-- Only somebody who could create the account outright can read a draft of one.
+--
+-- NULL rather than an empty object for an employee nobody has started this page for.
+ALTER TABLE `employee` ADD COLUMN `login_credentials_draft` JSON NULL;

@@ -1,0 +1,25 @@
+-- How a salary review went, and an increment that no longer has to be typed.
+--
+-- ── `outcome` ──
+--
+-- The one thing a review records that the money does not say. The list could only ever show what
+-- was awarded, so a review that shone in a year the studio held salaries read as identical to one
+-- that did not, and reading the mark off the amount would have been wrong in both directions: a
+-- large increment on a poor review that was still promised, or a fine review with nothing attached.
+--
+-- `Shine` or `Shadow` — the studio's own words, and the row's own appearance: a review that shone
+-- lifts its row, one that cast a shadow shades it. NULL for every review raised before this column
+-- and for one nobody judged, shown with no colour at all. That unmarked state is why there is no
+-- third middle mark: "nobody said" is not a grade somebody awarded.
+--
+-- ── `increment_amount` becoming nullable ──
+--
+-- Reviews are held without a figure: a confirmation, a year with no raises, a conversation recorded
+-- before the number is agreed. Required, it forced a 0 to be typed, and a 0 is a real increment of
+-- zero rather than the absence of one — indistinguishable afterwards from a review that genuinely
+-- awarded nothing.
+--
+-- The employee's totals already sum with `Number(x || 0)`, so a NULL contributes nothing and no
+-- total moves. Nothing is rewritten: every existing row keeps the amount it has, zeros included.
+ALTER TABLE `employee_review` ADD COLUMN `outcome` VARCHAR(20) NULL;
+ALTER TABLE `employee_review` MODIFY COLUMN `increment_amount` DECIMAL(12, 2) NULL;

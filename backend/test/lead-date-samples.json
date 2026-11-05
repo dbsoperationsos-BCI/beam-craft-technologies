@@ -1,0 +1,38 @@
+{
+  "_": [
+    "Every date shape a CRM lead may arrive in, and the day it means.",
+    "",
+    "One list, read by three things that must agree about it: `toIsoDay` in the backend,",
+    "`isoDaySqlFor` run against MySQL, and the frontend twin in frontend/src/lib/crmLeadDates.mjs.",
+    "The client decides what the Enquiry Date cell shows and the server decides which tab the lead",
+    "is in, so a shape they read differently is a lead shown one date and filed under another.",
+    "",
+    "`09-Sep-26` is the one this list exists for: Excel's short date, and therefore what a studio's",
+    "own exported CSV carries. It read as no date at all, which left the lead in no tab.",
+    "",
+    "A value of \"\" means the text is not a date, and every reader must say so rather than guess."
+  ],
+  "samples": {
+    "2026-09-09": "2026-09-09",
+    "2026-09-09 11:34": "2026-09-09",
+    "09/09/2026": "2026-09-09",
+    "9/9/26": "2026-09-09",
+    "09-09-2026": "2026-09-09",
+    "09.09.2026": "2026-09-09",
+    "09-Sep-26": "2026-09-09",
+    "9-Sep-26": "2026-09-09",
+    "09-Sep-2026": "2026-09-09",
+    "09-Sept-26": "2026-09-09",
+    "09-September-26": "2026-09-09",
+    "9 Sep 2026": "2026-09-09",
+    "9 September 2026": "2026-09-09",
+    "Sep 9, 2026": "2026-09-09",
+    "September 9, 2026": "2026-09-09",
+    "09-Sep-70": "1970-09-09",
+    "31-Feb-26": "",
+    "13/13/2026": "",
+    "not a date": "",
+    "—": "",
+    "": ""
+  }
+}
