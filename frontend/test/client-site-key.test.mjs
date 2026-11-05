@@ -20,8 +20,8 @@ test("the service posts to the team's site-key route", () => {
   assert.match(SERVICE, /export function createClientSiteKey\(id\)[\s\S]*?`\$\{BASE\}\/\$\{id\}\/site-key`, \{ method: "POST" \}/);
 });
 
-test("Site key is on a set-up client's row, beside Reset password, inside the write-only menu", () => {
-  assert.match(PAGE, /row\.client\?\.activatedAt \? \[\s*\{ label: "Reset password"[^\n]*\n\s*\{ label: "Site key", onSelect: \(\) => setKeyingRow\(row\) \}/);
+test("the manual site key is on a set-up client's row, beside Reset password, inside the write-only menu", () => {
+  assert.match(PAGE, /row\.client\?\.activatedAt \? \[\s*\{ label: "Reset password"[\s\S]{0,400}\{ label: "Manual site key \(other server\)", onSelect: \(\) => setKeyingRow\(row\) \}/);
   assert.match(PAGE, /renderActions: \(row\) => \(canWrite \?/);
 });
 
@@ -31,6 +31,7 @@ test("the key is shown once, as the .env lines, marked for the server and not th
   assert.match(PAGE, /This key is shown only once/);
 });
 
-test("making a new key warns that the old one stops working", () => {
-  assert.match(PAGE, /hasSiteKey[\s\S]{0,200}The old key stops working at once/);
+test("the manual key says it is not needed on our own server, and that a new one stops the old", () => {
+  assert.match(PAGE, /Not needed for [\s\S]{0,120}connects to Beam Craft by itself/);
+  assert.match(PAGE, /hasSiteKey \? " Making a new one stops the old manual key at once\." : ""/);
 });

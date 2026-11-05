@@ -208,7 +208,9 @@ function SubscriptionClientsScreen({ product = null }) {
       ...(row.state === "Submitted" ? [{ label: row.client?.activatedAt ? "Edit subscription" : "Set up account", onSelect: () => setSubscriptionRow(row) }] : []),
       ...(row.client?.activatedAt ? [
         { label: "Reset password", onSelect: () => setResettingRow(row) },
-        { label: "Site key", onSelect: () => setKeyingRow(row) },
+        // Not a setup step: a site on our own server connects by itself (its key is worked out from the
+        // shared secret). A key made here is only for a site running on another server.
+        { label: "Manual site key (other server)", onSelect: () => setKeyingRow(row) },
       ] : []),
       ...(row.client?.pendingChanges ? [
         { label: "Update site", onSelect: () => setPendingAction({ row, action: "publish" }) },
@@ -291,10 +293,8 @@ function SubscriptionClientsScreen({ product = null }) {
       <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">This password is shown only once. Copy the message before closing.</p>
     </Dialog>}
     {keyingRow && <ConfirmDialog
-      title="Site key"
-      message={keyingRow.client?.hasSiteKey
-        ? `Make a new site key for ${keyingRow.client?.subdomain || "the client"}.beamcraft.tech? The old key stops working at once, so the site cannot read its subscription until its server has the new one.`
-        : `Make the site key ${keyingRow.client?.subdomain || "the client"}.beamcraft.tech's server reads its subscription with?`}
+      title="Manual site key"
+      message={`Not needed for ${keyingRow.client?.subdomain || "the client"}.beamcraft.tech on our own server: it connects to Beam Craft by itself. Make a manual key only if this client's site runs on another server.${keyingRow.client?.hasSiteKey ? " Making a new one stops the old manual key at once." : ""}`}
       confirmLabel="Make key"
       busyLabel="Making..."
       tone="primary"
@@ -302,9 +302,9 @@ function SubscriptionClientsScreen({ product = null }) {
       onCancel={() => setKeyingRow(null)}
       onConfirm={() => void confirmSiteKey()}
     />}
-    {newSiteEnv && <Dialog title="Site Key" size="md" onClose={() => setNewSiteEnv(null)} footer={<Button className="max-sm:flex-1" type="button" onClick={() => setNewSiteEnv(null)}>Close</Button>}>
+    {newSiteEnv && <Dialog title="Manual Site Key" size="md" onClose={() => setNewSiteEnv(null)} footer={<Button className="max-sm:flex-1" type="button" onClick={() => setNewSiteEnv(null)}>Close</Button>}>
       <ShareableMessage label="For the server's .env, not for the client" rows={4} message={newSiteEnv} />
-      <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">This key is shown only once. Put it in the client server&apos;s .env before closing; never send it to the client.</p>
+      <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Only for a site on another server. This key is shown only once: put it in that server&apos;s .env before closing, and never send it to the client.</p>
     </Dialog>}
     {pendingAction && <ConfirmDialog
       title={pendingAction.action === "publish" ? "Update site" : "Discard changes"}

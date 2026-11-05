@@ -44,6 +44,11 @@ Every code change adds an entry here, in the same commit or PR as the code. This
   [DEPLOYMENT-WORKFLOW.md](project-state/DEPLOYMENT-WORKFLOW.md) describe DBS and no longer apply here.
 
 ### Changed
+- **A client's site on our own server connects to Beam Craft by itself - no site key to copy.** Its key
+  is worked out from its subdomain under one secret the apps on the server share with Beam Craft
+  (`BEAMCRAFT_SITE_SECRET`, HMAC-SHA256, a different key per client); Beam Craft accepts it beside any
+  pasted key ([siteApi](../backend/src/modules/subscribe/client-onboarding/siteApi.js)). The row action
+  is now **Manual site key (other server)** and says it is not a setup step.
 - **Beam Craft now runs DBS-Operations-OS's latest HRM, Sales & CRM, Accounts and Resource
   Management, with their Settings.** The whole application was brought up to DBS `main` of 5 Nov 2026
   (the copy dated from 23 Sep) and Beam Craft's own work re-applied on top: Subscribe, Client
