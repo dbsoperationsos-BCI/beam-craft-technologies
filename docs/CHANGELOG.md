@@ -40,6 +40,12 @@ Every code change adds an entry here, in the same commit or PR as the code. This
   [DEPLOYMENT-WORKFLOW.md](project-state/DEPLOYMENT-WORKFLOW.md) describe DBS and no longer apply here.
 
 ### Changed
+- **The sidebar is Beam Craft's own.** SUBSCRIBE → Account Manager reads **Client Domain Managing**;
+  Client Details has its own group, **Client Management**, instead of sitting under HRM; and Project
+  Management and Visual Curation are off the menu (`hidden` on every screen - routes, permissions and
+  code are untouched). A module with no screen left on the menu is no part of the default layout
+  either ([sidebarLayout](../frontend/src/lib/sidebarLayout.mjs)). Saved layouts follow on their own:
+  Client Details moves to its new group and the two hidden modules drop out.
 - **Client Details invites a client the way the Employee Repository invites a candidate.** Create
   Onboarding Invite now asks Client Name, Client Email, Client Phone, Designation and Expiry Date
   (a week out by default); Create Invite shows the message to send with **Send Invite**, which emails

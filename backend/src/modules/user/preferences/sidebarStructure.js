@@ -28,7 +28,8 @@
  */
 const SIDEBAR_STRUCTURE = {
   subscribe: ["media-studio-operations", "subscribe-account-manager"],
-  hrm: ["employee-repository", "employee-attendance", "attendance-register", "employee-referral", "tasks", "interview"],
+  "client-management": ["employee-repository"],
+  hrm: ["employee-attendance", "attendance-register", "employee-referral", "tasks", "interview"],
   "sales-crm": ["leads-followups", "reports-analytics", "contacts", "bookings-converted", "quotations"],
   "project-management": ["projects", "crd-documents", "client-gifts"],
   "visual-curation": ["ai-feature", "image-selection", "album-proofing"],

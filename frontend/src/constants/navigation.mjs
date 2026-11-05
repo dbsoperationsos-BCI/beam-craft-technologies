@@ -65,7 +65,19 @@ export const SIDEBAR_MODULES = [
     icon: "Subscriptions",
     items: [
       { id: "media-studio-operations", label: "Media Studio Operations", href: "/subscribe/media-studio-operations", activePath: "/subscribe/media-studio-operations" },
-      { id: "subscribe-account-manager", label: "Account Manager", href: "/subscribe/account-manager", activePath: "/subscribe/account-manager" },
+      { id: "subscribe-account-manager", label: "Client Domain Managing", href: "/subscribe/account-manager", activePath: "/subscribe/account-manager" },
+    ],
+  },
+  {
+    // Beam Craft's client companies, in their own group rather than under HRM.
+    id: "client-management",
+    title: "Client Management",
+    module: "SUBSCRIBE",
+    icon: "Business",
+    items: [
+      // Was Employee Repository. The id stays (saved sidebar layouts and the Administration family key
+      // on it); the employee list itself is still reached from the switch beside this page's heading.
+      { id: "employee-repository", label: "Client Details", href: "/hrm/client-details", activePath: "/hrm/client-details" },
     ],
   },
   {
@@ -74,9 +86,6 @@ export const SIDEBAR_MODULES = [
     module: "HRM",
     icon: "Groups",
     items: [
-      // Was Employee Repository. The id stays (saved sidebar layouts and the Administration family key
-      // on it); the employee list itself is still reached from the switch beside this page's heading.
-      { id: "employee-repository", label: "Client Details", href: "/hrm/client-details", activePath: "/hrm/client-details" },
       /*
        * Kept in the registry, taken out of the menu - see `hidden` below. Removing the three rows
        * outright would also take their names off the Roles screen (`FEATURE_LABELS` is built by
@@ -121,9 +130,9 @@ export const SIDEBAR_MODULES = [
     module: "PROJECT",
     icon: "AccountTree",
     items: [
-      { id: "projects", label: "Projects", href: "/project-management/projects", activePath: "/project-management/projects" },
-      { id: "crd-documents", label: "CRD Documents", href: "/project-management/crd-documents", activePath: "/project-management/crd-documents" },
-      { id: "client-gifts", label: "Client Gifts", href: "/project-management/client-gifts", activePath: "/project-management/client-gifts" },
+      { id: "projects", label: "Projects", href: "/project-management/projects", activePath: "/project-management/projects", hidden: true },
+      { id: "crd-documents", label: "CRD Documents", href: "/project-management/crd-documents", activePath: "/project-management/crd-documents", hidden: true },
+      { id: "client-gifts", label: "Client Gifts", href: "/project-management/client-gifts", activePath: "/project-management/client-gifts", hidden: true },
     ],
   },
   {
@@ -137,16 +146,16 @@ export const SIDEBAR_MODULES = [
       // own with its own permission, routes, tables and storage - it shares this heading with Image
       // Selection and nothing else. Overview and Events are the pair its own header switches between,
       // so neither is listed here; the entry lands on the overview and `activePath` is the module.
-      { id: "ai-feature", label: "AI Feature", href: "/visual-curation/ai/overview", activePath: "/visual-curation/ai" },
+      { id: "ai-feature", label: "AI Feature", href: "/visual-curation/ai/overview", activePath: "/visual-curation/ai", hidden: true },
       // One entry for Image Selection, and it is the only one: Dashboard and Projects are not listed
       // beneath it. They are the pair the module's own header switches between, and listing them
       // here as well put the same choice in two places. The entry lands on the dashboard, and
       // `activePath` is the module rather than that one route, so it stays lit on the Projects page.
-      { id: "image-selection", label: "Image Selection", href: "/image-selection/dashboard", activePath: "/image-selection" },
+      { id: "image-selection", label: "Image Selection", href: "/image-selection/dashboard", activePath: "/image-selection", hidden: true },
       // Album Proofing is a screen of its own, not a section of Image Selection: its own permission,
       // its own page, and its own row here — which is what `sidebarStructure.js` mirrors on the
       // backend as `"visual-curation": ["image-selection", "album-proofing"]`.
-      { id: "album-proofing", label: "Album Proofing", href: "/image-selection/album-proofing", activePath: "/image-selection/album-proofing" },
+      { id: "album-proofing", label: "Album Proofing", href: "/image-selection/album-proofing", activePath: "/image-selection/album-proofing", hidden: true },
     ],
   },
   {

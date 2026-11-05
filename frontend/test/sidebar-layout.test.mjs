@@ -32,7 +32,7 @@ test("with nothing saved, the sidebar is the registry's own order", () => {
 
 test("a saved order is the order, for the modules and inside them", () => {
   const stored = {
-    moduleOrder: ["accounts", "hrm", "subscribe", "sales-crm", "project-management", "visual-curation", "resource-management"],
+    moduleOrder: ["accounts", "hrm", "subscribe", "client-management", "sales-crm", "resource-management"],
     submoduleOrder: {
       ...DEFAULT_SIDEBAR_LAYOUT.submoduleOrder,
       "sales-crm": ["quotations", "contacts", "leads-followups", "reports-analytics", "bookings-converted"],
@@ -55,27 +55,28 @@ test("a layout that mentions only some of the modules is completed, and written 
 
   assert.equal(changed, true);
   assert.equal(layout.moduleOrder[0], "accounts");
-  assert.deepEqual(Object.keys(layout.submoduleOrder), DEFAULT_SIDEBAR_LAYOUT.moduleOrder);
+  // Every module's own order is kept, a module off the menu included (its list is just empty).
+  assert.deepEqual(Object.keys(layout.submoduleOrder), Object.keys(DEFAULT_SIDEBAR_LAYOUT.submoduleOrder));
   assert.equal(layout.submoduleOrder["sales-crm"][0], "quotations");
   // Completing it is a one-off: merging the completed layout again changes nothing.
   assert.equal(resolveSidebarLayout(layout, seeEverything).changed, false);
 });
 
 test("two logins arrange independently: one layout says nothing about another", () => {
-  const a = resolveSidebarLayout({ moduleOrder: ["sales-crm", "project-management", "hrm"], submoduleOrder: {} }, seeEverything);
+  const a = resolveSidebarLayout({ moduleOrder: ["sales-crm", "client-management", "hrm"], submoduleOrder: {} }, seeEverything);
   const b = resolveSidebarLayout({ moduleOrder: ["hrm", "resource-management", "sales-crm"], submoduleOrder: {} }, seeEverything);
-  assert.deepEqual(ids(a.groups).slice(0, 3), ["sales-crm", "project-management", "hrm"]);
+  assert.deepEqual(ids(a.groups).slice(0, 3), ["sales-crm", "client-management", "hrm"]);
   assert.deepEqual(ids(b.groups).slice(0, 3), ["hrm", "resource-management", "sales-crm"]);
 });
 
 test("a screen cannot be moved into another module, however the layout was written", () => {
-  // The exact case the rule exists for: Quotations, filed under Project Management.
+  // The exact case the rule exists for: Quotations, filed under Client Management.
   const stored = {
     moduleOrder: DEFAULT_SIDEBAR_LAYOUT.moduleOrder,
-    submoduleOrder: { "project-management": ["quotations", "projects", "crd-documents", "client-gifts"] },
+    submoduleOrder: { "client-management": ["quotations", "employee-repository"] },
   };
   const { groups } = resolveSidebarLayout(stored, seeEverything);
-  assert.equal(itemIds(groups, "project-management").includes("quotations"), false);
+  assert.equal(itemIds(groups, "client-management").includes("quotations"), false);
   // And it is still where it belongs, rather than lost.
   assert.equal(itemIds(groups, "sales-crm").includes("quotations"), true);
 });
@@ -87,22 +88,22 @@ test("a screen added to the application appears in a saved layout, at its defaul
     submoduleOrder: {
       // Includes two screens since taken off the menu (`hidden`), which is the realistic case for
       // a layout saved a while ago - a stored id for a screen nobody can see any more is dropped.
-      hrm: ["employee-attendance", "employee-repository"],
+      hrm: ["employee-attendance", "interview"],
       "sales-crm": ["quotations", "leads-followups", "contacts"],
     },
   };
   const { groups, layout, changed } = resolveSidebarLayout(stored, seeEverything);
 
   // The arrangement they made is untouched, and the new screens follow it, in registry order.
-  assert.deepEqual(itemIds(groups, "hrm"), ["employee-repository", "tasks", "interview"]);
+  assert.deepEqual(itemIds(groups, "hrm"), ["interview", "tasks"]);
   assert.deepEqual(itemIds(groups, "sales-crm"), ["quotations", "leads-followups", "contacts", "reports-analytics", "bookings-converted"]);
   // Worth writing back, so the stored record keeps up with the application.
   assert.equal(changed, true);
-  assert.equal(layout.submoduleOrder.hrm.at(-1), "interview");
+  assert.equal(layout.submoduleOrder.hrm.at(-1), "tasks");
 });
 
 test("a screen the role cannot open is neither added nor shown, and arrives when the permission does", () => {
-  const stored = { moduleOrder: ["hrm"], submoduleOrder: { hrm: ["employee-repository"] } };
+  const stored = { moduleOrder: ["hrm"], submoduleOrder: { hrm: ["interview"] } };
   const withoutTasks = (item) => item.id !== "tasks";
 
   const before = resolveSidebarLayout(stored, withoutTasks);
@@ -111,7 +112,7 @@ test("a screen the role cannot open is neither added nor shown, and arrives when
 
   // The permission is granted; nothing was reset and nothing had to be pressed.
   const after = resolveSidebarLayout(before.layout, seeEverything);
-  assert.deepEqual(itemIds(after.groups, "hrm"), ["employee-repository", "interview", "tasks"]);
+  assert.deepEqual(itemIds(after.groups, "hrm"), ["interview", "tasks"]);
 });
 
 test("a permission taken away hides the screen but keeps where it was put", () => {
@@ -214,7 +215,11 @@ test("a screen marked hidden is off the menu for everybody, permission or not", 
   assert.equal(hrm.includes("attendance-register"), false);
   // Employee Referral joined them: it is reached from the Employee Repository's heading instead.
   assert.equal(hrm.includes("employee-referral"), false);
-  assert.deepEqual(hrm, ["employee-repository", "tasks", "interview"]);
+  assert.deepEqual(hrm, ["tasks", "interview"]);
+  // Client Details has its own group; Project Management and Visual Curation are off the menu.
+  assert.deepEqual(itemIds(groups, "client-management"), ["employee-repository"]);
+  assert.equal(ids(groups).includes("project-management"), false);
+  assert.equal(ids(groups).includes("visual-curation"), false);
 });
 
 test("a hidden screen cannot be reordered either, since there is nothing to arrange", () => {

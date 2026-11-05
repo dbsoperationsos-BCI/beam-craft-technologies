@@ -50,8 +50,12 @@ export const SIDEBAR_LAYOUT_KEY = "app:sidebarLayout";
  * layout is a description of the menu, and one that named a screen the menu never draws would be a
  * second answer to "what is in the sidebar", disagreeing with the first.
  */
+// A module whose every screen is `hidden` is off the menu altogether (Project Management and Visual
+// Curation on Beam Craft), so it is no part of the default order either - as the resolver drops it.
+const MENU_MODULES = SIDEBAR_MODULES.filter((group) => (group.items || []).some((item) => !item.hidden));
+
 export const DEFAULT_SIDEBAR_LAYOUT = {
-  moduleOrder: SIDEBAR_MODULES.map((group) => group.id),
+  moduleOrder: MENU_MODULES.map((group) => group.id),
   submoduleOrder: Object.fromEntries(
     SIDEBAR_MODULES.map((group) => [group.id, (group.items || []).filter((item) => !item.hidden).map((item) => item.id)])
   ),

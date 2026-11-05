@@ -79,8 +79,7 @@ test("a reader who holds none of them has no row at all", () => {
 });
 
 test("the row it names is one the registry actually has", () => {
-  const hrm = SIDEBAR_MODULES.find((group) => group.id === "hrm");
-  const door = hrm.items.find((item) => item.id === FAMILY_SIDEBAR_ITEM_ID);
+  const door = SIDEBAR_MODULES.flatMap((group) => group.items).find((item) => item.id === FAMILY_SIDEBAR_ITEM_ID);
   assert.ok(door && !door.hidden, "the family's door is a visible entry in the menu");
 });
 
