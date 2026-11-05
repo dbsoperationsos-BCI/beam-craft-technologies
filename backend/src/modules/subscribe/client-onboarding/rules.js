@@ -3,8 +3,8 @@ const { phonesMatch } = require("../../hrm/onboarding-invites/controller");
 
 /** Beam Craft's products, each with its own page under SUBSCRIBE and its own list of companies. */
 const PRODUCTS = Object.freeze({
-  MEDIA_STUDIO_OPERATIONS: "Media Studio Operations",
-  ACCOUNT_MANAGER: "SAAS Application Managing",
+  MEDIA_STUDIO_OPERATIONS: "Orbyt",
+  ACCOUNT_MANAGER: "Accora",
 });
 
 const isProduct = (value) => Object.prototype.hasOwnProperty.call(PRODUCTS, value);
@@ -61,10 +61,9 @@ const prefillSchema = z.preprocess(
  * field is required; the company's own details are the client's to fill in on the form.
  */
 const contactSchema = z.object({
-  contactName: required("Candidate name", 150),
-  contactEmail: z.string({ error: "Candidate email ID is required." }).trim().toLowerCase().email("Enter a valid candidate email ID.").max(191, "Candidate email ID is too long."),
-  contactPhone: required("Client phone", 30),
-  contactDesignation: required("Designation", 150),
+  contactName: required("Company name", 150),
+  contactEmail: z.string({ error: "Company email ID is required." }).trim().toLowerCase().email("Enter a valid company email ID.").max(191, "Company email ID is too long."),
+  contactPhone: required("Company phone number", 30),
   expiresAt: z.string({ error: "Choose the expiry date." }).regex(/^\d{4}-\d{2}-\d{2}$/, "Choose the expiry date."),
 });
 const clientInviteSchema = contactSchema.extend({ company: prefillSchema.default({}) });

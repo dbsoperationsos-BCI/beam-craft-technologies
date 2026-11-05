@@ -60,12 +60,12 @@
 export const SIDEBAR_MODULES = [
   {
     id: "subscribe",
-    title: "Subscribe",
+    title: "Subscription Management",
     module: "SUBSCRIBE",
     icon: "Subscriptions",
     items: [
-      { id: "media-studio-operations", label: "Media Studio Operations", href: "/subscribe/media-studio-operations", activePath: "/subscribe/media-studio-operations" },
-      { id: "subscribe-account-manager", label: "SAAS Application Managing", href: "/subscribe/account-manager", activePath: "/subscribe/account-manager" },
+      { id: "media-studio-operations", label: "Orbyt", hint: "Media Studio OS", href: "/subscribe/media-studio-operations", activePath: "/subscribe/media-studio-operations" },
+      { id: "subscribe-account-manager", label: "Accora", hint: "Account Manager", href: "/subscribe/account-manager", activePath: "/subscribe/account-manager" },
     ],
   },
   /*

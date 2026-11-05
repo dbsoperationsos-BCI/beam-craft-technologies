@@ -141,7 +141,7 @@ export default function ClientInviteDialog({ row = null, onClose: close, onInvit
         {/* A set-up account's product carries its modules, so it is changed in Edit subscription, not here. */}
         {row?.client?.activatedAt
           ? <TextField label="Product" value={productOptions.find((option) => option.value === product)?.label || "Not assigned"} readOnly disabled note="Change it in Edit subscription, where its modules are chosen again." />
-          : <Dropdown label="Product" placeholder="Not assigned" value={product} onChange={setProduct} options={productOptions} />}
+          : <Dropdown sorted={false} label="Product" placeholder="Not assigned" value={product} onChange={setProduct} options={productOptions} />}
       </div>
     </SchemaFormSection>}
     <SchemaFormSection id="company" title="Company Details">

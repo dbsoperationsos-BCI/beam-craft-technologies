@@ -58,8 +58,6 @@ export const FIELD_LISTS = [
   { value: "employee-statuses", label: "Employee Statuses", singular: "Employee Status", screens: ["employee-repository"] },
   { value: "blood-groups", label: "Blood Groups", singular: "Blood Group", screens: ["employee-repository"] },
   { value: "languages", label: "Languages", singular: "Language", screens: ["employee-repository"] },
-  // The client contact's role on HRM → Client Details' Create Onboarding Invite.
-  { value: "client-designations", label: "Client Designations", singular: "Client Designation", screens: ["client-details"] },
 
   // ── Sales & CRM ──
   /*

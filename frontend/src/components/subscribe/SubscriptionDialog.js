@@ -142,7 +142,7 @@ export default function SubscriptionDialog({ row, onClose: close, onSaved }) {
     {pending && <p className="mx-4 mt-4 rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-800 sm:mx-6">These changes are saved but not live yet. Use Update site in Client Details to put them live.</p>}
     <Section id="account" title="Account" hint="Where the client logs in and who their Admin is.">
       <div className="grid gap-4 md:grid-cols-2">
-        <Dropdown required label="Product" placeholder="Select the product" value={form.product} onChange={(value) => set("product", value)} options={productOptions} />
+        <Dropdown required sorted={false} label="Product" placeholder="Select the product" value={form.product} onChange={(value) => set("product", value)} options={productOptions} />
         {/* The whole address pasted in is kept as its subdomain: "velava.beamcraft.tech" is "velava". */}
         <TextField required label="Subdomain" value={form.subdomain} onChange={(event) => set("subdomain", event.target.value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "").replace(/\.beamcraft\.tech$/, ""))} />
         <TextField required label="Admin Username" value={form.adminUsername} onChange={(event) => set("adminUsername", event.target.value.trim())} />

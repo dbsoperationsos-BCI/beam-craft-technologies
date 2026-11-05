@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import SimpleTable from "@/components/data-table/SimpleTable";
 import Button from "@/components/shared/Button";
 import DateField from "@/components/shared/DateField";
-import Dropdown from "@/components/shared/Dropdown";
 import FloatingNotice, { useNotice } from "@/components/shared/FloatingNotice";
 import Loader from "@/components/shared/Loader";
 import PhoneField from "@/components/shared/PhoneField";
@@ -12,7 +11,6 @@ import ShareableMessage from "@/components/shared/ShareableMessage";
 import TextField from "@/components/shared/TextField";
 import Dialog from "@/components/ui/Dialog";
 import { clearDraft, useDraft } from "@/lib/stayOnRefresh";
-import { getMasterData } from "@/services/hrm/master-data.service";
 import { cancelClientInvite, createClientInvite, listClientInvites, sendClientInvite, updateClientInviteContact } from "@/services/subscribe/client-onboarding.service";
 
 /*
@@ -24,7 +22,7 @@ import { cancelClientInvite, createClientInvite, listClientInvites, sendClientIn
 
 // A week from today, Indian time - the default the employee invite uses.
 const weekOut = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
-const initialForm = () => ({ contactName: "", contactEmail: "", contactPhone: "", contactDesignation: "", expiresAt: weekOut() });
+const initialForm = () => ({ contactName: "", contactEmail: "", contactPhone: "", expiresAt: weekOut() });
 const dayOf = (value) => (value ? new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date(value)) : "");
 
 function formFromInvite(invite) {
@@ -32,7 +30,6 @@ function formFromInvite(invite) {
     contactName: invite?.contactName || "",
     contactEmail: invite?.contactEmail || "",
     contactPhone: invite?.contactPhone || "",
-    contactDesignation: invite?.contactDesignation || "",
     // The invite's own expiry while it is still ahead; a lapsed one is offered a fresh week, which is
     // how an expired invite is brought back without a new link.
     expiresAt: dayOf(invite?.expiresAt) >= dayOf(new Date()) ? dayOf(invite.expiresAt) : weekOut(),
@@ -45,7 +42,7 @@ const STATUS_LABELS = { Pending: "Created", Submitted: "Submitted", Cancelled: "
 const STATUS_CLASS = { Pending: "bg-blue-50 text-blue-700", Submitted: "bg-emerald-50 text-emerald-700", Cancelled: "bg-slate-100 text-slate-600", Expired: "bg-amber-50 text-amber-700" };
 const errorMessage = (error, fallback) => error?.data?.message || error?.message || fallback;
 
-const REQUIRED = [["contactName", "Candidate Name"], ["contactEmail", "Candidate Email ID"], ["contactPhone", "Client Phone"], ["contactDesignation", "Designation"], ["expiresAt", "Expiry Date"]];
+const REQUIRED = [["contactName", "Company Name"], ["contactEmail", "Company Email ID"], ["contactPhone", "Company Phone Number"], ["expiresAt", "Expiry Date"]];
 
 export default function ClientOnboardingInviteDialog({ initialMode = "create", onClose, onInviteCreated, onInviteSent }) {
   const [mode, setMode] = useState(initialMode);
@@ -61,18 +58,6 @@ export default function ClientOnboardingInviteDialog({ initialMode = "create", o
   const [loadingInvites, setLoadingInvites] = useState(() => initialMode === "list");
   const [busyId, setBusyId] = useState("");
   const { notice, showSuccess, showError, clearNotice } = useNotice();
-  /*
-   * The roles a client contact can hold, from Settings → Field Settings → Client Designations - the
-   * list the team keeps, as the employee invite offers HR's Designations. null while loading.
-   */
-  const [designations, setDesignations] = useState(null);
-  useEffect(() => {
-    let live = true;
-    getMasterData("client-designations", { active: true })
-      .then((result) => { if (live) setDesignations((result?.data || []).map((record) => record.name).filter(Boolean)); })
-      .catch(() => { if (live) setDesignations([]); });
-    return () => { live = false; };
-  }, []);
 
   const setField = (name, value) => setForm((current) => ({ ...current, [name]: value }));
   const updateField = (event) => setField(event.target.name, event.target.value);
@@ -93,7 +78,6 @@ export default function ClientOnboardingInviteDialog({ initialMode = "create", o
     contactName: form.contactName.trim(),
     contactEmail: form.contactEmail.trim(),
     contactPhone: form.contactPhone.trim(),
-    contactDesignation: form.contactDesignation.trim(),
     expiresAt: form.expiresAt,
   });
 
@@ -230,14 +214,13 @@ export default function ClientOnboardingInviteDialog({ initialMode = "create", o
         {!loadingInvites && invites.length > 0 && <SimpleTable
           variant="plain"
           classNames={{ table: "min-w-[860px]" }}
-          columns={[{ key: "name", label: "Candidate Name" }, { key: "email", label: "Candidate Email ID" }, { key: "phone", label: "Phone" }, { key: "designation", label: "Designation" }, { key: "status", label: "Status" }, { key: "expires", label: "Expires At" }, { key: "created", label: "Created At" }, { key: "action", label: "Action" }]}
+          columns={[{ key: "name", label: "Company Name" }, { key: "email", label: "Company Email ID" }, { key: "phone", label: "Company Phone Number" }, { key: "status", label: "Status" }, { key: "expires", label: "Expires At" }, { key: "created", label: "Created At" }, { key: "action", label: "Action" }]}
           rows={invites}
           rowKey={(invite) => invite.id}
           renderRow={(invite) => <tr key={invite.id} className="border-b border-slate-100 text-slate-700">
             <td className="whitespace-nowrap px-3 py-3 font-medium">{invite.contactName || invite.client?.companyName || "—"}</td>
             <td className="whitespace-nowrap px-3 py-3">{invite.contactEmail || "—"}</td>
             <td className="whitespace-nowrap px-3 py-3">{invite.contactPhone || "—"}</td>
-            <td className="whitespace-nowrap px-3 py-3">{invite.contactDesignation || "—"}</td>
             <td className="px-3 py-3"><span className={`rounded-full px-2 py-1 text-xs font-medium ${STATUS_CLASS[invite.state] || "bg-slate-100 text-slate-700"}`}>{STATUS_LABELS[invite.state] || invite.state}</span></td>
             <td className="whitespace-nowrap px-3 py-3">{formatDate(invite.expiresAt)}</td>
             <td className="whitespace-nowrap px-3 py-3">{formatDate(invite.createdAt)}</td>
@@ -248,19 +231,9 @@ export default function ClientOnboardingInviteDialog({ initialMode = "create", o
         <ShareableMessage label="Message to send them" rows={9} message={created?.message || ""} />
       </div> : <div className="space-y-4">
         {error && <p role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
-        <TextField required label="Candidate Name" name="contactName" value={form.contactName} onChange={updateField} />
-        <TextField required type="email" label="Candidate Email ID" name="contactEmail" value={form.contactEmail} onChange={updateField} />
-        <PhoneField required label="Client Phone" field="contactPhone" value={form.contactPhone} onChange={setField} />
-        <Dropdown
-          searchable
-          required
-          label="Designation"
-          value={form.contactDesignation}
-          onChange={(value) => setField("contactDesignation", value)}
-          // An invite edited after its role left the list still shows the role it has.
-          options={form.contactDesignation && designations && !designations.includes(form.contactDesignation) ? [...designations, form.contactDesignation] : designations || []}
-          placeholder={designations === null ? "Loading..." : designations.length ? "Select the designation" : "Add client designations in Settings → Field Settings"}
-        />
+        <TextField required label="Company Name" name="contactName" value={form.contactName} onChange={updateField} />
+        <TextField required type="email" label="Company Email ID" name="contactEmail" value={form.contactEmail} onChange={updateField} />
+        <PhoneField required label="Company Phone Number" field="contactPhone" value={form.contactPhone} onChange={setField} />
         <DateField required label="Expiry Date" value={form.expiresAt} onChange={(value) => setField("expiresAt", value)} />
       </div>}
     </Dialog>

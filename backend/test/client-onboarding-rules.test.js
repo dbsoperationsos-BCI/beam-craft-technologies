@@ -24,7 +24,7 @@ function validSubmission() {
 }
 
 test("the two products and nothing else", () => {
-  assert.deepEqual(PRODUCTS, { MEDIA_STUDIO_OPERATIONS: "Media Studio Operations", ACCOUNT_MANAGER: "SAAS Application Managing" });
+  assert.deepEqual(PRODUCTS, { MEDIA_STUDIO_OPERATIONS: "Orbyt", ACCOUNT_MANAGER: "Accora" });
   assert.equal(isProduct("ACCOUNT_MANAGER"), true);
   assert.equal(isProduct("HRM"), false);
 });
@@ -78,8 +78,8 @@ test("verify accepts the phone in another format", () => {
 const { clientInviteSchema } = require("../src/modules/subscribe/client-onboarding/rules");
 
 test("the invite asks who it is for and until when, all required; company details stay optional", () => {
-  const contact = { contactName: " Kamalnath ", contactEmail: " Owner@Velava.in ", contactPhone: "+91 9442648610", contactDesignation: "Owner", expiresAt: "2026-11-12" };
-  assert.deepEqual(clientInviteSchema.parse(contact), { contactName: "Kamalnath", contactEmail: "owner@velava.in", contactPhone: "+91 9442648610", contactDesignation: "Owner", expiresAt: "2026-11-12", company: {} });
+  const contact = { contactName: " Kamalnath ", contactEmail: " Owner@Velava.in ", contactPhone: "+91 9442648610", expiresAt: "2026-11-12" };
+  assert.deepEqual(clientInviteSchema.parse(contact), { contactName: "Kamalnath", contactEmail: "owner@velava.in", contactPhone: "+91 9442648610", expiresAt: "2026-11-12", company: {} });
   for (const field of Object.keys(contact)) assert.equal(clientInviteSchema.safeParse({ ...contact, [field]: "" }).success, false, `${field} is required`);
   assert.equal(clientInviteSchema.safeParse({ ...contact, contactEmail: "not-an-email" }).success, false);
   assert.deepEqual(clientInviteSchema.parse({ ...contact, company: { companyName: "Velava Agencies", address: "", gstNumber: " 33abcde1234f1z5 " } }).company, { companyName: "Velava Agencies", gstNumber: "33ABCDE1234F1Z5" });

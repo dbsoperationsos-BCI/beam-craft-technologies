@@ -58,7 +58,7 @@ export default function AppSidebar({ open, onClose }) {
           ...group,
           items: group.items
             .map((item) => (item.children ? { ...item, children: item.children.filter((child) => matches(child.label)) } : item))
-            .filter((item) => matches(item.label) || (item.children || []).length > 0),
+            .filter((item) => matches(item.label) || (item.hint && matches(item.hint)) || (item.children || []).length > 0),
         };
       })
       .filter((group) => group.items.length > 0);
@@ -287,7 +287,7 @@ export default function AppSidebar({ open, onClose }) {
             const itemActive = !childActive && longest >= 0 && claimLength(item, pathname) === longest;
             return <div key={item.label}>
               {item.href
-                ? <Link href={item.href} onClick={closeDrawer} className={`flex items-center justify-between gap-2 rounded-md px-2.5 py-1 text-sm hover:bg-slate-50 ${itemActive ? "font-medium text-blue-600" : "text-slate-700"}`}>
+                ? <Link href={item.href} onClick={closeDrawer} title={item.hint} className={`flex items-center justify-between gap-2 rounded-md px-2.5 py-1 text-sm hover:bg-slate-50 ${itemActive ? "font-medium text-blue-600" : "text-slate-700"}`}>
                   <span className="min-w-0 truncate">{item.label}</span>
                 </Link>
                 : <span aria-disabled="true" className="block cursor-not-allowed rounded-md px-2.5 py-1 text-sm text-slate-400">{item.label}</span>}
