@@ -1,7 +1,7 @@
 /** Beam Craft's products, each a page under SUBSCRIBE. The keys match the backend's. */
 export const PRODUCTS = Object.freeze({
   MEDIA_STUDIO_OPERATIONS: "Media Studio Operations",
-  ACCOUNT_MANAGER: "Account Manager",
+  ACCOUNT_MANAGER: "SAAS Application Managing",
 });
 
 export const CLIENT_TABS = ["All", "Form Pending", "Submitted", "Active", "Update Pending", "Expired", "Link Expired/Cancelled"];

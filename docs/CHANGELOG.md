@@ -44,6 +44,9 @@ Every code change adds an entry here, in the same commit or PR as the code. This
   [DEPLOYMENT-WORKFLOW.md](project-state/DEPLOYMENT-WORKFLOW.md) describe DBS and no longer apply here.
 
 ### Changed
+- **The Account Manager product is called "SAAS Application Managing".** Sidebar (SUBSCRIBE), its page
+  title, and the Product choice in Edit / Set up account. The stored key stays `ACCOUNT_MANAGER`, so
+  existing clients are unchanged.
 - **A client's site on our own server connects to Beam Craft by itself - no site key to copy.** Its key
   is worked out from its subdomain under one secret the apps on the server share with Beam Craft
   (`BEAMCRAFT_SITE_SECRET`, HMAC-SHA256, a different key per client); Beam Craft accepts it beside any

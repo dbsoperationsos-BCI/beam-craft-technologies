@@ -24,7 +24,7 @@ function validSubmission() {
 }
 
 test("the two products and nothing else", () => {
-  assert.deepEqual(PRODUCTS, { MEDIA_STUDIO_OPERATIONS: "Media Studio Operations", ACCOUNT_MANAGER: "Account Manager" });
+  assert.deepEqual(PRODUCTS, { MEDIA_STUDIO_OPERATIONS: "Media Studio Operations", ACCOUNT_MANAGER: "SAAS Application Managing" });
   assert.equal(isProduct("ACCOUNT_MANAGER"), true);
   assert.equal(isProduct("HRM"), false);
 });

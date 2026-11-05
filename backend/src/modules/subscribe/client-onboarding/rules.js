@@ -4,7 +4,7 @@ const { phonesMatch } = require("../../hrm/onboarding-invites/controller");
 /** Beam Craft's products, each with its own page under SUBSCRIBE and its own list of companies. */
 const PRODUCTS = Object.freeze({
   MEDIA_STUDIO_OPERATIONS: "Media Studio Operations",
-  ACCOUNT_MANAGER: "Account Manager",
+  ACCOUNT_MANAGER: "SAAS Application Managing",
 });
 
 const isProduct = (value) => Object.prototype.hasOwnProperty.call(PRODUCTS, value);

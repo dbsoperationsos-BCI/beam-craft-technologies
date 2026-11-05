@@ -75,9 +75,13 @@ ssh -o BatchMode=yes "$SERVER" "set -e
   pm2 restart beamcraft-api beamcraft-web --update-env >/dev/null && echo restarted"
 
 say "Checking the live site"
-sleep 12
-api=$(curl -s -m 20 "$API/api/health" || true)
-page=$(curl -s -m 20 -o /dev/null -w '%{http_code}' "$SITE/" || true)
+# The apps take a little while to start: try for up to 90 seconds before calling it a failure.
+for try in $(seq 1 18); do
+  sleep 5
+  api=$(curl -s -m 20 "$API/api/health" || true)
+  page=$(curl -s -m 20 -o /dev/null -w '%{http_code}' "$SITE/" || true)
+  case "$api" in *'"ok":true'*) [ "$page" = "200" ] && break ;; esac
+done
 echo "api: $api"; echo "home page: $page"
 case "$api" in *'"ok":true'*) [ "$page" = "200" ] && { printf '\n\033[32m✅ Beam Craft is live with this version.\033[0m\n'; exit 0; } ;; esac
 fail "The live check failed. Look at: ssh $SERVER 'pm2 logs beamcraft-api --lines 50'"

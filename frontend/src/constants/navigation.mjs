@@ -65,7 +65,7 @@ export const SIDEBAR_MODULES = [
     icon: "Subscriptions",
     items: [
       { id: "media-studio-operations", label: "Media Studio Operations", href: "/subscribe/media-studio-operations", activePath: "/subscribe/media-studio-operations" },
-      { id: "subscribe-account-manager", label: "Client Domain Managing", href: "/subscribe/account-manager", activePath: "/subscribe/account-manager" },
+      { id: "subscribe-account-manager", label: "SAAS Application Managing", href: "/subscribe/account-manager", activePath: "/subscribe/account-manager" },
     ],
   },
   /*
