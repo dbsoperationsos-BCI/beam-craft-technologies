@@ -33,6 +33,12 @@ Every code change adds an entry here, in the same commit or PR as the code. This
   `20261104200000_client_site_key`. Same roles as before: SUBSCRIBE / Client Onboarding at READ_WRITE
   makes a key; no new permission.
 
+### Removed
+- **The two GitHub Actions pipelines carried over from DBS-Operations-OS are gone.** `.github/workflows/ci.yml`
+  and `deploy.yml` checked DBS's `develop` and deployed `main` to the DBS VPS; nothing in this repository
+  runs automatically now. The `ci.yml` / `deploy.yml` sections of
+  [DEPLOYMENT-WORKFLOW.md](project-state/DEPLOYMENT-WORKFLOW.md) describe DBS and no longer apply here.
+
 ### Changed
 - **Client Details invites a client the way the Employee Repository invites a candidate.** Create
   Onboarding Invite now asks Client Name, Client Email, Client Phone, Designation and Expiry Date

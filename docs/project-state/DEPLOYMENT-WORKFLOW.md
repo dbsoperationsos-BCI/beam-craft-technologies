@@ -1,5 +1,9 @@
 # Development, Git, Deployment, and Automation Safety
 
+> **This repository has no CI or deploy pipeline.** The `ci.yml` and `deploy.yml` described below
+> belong to DBS-Operations-OS and were removed from this copy; read those sections as DBS's, not this
+> repository's.
+
 ## Local Development Workflow
 
 1. Work locally first.
