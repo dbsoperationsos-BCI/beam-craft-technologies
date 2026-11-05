@@ -48,9 +48,17 @@ NEXT_PUBLIC_R2_PUBLIC_BASE_URL=$R2_PUBLIC
 NEXT_PUBLIC_APP_VERSION=$VERSION
 EOF
 # `npm run build` is the project's own (webpack, as DBS builds it). It downloads Google fonts, which
-# now and then fails for a moment, so one failed build is tried again before giving up.
+# now and then answers with a font link the builder cannot read. A failure caused by that is tried
+# again, up to five times with a pause; any other failure stops at once and shows why.
 build() { (cd "$BUILD/frontend" && rm -rf .next && NODE_ENV=production npm run build) > "$BUILD/build.log" 2>&1; }
-build || { echo "first build failed - trying once more"; build; } || { tail -30 "$BUILD/build.log"; fail "The website did not build. Nothing was changed on the server."; }
+built=no
+for try in 1 2 3 4 5; do
+  if build; then built=yes; break; fi
+  grep -q "next/font" "$BUILD/build.log" || break
+  echo "Google Fonts hiccup (try $try of 5) - waiting 15 seconds and trying again"
+  sleep 15
+done
+[ "$built" = yes ] || { tail -30 "$BUILD/build.log"; fail "The website did not build. Nothing was changed on the server."; }
 echo "built"
 
 say "Backing up the live database"
