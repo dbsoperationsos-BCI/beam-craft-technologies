@@ -47,7 +47,10 @@ NEXT_PUBLIC_PUBLIC_APP_URL=$SITE
 NEXT_PUBLIC_R2_PUBLIC_BASE_URL=$R2_PUBLIC
 NEXT_PUBLIC_APP_VERSION=$VERSION
 EOF
-(cd "$BUILD/frontend" && NODE_ENV=production npx next build) > "$BUILD/build.log" 2>&1 || { tail -30 "$BUILD/build.log"; fail "The website did not build. Nothing was changed on the server."; }
+# `npm run build` is the project's own (webpack, as DBS builds it). It downloads Google fonts, which
+# now and then fails for a moment, so one failed build is tried again before giving up.
+build() { (cd "$BUILD/frontend" && rm -rf .next && NODE_ENV=production npm run build) > "$BUILD/build.log" 2>&1; }
+build || { echo "first build failed - trying once more"; build; } || { tail -30 "$BUILD/build.log"; fail "The website did not build. Nothing was changed on the server."; }
 echo "built"
 
 say "Backing up the live database"
