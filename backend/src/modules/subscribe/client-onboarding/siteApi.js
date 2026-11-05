@@ -28,6 +28,24 @@ function siteKeyMatches(presented, storedHash) {
   return same && Boolean(presented) && stored !== NO_HASH;
 }
 
+/**
+ * The key a client's site works out for itself: HMAC-SHA256 of its subdomain under the one secret the
+ * client apps on our own server share with Beam Craft (`BEAMCRAFT_SITE_SECRET` in each `.env`). Nobody
+ * copies a key: a site set up in Client Details connects by itself. Every subdomain gets a different key,
+ * so one client still cannot read another's plan. Null when the secret is not set.
+ */
+function derivedSiteKey(subdomain, secret = process.env.BEAMCRAFT_SITE_SECRET) {
+  if (!secret || String(secret).length < 32 || !subdomain) return null;
+  return crypto.createHmac("sha256", String(secret)).update(`beamcraft-site:${subdomain}`).digest("hex");
+}
+
+/** Whether `presented` is the key `subdomain` works out from the shared secret, compared in constant time. */
+function derivedKeyMatches(presented, subdomain, secret) {
+  const expected = derivedSiteKey(subdomain, secret);
+  if (!expected || !HASH_PATTERN.test(String(presented || ""))) return false;
+  return crypto.timingSafeEqual(Buffer.from(String(presented), "hex"), Buffer.from(expected, "hex"));
+}
+
 const bearerToken = (req) => /^Bearer\s+(\S+)$/i.exec(String(req.get("authorization") || ""))?.[1] || "";
 
 /** What the client's site is given: the live columns only - never a change still waiting for Update site. */
@@ -54,7 +72,10 @@ async function getSiteSubscription(req, res, db = prisma) {
   const subdomain = String(req.get("x-site") || "").trim().toLowerCase();
   try {
     const client = SUBDOMAIN_PATTERN.test(subdomain) ? await db.subscriptionClient.findUnique({ where: { subdomain } }) : null;
-    if (!siteKeyMatches(bearerToken(req), client?.siteKeyHash)) return res.status(401).json({ message: NOT_RECOGNISED });
+    // A key made with Site key (pasted into the site's .env) or the one the site works out for itself.
+    const presented = bearerToken(req);
+    const known = siteKeyMatches(presented, client?.siteKeyHash) || Boolean(client && derivedKeyMatches(presented, subdomain));
+    if (!known) return res.status(401).json({ message: NOT_RECOGNISED });
     if (!client.activatedAt) return res.status(404).json({ message: "This site's account is not set up yet." });
     return res.json({ data: siteSubscription(client) });
   } catch (error) {
@@ -63,4 +84,4 @@ async function getSiteSubscription(req, res, db = prisma) {
   }
 }
 
-module.exports = { NOT_RECOGNISED, hashSiteKey, makeSiteKey, siteKeyMatches, siteSubscription, getSiteSubscription };
+module.exports = { NOT_RECOGNISED, derivedSiteKey, derivedKeyMatches, hashSiteKey, makeSiteKey, siteKeyMatches, siteSubscription, getSiteSubscription };

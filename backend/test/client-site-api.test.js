@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const bcrypt = require("bcryptjs");
-const { NOT_RECOGNISED, hashSiteKey, makeSiteKey, siteKeyMatches, siteSubscription, getSiteSubscription } = require("../src/modules/subscribe/client-onboarding/siteApi");
+const { NOT_RECOGNISED, derivedSiteKey, derivedKeyMatches, hashSiteKey, makeSiteKey, siteKeyMatches, siteSubscription, getSiteSubscription } = require("../src/modules/subscribe/client-onboarding/siteApi");
 const { serializeInvite, passwordColumns, assertCanMakeSiteKey } = require("../src/modules/subscribe/client-onboarding/controller");
 
 const { key: KEY, hash: HASH } = makeSiteKey();
@@ -119,4 +119,27 @@ test("a site key is made only for a set-up account", () => {
 test("the public answer reads off the live columns alone", () => {
   assert.equal(siteSubscription(liveClient({ adminPasswordSetAt: null })).passwordSetAt, null);
   assert.deepEqual(siteSubscription(liveClient({ modules: null })).modules, []);
+});
+
+test("a site works out its own key from the shared secret: no copying, a different key per subdomain", async () => {
+  const secret = "s".repeat(48);
+  const before = process.env.BEAMCRAFT_SITE_SECRET;
+  process.env.BEAMCRAFT_SITE_SECRET = secret;
+  try {
+    const own = derivedSiteKey("velavaagencies", secret);
+    assert.match(own, /^[a-f0-9]{64}$/);
+    assert.notEqual(derivedSiteKey("kamal", secret), own);
+    assert.equal(derivedKeyMatches(own, "velavaagencies", secret), true);
+    // Another client's key, a short secret or no secret never match.
+    assert.equal(derivedKeyMatches(derivedSiteKey("kamal", secret), "velavaagencies", secret), false);
+    assert.equal(derivedSiteKey("velavaagencies", "short"), null);
+    assert.equal(derivedSiteKey("velavaagencies", ""), null);
+    // The route takes it for a client with no pasted key at all, and refuses it for another subdomain.
+    assert.equal((await call({ authorization: `Bearer ${own}`, "x-site": "velavaagencies" }, liveClient({ siteKeyHash: null }))).statusCode, 200);
+    assert.equal((await call({ authorization: `Bearer ${derivedSiteKey("kamal", secret)}`, "x-site": "velavaagencies" }, liveClient({ siteKeyHash: null }))).statusCode, 401);
+    // The pasted key still works beside it.
+    assert.equal((await call({ authorization: `Bearer ${KEY}`, "x-site": "velavaagencies" }, liveClient())).statusCode, 200);
+  } finally {
+    if (before === undefined) delete process.env.BEAMCRAFT_SITE_SECRET; else process.env.BEAMCRAFT_SITE_SECRET = before;
+  }
 });
