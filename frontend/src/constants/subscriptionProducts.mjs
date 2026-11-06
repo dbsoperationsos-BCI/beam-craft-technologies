@@ -151,9 +151,7 @@ const productTableFields = [
   ["versionLabel", "Version", undefined, 120, 100],
   // Whether the live site answers, from the monitor's checks every 5 minutes.
   ["healthStatus", "Health", "status", 160, 130],
-  ["responseLabel", "Response", undefined, 130, 110],
   ["lastCheckedLabel", "Last Checked", undefined, 170, 140],
-  ["uptimeLabel", "Uptime (24h)", undefined, 140, 120],
 ];
 
 /** Client Details shows every field of the form; a product's page, the short list. */
@@ -164,7 +162,7 @@ export const clientInfoSections = [
   { title: "Main Contact Person", fields: [["mainContactName", "Name"], ["mainContactPhone", "Contact Number"], ["mainContactDesignation", "Designation"]] },
   { title: "Secondary Contact Person", fields: [["secondaryContactName", "Name"], ["secondaryContactPhone", "Contact Number"], ["secondaryContactDesignation", "Designation"]] },
   { title: "Logo & Favicon", fields: [["logoUrl", "Logo", "gallery"], ["faviconUrl", "Favicon", "gallery"]] },
-  { title: "Site Health", fields: [["healthStatus", "Health"], ["responseLabel", "Response Time"], ["lastCheckedLabel", "Last Checked"], ["uptimeLabel", "Uptime (24h)"], ["siteVersion", "App Version Reported"], ["healthError", "Last Problem"]] },
+  { title: "Site Health", fields: [["healthStatus", "Health"], ["lastCheckedLabel", "Last Checked"], ["siteVersion", "App Version Reported"], ["healthError", "Last Problem"]] },
   { title: "Subscription", fields: [["subdomain", "Subdomain"], ["usersAllowed", "Number Of Users"], ["adminUsername", "Admin Username"], ["validFrom", "Valid From", "date"], ["validUntil", "Valid Until", "date"], ["modulesSummary", "Modules"]] },
 ];
 

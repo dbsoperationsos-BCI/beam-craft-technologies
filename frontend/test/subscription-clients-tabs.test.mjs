@@ -44,10 +44,10 @@ test("the table's columns are the onboarding form's fields, in its order, and no
   assert.equal(clientTableFieldsFor(null)[1][2], "status");
   // A product's own page under SUBSCRIBE is a short list: the company and its contact number.
   for (const product of ["ACCOUNT_MANAGER", "MEDIA_STUDIO_OPERATIONS"]) {
-    assert.deepEqual(clientTableFieldsFor(product).map(([key, label]) => [key, label]), [["companyName", "Company Name"], ["status", "Status"], ["mainContactPhone", "Contact Number"], ["versionLabel", "Version"], ["healthStatus", "Health"], ["responseLabel", "Response"], ["lastCheckedLabel", "Last Checked"], ["uptimeLabel", "Uptime (24h)"]]);
+    assert.deepEqual(clientTableFieldsFor(product).map(([key, label]) => [key, label]), [["companyName", "Company Name"], ["status", "Status"], ["mainContactPhone", "Contact Number"], ["versionLabel", "Version"], ["healthStatus", "Health"], ["lastCheckedLabel", "Last Checked"]]);
   }
   // The details panel: the form's fields, then the account Beam Craft set up.
-  const HEALTH = ["healthStatus", "responseLabel", "lastCheckedLabel", "uptimeLabel", "siteVersion", "healthError"];
+  const HEALTH = ["healthStatus", "lastCheckedLabel", "siteVersion", "healthError"];
   const SUBSCRIPTION = ["subdomain", "usersAllowed", "adminUsername", "validFrom", "validUntil", "modulesSummary"];
   assert.deepEqual(clientInfoSections.flatMap((section) => section.fields.map(([key]) => key)).sort(), [...FORM, ...SUBSCRIPTION, ...HEALTH].sort());
 });

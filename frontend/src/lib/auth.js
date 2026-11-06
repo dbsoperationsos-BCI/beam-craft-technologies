@@ -89,5 +89,6 @@ export function isClientAccount(user = getAuthenticatedUser()) {
 
 /** Where signing in lands: the studio's landing screen, or a client's own page. */
 export function getDefaultAuthenticatedRoute() {
-  return isClientAccount() ? CLIENT_ROUTE : "/employees";
+  // Beam Craft opens on Client Details: the clients are what the studio works on first.
+  return isClientAccount() ? CLIENT_ROUTE : "/hrm/client-details";
 }

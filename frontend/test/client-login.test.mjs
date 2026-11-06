@@ -97,7 +97,7 @@ test("Create Project's rail groups the project's sections under Project, then Cl
 });
 
 test("a client's sign-in lands on its own page, which offers no password change", () => {
-  assert.match(AUTH, /return isClientAccount\(\) \? CLIENT_ROUTE : "\/employees";/);
+  assert.match(AUTH, /return isClientAccount\(\) \? CLIENT_ROUTE : "\/hrm\/client-details";/);
   assert.match(REQUIRE_AUTH, /setAuthorized\(hasToken && !client\);/);
   assert.match(REQUIRE_AUTH, /else if \(client\) router\.replace\(CLIENT_ROUTE\);/);
   assert.match(PORTAL, /if \(!isClientAccount\(signedIn\)\) \{ router\.replace\(getDefaultAuthenticatedRoute\(\)\); return; \}/);
