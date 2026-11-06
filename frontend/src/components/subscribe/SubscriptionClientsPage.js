@@ -7,6 +7,8 @@ import DataTableShell from "@/components/data-table/DataTableShell";
 import DataTableInfoPanel from "@/components/data-table/DataTableInfoPanel";
 import RecordViewPanel from "@/components/data-table/RecordViewPanel";
 import TableFooter from "@/components/data-table/TableFooter";
+import KanbanBoard from "@/components/data-table/KanbanBoard";
+import TableBoardSwitch, { useTableBoardLayout } from "@/components/data-table/TableBoardSwitch";
 import { buildTableColumns, defaultVisibilityFor } from "@/components/data-table/tableCells";
 import OptionsMenu from "@/components/ui/OptionsMenu";
 import Button from "@/components/shared/Button";
@@ -56,6 +58,13 @@ const siteEnvLines = ({ subdomain, siteKey }) => [`BEAMCRAFT_SITE=${subdomain}`,
  * With a `product` it is that product's page under SUBSCRIBE; without one it is HRM -> Client Details,
  * every client together.
  */
+// A board card: the company, then who to call, then the product and site.
+const BOARD_CARD = {
+  title: (row) => row.companyName || row.mainContactName || "Client",
+  subtitle: (row) => [row.mainContactName, row.mainContactPhone].filter(Boolean).join(" · "),
+  meta: (row) => [PRODUCTS[row.product], row.client?.subdomain].filter(Boolean).join(" · "),
+};
+
 export default function SubscriptionClientsPage(props) {
   // The open form and the selected row live in the address, which is read through a Suspense boundary.
   return <Suspense fallback={null}><SubscriptionClientsScreen {...props} /></Suspense>;
@@ -79,6 +88,9 @@ function SubscriptionClientsScreen({ product = null }) {
   const tabs = product ? LIVE_TABS : CLIENT_TABS;
   const [activeTab, setActiveTab] = useStickyTab(`clients-${product || "all"}`, "All", tabs);
   const [stats, setStats] = useState({ total: 0 });
+  // Table or Board, remembered per page. The board's columns are the statuses (the tabs, without All).
+  const [layout, setLayout] = useTableBoardLayout(`clients-${product || "all"}`);
+  const onBoard = layout === "board";
   const [freezeCount, setFreezeCount] = useState(2);
   // The row shown in the info panel, by id - read from the latest rows, so an action or a reload
   // shows there at once, and a deleted client leaves it.
@@ -203,14 +215,10 @@ function SubscriptionClientsScreen({ product = null }) {
     }
   }
 
-  const defaultVisibility = useMemo(() => defaultVisibilityFor(fields), [fields]);
-  const columns = useMemo(() => buildTableColumns({
-    fields,
-    startIndex: 0,
-    statusStyles: clientStatusStyles,
-    renderActions: (row) => (product ? (canDelete ? <OptionsMenu ariaLabel={`Actions for ${row.companyName || "client"}`} items={[
+  // A row's ⋮ - the same items on the table row and on its board card.
+  const rowMenuItems = useCallback((row) => (product ? (canDelete ? [
       { label: "Delete", tone: "danger", onSelect: () => setDeletingRow(row) },
-    ]} /> : null) : canWrite ? <OptionsMenu ariaLabel={`Actions for ${row.companyName || "client"}`} items={[
+    ] : []) : canWrite ? [
       ...(row.state === "Submitted" ? [{ label: row.client?.activatedAt ? "Edit subscription" : "Set up account", onSelect: () => setSubscriptionRow(row) }] : []),
       ...(row.client?.activatedAt ? [
         { label: "Reset password", onSelect: () => setResettingRow(row) },
@@ -224,28 +232,50 @@ function SubscriptionClientsScreen({ product = null }) {
       ] : []),
       { label: "Edit", onSelect: () => setEditingRow(row) },
       { label: "Delete", tone: "danger", onSelect: () => setDeletingRow(row) },
-    ]} /> : null),
-  }), [canDelete, canWrite, fields, product, setEditingRow, setSubscriptionRow]);
+    ] : []), [canDelete, canWrite, product, setEditingRow, setSubscriptionRow]);
+
+  const defaultVisibility = useMemo(() => defaultVisibilityFor(fields), [fields]);
+  const columns = useMemo(() => buildTableColumns({
+    fields,
+    startIndex: 0,
+    statusStyles: clientStatusStyles,
+    renderActions: (row) => { const items = rowMenuItems(row); return items.length ? <OptionsMenu ariaLabel={`Actions for ${row.companyName || "client"}`} items={items} /> : null; },
+  }), [fields, rowMenuItems]);
+
+  const boardColumns = useMemo(() => tabs.filter((tab) => tab !== "All").map((tab) => ({ value: tab, label: tab, className: `${clientStatusStyles[tab] || "bg-slate-400"} text-white` })), [tabs]);
 
   const updatedText = lastUpdated ? new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short" }).format(lastUpdated) : "—";
 
   return <section className="flex h-full min-h-0 w-full min-w-0 flex-col">
     <ModulePageHeader
       title={productLabel}
-      tabs={tabs.map((tab) => ({ id: tab, label: tab, count: counts[tab] || 0 }))}
+      tabs={onBoard ? undefined : tabs.map((tab) => ({ id: tab, label: tab, count: counts[tab] || 0 }))}
       tabValue={activeTab}
       onTabChange={setActiveTab}
       tabsAriaLabel={`${productLabel} clients`}
       // Invites are sent from HRM -> Client Details only; a product page just lists that product's clients.
       // The product pages are lists only; the monitor checks every site on its own every 5 minutes.
-      actions={!product && canWrite ? <Button type="button" variant="primary" onClick={() => setInviting(true)}>Create Onboarding Invite</Button> : null}
+      actions={<><TableBoardSwitch value={layout} onChange={setLayout} />{!product && canWrite ? <Button type="button" variant="primary" onClick={() => setInviting(true)}>Create Onboarding Invite</Button> : null}</>}
       // Every invite sent, with what became of each - as the Employee Repository's own ⋮, after Nebula.
       menu={!product && canWrite ? <OptionsMenu ariaLabel="Client invite options" items={[{ label: "View All Invites", onSelect: () => setOpenParam("invites") }]} /> : null}
     />
     <FloatingNotice notice={notice} onClose={clearNotice} />
-    <DataTableShell className="min-h-0 flex-1" footer={<TableFooter spread className="z-30"><span>Last updated: {updatedText}</span><span>Total rows: {stats.total}</span></TableFooter>}>
+    <DataTableShell className="min-h-0 flex-1" footer={<TableFooter spread className="z-30"><span>Last updated: {updatedText}</span><span>Total rows: {onBoard ? rows.length : stats.total}</span></TableFooter>}>
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <div className="flex min-h-0 min-w-0 flex-1">
+        {onBoard ? <KanbanBoard
+          rows={rows}
+          columns={boardColumns}
+          statusOf={(row) => row.tab}
+          card={BOARD_CARD}
+          onOpen={(row) => { setInfoRowId(row.id); setInfoPanelState("expanded"); }}
+          cardActions={rowMenuItems}
+          // A status follows what happened (form sent, submitted, account set up, expiry), so cards are not dragged.
+          viewOnly="A client's status changes by itself: when the form is submitted, the account is set up, or the plan expires."
+          loading={loading}
+          noun="clients"
+          screenKey={`clients-${product || "all"}`}
+          ariaLabel={`${productLabel} clients board`}
+        /> : <div className="flex min-h-0 min-w-0 flex-1">
           <DataTable
             key={activeTab}
             // Table Options → Import: companies filed as submitted forms, ready for Set up account. On a
@@ -286,7 +316,7 @@ function SubscriptionClientsScreen({ product = null }) {
               csvExport: { enabled: true, fileName: `${(product || "all").toLowerCase()}-clients`, onResult: (exported) => showNotice(exported ? "Clients CSV export downloaded." : "No rows available to export.") },
             }}
           />
-        </div>
+        </div>}
         <DataTableInfoPanel
           title="Info"
           entity={infoRow}
